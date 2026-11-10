@@ -3872,8 +3872,9 @@ that skips its own validation. Three small gaps: an undocumented `gc.get_referen
 **SR-13 — FAIL.** The gate set is never checked for completeness: a **failed** validity gate can be
 deleted, or swapped for a duplicate of a passing one, and the page shows all-SUPPORTED with no alarm.
 The swap case is the worst — the gate count stays at 7, seven PASS rows render, and no count-based
-check can see it. An honest n=29 run where `min_seeds` genuinely fails is laundered into full
-JOINT_SUPPORTED. Components have had exactly this protection all along; gates never did. Plus the
+check can see it. ~~An honest n=29 run where `min_seeds` genuinely fails is laundered into full
+JOINT_SUPPORTED.~~ **Struck — see the correction below; this case does not reproduce as stated.**
+Components have had exactly this protection all along; gates never did. Plus the
 `min_n`/`width_tol` fail-open above, and a **literal breach of the acceptance criterion**: a missing,
 `None`, `NaN` or non-numeric margin **vanishes from the uncertainty panel** rather than rendering
 UNKNOWN, on a panel whose own closing sentence reads "UNKNOWN means unmeasured, never zero". Also
@@ -3928,3 +3929,98 @@ test cited as co-enforcing would miss `import asyncio`.
   were annotation-free and the target was not.
 - **Ask where thresholds come from, not only where values come from.** Both fail-opens this round were
   parameter provenance, in modules whose value provenance was already thorough.
+
+---
+
+## SR-13/SR-14 rework landed — and the builder corrected two of QA's measurements
+
+**Date:** 2026-11-10. `test_dashboard.py` + `test_claim_ledger.py`: **250** tests (was 204), **OK**.
+32 of 35 mutants killed. Verified independently before commit: 250 OK on the two reworked modules and
+**342 OK (skipped=2)** across the seven modules neither owner touched.
+
+### Two QA measurements that do not reproduce — corrections to round 3 above
+Both were in the SR-13 reviewer's finding 2, and I repeated the first verbatim in the round-3 entry.
+
+1. **"An honest n=29 run is laundered into full JOINT_SUPPORTED" does NOT reproduce on `f570148`.**
+   `h.blocking` still carries `min_seeds`, so HEAD already renders all-INCONCLUSIVE **with** the
+   alarm. The `min_n` forgery route is real, but it requires `blocking` and `supported_blockers` to be
+   cleared as well — a materially larger forgery than "one extra attribute edit", which was the
+   rhetorical force of the original finding. The builder's test does clear them, so the route is now
+   pinned at its true cost. **Struck in the round-3 entry rather than quietly reworded.**
+2. **The "widths differ by more than 25%" case is unsubstantiated.** The builder could not produce a
+   genuine width-disagreement INCONCLUSIVE at the default `width_tol` in any fixture it tried. The
+   clause *is* reachable at `width_tol=0.10`, which is how the fix was tested — but the measurement as
+   reported did not hold up.
+
+**The pattern, now on both sides of the ledger.** Round 3 corrected three of my claims that came from
+owner self-reports I did not re-measure. These two are the mirror image: **reviewer** measurements I
+did not re-measure either, passed to a builder as established fact. The builder re-measured and
+refused two of them. The rule is symmetric and I had been applying it in one direction only: a
+measurement is a claim regardless of who makes it, and a FAIL-grade finding deserves the same
+scepticism as a PASS-grade one. The findings themselves survive — both defects were real and are
+fixed — but their severity was overstated, and severity is what justifies a FAIL.
+
+### The config-hash anchor: asked for, argued down, and the argument is correct
+I told the builder the record's `config` hash was a stronger anchor than a constant. **It is not
+reachable from the renderer, and the builder declined to fake one.** `JointResult` carries
+`config_hash` but not the config; the digest is over **18** `BenchmarkConfig` fields of which the
+renderer can see **2**, so it can neither be inverted nor used to verify a candidate; and it sits on
+the same producer-asserted object, so it would not be an independent check even if it could.
+Anchor actually used: the scorer's **own declared default**, read from `bm.interval_verdict`'s
+signature rather than hard-coded, applied as a **one-sided floor** —
+`min(c.width_tol, declared)` / `max(c.min_n, declared)`. A study registered at the stricter
+`width_tol=0.10` keeps `0.10`; verified end to end, no flip and no false alarm. **That makes the
+dashboard structurally immune to the `verdict_from_records` defect**, which is a better outcome than
+the cross-check I asked for. Candidate for later, deliberately NOT taken unasked because it changes
+the public API: an optional caller-supplied expected config hash on `render_scorecard`, mirroring
+`registered_digest`.
+
+### A new honesty defect the fix itself created, caught by the builder
+Flooring the thresholds made an **honest** weak configuration (`min_seeds=5`) render as "stored
+verdict disagrees" — which reads as an accusation of tampering. `_weaker_than_protocol` now names the
+offending parameters and states explicitly that this is a **configuration statement, not evidence of
+tampering** (protocol 6.1: such a run is exploratory/non-compliant). Four mutants killed, one of which
+reverses the wording. Worth recording as a class: **a guard that cannot distinguish "weaker than the
+protocol" from "forged" will libel honest runs**, and the fix for a fail-open must not create one.
+
+### F15's real distinction, which is sharper than the one I briefed
+I asked for a field that could not be misread as a classification. The builder supplied the reason the
+wording was wrong: **"not a safety claim" describes the claim's CONTENT — something this module never
+classifies — whereas "not a safety finding" describes the RECORD, and is true by construction.**
+`is_safety_claim` is **removed** rather than documented, so a stale consumer gets a `KeyError` instead
+of a confident `False`; `safety_claim_classification: "NOT_PERFORMED"` replaces it, with a note that
+absence of classification is not a finding of harmlessness. `state_label` and `SUMMARY_CAVEAT` are
+reworded on the same basis.
+
+**Queued, not done: `schema.py`'s `TOY_LABEL` carries the same flaw** — it reads
+"TOY RESULT (synthetic, non-biological; **not a safety claim**)" and is prepended to arbitrary
+user-supplied notes, which is exactly SR-12's Q6 (a crop reads as the kit vouching for the user's
+"model is safe"). By the distinction above it should say "not a safety **finding**". Not changed yet
+because the literal is pinned in `test_benchmark.py:1957` (via a `.replace`) and `test_schema.py:191`,
+and `schema.py:249` validates the label on deserialization, so it is a serialization-contract change
+touching a file another owner is editing. **Do it as one coherent change once SR-10's owner is done**,
+format-version implications included.
+
+### Other reports from this owner
+- **A real defect in `benchmark.py`, routed to its owner:** `analyze_scores(margins=Margins())` is a
+  **mutable default argument**, so every fixture built without an explicit `margins=` shares one
+  instance and mutating a *field* poisons the scorer's default **process-wide**. It broke 24 of this
+  owner's tests with a confusing `TypeError` before they isolated it. `Margins` being a *frozen*
+  dataclass is why nobody looked — but this codebase's test surface routinely uses
+  `object.__setattr__` to simulate tampering, and that reaches straight through the freeze into the
+  shared default. Same hazard class as the `clear_bytecode` bug: **a test mutating shared state the
+  surrounding run depends on.**
+- **It disagreed with one of QA's four equivalence claims and proved it.** `D31` is *not* equivalent:
+  the fall-through loses "not a flat zero curve", gains a spurious "no valid `ExperimentRecord`
+  attached", and gains a four-row metric table. The verdict label stays UNKNOWN, so the behaviour was
+  merely **unasserted** rather than equivalent. Now pinned. The other three (D12, D15, D24) it
+  verified and accepted without re-testing, which is the right disposition.
+- **An unreachability it stated rather than papered over:** fields with class-level dataclass defaults
+  (`min_n`, `width_tol`, `delta_sel`, `subject_kind`) **cannot** be made absent by
+  `object.__delattr__` — it falls back to the class attribute. Several "absent attribute" branches are
+  therefore unreachable on real objects; they are tested via stand-in objects and a `__class__` swap,
+  and the tests say so. `margins` has no default, which is why C2b is genuinely reachable.
+- **One survivor left unpinned with an argument instead of a test:** `M1d` — `gate_set_bad` always
+  implies `bad`, and `if bad: jv = JOINT_INCONCLUSIVE` overrides `_combine`, so removing
+  `not gate_set_bad` from `gates_ok` changes no rendered page (verified by rendering both ways).
+  Documented in-line rather than pinned by a test that could not fail. That is the correct call.
