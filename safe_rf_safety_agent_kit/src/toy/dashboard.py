@@ -156,11 +156,57 @@ def _num(x: float) -> str:
     return repr(float(x))
 
 
+def _finite_float(x: Any) -> Optional[float]:
+    """THE ONE PLACE a stored number is admitted as displayable. None means "render UNKNOWN", never 0.0.
+
+    Accepts a genuine finite `float` and nothing else: not `int`, not `bool`, not a numeric string, not
+    NaN/inf. That is exactly the invariant `MetricValue.__post_init__` already enforces on a measured
+    value (schema.py: float-only, bool rejected, `math.isfinite`), so a value that fails HERE cannot have
+    come through the constructor -- it was forged with `object.__setattr__`, or the field's type drifted.
+
+    WHY THIS IS ONE FUNCTION AND NOT FOUR CHECKS (the SR-13 root cause). `_metric_cell` carried this test
+    inline while `_interval`, the `level` cell and the `SUBJECT_KIND_CODE` cell each gated on something
+    weaker: `MetricValue.is_measured`, which is only `value is not None`; `isinstance(..., float)`, which
+    admits NaN; and a bare `float(code)`, which coerces. The same forged `MetricValue` therefore rendered
+    UNKNOWN in one cell of a row and a measured `[0.0, 0.0]` in the next two, and `""`/`[]`/`{}` crashed
+    the whole render through `_num`'s `float()`. Three reviewers checked the forged cases against
+    `_metric_cell` ONLY and so missed `_interval`, which consumes the same type. Every consumer of a
+    stored number now routes through this function, so the next consumer cannot repeat the gap.
+
+    THE `bool` CLAUSE IS REDUNDANT HERE, and is labelled rather than left as a surviving mutant. Argued
+    over the public API, not assumed: `bool` subclasses `int`, NOT `float` (`bool.__mro__` is
+    (bool, int, object)), so `isinstance(True, float)` is False and `isinstance(x, bool)` can never be
+    True while `isinstance(x, float)` is. No `float` subclass can also be a `bool` either, because `bool`
+    cannot be subclassed at all (`class X(bool)` raises TypeError: not an acceptable base type). The
+    clause is therefore unreachable for EVERY possible input, dropping it changes no output, and no test
+    can pin it -- measured: that mutant survives all 170 tests, and it is the only one that does.
+    It is kept deliberately: the sibling count cells (`_int_cell`, `_int_or_unk`) test `int`, where the
+    identical clause IS load-bearing, and widening this test to `(int, float)` -- the obvious future
+    edit, since `Margins` fields and `c.margin` do accept int -- would make it load-bearing here too."""
+    if isinstance(x, bool) or not isinstance(x, float) or not math.isfinite(x):
+        return None
+    return x
+
+
+def _mv_float(mv: Any) -> Optional[float]:
+    """THE ONE PLACE a `MetricValue` becomes a number. None means "render UNKNOWN", never 0.0.
+    A non-MetricValue, a genuinely unmeasured one, and one whose `value` was forged are all None."""
+    return _finite_float(mv.value) if isinstance(mv, MetricValue) else None
+
+
+def _float_cell(x: Any, why: str) -> str:
+    """Render a plain stored number (not a `MetricValue`): measured, or UNKNOWN with `why`. Never 0."""
+    v = _finite_float(x)
+    return f'<span class="measured">{_e(_num(v))}</span>' if v is not None else _unknown(why)
+
+
 def _metric_cell(mv: Any) -> str:
-    """Measured -> repr (0.0 stays 0.0). Unmeasured or absent or malformed -> UNKNOWN (+reason). Never 0."""
+    """Measured -> repr (0.0 stays 0.0). Unmeasured or absent or malformed -> UNKNOWN (+reason). Never 0.
+
+    The float-and-finite test lives in `_finite_float`, shared with `_interval`, the `level` cell and the
+    `SUBJECT_KIND_CODE` cell, so one value can never read UNKNOWN here and measured in the next cell."""
     if isinstance(mv, MetricValue):
-        if mv.value is not None and not isinstance(mv.value, bool) and isinstance(mv.value, float) \
-                and math.isfinite(mv.value):
+        if _mv_float(mv) is not None:
             return f'<span class="measured">{_e(_num(mv.value))}</span>'
         reason = mv.reason if mv.value is None else "malformed measured value"
         return f'<span class="unknown">UNKNOWN</span> <span class="caveat">{_e(_visible(str(reason))[:MAX_TEXT])}</span>'
@@ -407,20 +453,32 @@ def _subject_kind(joint: Any) -> tuple:
     label, caveat = _SUBJECT_KIND_LABELS[kind]
     try:
         code = bm.SUBJECT_KIND_CODE[kind]
-        code_text = _num(float(code))
     except Exception:  # noqa: BLE001 - a patched/missing table is a problem, not a silent pass
-        code_text = None
+        code = None
+    # `_finite_float`, not the old `float(code)`: a table patched to `{"unknown": nan}` raises nothing and
+    # so used to render a measured `nan` with NO problem reported. A code that is not a finite float is
+    # not an encoding, whether the lookup raised or not.
+    code_num = _finite_float(code)
+    code_text = _num(code_num) if code_num is not None else None
+    if code_text is None:
         problem = (problem + "; " if problem else "") + \
-                  "benchmark.SUBJECT_KIND_CODE does not encode this kind (table missing or patched)"
+                  "benchmark.SUBJECT_KIND_CODE does not encode this kind as a finite number " \
+                  "(table missing or patched)"
     try:
         exempt = [g.name for g in joint.gates if getattr(g, "exempt", False) is True]
     except Exception:  # noqa: BLE001
         exempt = []
     relabelled = bool(exempt) and kind != "fixture"
     if relabelled:
+        # Wording precision: this proves the result changed AFTER construction, not WHICH side changed.
+        # `JointResult.__post_init__` refuses this combination, so one of the two must have been edited --
+        # but `benchmark.carries_exemption` reads `exempt` off ANY object in the gate list, so injecting a
+        # duck-typed gate carrying `exempt=True` into an honestly-labelled result produces this same
+        # message. The gates, not the label, may be what changed. Both are post-construction tampering.
         problem = (problem + "; " if problem else "") + \
                   (f"gate(s) {sorted(exempt)} carry the fixture exemption but subject_kind is "
-                   f"{kind!r}: the result was relabelled after construction")
+                   f"{kind!r}: JointResult refuses that combination at construction, so the label or the "
+                   f"gate list was relabelled after construction (which of the two is not determined)")
     return label, caveat, code_text, problem, relabelled
 
 
@@ -440,8 +498,19 @@ def _verdict_cell(v: Optional[Verdict], joint: bool = False, note: str = "",
 
 
 def _interval(lo: Any, hi: Any) -> str:
-    if isinstance(lo, MetricValue) and isinstance(hi, MetricValue) and lo.is_measured and hi.is_measured:
-        return f'<span class="measured">[{_e(_num(lo.value))}, {_e(_num(hi.value))}]</span>'
+    """Both bounds measured and finite -> `[lo, hi]`. Anything else -> UNKNOWN, never `[0.0, 0.0]`.
+
+    THE SR-13 FAIL GROUND. This used to gate on `MetricValue.is_measured` alone, which is merely
+    `value is not None` (schema.py), and then call `_num` = `repr(float(x))`. A forged `value` of `0`,
+    `False` or `"0"` therefore rendered `[0.0, 0.0]` in `.measured` monospace -- "an interval of [0, 0]
+    where the value is genuinely unknown" -- NaN/inf rendered `[nan, nan]`, and `""`/`[]`/`{}` raised out
+    of `float()` and took `render_dashboard` down, contradicting its own docstring (pure; a malformed
+    object refused with NO figures). `_metric_cell` on the SAME `MetricValue` said UNKNOWN, so one
+    rendered row contradicted itself: `mean` UNKNOWN beside two measured `[0.0, 0.0]` intervals.
+    `_mv_float` is the shared check, and it never calls `float()`, so no input can crash here."""
+    lo_v, hi_v = _mv_float(lo), _mv_float(hi)
+    if lo_v is not None and hi_v is not None:
+        return f'<span class="measured">[{_e(_num(lo_v))}, {_e(_num(hi_v))}]</span>'
     return _unknown("interval not computable")
 
 
@@ -455,6 +524,18 @@ def _contract_problems() -> list:
             probs.append(f"interval_verdict signature changed: {params}")
     except Exception as ex:  # noqa: BLE001 - any failure is a contract problem
         probs.append(f"interval_verdict not inspectable: {type(ex).__name__}")
+    # The parameter NAMES being present is not enough: `_protocol_params` needs their DEFAULTS, and it is
+    # the sole source of the protocol floor every recomputation applies. Measured before this existed: an
+    # `interval_verdict` declaring `width_tol`/`min_n` with no defaults passed the signature check above,
+    # so `_contract_problems` returned [] while `_protocol_params` raised LookupError; every component
+    # then became 'could not recompute' and the page showed ONLY the generic "stored verdict disagrees"
+    # warning -- which reads as an edited field when the truth is that the scorer's own protocol
+    # parameters are unreadable. Reported here so the page says which it is (see `_protocol_params`).
+    try:
+        _protocol_params()
+    except Exception as ex:  # noqa: BLE001 - any failure is a contract problem
+        probs.append(f"interval_verdict protocol parameters (width_tol, min_n) unreadable: "
+                     f"{type(ex).__name__}: {ex}")
     if {v.value for v in Verdict} != {"SUPPORTED", "UNSUPPORTED", "INCONCLUSIVE"}:
         probs.append("Verdict members changed")
     if {v.value for v in JointVerdict} != {"JOINT_SUPPORTED", "JOINT_UNSUPPORTED", "JOINT_INCONCLUSIVE"}:
@@ -480,7 +561,9 @@ def _protocol_params() -> tuple:
     """The protocol's declared `(width_tol, min_n)`, read from the scorer's own `interval_verdict`
     signature instead of being hard-coded here, so a protocol-parameter change in `benchmark` is picked up
     rather than silently contradicted. Raises if either default is missing or not a usable number; the
-    caller turns that into 'could not recompute', and `_contract_problems` reports it on the page."""
+    caller turns that into 'could not recompute', and `_contract_problems` calls this function and reports
+    the failure on the page (it checks parameter NAMES, which a defaultless signature passes, so the name
+    check alone left an unreadable protocol parameter visible only as a generic verdict disagreement)."""
     params = inspect.signature(bm.interval_verdict).parameters
     out = []
     for name in ("width_tol", "min_n"):
@@ -489,6 +572,28 @@ def _protocol_params() -> tuple:
             raise LookupError(f"interval_verdict declares no usable default for {name}")
         out.append(v)
     return tuple(out)
+
+
+def _pair_numbers_ok(pair: Any) -> bool:
+    """Every bound the recomputation reads off an `IntervalPair` must still satisfy `MetricValue`'s OWN
+    invariant: either properly unmeasured (`value is None`) or a finite float.
+
+    NOT cosmetic, and not the same gap as `_interval`'s. `IntervalPair.boot()` / `tint()` (benchmark.py)
+    gate on `is_measured` alone, so a forged non-finite bound reaches `interval_verdict` AS A NUMBER:
+    measured, with `boot_lo.value = boot_hi.value = inf`, `lo > margin` is true and the component cell
+    renders a decisive `vd-supported` -- while `_metric_cell`/`_interval` on the same pair say UNKNOWN. A
+    row claiming SUPPORTED with no figures behind it is worse than the `[0.0, 0.0]` this fix started from,
+    so the recomputation fails closed ('could not recompute' -> INCONCLUSIVE + alarm) instead.
+
+    Cannot false-fire: nothing constructible through `MetricValue` fails this check, because its
+    constructor enforces exactly this. Only post-construction tampering reaches it."""
+    for name in ("boot_lo", "boot_hi", "t_lo", "t_hi"):
+        mv = getattr(pair, name, None)
+        if not isinstance(mv, MetricValue):
+            return False
+        if mv.value is not None and _finite_float(mv.value) is None:
+            return False
+    return True
 
 
 def _recompute(c: Any, margins: Any = None) -> Optional[Verdict]:
@@ -529,6 +634,8 @@ def _recompute(c: Any, margins: Any = None) -> Optional[Verdict]:
             direction, margin = _declared(c.metric, margins)
             if c.direction != direction or float(c.margin) != margin:
                 return None
+        if not _pair_numbers_ok(getattr(c, "pair", None)):
+            return None
         wt_declared, mn_declared = _protocol_params()
         wt, mn = getattr(c, "width_tol", None), getattr(c, "min_n", None)
         if isinstance(wt, bool) or not isinstance(wt, (int, float)) or not math.isfinite(wt) or wt < 0:
@@ -596,7 +703,14 @@ def _weaker_than_protocol(joint: Any) -> list:
     whatever is computed is labelled below protocol minimum, exploratory, non-compliant". `_recompute`
     floors such a run to the protocol value, which makes its stored verdict disagree with the
     recomputation. Without this note the page would show only the generic "stored verdict disagrees"
-    warning and so imply that somebody edited a field. It says what actually happened instead."""
+    warning and so imply that somebody edited a field.
+
+    WHAT THIS LIST DOES NOT ESTABLISH. It names a declared value that is weaker than the protocol's; it
+    does not establish WHY it is weaker. An honest non-compliant configuration and a parameter edited
+    after the fact both land here and are indistinguishable from the result alone, so the caller
+    (`render_scorecard`) must assert neither -- it used to assert the honest reading unconditionally,
+    including over two measured forgeries. The one thing the caller CAN say is whether a decisive verdict
+    was actually withheld, which it reads off its own `mismatch`/`bad` state rather than from this list."""
     try:
         wt_declared, mn_declared = _protocol_params()
     except Exception:  # noqa: BLE001 - a contract problem, already reported by _contract_problems
@@ -638,6 +752,14 @@ def _gate_set_ok(gates: Any) -> bool:
     conv=False, gate_inputs=False, L=1.0, 5 seeds, unregistered digest), 7 of 7. So no legitimate path
     omits a gate and this check cannot false-fire on an honest result; only post-hoc tampering
     (`object.__setattr__` on `gates`) reaches it.
+
+    MORE LOAD-BEARING THAN "no legitimate path omits a gate" SUGGESTS -- do not "simplify" it away on the
+    grounds that `JointResult` already validates the names. `JointResult.__post_init__` filters
+    `isinstance(g, GateResult)` before comparing names, so a gate list of the 7 real gates PLUS a
+    duck-typed extra object CONSTRUCTS FINE upstream: the extra object is invisible to that check. This
+    function does not filter, so it sees 8 names and fails. An injected gate is also exactly what
+    `benchmark.carries_exemption` reads `exempt` off (it reads any object in the list), so the injection
+    route is live, not hypothetical. The duck-typed-extra case is caught HERE and nowhere else.
 
     RESIDUAL LIMIT: this checks names only. A gate's `passed` flag is producer-asserted, so flipping a
     failed gate to passed IN PLACE keeps the name set intact and is not detectable here; it is caught only
@@ -772,8 +894,10 @@ def render_scorecard(joint: Any) -> str:
                     f"<td>{_e(_visible(str(c.direction)))} {_e(_num(margin)) if margin is not None else _unknown('margin')}</td>"
                     f"<td>{_metric_cell(pair.mean)}</td><td>{_interval(pair.boot_lo, pair.boot_hi)}</td>"
                     f"<td>{_interval(pair.t_lo, pair.t_hi)}</td>"
-                    f"<td>{_e(pair.n) if isinstance(pair.n, int) else _unknown('n')}</td>"
-                    f"<td>{_e(_num(pair.level)) if isinstance(pair.level, float) else _unknown('level')}</td>"
+                    # `not isinstance(..., bool)`: `pair.n = True` rendered the word "True" in a column of
+                    # counts, unlike every sibling cell (`_int_cell`, `_int_or_unk`) which already excluded it.
+                    f"<td>{_e(pair.n) if isinstance(pair.n, int) and not isinstance(pair.n, bool) else _unknown('n')}</td>"
+                    f"<td>{_float_cell(pair.level, 'level')}</td>"
                     f"<td>{_verdict_cell(ecv, kind_caveat=supported_caveat)}</td></tr>")
         rows += (f"<tr><th colspan=8>{_e(h.hid)} hypothesis verdict</th>"
                  f"<td>{_verdict_cell(ev, note=' [hypothesis-level]', kind_caveat=supported_caveat)}</td></tr>")
@@ -833,13 +957,40 @@ def render_scorecard(joint: Any) -> str:
                  f'recomputation (or could not be recomputed) and are NOT shown; INCONCLUSIVE is displayed.</p>')
     weaker = _weaker_than_protocol(joint)
     if weaker:
+        # LABELLING ONLY -- which in this kit is the product. The GUARD is sound and is not touched here:
+        # the one-sided floor in `_recompute` means a weaker declared parameter can never buy a decisive
+        # verdict, and nothing is laundered. What was wrong was the prose, which asserted two things
+        # unconditionally: (1) "so any decisive verdict is withheld" and (2) "this is a configuration
+        # statement, NOT evidence of tampering".
+        # MEASURED at HEAD: on a `min_n` 30->1 forgery over a real n=30 run, and on a `width_tol`
+        # 0.25->1e9 forgery, BOTH sentences were false as rendered -- no verdict was withheld
+        # (JOINT_SUPPORTED was displayed) and the field HAD been edited -- while an HONEST
+        # `BenchmarkConfig(min_seeds=10)` run over 10 seeds got the same exculpation *plus* the generic
+        # "stored verdict disagrees" warning. The honest run got the accusation; the forgery got the
+        # acquittal.
+        # (1) is now conditional on a verdict having actually been withheld, which is observable right
+        # here (`mismatch` / `bad` are exactly the verdicts the page is refusing to show).
+        # (2) IS GONE IN BOTH DIRECTIONS, and is deliberately not replaced by the opposite claim. A weak
+        # declared value is produced both by an honest non-compliant configuration and by a forged field,
+        # and the two are not distinguishable from the result: `BenchmarkConfig(min_seeds=10)` with 30
+        # collected seeds is honest and renders identically to `min_n` forged to 1 on an n=30 run
+        # (measured), and the laundering fixture that forges `min_n` on a genuine n=29 run lands in the
+        # withheld branch, so neither branch is clean. The page states the undecidability and asserts
+        # neither side -- the one thing it can say that is true of every case above.
+        withheld = bool(mismatch) or bad
         body += ('<p class="warn">PROTOCOL PARAMETERS WEAKER THAN THE PROTOCOL DECLARES: '
-                 + _e("; ".join(weaker)) +
-                 '. The recomputation used the protocol values, so any decisive verdict is withheld. '
-                 'Protocol 6.1 produces no verdict below the minimum n and labels such a run '
-                 'exploratory and non-compliant; this is a configuration statement, NOT evidence of '
-                 'tampering. The renderer cannot tell the two apart from the result alone, because '
-                 'JointResult carries only an opaque config_hash and not its BenchmarkConfig.</p>')
+                 + _e("; ".join(weaker)) + '. The recomputation used the protocol values instead. '
+                 + ('The stored verdicts named above are therefore the ones being withheld, and the '
+                    'disagreement warning above is explained by this: it does not by itself mean a '
+                    'field was edited. ' if withheld else
+                    'That changed nothing displayed here: every verdict shown above is one the '
+                    'recomputation reproduced AT THE PROTOCOL VALUES, so no decisive verdict was '
+                    'withheld on account of these parameters. ')
+                 + 'Protocol 6.1 produces no verdict below the minimum n and labels such a run '
+                   'exploratory and non-compliant. WHETHER THIS IS AN HONEST NON-COMPLIANT '
+                   'CONFIGURATION OR A FIELD EDITED AFTER THE FACT CANNOT BE DETERMINED FROM THIS '
+                   'RESULT, and this page asserts neither: JointResult carries only an opaque '
+                   'config_hash and not its BenchmarkConfig, so the two are indistinguishable here.</p>')
     body += ('<p class="caveat">Verdicts are shown only when stored and recomputed values agree. They describe a '
              'scorer run on synthetic toy data and say nothing about any real model. Margins are arbitrary '
              'protocol parameters.</p>')

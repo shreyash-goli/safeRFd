@@ -2294,6 +2294,50 @@ class RelabelRouteFullGrid(unittest.TestCase):
             self.assertIn(needle, doc)
 
 
+class IntervalPairBoundsMustBeFiniteFloats(unittest.TestCase):
+    """SR-13's re-attestation found that a forged non-finite bound bought a decisive SUPPORTED
+    verdict, not merely an ugly interval. `IntervalPair.boot()`/`tint()` gated on `is_measured`,
+    which is only `value is not None`, so `object.__setattr__(pair.boot_lo, "value", inf)` reached
+    `interval_verdict` as a real number and `lo > margin` was trivially true. The dashboard fixed it
+    at the renderer; this pins the root cause here, where every other consumer of these methods also
+    benefits."""
+
+    def _pair(self):
+        return bm.summarize("S", [0.5 + 0.01 * i for i in range(30)], 0.9875, 200, 7)
+
+    def test_a_forged_bound_cannot_produce_an_interval_or_a_verdict(self):
+        bad = [math.inf, -math.inf, math.nan, 0, 1, True, False, "0", "", [], {}, None, object()]
+        for v in bad:
+            for attr in ("boot_lo", "boot_hi", "t_lo", "t_hi"):
+                p = self._pair()
+                self.assertIsNotNone(p.boot(), "the honest fixture must have a usable interval")
+                object.__setattr__(getattr(p, attr), "value", v)
+                which = p.boot() if attr.startswith("boot") else p.tint()
+                self.assertIsNone(which, f"{attr}={v!r} must make the interval not computable")
+                # and the verdict built from it must not be decisive
+                verd = bm.interval_verdict(p, direction="greater", margin=0.1)[0]
+                self.assertIsNot(verd, V.SUPPORTED, f"{attr}={v!r} bought a decisive verdict")
+
+    def test_the_honest_path_is_unaffected(self):
+        """The guard must not false-fire: a genuine fixture still yields both intervals and can
+        still reach SUPPORTED, so this is not a fix that simply refuses everything."""
+        p = self._pair()
+        self.assertIsNotNone(p.boot())
+        self.assertIsNotNone(p.tint())
+        for iv in (p.boot(), p.tint()):
+            self.assertTrue(all(isinstance(x, float) and math.isfinite(x) for x in iv))
+        self.assertIs(bm.interval_verdict(p, direction="greater", margin=0.1)[0], V.SUPPORTED)
+        # a genuine 0.0 bound is a measurement, not a forgery, and must survive
+        p2 = self._pair()
+        object.__setattr__(p2.boot_lo, "value", 0.0)
+        self.assertEqual(p2.boot()[0], 0.0)
+
+    def test_the_reason_is_recorded_where_the_next_reader_looks(self):
+        doc = " ".join(bm.IntervalPair._bound.__doc__.split())
+        self.assertIn("is only `value is not None`", doc)
+        self.assertIn("decisive **SUPPORTED** with no figures behind it", doc)
+
+
 class TIntervalAndBootstrapContracts(unittest.TestCase):
     def test_sum_vs_fsum_claim_is_stated_precisely(self):
         doc = " ".join(bm._sum_sq.__doc__.split())

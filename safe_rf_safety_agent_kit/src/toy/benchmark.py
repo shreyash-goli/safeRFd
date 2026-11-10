@@ -522,11 +522,32 @@ class IntervalPair:
     t_hi: MetricValue
     flags: tuple = ()
 
+    @staticmethod
+    def _bound(m: Any) -> Optional[float]:
+        """A bound is usable only if it is a genuine finite `float`, not merely `is_measured`.
+
+        THE DEFECT THIS CLOSES, found by the SR-13 re-attestation and fixed there renderer-side
+        while the root cause stayed here: `is_measured` is only `value is not None`
+        (`schema.py`), so a post-hoc `object.__setattr__(pair.boot_lo, "value", inf)` -- route (b),
+        the same one every other guard in this module is built against -- passed this gate and
+        reached `interval_verdict` as a real number. `lo > margin` is then trivially true, so the
+        component returned a decisive **SUPPORTED** with no figures behind it. A forged `nan`,
+        an `int`, a `str`, a `bool` or a list got the same treatment and were formatted as
+        measurements downstream.
+        Returning None means "interval not computable", which every caller already handles as the
+        fail-closed case, so a forged bound can no longer produce a verdict in either direction."""
+        v = getattr(m, "value", None)
+        if isinstance(v, bool) or not isinstance(v, float) or not math.isfinite(v):
+            return None
+        return v
+
     def boot(self) -> Optional[tuple[float, float]]:
-        return (self.boot_lo.value, self.boot_hi.value) if self.boot_lo.is_measured and self.boot_hi.is_measured else None
+        lo, hi = self._bound(self.boot_lo), self._bound(self.boot_hi)
+        return None if lo is None or hi is None else (lo, hi)
 
     def tint(self) -> Optional[tuple[float, float]]:
-        return (self.t_lo.value, self.t_hi.value) if self.t_lo.is_measured and self.t_hi.is_measured else None
+        lo, hi = self._bound(self.t_lo), self._bound(self.t_hi)
+        return None if lo is None or hi is None else (lo, hi)
 
 
 def summarize(name: str, values: Sequence[float], level: float, n_boot: int, base_seed: int,
