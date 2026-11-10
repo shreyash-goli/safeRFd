@@ -289,15 +289,26 @@ These are PROTOCOL PARAMETERS (rules of the study, not findings). The "value" co
 
 ### 8.3.1 Seed-dependence of scorer-validation gate outcomes at the v1 defaults (observation referenced, figures held in the journal)
 
-**Reference, not content.** A scorer-validation observation on the synthetic fixtures exists. It indicates that the `ORACLE_GATED` fixture's gate 11(b) and gate 12 outcomes are **seed-dependent at the current placeholder values**, so the fixture does not reach the same verdict at every base seed. The observation, its figures, and its source attribution (the SR-10 re-review) are recorded in **`docs/PROGRESS.md`, the location of record**. They are deliberately not reproduced here: this document specifies what will be measured and contains no measurements. The observation concerns the scorer's own gates on synthetic fixtures; it is not a result about any method, any erasure intervention, RFdiffusion or any real model, and this author has not reproduced it.
+**Reference, not content.** A fixture's gate outcomes **can** depend on the base seed, because the gates (11(b) in particular, and 12) compare per-seed quantities against fixed thresholds. That possibility is why scorer validation must span a frozen list of base seeds (section 2). **Whether it does so at the current placeholder values is recorded in `docs/PROGRESS.md`, the location of record (entry recorded at commit `2b06fff`), and is deliberately not stated here:** this document specifies what will be measured and asserts no measured outcome, in numbers or in prose. The journal entry was made under a reduced configuration (`n_boot` = 2000 and 30 seeds, taken from the benchmark source docstring), which is **not** the registered configuration of sections 6.1-6.2; it is therefore not a registered run of anything. Nothing recorded there is a result about any method, erasure intervention, RFdiffusion or real model, and this author has not reproduced it. The journal is mutable; the commit pin is what makes the reference verifiable.
 
-**Interpretation, labelled.** INFERENCE: a gate meant to catch non-convergence can fire on a fixture constructed to be correct if its threshold is too strict for the training budget. Two parameters could be responsible and this document does not decide between them: `tau_conv` and the budget `steps_conv`. Whether the same behaviour would occur for the actual erasure arm `E` is **UNKNOWN**; the fixture is not the arm. The observation is the first empirical signal about these defaults, which were chosen a priori and never validated against a trained-arm run (section 8.3 provenance).
+**Interpretation, labelled and conditional.** INFERENCE: if a convergence gate's threshold is too strict for the training budget, it can fire on a fixture constructed to be correct. Two parameters could then be responsible and this document does not decide between them: `tau_conv` and the budget `steps_conv`. Whether any such behaviour would occur for the actual erasure arm `E` is **UNKNOWN**; the fixture is not the arm. The defaults were chosen a priori and never validated against a trained-arm run (section 8.3 provenance).
 
 **Consequences recorded (amendment A-2, section 7.1):**
 1. `tau_conv` and `eps_fit` (and `steps_conv`, which they interact with) **must be set at registration** rather than inherited from the v1 defaults. The v1 defaults remain in the table above as placeholders and are not endorsed.
 2. **Timing rule.** If they are set before any registered arm is frozen, that is a pre-registration decision. If they are changed afterwards, it is a **post-data amendment** demoting affected verdicts to EXPLORATORY, exactly as for `steps_conv` in the table above.
-3. **No new values are chosen here.** Choosing them from the fixture outputs above would be tuning on observed output, which the provenance statement of section 8.3 exists to prevent. The registration record states the basis for each value (teacher statistics, and the convergence behaviour of control arms on the disjoint **pilot** seeds of section 6.1); a value chosen so that the oracle fixture passes is circular and is not an acceptable basis by itself.
-4. **A gate must be shown to reject a known-bad case as well as to pass a known-good one.** After any registration-time choice of `tau_conv`, `eps_fit` or `steps_conv`, validation must also show that gate 12 fires on a deliberately under-trained arm and that the fixtures that must not be SUPPORTED are not.
+3. **No new values are chosen here.** Choosing them from observed fixture behaviour (including whatever `docs/PROGRESS.md` records) would be tuning on observed output, which the provenance statement of section 8.3 exists to prevent. The registration record states the basis for each value (teacher statistics, and the convergence behaviour of control arms on the disjoint **pilot** seeds of section 6.1); a value chosen so that the oracle fixture passes is circular and is not an acceptable basis by itself.
+4. **Known-bad rejection (operational).** A gate must be shown to reject a known-bad case as well as to pass a known-good one; otherwise "tuned the threshold until the oracle passes" is indistinguishable from "disabled the gate". After any registration-time choice of `tau_conv`, `eps_fit`, `delta_A`, `loss_factor` or `steps_conv`, and before any registered arm is run, validation must show each gate below **firing** on its known-bad case. "Firing" means the gate result's `passed` is false with a reason string naming the failed sub-check (and, for gates 11, the resulting H1, H2, H3 and JOINT verdicts are INCONCLUSIVE; for gate 12, H3 is not SUPPORTED). All cases are synthetic and use the registered scorer-validation base-seed list of section 2: **every** registered base seed, with no seed omitted.
+
+   | Gate | Known-bad case | Registration-time constraint it imposes |
+   |---|---|---|
+   | 11(a) | `C0` replaced by the untrained student (`steps` = 0), so `A(s)` is zero by construction | `delta_A` must be strictly positive |
+   | 11(b) | `C0` replaced by a control that returns the *conditioned* teacher output (large absolute misfit on `U` relative to `G_s`) | `eps_fit` must be below that control's `F`, which is computable from the teacher alone before any student is trained, and is checked then |
+   | 11(c) | Arm `E` with `steps` = 0 (loss ratio of one) | `loss_factor` must be greater than one |
+   | 12 | `E`, `C0` and `C_shuf` at a deliberately insufficient converged budget `steps_bad`, strictly smaller than the registered finite-budget `steps` and fixed at registration by a rule that does not look at outcomes | `tau_conv` must be such that the gate fires there; this is verified, not assumed |
+
+   **Seeds.** The known-bad validation uses the registered scorer-validation base seeds; the **pilot seeds of section 6.1 are not reused** for it (the pilot informs the parameter values, validation must not be circular with it) and are never used in a verdict.
+
+   **Stands alone, not through section 2(iii) by implication.** The negative cases above are only half of validation; a scorer that never says SUPPORTED would pass them. Validation therefore requires **all** of the following together: the oracle reaches JOINT_SUPPORTED at every registered base seed; the global degrader reaches JOINT_UNSUPPORTED at every one; the identity fixture is never JOINT_SUPPORTED; and every gate fires on its known-bad case at every one. An INCONCLUSIVE from a gate counts as demonstrating neither "can say yes" nor "can say no". A scorer-validation pass is a statement about the scorer, never about a method.
 5. Scorer validation spans several base seeds (section 2).
 
 **TEMPLATE: per-base-seed scorer-validation table (every cell is a slot; nothing here is measured).**
@@ -305,6 +316,12 @@ These are PROTOCOL PARAMETERS (rules of the study, not findings). The "value" co
 | Registered base seed | n | ORACLE_GATED JOINT verdict | GLOBAL_DEGRADER JOINT verdict | IDENTITY JOINT verdict | Failed gate(s), if any |
 |---|---|---|---|---|---|
 | UNKNOWN (registered list, frozen before running) | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
+
+**TEMPLATE: per-base-seed known-bad rejection (item 4; every cell is a slot, nothing here is measured).**
+
+| Registered base seed | Gate 11(a) fired | Gate 11(b) fired | Gate 11(c) fired | Gate 12 fired |
+|---|---|---|---|---|
+| UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
 
 ## 8a. Report schema in `src/toy/schema.py` types
 
@@ -413,7 +430,7 @@ Any claim that a real concept-erasure intervention reduced a harmful capability 
 
 | Date | Version | Change |
 |---|---|---|
-| 2026-11-10 | v1-DRAFT-r5 | Amendment A-2: references (figures held in docs/PROGRESS.md, not in this document) the seed-dependence of the oracle fixture's gate 11(b) and gate 12 outcomes at the v1 defaults (section 8.3.1); `tau_conv`, `eps_fit`, `steps_conv` to be set at registration, defaults not endorsed; scorer validation must span a frozen list of base seeds; gates must be shown to reject known-bad cases; the converged-`C0` check relabelled candidate A-3; the unconditional "zero measured results" property is retained. No new threshold values chosen. |
+| 2026-11-10 | v1-DRAFT-r5 | Amendment A-2: points to docs/PROGRESS.md (commit 2b06fff) for a scorer-validation observation, stating here only that fixture gate outcomes can depend on the base seed (section 8.3.1); `tau_conv`, `eps_fit`, `steps_conv` to be set at registration, defaults not endorsed; scorer validation must span a frozen list of base seeds; gates must be shown to reject known-bad cases; the converged-`C0` check relabelled candidate A-3; the unconditional "zero measured results" property is retained. No new threshold values chosen. |
 | 2026-11-10 | v1-DRAFT-r4 (corrected after review) | Corrected A-1 provenance (ff451e1 only announced the change; 12bc490 first contained the code; divergence period stated); §7 amendment template now has decided_at_utc, timestamp_utc, implemented_at_utc, logged_late; §7/§8 wording distinguishes global gates (force INCONCLUSIVE) from block-only gate 12; converged-C0 limitation surfaced in §4.1 item 5, §8 rows 11-12 and A-1; "always False" and exemption-route overstatements softened; date convention stated. Earlier r4 content:  Amendment A-1 (post-hoc, logged late): gate 11 `control_adequacy` is global. Open-issue paragraph replaced by its resolution; section 5, section 8 row 11 and section 8.1 updated; gate 11(c) exemption rewritten to the positive-declaration, fail-closed mechanism now implemented; amendment log section 7.1 created with entry A-1; statement that the QA PASS covered r2 only; consistency pass over sections 5, 7, 8.1, 8.2, 8.3, 8a (m = 4, 98.75% everywhere; four primary intervals plus two converged rows). No measured results added. |
 | 2026-11-09 | v1-DRAFT-r3 | Post-implementation disclosure. New sections 8.1-8.3 and 4.1 items 5-7: per-gate scope; block-only converged-budget requirement and why; controls and level of the converged-budget run; explicit gate 11(c) exemption and its conditions; provenance of `steps_conv`, `tau_conv`, `delta_A`, `eps_fit`, `loss_factor`, `tail_ratio_max`; deferred checks D1-D6 and the conditionality of JOINT_SUPPORTED; section 5 gate wording made scope-aware (earlier "any gate failure -> INCONCLUSIVE" is superseded); scorecard template extended to the four-interval family plus converged rows and gates; open issue on gate 11 vs H3 recorded. No measured results added. |
 | 2026-11-09 | v1-DRAFT-r2 | QA revision. (P2) "no selectivity mechanism" restricted to the converged limit; finite-budget dependence on `steps`/`lr` registered; new section 4.1, `C_conv` arm and gate 12; a finite-budget SUPPORTED H3 is partial-convergence evidence and triggers review. (P1) H3 split into H3a/H3b, `Δ_Call` removed, m = 4 (98.75%), simultaneous-interval reading of the joint rule, H3 disconfirmation reconciled with the section 7 table. (P3) H4 withdrawn as a hypothesis and replaced by an exact-identity unit test (I-norm). (P4) gate 11 (absolute fit of `C0`/`E`), fixed pilot-based precision rule for `n_planned`, verdicts recomputed from stored metrics and never parsed from `notes`. Smaller: eligibility enforces >= 2 masked rows; n >= 30 minimum made consistent with the bootstrap assumption and labelled a convention; UNKNOWN vs HYPOTHESIS slot status unified; SR-06 -> SR-05; H5 expectation withdrawn. No measured results added. |
@@ -460,6 +477,8 @@ effect_on_claims    : none demoted, because no registered verdict exists. Behavi
 approved_by         : UNKNOWN. Proposed and decided by the orchestrator; independent approval pending the review of r4/this correction.
 ```
 
+**Addendum to A-1 (appended 2026-11-10T03:45:26Z; the original `approved_by` line above is left unchanged because the log is append-only).** As reported by the coordinator and not witnessed by this author, the independent final review of r4 passed, including its check of A-1's provenance. A-1's `approved_by` therefore reads, as of this addendum: independent review of r4: reported PASS; approving individual: UNKNOWN. The earlier "pending" wording describes the state when the entry was written.
+
 **Separate pre-existing divergence, not part of A-1.** r2 (commit `905bbfe`) already specified gate 11, yet `benchmark.py` had no `control_adequacy` until `12bc490`. That is an **implementation lag** (the document specified something the code did not yet have), not an amendment and not a scope change; A-1 does not cover it.
 
 **A-2 (protocol change, logged at the time of writing; not late).** Records a reviewer-reported observation about the oracle fixture's gates and the consequent rules. **Label reassignment:** A-1's `known_residual` called the optional converged-`C0` `A`/`F` check "amendment A-2". That label is reassigned here; the converged-`C0` check, still not adopted, is candidate **A-3**. A-1's text is left unchanged because the log is append-only.
@@ -474,18 +493,18 @@ divergence_period   : n/a
 changed_item        : (i) tau_conv, eps_fit and steps_conv: "v1 registered defaults" -> "placeholders that must be set at
                       registration; defaults not endorsed" (section 8.3, 8.3.1). (ii) New rules: scorer validation must span
                       a frozen list of >= 5 base seeds, reported in full, with explicit say-yes/say-no criteria (section 2);
-                      gates must be shown to reject a known-bad case as well as pass a known-good one (section 8.3.1).
-reason              : a scorer-validation observation (figures and source recorded in docs/PROGRESS.md, not here) indicates
-                      the oracle fixture's gate 11(b) and gate 12 outcomes are seed-dependent at the v1 defaults; a
-                      single-base-seed validation therefore cannot show the scorer can say yes. This is the first empirical signal about
-                      parameters that were never validated against a trained-arm run.
-known_residual      : the observation is not reproduced by this author; whether the behaviour transfers to arm E is
+                      gates must be shown to reject specified known-bad cases, per gate, on the registered validation seeds, as well as pass a known-good one (section 8.3.1 item 4).
+reason              : a fixture's gate outcomes can depend on the base seed, so single-base-seed validation cannot show the
+                      scorer can say yes or no. Whether that happens at the v1 defaults is recorded in docs/PROGRESS.md
+                      (commit 2b06fff, reduced configuration n_boot=2000 and 30 seeds), not here. The defaults were never
+                      validated against a trained-arm run.
+known_residual      : what the journal records is not reproduced by this author; whether the behaviour transfers to arm E is
                       UNKNOWN; no replacement values are chosen (deliberate: choosing them from this output would be tuning).
-data_seen_before    : the fixture observation was seen before this entry. No registered study has been frozen or run,
+data_seen_before    : a fixture observation (held in the journal) was seen before this entry. No registered study has been frozen or run,
                       and no value is changed by this amendment, so no verdict is affected or demoted.
 effect_on_claims    : none now. Future effect: a study whose tau_conv/eps_fit/steps_conv were not set in its registration record
                       cannot claim JOINT_SUPPORTED as a registered result.
 approved_by         : UNKNOWN. Proposed by the orchestrator; independent approval pending review.
 ```
 
-Other changes since the r2 review (r3 items, also not covered by any QA PASS): sections 4.1 items 5-7, 8.1-8.3 and the scorecard extension. They were made after the r2 review and are subject to the same pending review.
+Other changes since the r2 review (r3 items): sections 4.1 items 5-7, 8.1-8.3 and the scorecard extension. They were made after the r2 review. As reported by the coordinator (not witnessed by this author), r3 and r4 later passed a final independent review; r5 (A-2) has not been reviewed.

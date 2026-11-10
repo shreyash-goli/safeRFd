@@ -2667,3 +2667,58 @@ journal rather than only in code.
 **A second copy of the figures now exists** in the `benchmark.py` module docstring. Acceptable for
 code provenance, but it can drift from the journal, so it is being annotated to name
 `docs/PROGRESS.md` as authoritative.
+
+---
+
+## SR-09 → v1-DRAFT-r6: the three r5 defects fixed, plus a distinction the orchestrator missed
+
+**Date:** 2026-11-10. **Orchestrator verified:** "zero measured results" appears twice and remains
+**unconditional**; the prose outcome sentence is **gone** (zero matches); the stale "fixture outputs
+above" is **gone**; and the pointer now pins commit `2b06fff`.
+
+- **Defect 1 resolved as decided.** §8.3.1 now says a fixture's gate outcomes **can** depend on the
+  base seed — because the gates compare per-seed quantities against fixed thresholds — and that
+  **whether they do at the current placeholder values is recorded in `docs/PROGRESS.md` and is
+  deliberately not stated here**, since the document "specifies what will be measured and asserts no
+  measured outcome, **in numbers or in prose**". The interpretation paragraph is now conditional ("if
+  a convergence gate's threshold is too strict…"). The A-2 `reason` and the changelog row are reworded
+  to match.
+- **Defect 2 resolved:** item 3 now refers to "observed fixture behaviour (including whatever
+  `docs/PROGRESS.md` records)".
+- **Defect 3 resolved without rewriting the append-only log:** the trailer now states r3 and r4 later
+  passed independent review **as the coordinator reported and the author did not witness**, and that
+  r5 is unreviewed. A-1's original `approved_by` line is **untouched**; a dated **addendum** records
+  that the r4 review is reported as passed and the approving individual is UNKNOWN. That is the
+  correct reading of its own append-only rule.
+
+**A distinction the owner added that the orchestrator should have required.** The journal observation
+was produced at **`n_boot=2000` with 30 seeds**, which is **not** the registered configuration of
+§§6.1–6.2 (B = 10,000, n = 100) — so the protocol now states it is **"not a registered run of
+anything."** That closes a gap the orchestrator had left open: without it, a reduced-configuration
+diagnostic could later be cited as though it were a registered measurement. The pointer also records
+that the journal is mutable and that **the commit pin is what makes the reference verifiable**.
+
+**The known-bad-rejection rule is now operational, with a per-gate case for each sub-check:**
+- **11(a):** `C0` replaced by the untrained student, so `A(s)` is zero by construction (requires
+  `delta_A > 0`).
+- **11(b):** a control returning the conditioned teacher output, whose misfit is computable **from the
+  teacher alone**, so `eps_fit` can be checked before any student is trained.
+- **11(c):** arm `E` at `steps = 0` (requires `loss_factor > 1`) — **the owner added this case
+  unprompted**, closing the same gap for a sub-check the orchestrator had not asked about.
+- **12:** all trained arms at a registered, insufficient budget `steps_bad`, fixed by a rule that
+  does not look at outcomes.
+- **"Firing" is now defined:** the gate's `passed` is false with a reason naming the sub-check, and
+  downstream verdicts follow the gate's scope.
+- **Seeds:** validation uses every registered scorer-validation base seed, and **the pilot seeds are
+  deliberately not reused, to avoid circularity.**
+- **The rule now stands alone**, which was the defect: validation requires **all four** of the oracle
+  reaching JOINT_SUPPORTED, the degrader reaching JOINT_UNSUPPORTED, the identity fixture never being
+  SUPPORTED, **and every gate firing on its known-bad case** — so a scorer that never says SUPPORTED
+  can no longer pass by satisfying the negative conditions alone.
+- An all-UNKNOWN template table accompanies it.
+
+**The owner flagged its own design choices for scrutiny** rather than presenting them as derived: the
+11(b) case, the `steps_bad` rule and the pilot-seed separation are its decisions, and it said so. It
+also noted — for the **fourth** time on this file — that it checked by **grep only**, so the full
+read and token extraction still need doing independently. That self-report is why r6 will get a
+review rather than being taken on trust.
