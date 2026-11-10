@@ -95,8 +95,10 @@ def check_finite_scalar(value, name: str = "value") -> float:
     """Return `float(value)` if it is a finite real number, else raise.
 
     bool is rejected (True is not a measurement). -0.0 is finite and is
-    returned unchanged (sign preserved, not normalised to +0.0), consistently
-    in every helper below.
+    returned unchanged (sign preserved, not normalised to +0.0) by the
+    `check_finite_*` validators. Arithmetic results are NOT covered by that
+    promise: `masked_mean_checked` sums from int 0, so an all `-0.0` input
+    yields `0.0` (numerically equal; the sign of zero is not preserved).
     """
     if isinstance(value, bool) or not isinstance(value, Real):
         raise NonNumericError(f"{name} is not a real number: {value!r} ({type(value).__name__})")
@@ -213,9 +215,14 @@ def _validated_masked_values(values, mask, name: str, strict: bool):
             if isinstance(v, bool) or not isinstance(v, Real):
                 raise NonNumericError(f"{where} is not a real number: {v!r} ({type(v).__name__})")
             if use or strict:
-                if not math.isfinite(float(v)):
+                try:
+                    fv = float(v)
+                except OverflowError:  # huge int: not representable, never a bare OverflowError
+                    fv = math.inf
+                if not math.isfinite(fv):
                     tag = "" if use else " (masked OUT; strict_masked_out=True rejects hidden non-finite values)"
-                    raise NonFiniteError(f"{where} is non-finite: {float(v)!r}{tag}")
+                    raise NonFiniteError(f"{where} is non-finite or not representable as a float: "
+                                         f"{fv!r}{tag}")
         if use:
             kept.append(tuple(float(v) for v in r))
     return tuple(kept), mk, width
@@ -328,6 +335,20 @@ def check_gradient(fn: Callable[[list], float], grad_fn: Callable[[list], Sequen
     h = `step` (absolute). Pass iff |analytic_i - numeric_i| <=
     atol + rtol * max(|analytic_i|, |numeric_i|) for every i. Defaults
     (h=1e-6, rtol=1e-4, atol=1e-6) are tuned for O(1)-scale smooth functions.
+
+    SMALL-SCALE BLIND SPOT (worked example): `atol` is absolute, so when the
+    true gradient is comparable to or below `atol` the check is nearly vacuous.
+    For f(x) = 1e-9 * x**2 at x = 1 (true gradient 2e-9) a claimed gradient
+    100x too large (2e-7) PASSES at the defaults; 2e-6 is caught. A loss that
+    carries a small constant factor (e.g. 0.01 squared-error weights on small
+    errors) can land in this regime. A pass on a small-scale loss is therefore
+    NOT evidence: rescale the problem, or set `atol` well below the expected
+    gradient magnitude (e.g. atol=1e-12 catches the 100x error above).
+
+    `sum()` is used for accumulation elsewhere in this module and relies on
+    CPython 3.12+ compensated float summation (sum([1e16, 1.0, -1e16]) is
+    1.0 there, not 0.0); masked means can differ in the last bits on
+    older Pythons.
 
     Rejected before comparing (none counts as evidence of a working gradient):
       * analytic gradient with any NaN/inf (NonFiniteError),

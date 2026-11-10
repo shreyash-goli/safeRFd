@@ -679,3 +679,322 @@ per README step 1 and to avoid writing to that repo's `main`. No remote is confi
 - **Unverified by the builder, stated honestly:** it did not re-run the numeric checks, so the
   0.41999998 figure and the worked examples in the document rest on QA's computation rather than its
   own. Flagged for the QA re-review.
+
+---
+
+## Orchestrator correction — the SR-05 "equivalent mutant" adjudication was too quick
+
+- **Date:** 2026-11-09.
+- Earlier in this journal the orchestrator accepted the SR-05 builder's argument that QA's
+  `after = before` mutant was an *equivalent* mutant and recorded it as settled. The QA re-review
+  **partly refuted** it, and the orchestrator was wrong to close the question on the builder's
+  reasoning alone.
+- **What is true:** for the stock `Teacher`, the argument holds. Its params are a frozen
+  `MappingProxyType` of tuples, `outputs()` is pure, and `train` never touches it, so
+  `teacher_before` and `teacher_after` genuinely cannot differ.
+- **What is false:** the argument was stated about the *public API*, and `train` never type-checks
+  `teacher`. QA passed a stateful `Teacher` subclass, and separately a duck-typed object exposing
+  only `outputs()`; both were accepted, both produced `teacher_before != teacher_after`, and `train`
+  still returned a record labelled `TOY_RESULT`. The config hash covers only `teacher.params`, which
+  was *empty* for the duck-typed probe — so the provenance record misrepresented the run. The
+  `after` field is therefore a genuine runtime tripwire that nothing currently checks.
+- **Process lesson, recorded deliberately:** an "equivalent mutant" claim is a proof obligation about
+  the whole reachable input space, not about the one class the author had in mind. The orchestrator
+  should have asked for that argument rather than accepting the narrower one. Routed to the builder
+  as defect D1 with a requirement to validate the teacher type and assert
+  `teacher_before == teacher_after`.
+
+---
+
+## SR-07 — Non-in-place ops, mutation detection, device/precision comparison
+
+- **Task ID and date:** SR-07, 2026-11-09. **Owner:** numerics teammate.
+  **Files:** `src/toy/tensor_ops.py`, `tests/toy_tests/test_tensor_ops.py`.
+- **Status: IMPLEMENTED, PENDING INDEPENDENT QA.** 70 tests in-file (69 pass, 1 skipped).
+- **MPS was genuinely available on this machine**, so a *real* second-device comparison was performed
+  rather than everything skipping. CPU vs MPS float32 on sum-of-squares, matmul and normalize each
+  showed max relative difference ≈1e-7 and **was not bitwise identical**; a large sum showed an
+  absolute difference of 3.1e-5. MPS does not support float64, which is reported as *skipped with a
+  reason*, not as a zero difference.
+- **Measured float32 vs float64 divergence (CPU, float64 reference):** `(1+x)−1` for x∈[1e-9,1e-7] →
+  max abs 5.9e-8, max rel 0.59; the single value `(1+1e-8)−1` → rel 1.0 (float32 returns exactly 0);
+  a 50,000-term sequential sum of 0.1 (true ≈5000) → abs 2.53, rel 5.1e-4; control (sum of squares of
+  O(1) values) → abs 3.7e-7, rel 7.3e-10; **Kabsch rotation on well-spread points → rel 1.8e-7, but
+  on near-collinear points → rel 1.17.** Nothing was bitwise identical. Documented as a *quantified
+  sensitivity*, not a defect, and the tests assert the stressed fixtures exceed the control by >1000×.
+  Generically relevant because the fork rewrote alignment code in `inference/utils.py` — but this is
+  a property of the arithmetic, **not** a claim about the fork.
+- **In-place autograd probe (torch 2.7.1), seven recorded cases:** a write into a grad-requiring leaf
+  raises `RuntimeError` ("a leaf Variable that requires grad is being used in an in-place
+  operation"); a view of a leaf is non-leaf but still raises; a non-leaf write does *not* raise at the
+  write and is caught at `backward()` only if a saved tensor was modified; a non-leaf write autograd
+  did not save is **silent** with the gradient still correct; `no_grad` bypasses the leaf check but a
+  graph built earlier then fails at `backward()`; clone-then-write is the safe pattern. Tied in the
+  docstring to ER-11 and to SR-02's `x_t_student` leaf finding. RFdiffusion is neither imported nor run.
+- **Mutation detector limits tested, not just asserted:** a write through `.data` changes values
+  without bumping `_version`; writing the same value bumps the version only; mutate-then-restore
+  (`mul_` then `div_`) bumps the version only. Objects it cannot compare go to `unchecked`, never
+  reported as clean. It sees inputs only — not globals, nor tensors reachable via object attributes.
+- **Unmeasured ≠ measured zero:** with fewer than two comparable configurations the diffs are
+  `MetricValue.unmeasured` and `bitwise_identical` is `None`, with a test asserting this is not equal
+  to a measured 0.0.
+- **UNKNOWN for want of hardware:** all CPU-vs-CUDA comparisons; CUDA nondeterminism (e.g. atomics in
+  `scatter_add`); Kabsch SVD sign/ordering on a real GPU (on MPS `linalg.svd` falls back to CPU, so it
+  would not be a GPU test and no MPS SVD comparison was claimed); float64 on any GPU; cross-machine
+  and cross-BLAS variance.
+- **Caveat recorded:** the leaf exception message is torch-version dependent; the test asserts the
+  substring and the evidence records `torch_version`.
+- **Torch-blocked run:** 266 tests OK with 54 skipped; every torch/CUDA/MPS test skips *with a reason*.
+
+---
+
+## SR-08 — Safe toy checkpoints with provenance and integrity digest
+
+- **Task ID and date:** SR-08, 2026-11-09. **Owner:** toy-researcher teammate.
+  **Files:** `src/toy/checkpoint.py`, `tests/toy_tests/test_checkpoint.py`.
+- **Status: IMPLEMENTED, PENDING INDEPENDENT QA.** 47 new tests.
+- **No pickle, by construction.** The module imports none of `pickle`, `torch`, `dill`, `marshal`,
+  `shelve`; an **AST scan** test enforces this and was shown non-vacuous against 13 bad snippets while
+  correctly ignoring docstring mentions. This is the direct counterpart to ER-08 / the audited script's
+  unrestricted `torch.load` at L479.
+- **Digest coverage is exact and tested:** sha256 over the canonical JSON of every top-level key
+  except `digest` itself — covering `format_version`, `label`, `created_utc`, every provenance field
+  including `input_hashes`, and every param including `-0.0` vs `0.0`. A test mutates **each** covered
+  field in turn and confirms the digest changes. The loader additionally requires the file bytes to be
+  byte-identical to a canonical re-serialisation of what it parsed, catching changes that parse to the
+  same content (whitespace, key order, number spelling, escape case).
+- **Orchestrator independent verification:** exhaustive single-byte mutation over the whole 386-byte
+  file with masks 0x01/0x20/0xFF — **0 of 1158 mutations undetected**. `-0.0`, `5e-324` and `1.0`
+  round-tripped exactly.
+- **Corruption matrix**, each with a specific exception: byte flip/delete/insert at *every* offset;
+  truncation at 8 points; empty file; non-JSON and non-UTF-8 bytes; top-level array or scalar;
+  duplicate key; non-canonical key order; oversize (>1 MiB); deep nesting; unknown key added
+  (including a `student_model_state_dict` key); any of 5 keys removed; a key renamed to
+  `model_state_dict`; digest removed/altered/malformed/non-string; unsupported `format_version`
+  (2, 0, −1, 1e9); NaN/±Infinity/±1e999 params; wrong types in params; malformed provenance. Unknown
+  or renamed keys are rejected *before* the digest check, so they fail even with a recomputed digest.
+  This is the generic analogue of the audited silent `student_model_state_dict` key incompatibility.
+- **Honest statement of the limit, with a test that demonstrates it:** the digest detects accidental
+  corruption and naive tampering, but is **not a signature or MAC** — an attacker who can rewrite the
+  whole file may edit content, recompute the digest, and the loader will accept it.
+  `test_attacker_recomputed_digest_is_accepted_documented_limit` exists precisely to pin that. It also
+  says nothing about whether the parameters are good or safe.
+- **Atomic write** (temp + `os.replace`): a simulated failure in `os.replace` or `os.fsync` leaves no
+  target file and no temp leftovers, and a failed overwrite leaves the previous valid file intact.
+
+---
+
+## SR-10 — Synthetic benchmark scoring and confidence intervals
+
+- **Task ID and date:** SR-10, 2026-11-09. **Owner:** evaluation teammate.
+  **Files:** `src/toy/benchmark.py`, `tests/toy_tests/test_benchmark.py`.
+- **Status: IMPLEMENTED, PENDING INDEPENDENT QA.** 56 new tests. Standard library only — the
+  statistics are hand-implemented precisely so they can be checked against known values.
+- **The protocol's experiment was NOT run.** The erasure arm `E` is never run as a study; only `C0`
+  and `C_shuf` appear in the scorer-validation fixtures. Both the module docstring and the test header
+  state that every number produced is a property of the *scorer* on a fixture whose answer is known by
+  construction — not a result about the toy method, and not about RFdiffusion.
+- **Statistics validated against hand-computed values:** t quantile at 0.975 for df=1 = `tan(0.475π)`
+  = 12.7062; df=2 = `0.95/sqrt(2·0.975·0.025)` = 4.30265; textbook values for df=4, 9, 29 and the
+  large-df limit 1.96; `t_cdf(1, df=1) = 0.75`; the t-interval for [1,2,3,4,5] = [1.036757, 4.963243]
+  (sd 1.5811, se 0.7071, t 2.7764) — **the builder's first hand-computed figure contained an
+  arithmetic slip, the test caught it, and the comment was corrected**; type-7 quantiles of
+  [10,20,30,40]; the percentile interval of 0..100 = [2.5, 97.5]; and for a bootstrap of [1,2,3] all
+  27 resamples enumerated exactly (mean 2, variance 2/9, P(all ones) = 1/27), matched to ≈5σ of
+  sampling noise. Known-answer checks: constant sample → zero-width interval; symmetric sample →
+  exactly symmetric t-interval; width scales as 1/√n across n = 30, 120, 480.
+- **The scorer is falsifiable in both directions** — the property that makes it worth anything:
+  ORACLE_GATED → JOINT_SUPPORTED (H1, H2, H3 all SUPPORTED); **GLOBAL_DEGRADER → H1 SUPPORTED but H2
+  UNSUPPORTED, giving JOINT_UNSUPPORTED** (the required "must fail" case, proving suppression alone
+  cannot pass); IDENTITY_TEACHER_UNCOND → H1 UNSUPPORTED. A separate test confirms the scorer is
+  neither always-yes nor always-no.
+- **One-sided reporting is structurally impossible:** `JointResult` is the only holder of verdicts and
+  its `.verdict` is a derived property that cannot be set. `ExploratoryResult` has **no verdict field
+  at all**. Verdicts are returned as a structured object, with `notes` only a labelled fallback.
+- **All 27 H1/H2/H3 combinations** are tested against the joint rule, with gates passing and failing.
+  Gates fire on <30 seeds, >5% failures (2-of-32 fails, 1-of-31 passes), an unfrozen or mismatched
+  seed list, and unverified row-set disjointness; a gate failure overrides UNSUPPORTED. The
+  disagreement rule was verified on a constructed case (29 zeros and one 10) where the bootstrap lower
+  bound is 0 while the t lower bound is below −0.2, correctly forcing INCONCLUSIVE.
+- **Nine points where the protocol was ambiguous were reported rather than silently resolved**,
+  including the §4-vs-§7 H3 rule conflict, how to combine H3's two conditions, gate-vs-UNSUPPORTED
+  precedence, what the 25% width tolerance is relative to, incomplete gate coverage
+  (`complete_gate_coverage` stays **False** and `deferred_gates` is populated, since a literal reading
+  of the protocol would make JOINT_SUPPORTED unattainable), the unnamed bootstrap quantile method
+  (type 7 chosen), and that "frozen" is only checkable as a digest match and so remains
+  producer-asserted. Several of these fed directly into the SR-09 revision below.
+- **Reduced-cost note, stated honestly:** the scorer-validation studies used 30 frozen seeds and
+  **2,000** bootstrap resamples to keep the suite fast; the production default remains 10,000.
+
+---
+
+## SR-05 — Residual defects closed (after QA PASS)
+
+- **Date:** 2026-11-09. All six residuals closed; 333 tests green at that point.
+- **D1 (provenance integrity, the one that mattered):** `train` now rejects any non-`Teacher` object
+  (subclasses still allowed) and snapshots the teacher's params up front, refusing to record the run
+  if `teacher_after != teacher_before`. This closes the hole QA found, where a duck-typed object with
+  an empty `params` produced a `TOY_RESULT` record whose provenance misrepresented the run. Proven
+  non-vacuous: short-circuiting the tripwire fails `test_mutating_teacher_is_caught_not_recorded`, and
+  neutering the isinstance branch fails `test_non_teacher_object_rejected`.
+- **D2:** `eta` is normalised to float before hashing, so `eta=1` and `eta=1.0` no longer produce
+  different config hashes for identical runs.
+- **D3:** `run_id` now embeds the first 12 hex of the config hash, so different configs no longer
+  collide on `run_id`.
+- **D4:** `TrainResult` gained `loss_increased`, surfaced as a metric and an explicit WARNING in the
+  record notes, so a runaway-but-finite learning rate (0.92 → 47.5 at `lr=3.0`) can no longer be
+  recorded as an unremarkable `TOY_RESULT`. Gradient norm now uses `math.hypot`, and huge finite
+  inputs report "numeric overflow … input magnitude too large" instead of the schema's generic message.
+- **D5/D6:** `erasure_demo` exception types and `bool` policy made consistent via a `_real()` helper;
+  the stale "pins CURRENT behaviour / Source is unchanged" comments corrected, including the
+  inaccurate claim about which tests originally existed.
+
+---
+
+## SR-06 — Re-work after QA FAIL
+
+- **Date:** 2026-11-09. **Status: RE-IMPLEMENTED, PENDING QA RE-REVIEW.** `test_stability.py` 39 → 50.
+- **M-S1 was the critical gap and is fixed.** QA truncated `check_gradient`'s comparison loop to
+  coordinate 0 and **every test still passed** — every wrong-gradient fixture happened to be wrong at
+  index 0 or everywhere, so an error at indices 1…n would have gone undetected by the kit's core
+  gradient-verification tool. New fixtures place the error at index 1, an interior index and the last
+  index, each as an offset, a sign flip and a 2× scale, and require the message to name the right
+  index. The truncation mutant now dies.
+- **D-S1 (contract defect) fixed:** `float(v)` in the masked path raised a bare `OverflowError` for a
+  huge int, violating the module's stated contract that every error derives from
+  `StabilityError(ValueError)`. Now `NonFiniteError`. Proven by removing the handler.
+- **D-S2:** the `-0.0` docstring overclaim was corrected rather than papered over — the sign-preserving
+  promise now covers only the `check_finite_*` validators, and `masked_mean_checked` returning `0.0`
+  for all-`-0.0` input is pinned by a test.
+- **Mutants M-S2, M-S3, M-S5, M-S11 confirmed killed** by applying each one. Tests were added for
+  M-S4, M-S6, M-S7, M-S8–M-S10, but the builder **honestly reports it did not run those mutants**, so
+  those tests are not yet demonstrated to kill them. Recorded as an open limitation.
+- **A real limitation now documented loudly instead of quietly:** with `f = 1e-9·x²` (true gradient
+  2e-9) a claimed gradient **100× too large** passes at the default tolerances; it is caught at 2e-6,
+  or at 2e-7 with `atol=1e-12`. This matters because the audited loss carries a `0.01` factor. A test
+  pins all of it and the docstring states that a pass on a small-scale loss is not evidence.
+- **Methodological note worth preserving:** the builder found that same-size source edits within the
+  same second can reuse a stale `.pyc`, contaminating mutation results; its first M-S3 and M-S11
+  results were affected and were re-run with the cache cleared. Any future mutation testing in this
+  kit must disable bytecode caching.
+
+---
+
+## SR-09 — Re-work after QA FAIL (v1-DRAFT-r2)
+
+- **Date:** 2026-11-09. **Status: RE-IMPLEMENTED, PENDING QA RE-REVIEW.** Builder agreed with all four
+  findings. Still zero measured results; Level A / Level B separation preserved.
+- **P2 (the serious one):** the "no selectivity mechanism" claim is now restricted to the **converged
+  limit**, still labelled an inference to be confirmed by derivation and unit test. A new §4.1 records
+  that at a finite budget, partial convergence plus extrapolation off the fitted region produces
+  *apparent* selectivity that is **not** a mask mechanism, with magnitude depending on `steps` and
+  `lr`. `steps` and `lr` are now registered, the end-of-training gradient norm is recorded per run, a
+  new `C_conv` arm re-runs `E` and the shuffled-mask arm at a converged budget fixed in advance, and
+  new validity gate 12 covers this. A finite-budget SUPPORTED on H3 now triggers the
+  scorer/leakage/convergence review rather than counting as a finding, and H3 can be SUPPORTED only if
+  it also holds at the converged budget. **None of QA's probe numbers appear in the document** — QA
+  explicitly flagged them as non-results (12 seeds, SD ≈ 0.23–0.32, its own fixture), and the point
+  was used qualitatively only.
+- **P1:** H3 split into H3a (`Δ_E > δ_sel`) and H3b (`Δ_E − Δ_Cshuf > δ_sel`); the `Δ_Call` condition
+  **removed** because it had no operational definition; the primary family is now four simultaneous
+  intervals, so m = 4 at 98.75% each, with both JOINT labels read from those intervals rather than
+  from an unadjusted union; and H3's disconfirmation condition now matches the §7 verdict table.
+- **P3:** H4 **withdrawn as a hypothesis** — QA showed it is an identity (trajectories at `lr/width`
+  are bit-identical to ~1e-17), so its "CI excludes 0" disconfirmation could only fire on rounding
+  noise or a bug. Replaced by an exact-identity unit test ("I-norm") handed to SR-10; the equal-`lr`
+  cross-normalisation difference remains exploratory and descriptive.
+- **P4:** new gate 11 requires `C0` to be genuinely trained relative to `C_init` (which was previously
+  defined but unused), plus a bounded absolute fit and a fall in `E`'s own training loss — closing the
+  hole where an undertrained `C0` would make H2 SUPPORTED vacuously. The vague n=100 "precision check"
+  is replaced by a concrete rule: pilot seeds *disjoint from the frozen list* estimate the per-seed SD,
+  a formula sets `n_planned = max(100, n_req)` with a cap, and the rule runs once before registration
+  is frozen. And **verdicts are now always recomputed by the scorer from stored metrics, the seed-list
+  hash and the registered parameters; `notes` is never parsed, and a `notes` string disagreeing with
+  the recomputed verdict marks the report invalid** — closing the gap QA demonstrated, where
+  `notes="verdict: JOINT_SUPPORTED; model is safe"` is accepted by the schema under `TOY_RESULT`.
+- **Smaller corrections:** the "at least 2 masked rows" requirement is now enforced via seed
+  eligibility instead of holding by chance; n ≥ 30 is labelled a convention of this protocol rather
+  than a cited result, and below 30 completed seeds the protocol now yields no verdict and no
+  registered interval (matching the bootstrap assumption); every planned-but-unrun slot is `UNKNOWN`,
+  with `HYPOTHESIS` reserved for the single pre-registration record; the SR-06/SR-05 attribution is
+  fixed; and **H5's expected direction was withdrawn** — it is now two-sided and exploratory, because
+  the rescale factor clamped to [0.1, 2.0] can move the target *farther* from the conditioned output.
+
+---
+
+## Orchestrator integration fix — private API coupling, and a self-inflicted breakage
+
+- **Date:** 2026-11-09.
+- **Defect:** `src/toy/checkpoint.py` imported `_canonical` — a **private** name — from
+  `src/toy/schema.py`, because it must produce byte-identical serialisations to hash over. Two
+  modules depending on another module's private helper is fragile, and it would have spread as more
+  modules needed canonical bytes. Fixed by promoting it to a public `canonical_json()` with a
+  docstring recording that any change to its output is a breaking change for every stored
+  `content_hash` and checkpoint digest, keeping `_canonical` as a documented backwards-compatible
+  alias, and updating `checkpoint.py` to the public name.
+- **Self-inflicted breakage, recorded rather than hidden:** the orchestrator's first attempt used
+  `sed -i '' 's|\b_canonical(|canonical_json(|g'`, but **BSD/macOS `sed` does not support `\b`**, so
+  the call sites were not renamed while the import was — leaving `_canonical` undefined in
+  `checkpoint.py` and producing **43 test errors**. Caught immediately by running the suite, and fixed
+  by completing the rename. Lesson for this kit's own tooling: prefer exact-match edits over
+  regex-with-word-boundaries in shell on macOS, and always re-run the suite after a mechanical rename.
+
+---
+
+## SR-03 — Re-work after QA FAIL
+
+- **Date:** 2026-11-09. **Status: RE-IMPLEMENTED, PENDING QA RE-REVIEW.**
+- **Severity calibration corrected** — the register's value depends on being calibrated, so an
+  overstated row is as damaging as an understated one:
+  - **ER-07** retitled to describe the general *pattern* and explicitly marked as **not applying to
+    the script's logged value**; severity split (Low for the script, Medium for the pattern), with the
+    caveat that `S:373` assigns the pre-clip return value which is then logged at `S:384`/`S:425`.
+    Previously the title claimed a problem in the real program that the entry's own body denied.
+  - **ER-01** lowered High → Medium: a loud crash, not silent corruption. Records that the script has
+    no `except RuntimeError`, and that `except Exception` at `S:663`/`S:683` *would* catch the
+    resulting `UnboundLocalError`.
+  - **ER-03** lowered Medium → Low: no *unintended* detach was identified, and "CONFIRMED" is now
+    stated to refer only to the existence of the calls.
+  - **ER-04** stays High (justified — the acceptance gate is absent and would not discriminate), but
+    the false claim that SR-06 reports a gradient-coverage fraction was removed;
+    `require_parameter_gradient` takes one flat gradient and reports none.
+- **ER-02 strengthened where QA found it too conservative:** now also CONFIRMED-IN-SOURCE for the mask
+  multiply at `S:307`, cites `S:199-200` for the all-True `atom_mask`, adds the caveat that the NaN
+  write-back can only restore NaN already present and that absent-atom slots may be finite
+  placeholders, and the torch demonstration now shows `clamp` preserves NaN.
+- **Both inherited citation errors fixed:** ER-07 `S:385` → `S:384`; ER-02 `D:333-335` → `D:335-337`.
+- **Test gaps closed, with mutations confirming each:** float-inexact configurations `(7,(14,3))`,
+  `(1,(7,))`, `(9,(3,3,3))` now require `Fraction` (previously a `float` substitution survived because
+  every tested case happened to be float-exact); `PATTERN_FUNCTIONS` key set pinned; the `exec` demos
+  return an asserted evaluated count so replacing them with `pass` no longer passes vacuously; the
+  `ValueError` path in `mask_polarity_inversion` and the equal-losses case covered; **the torch import
+  guard now catches any `Exception`**, with tests simulating `OSError` and `RuntimeError` failures (the
+  previous `except ImportError` would have made the whole module error instead of skip on a broken
+  install or ABI mismatch); and a new structural register test pins ER-01…ER-11, the required fields
+  per entry, a valid label per entry, and the absence of sentence-initial "The method is
+  broken/safe". Mutants verified killed: the float substitution, dropping the ER-07 key, `exec` →
+  `pass`, deleting the ER-09 section, and inserting "The method is broken."
+- **The runner-divergence report was MY mischaracterisation, and the builder corrected it.** The
+  orchestrator relayed the unittest-green / pytest-red observation as evidence of a runner difference.
+  The builder could not reproduce any runner dependence: paths were already resolved from `__file__`,
+  and the only `sys.modules` mutation happens inside child processes. The actual causes were all in
+  its own files and runner-independent: (1) `test_register_structure` was written against register
+  fields that did not yet exist — **the doc and its test were being edited concurrently, so each
+  runner observed a different on-disk state**; (2) an over-broad deny-list matched the register's own
+  sentence "no claim that the method is broken", now restricted to sentence-initial matches; and
+  (3) the blocked-torch child process re-ran the whole test module, so one register failure surfaced
+  as two apparently independent failures — the child now runs only the stdlib and torch-pattern
+  classes and asserts exactly 2 skips. **Recorded at the builder's explicit request as "tests coupled
+  to a doc under concurrent edit; fixed by decoupling and pinning structure explicitly", not as a
+  proven runner difference.** The orchestrator should not have asserted a root cause it had not
+  established.
+- **Second instance of the same tooling trap:** the builder's first fix attempt was a BSD `sed -i`
+  that silently did nothing because the shell `&&` chain aborted — the same class of failure that bit
+  the orchestrator during the `canonical_json` rename. Two independent occurrences in one session;
+  worth a standing rule for this kit.
+- **Order-independence verified explicitly:** the file alone (14 passed, 1 skipped), from a different
+  cwd (same), and in first, middle and last positions in the suite — all consistent.
+- **Commands:** `unittest discover` → 347 tests OK, 2 skipped; `pytest -q` → 345 passed, 2 skipped;
+  torch-blocked `unittest` → 347 OK, 54 skipped; torch-blocked `pytest` → 293 passed, 54 skipped.
+  **Orchestrator independently re-ran all of these and confirms the tree is green under both runners,
+  including the file in isolation.**

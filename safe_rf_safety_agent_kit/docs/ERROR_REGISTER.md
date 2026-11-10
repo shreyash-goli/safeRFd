@@ -24,13 +24,13 @@ An entry may carry two labels (e.g. CONFIRMED-IN-SOURCE for the text plus PATTER
 
 | ID | Concern | Labels | Severity | Generic reproduction |
 |---|---|---|---|---|
-| ER-01 | Bare `RuntimeError` is not raised (empty mask) | CONFIRMED-IN-SOURCE + PATTERN-DEMONSTRATED | High (if path reached) | `bare_exception_statement_is_a_no_op` |
-| ER-02 | NaN masked by multiplication survives | PATTERN-DEMONSTRATED; reach UNKNOWN-NEEDS-EXECUTION | Medium | `nan_times_zero_is_nan` |
-| ER-03 | Detach severs parameter gradient | PATTERN-DEMONSTRATED + CONFIRMED-IN-SOURCE (detach sites) | Medium | `detach_severs_gradient` |
+| ER-01 | Bare `RuntimeError` is not raised (empty mask) | CONFIRMED-IN-SOURCE + PATTERN-DEMONSTRATED | Medium (if path reached; loud crash) | `bare_exception_statement_is_a_no_op` |
+| ER-02 | NaN masked by multiplication survives | CONFIRMED-IN-SOURCE (mask multiply) + PATTERN-DEMONSTRATED; NaN presence UNKNOWN-NEEDS-EXECUTION | Medium | `nan_times_zero_is_nan` |
+| ER-03 | Detach severs parameter gradient (generic pattern; no unintended detach identified) | PATTERN-DEMONSTRATED + CONFIRMED-IN-SOURCE (existence of the detach calls only) | Low (no unintended detach identified) | `detach_severs_gradient` |
 | ER-04 | Output `requires_grad` does not prove parameter gradient; checks commented out | CONFIRMED-IN-SOURCE + PATTERN-DEMONSTRATED; flow itself UNKNOWN-NEEDS-EXECUTION | High | `input_leaf_requires_grad_does_not_prove_parameter_gradient` |
 | ER-05 | Loss normalization omits trailing dims | CONFIRMED-IN-SOURCE (arithmetic) + PATTERN-DEMONSTRATED | Low-Medium | `normalization_mismatch_scale_factor` |
 | ER-06 | Ambiguous mask polarity is silent | PATTERN-DEMONSTRATED; applicability INFERENCE only | Medium | `mask_polarity_inversion` |
-| ER-07 | Clipping bounds reported norm, hides magnitude | PATTERN-DEMONSTRATED; script's logged value STATIC-ANALYSIS-ONLY | Medium | `gradient_clipping_hides_magnitude` |
+| ER-07 | General pattern: a post-clip norm in a log cannot show gradient magnitude (the script itself logs the pre-clip value) | PATTERN-DEMONSTRATED (pattern only); script's logged value STATIC-ANALYSIS-ONLY | Low for this script; Medium for the pattern in general | `gradient_clipping_hides_magnitude` |
 | ER-08 | Unrestricted `torch.load`/pickle trust | STATIC-ANALYSIS-ONLY (no demo, by design) | Medium-High on untrusted files | none |
 | ER-09 | Cross-device (CPU/GPU) numerical variance | UNKNOWN-NEEDS-EXECUTION | Unknown | none yet (SR-07 scaffold) |
 | ER-10 | Baseline-mode confound (`model_runner` switch) | CONFIRMED-IN-SOURCE (diff) + STATIC-ANALYSIS-ONLY; effect UNKNOWN-NEEDS-EXECUTION | Medium (validity of comparisons) | none (design only) |
@@ -44,27 +44,27 @@ Severity is the author's judgement of *consequence if the defect is reached*, wi
 
 - **Where:** `S:312-313` (`else: RuntimeError`), `return loss` at `S:325`; METHOD_AUDIT section 4 ("Empty-mask path") and claims-register #13; FORK_AUDIT concern 1.
 - **Classification:** CONFIRMED-IN-SOURCE (text observed in METHOD_AUDIT) + PATTERN-DEMONSTRATED. Whether an empty mask ever occurs at runtime: UNKNOWN-NEEDS-EXECUTION.
-- **Severity: High if reached.** The intended guard silently fails and the failure surfaces later as a different exception type, which `except RuntimeError` handlers would miss; a caller could see an unrelated error far from the cause. Not rated higher because with one fixed `(pdb, contig)` pair the empty case may never arise (UNKNOWN).
+- **Severity: Medium if reached (lowered from High).** The failure is loud, not silent corruption: the intended `RuntimeError` is replaced by an `UnboundLocalError` crash at `return loss`, with a less informative message and the wrong type. QA established that the script contains **no** `except RuntimeError`; its only handlers are `except Exception` at `S:663` and `S:683`, which **would** catch the resulting `UnboundLocalError`, so the type change would not by itself bypass handling. Reaching the path at all is UNKNOWN (one fixed `(pdb, contig)` pair).
 - **Reproduction:** `bare_exception_statement_is_a_no_op`; test `TestStdlibPatterns.test_bare_exception_is_noop_and_unboundlocalerror`.
 - **Demonstrated (exact):** evaluating the bare name or an un-raised `RuntimeError('...')` raises nothing; the function then raises `UnboundLocalError` (message, Python 3.12: `cannot access local variable 'loss' where it is not associated with a value`; wording is version-dependent, type is not). `issubclass(UnboundLocalError, RuntimeError)` is `False`. Control with `raise RuntimeError("empty mask")` raises `RuntimeError`. Non-empty mask returns normally.
-- **Does not establish:** that the audited script ever has `valid == 0`; that the script's enclosing code catches or does not catch the error; any behaviour of the real call chain.
+- **Does not establish:** that the audited script ever has `valid == 0`; what happens after the `except Exception` handlers at `S:663`/`S:683` catch it (not examined here); any behaviour of the real call chain.
 - **To settle:** a generic stand-in with the same control flow cannot answer reach. Needs execution of the script on its configured input, or an author statement that the mask is provably non-empty. The static fact (no raise) needs nothing further.
 
 ## ER-02: masking by multiplication does not remove NaN
 
-- **Where:** `S:306-311` (`element_loss * scaffold_mask`, `.sum() / valid`); METHOD_AUDIT section 4 "No finite check" (INFERENCE). Related: fork alignment writes NaN at `~atom_mask` positions (`D:333-335`, METHOD_AUDIT 3.2 item 5); the `clamp` in the renormalization (`S:295`) is not a NaN remover.
-- **Classification:** PATTERN-DEMONSTRATED. Presence of NaN in the real `px0` tensors: UNKNOWN-NEEDS-EXECUTION.
+- **Where:** `S:306-311` (`element_loss * scaffold_mask`, `.sum() / valid`); METHOD_AUDIT section 4 "No finite check" (INFERENCE). Related: fork alignment writes NaN at `~atom_mask` positions (`D:335-337`: comment at D:335, `nan_tensor` at D:336, `torch.where` at D:337; METHOD_AUDIT 3.2 item 5). That write-back can only restore NaN already present in `px0`, it does not create or remove any. `atom_mask` is set all-True at `S:199-200`. The `clamp` in the renormalization (`S:295`) is not a NaN remover.
+- **Classification:** CONFIRMED-IN-SOURCE (`S:307` multiplies the element loss by the mask, and `S:311` sums then divides) + PATTERN-DEMONSTRATED (multiplication does not remove NaN). Presence of NaN in the real `px0` tensors: UNKNOWN-NEEDS-EXECUTION. METHOD_AUDIT 3.2 item 5 infers absent-atom slots are probably finite placeholders rather than NaN, which would make the hazard dormant; not verified.
 - **Severity: Medium.** If any masked-out element is non-finite the loss and every gradient become NaN while the mask appears to be applied. `set_detect_anomaly(True)` (`S:350`) might surface this, but that is also unobserved.
 - **Reproduction:** `nan_times_zero_is_nan`; test `test_nan_times_zero_is_nan`.
 - **Demonstrated (exact):** `0.0 * nan` and `0.0 * inf` are both `nan`; for values `(1.0, nan, 3.0)` with keep `(T, F, T)` the multiplicative sum is `nan`, the selection-based sum is `4.0`. With all-finite input both agree (the pattern is harmless there).
-- **Does not establish:** that NaN/Inf reach the script's loss; that torch tensor ops behave like Python floats in every respect (the IEEE rule is the same, but torch's `where`/indexing semantics were not exercised here). The statement that `torch.clamp` does not remove NaN is STATIC-ANALYSIS-ONLY (not run).
+- **Does not establish:** that NaN/Inf reach the script's loss; that NaN is present. With torch, the demo also confirms `(v*m).sum()` is NaN, selection gives `4.0`, and `torch.clamp(nan, 0.1, 2.0)` stays NaN (`torch_check`; skipped without torch).
 - **To settle:** a finiteness probe on the real intermediate tensors (needs execution, gated), or confirmation that padded atoms are zero-filled rather than NaN-filled.
 
 ## ER-03: detach severs parameter gradient
 
 - **Where:** detach sites `S:218, 243, 306` (teacher outputs and target; intended), `D:173-200` (`get_next_frames` `.cpu().detach()...numpy()`; the `x_t_1` path, discarded by the script), ancestor `A:rfdiffusion/Track_module.py:415-416, 435-436, 456-457` (`R_in.detach()`, `T_in.detach()`); METHOD_AUDIT section 6; FORK_AUDIT concern 3.
 - **Classification:** PATTERN-DEMONSTRATED + CONFIRMED-IN-SOURCE for the detach sites. Net effect on which student parameters get gradient: UNKNOWN-NEEDS-EXECUTION.
-- **Severity: Medium.** Intended detaches (teacher side) are correct; the concern is unintended ones on the student path, and the upstream `Track_module` detaches truncate gradient through the iterated rotation/translation state (METHOD_AUDIT 6 item 8 and the INFERENCE that follows), so parameter coverage is partial by construction of upstream code.
+- **Severity: Low (lowered from Medium).** The script's detaches (teacher outputs, target) are intended and the upstream `Track_module` detaches are by design (`# detach rotation (for stability)`); I have identified **no unintended detach** on the student path. "CONFIRMED" here refers only to the existence of the calls, not to any defect. The register keeps the entry because the pattern bears on what ER-04's check must discriminate, and because upstream detaches mean parameter coverage is partial by construction (INFERENCE). Severity would rise only if a gated run showed parameters that should learn receiving no gradient.
 - **Reproduction:** `detach_severs_gradient` (torch); test `TestTorchPatterns.test_detach_severs_gradient` (skipped without torch).
 - **Demonstrated (exact):** with `out = (w1*x).detach().sum() + (w2*x).sum()`, `x=(1,2)`: `w1.grad is None`, `w2.grad == [1.0, 2.0]`, `out.requires_grad` is `True`, and the detached branch has `requires_grad == False`.
 - **Does not establish:** which of the real model's parameters are reached, or whether the real student path contains any unintended detach.
@@ -86,7 +86,7 @@ Severity is the author's judgement of *consequence if the defect is reached*, wi
 
   The naive predicate is True in all three rows; only the per-parameter gradient check separates them.
 - **Does not establish:** that the real student has the severed or zeroed topology (it may well be connected; that is the point: source alone cannot say). It also does not show that a non-zero gradient implies useful learning; non-zero is necessary for parameter-level flow, not sufficient for anything else.
-- **To settle:** after `backward()`, check that parameters have non-None, non-zero `.grad`, with coverage fraction reported (SR-06 provides validators for generic stand-ins). For the real model this requires one gated forward/backward, outside the autonomous loop (SR-17).
+- **To settle:** after `backward()`, check that parameters have non-None, non-zero `.grad` (a per-parameter check; note SR-06's `require_parameter_gradient` takes one flat gradient and reports no coverage, so a per-parameter coverage report is not yet provided by any kit module). For the real model this requires one gated forward/backward, outside the autonomous loop (SR-17).
 
 ## ER-05: normalization mismatch (divisor omits trailing dimensions)
 
@@ -108,11 +108,11 @@ Severity is the author's judgement of *consequence if the defect is reached*, wi
 - **Does not establish:** that the script's polarity is wrong, or that its uses are inconsistent beyond what METHOD_AUDIT already reasons.
 - **To settle:** a unit test of the real `diffuse_pose` mask convention on a synthetic tensor (SR-02's suggestion), or author confirmation.
 
-## ER-07: gradient clipping bounds the reported norm and hides magnitude
+## ER-07: general pattern: a post-clip norm cannot show gradient magnitude (does NOT apply to the script's logged value)
 
-- **Where:** `clip_grad_norm_` at `S:373-376`, `max_grad_norm=10` in `main()` (`S:661`), logged `grad_norm` `S:385, S:430-435`; the author's own commit note "gradient is high and needs to be looked at" (commit `12d5426`; FORK_AUDIT concern 6); METHOD_AUDIT section 4 (last paragraph).
+- **Where:** `clip_grad_norm_` at `S:373-376`, `max_grad_norm=10` in `main()` (`S:661`), logged `grad_norm` `S:384, S:425, S:430-435` (`S:373` assigns the return value of `clip_grad_norm_`; `S:385` is `lr`); the author's own commit note "gradient is high and needs to be looked at" (commit `12d5426`; FORK_AUDIT concern 6); METHOD_AUDIT section 4 (last paragraph).
 - **Classification:** PATTERN-DEMONSTRATED (generic). What the script logs: STATIC-ANALYSIS-ONLY (INFERENCE from API: `clip_grad_norm_` returns the **pre-clip** total norm, so the script's logged value is likely not hidden; checked on a stand-in tensor only). Actual gradient magnitudes: UNKNOWN-NEEDS-EXECUTION.
-- **Severity: Medium.** A bounded post-clip norm in any log (or a clipped update) is compatible with arbitrarily ill-conditioned gradients; clipping changes the update's scale, not its cause. **This register makes no claim of stability from clipping.**
+- **Severity: Low for this script, Medium for the pattern.** The pattern (a bounded post-clip norm is compatible with arbitrarily large raw gradients) is real, but the source shows the script assigns the return of `clip_grad_norm_` at `S:373`, which PyTorch documents as the pre-clip total norm, and logs that (`S:384`, `S:425`). So **the register does not claim the script hides gradient magnitude**; that claim would be false per its own source. The residual concerns are that the author flagged high gradients, that `max_grad_norm=10` means clipping may or may not engage (UNKNOWN), and that clipped updates are not evidence of conditioning. METHOD_AUDIT's caveat applies: the logged norm is the pre-clip value by API behaviour (INFERENCE, checked here only on a stand-in tensor). **This register makes no claim of stability from clipping.**
 - **Reproduction:** `gradient_clipping_hides_magnitude`; test `test_gradient_clipping_hides_magnitude`.
 - **Demonstrated (exact):** vector `(3,4)*s` with `max_norm=1`: pre-clip norms `50, 5e3, 5e6, 5e9` (a `1e8` span) all clip to post-clip norm `1.0` (agree to <1e-4). With `max_norm=100` and `s=1`, pre-clip `5.0` is untouched. With torch present, `clip_grad_norm_` on grad `(3e3,4e3)` returns `5000.0` and leaves norm `1.0`.
 - **Does not establish:** the script's actual gradient scale, whether clipping engages (with `max_grad_norm=10` it may rarely engage if norms are below 10: UNKNOWN), or whether training converges.
@@ -135,7 +135,7 @@ Severity is the author's judgement of *consequence if the defect is reached*, wi
 - **Classification:** **UNKNOWN-NEEDS-EXECUTION.** No GPU is available in this environment (macOS host; CPU only), so no CPU-vs-GPU comparison was or could be performed. Nothing here is a finding about device variance.
 - **Severity: Unknown.** Floating-point reductions, SVD sign/ordering choices and `det`-based reflection fixes are generic sources of device-dependent differences; their size here is not measured.
 - **Reproduction:** none yet. SR-07 is to add generic device/precision comparison scaffolding with `skipUnless(cuda available)`.
-- **Test that would settle it (spec for SR-07):** on synthetic tensors only, compute a fixed battery (sum/mean over large vectors, a Kabsch-style SVD alignment on random finite point sets and on degenerate/near-collinear sets, normalization with tiny norms) on CPU float32, CPU float64 and, where present, CUDA float32; assert agreement within a documented tolerance, report maximum absolute and relative differences, and require the tests to report as skipped, not passed, when CUDA is absent. Real-model cross-device equivalence needs a gated run (SR-17).
+- **To settle:** (spec for the test SR-07 should add) on synthetic tensors only, compute a fixed battery (sum/mean over large vectors, a Kabsch-style SVD alignment on random finite point sets and on degenerate/near-collinear sets, normalization with tiny norms) on CPU float32, CPU float64 and, where present, CUDA float32; assert agreement within a documented tolerance, report maximum absolute and relative differences, and require the tests to report as skipped, not passed, when CUDA is absent. Real-model cross-device equivalence needs a gated run (SR-17).
 - **Does not establish:** anything about the audited program on any device.
 
 ## ER-10: baseline-mode confound (`model_runner: SelfConditioning` -> `default`)
@@ -170,6 +170,13 @@ Severity is the author's judgement of *consequence if the defect is reached*, wi
 | ER-11 in-place hazards | Which tensors the real graph saves is unknowable without running it. |
 | Whether any pattern is reached at runtime (all of ER-01..07) | Requires executing the audited script, out of scope. |
 | Dropout/eval-mode mismatch (METHOD_AUDIT claim #17), radial-component loss under per-atom renormalization (claim #7), re-diffusion of already-noised input (3.3) | Not in the SR-03 list; method-level inferences needing a synthetic numeric study or execution. Not catalogued here to avoid unverified entries. |
+
+## Known limits of this kit's own checks
+
+- The "no pickle / `torch.load` text" test is a deny-list over a few strings; it would not catch other vectors (for example `import marshal`), and nothing scans this register for such content. It is a tripwire, not a guarantee.
+- The `exec("RuntimeError", ...)` calls in `failure_modes.py` use constant strings with no external input; they are the demonstration of ER-01 and are harmless.
+- The register's prose is only partly coupled to the tests: `test_register_structure` pins the ER id set, the required fields per entry and a valid label per entry, but cannot check that the prose is correct. Correctness of classifications rests on the independent QA review.
+- The torch import guard catches any `Exception` (not just `ImportError`) so a broken install (for example an ABI mismatch raising `OSError`/`RuntimeError`) yields skips rather than a module error; this is tested with simulated failing importers.
 
 ## How to reproduce
 

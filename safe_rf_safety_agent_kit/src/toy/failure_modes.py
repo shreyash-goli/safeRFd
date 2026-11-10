@@ -26,7 +26,7 @@ from typing import Any, Sequence
 try:  # guarded: a clean clone without torch must still import and pass.
     import torch  # type: ignore
     TORCH_AVAILABLE = True
-except ImportError:  # includes ModuleNotFoundError and a blocked import
+except Exception:  # noqa: BLE001 - ImportError, but also OSError/RuntimeError from a broken install (e.g. ABI mismatch)
     torch = None  # type: ignore
     TORCH_AVAILABLE = False
 
@@ -71,12 +71,15 @@ def bare_exception_statement_is_a_no_op() -> dict[str, Any]:
 
     # (d) the statement itself
     raised = False
+    ns: dict[str, Any] = {"evaluated": 0}
     try:
-        exec("RuntimeError", {})
-        exec("RuntimeError('never raised')", {})
+        # constant strings only, no external input: harmless by construction
+        exec("evaluated += 1; RuntimeError", ns)
+        exec("evaluated += 1; RuntimeError('never raised')", ns)
     except BaseException:  # pragma: no cover - would contradict the claim
         raised = True
     out["bare_statements_raised"] = raised
+    out["bare_statements_evaluated"] = ns["evaluated"]  # proves the exec calls really ran
 
     # (a) the pattern
     try:
@@ -117,7 +120,17 @@ def nan_times_zero_is_nan(values: Sequence[float] = (1.0, float("nan"), 3.0),
     nan = float("nan")
     by_multiplication = sum(v * w for v, w in zip(values, weights))
     by_selection = sum(v for v, k in zip(values, keep) if k)
+    torch_check = None
+    if TORCH_AVAILABLE:
+        tv = torch.tensor([float(v) for v in values])
+        tm = torch.tensor([1.0 if k else 0.0 for k in keep])
+        torch_check = {
+            "mult_sum_is_nan": bool(torch.isnan((tv * tm).sum())),
+            "selection_sum": float(tv[torch.tensor(list(keep))].sum()),
+            "clamp_preserves_nan": bool(torch.isnan(torch.clamp(torch.tensor(float("nan")), 0.1, 2.0))),
+        }
     return {
+        "torch_check": torch_check,
         "label": LABEL,
         "zero_times_nan_is_nan": math.isnan(0.0 * nan),
         "zero_times_inf_is_nan": math.isnan(0.0 * float("inf")),

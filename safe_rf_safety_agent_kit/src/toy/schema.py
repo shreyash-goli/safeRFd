@@ -268,8 +268,19 @@ class ExperimentRecord:
 
 
 # --------------------------------------------------------------- json util
-def _canonical(obj: Any) -> str:
+def canonical_json(obj: Any) -> str:
+    """Canonical JSON: sorted keys, compact separators, ASCII-escaped, NaN/inf rejected.
+
+    Public because other modules in this kit (e.g. `toy.checkpoint`) must produce byte-identical
+    serialisations to hash over. It was originally private (`_canonical`); depending on a private
+    name across modules is fragile, so it is now part of the supported surface and any change to
+    its output is a breaking change for every stored `content_hash` and checkpoint digest.
+    """
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+
+
+# Backwards-compatible alias for the former private name. Do not use in new code.
+_canonical = canonical_json
 
 
 def _strict_loads(text: str) -> Any:

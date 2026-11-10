@@ -344,5 +344,121 @@ class NoMutationAndNoSilentPass(unittest.TestCase):
                     c()
 
 
+class QAHardening(unittest.TestCase):
+    """Tests added after QA mutation testing (SR-06 round 2)."""
+
+    def setUp(self):
+        self.p = [0.7, 0.9, 0.1, -0.2]
+        self.fn = lambda p: masked_mse_loss_and_grad(p, X, T, M)[0]
+        self.gf = lambda p: masked_mse_loss_and_grad(p, X, T, M)[1]
+
+    # M-S1: the comparison loop must cover every coordinate
+    def test_error_only_at_one_coordinate_is_caught(self):
+        for bad_idx in (1, 2, 3):  # index 1, interior 2, last 3 (index 0 is correct in each)
+            for label, tweak in (("offset", lambda a: a + 0.5), ("sign", lambda a: -a), ("x2", lambda a: 2 * a)):
+                def g(p, k=bad_idx, tw=tweak):
+                    out = list(self.gf(p))
+                    out[k] = tw(out[k])
+                    return out
+                with self.subTest(index=bad_idx, kind=label):
+                    with self.assertRaises(st.GradientMismatchError) as cm:
+                        st.check_gradient(self.fn, g, self.p)
+                    self.assertIn(f"index {bad_idx}", str(cm.exception))
+
+    # M-S2: a correct gradient with one zero component must pass
+    def test_correct_gradient_with_a_zero_component_passes(self):
+        f = lambda p: p[0] ** 2 + p[1] ** 2
+        r = st.check_gradient(f, lambda p: [2 * p[0], 2 * p[1]], [0.0, 1.0])
+        self.assertEqual(r.analytic, (0.0, 2.0))
+
+    # D-S1: huge ints raise StabilityError (a ValueError), never bare OverflowError
+    def test_huge_int_is_stability_error(self):
+        for call in (lambda: st.masked_mean_checked([10 ** 400], [True], 1),
+                     lambda: st.masked_mean_checked([1.0, 10 ** 400], [True, False], 1),
+                     lambda: st.masked_mean_checked([[1.0, 10 ** 400]], [True], 2),
+                     lambda: st.masked_squared_error_mean([10 ** 400], [0.0], [True], 1),
+                     lambda: st.masked_squared_error_mean([0.0], [10 ** 400], [True], 1)):
+            with self.assertRaises(st.NonFiniteError):
+                try:
+                    call()
+                except OverflowError:
+                    self.fail("bare OverflowError escaped")
+        # lenient policy: a masked-out huge int is simply not used
+        self.assertEqual(st.masked_mean_checked([1.0, 10 ** 400], [True, False], 1, strict_masked_out=False), 1.0)
+
+    # M-S3: mask longer than data
+    def test_mask_longer_than_data(self):
+        with self.assertRaises(st.MaskLengthError):
+            st.check_mask([True, True, True], 2)
+        with self.assertRaises(st.MaskLengthError):
+            st.masked_mean_checked([1.0, 2.0], [True, True, True], 2)
+
+    # M-S4 / M-S6: bool is not a number in the masked path
+    def test_bool_values_rejected(self):
+        for strict in (True, False):
+            with self.assertRaises(st.NonNumericError):
+                st.masked_mean_checked([True, 1.0], [True, True], 2, strict_masked_out=strict)
+            with self.assertRaises(st.NonNumericError):
+                st.masked_mean_checked([1.0, False], [True, False], 1, strict_masked_out=strict)
+        with self.assertRaises(st.NonNumericError):
+            st.masked_squared_error_mean([True], [0.0], [True], 1)
+        with self.assertRaises(st.NonNumericError):
+            st.masked_squared_error_mean([1.0], [False], [True], 1)
+
+    # M-S5: an overflowing difference must never become 0.0
+    def test_squared_error_overflow_not_zero(self):
+        for strict in (True, False):
+            with self.assertRaises(st.NonFiniteError):
+                st.masked_squared_error_mean([10 ** 400], [0.0], [True], 1, strict_masked_out=strict)
+        with self.assertRaises(st.NonFiniteError):
+            st.masked_squared_error_mean([1.0, 10 ** 400], [1.0, 0.0], [True, False], 1)  # strict, masked out
+
+    # M-S7: Mapping/set are not sequences on the value path either
+    def test_mapping_and_set_values_rejected(self):
+        for bad in ({1.0: 1}, {1.0}, frozenset({1.0})):
+            with self.assertRaises(st.ShapeError):
+                st.check_finite_sequence(bad)
+            with self.assertRaises(st.ShapeError):
+                st.masked_mean_checked(bad, [True], 1)
+            with self.assertRaises(st.ShapeError):
+                st.check_finite_matrix(bad)
+
+    # M-S11: negative min_abs_change would disable the no-op guard
+    def test_negative_min_abs_change_rejected(self):
+        with self.assertRaisesRegex(st.StabilityError, ">= 0"):
+            st.check_params_changed([1.0], [1.0], min_abs_change=-1.0)
+
+    # M-S8/9/10: tolerance is neither loosened nor unreported
+    def test_default_tolerance_is_tight_and_report_populated(self):
+        r = st.check_gradient(self.fn, self.gf, self.p)
+        self.assertEqual((r.step, r.rtol, r.atol), (1e-6, 1e-4, 1e-6))
+        self.assertEqual(r.analytic, tuple(self.gf(self.p)))
+        self.assertGreater(r.max_abs_error, 0.0)
+        self.assertGreater(r.max_rel_error, 0.0)
+        self.assertLess(r.max_abs_error, 1e-6)
+        # 3e-4 relative error is > rtol (1e-4) but < 10x looser rtol (1e-3): must fail
+        with self.assertRaises(st.GradientMismatchError):
+            st.check_gradient(self.fn, lambda p: [a * 1.0003 for a in self.gf(p)], self.p)
+        st.check_gradient(self.fn, lambda p: [a * 1.00005 for a in self.gf(p)], self.p)
+
+    # documented limitation: atol dominates at small scale
+    def test_small_scale_blind_spot_is_real_and_documented(self):
+        f = lambda p: 1e-9 * p[0] ** 2  # true gradient 2e-9 at 1.0
+        st.check_gradient(f, lambda p: [2e-7], [1.0])  # 100x too large PASSES at defaults (the limitation)
+        with self.assertRaises(st.GradientMismatchError):
+            st.check_gradient(f, lambda p: [2e-6], [1.0])
+        with self.assertRaises(st.GradientMismatchError):  # a tight atol closes the gap
+            st.check_gradient(f, lambda p: [2e-7], [1.0], atol=1e-12)
+        st.check_gradient(f, lambda p: [2e-9], [1.0], atol=1e-12)
+        self.assertIn("100x too large", st.check_gradient.__doc__)
+
+    # D-S2: docstring claim matches behaviour
+    def test_negative_zero_claim_scope(self):
+        self.assertEqual(math.copysign(1.0, st.check_finite_sequence([-0.0])[0]), -1.0)
+        self.assertEqual(math.copysign(1.0, st.masked_mean_checked([-0.0], [True], 1)), 1.0)
+        self.assertIn("NOT covered", st.check_finite_scalar.__doc__)
+
+
+
 if __name__ == "__main__":
     unittest.main()

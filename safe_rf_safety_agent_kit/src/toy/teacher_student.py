@@ -277,10 +277,17 @@ class TrainResult:
     teacher_before: TeacherOutput
     teacher_after: TeacherOutput
     record: ExperimentRecord
+    loss_increased: bool = False  # True when final loss > initial loss (runaway-but-finite lr, etc.)
 
 
 def _hash_json(obj) -> str:
     return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _finite_metric(name: str, v: float) -> MetricValue:
+    if not math.isfinite(v):
+        raise ValueError(f"metric {name} is non-finite: input or parameter magnitudes are too large for float64")
+    return MetricValue.measured(float(v))
 
 
 def make_inputs(seed: int, rows: int = 4, width: int = 3) -> Matrix:
@@ -308,7 +315,7 @@ def train(seed: int, steps: int = 50, lr: float = 0.05, eta: float = 0.5, rescal
     if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
         raise ValueError("steps must be a nonnegative int")
     lr = _check_lr(lr)
-    _check_eta(eta)
+    eta = _check_eta(eta)
     if x is not None:
         xm = as_matrix("x", x)
         if rows is not None and rows != len(xm):
@@ -321,7 +328,11 @@ def train(seed: int, steps: int = 50, lr: float = 0.05, eta: float = 0.5, rescal
             if isinstance(v, bool) or not isinstance(v, int) or v < 1:
                 raise ValueError(f"{nm} must be a positive int")
         xm = make_inputs(seed, rows, width)
-    teacher = teacher if teacher is not None else make_teacher(seed, len(xm[0]))
+    if teacher is None:
+        teacher = make_teacher(seed, len(xm[0]))
+    elif not isinstance(teacher, Teacher):
+        raise ValueError(f"teacher must be a Teacher instance, got {type(teacher).__name__}")
+    params_snapshot = {k: tuple(v) for k, v in teacher.params.items()}
     mk = _check_mask(mask if mask is not None else (True,) * len(xm), len(xm))
     before = teacher.outputs(xm)
     target = erasure_target(before.conditioned, before.unconditioned, eta, rescale=rescale)
@@ -335,27 +346,36 @@ def train(seed: int, steps: int = 50, lr: float = 0.05, eta: float = 0.5, rescal
         except ValueError as e:
             if k == 0:
                 raise
-            raise ValueError(f"training diverged at step {k} (learning rate too large?): {e}") from None
-        history.append((k, loss, math.sqrt(sum(g * g for g in grad))))
+            raise ValueError(f"training diverged at step {k} (numeric overflow: learning rate or input magnitude too large?): {e}") from None
+        history.append((k, loss, math.hypot(*grad)))
         if k < steps:
             try:
                 student.step(grad, lr)
             except ValueError as e:
                 if str(e).startswith("diverged"):
-                    raise ValueError(f"training diverged at step {k + 1} (learning rate too large?)") from None
+                    raise ValueError(f"training diverged at step {k + 1} (non-finite parameters: learning rate or input magnitude too large?)") from None
                 raise
     after = teacher.outputs(xm)
-    metrics = {"initial_loss": MetricValue.measured(history[0][1]),
-               "final_loss": MetricValue.measured(history[-1][1]),
-               "final_grad_norm": MetricValue.measured(history[-1][2])}
+    # Tripwire: a frozen teacher cannot change; a stateful subclass could. Never record such a run.
+    if after != before or {k: tuple(v) for k, v in teacher.params.items()} != params_snapshot:
+        raise ValueError("teacher changed during training; the teacher must be frozen. Refusing to record this run")
+    loss_increased = history[-1][1] > history[0][1]
+    metrics = {"initial_loss": _finite_metric("initial_loss", history[0][1]),
+               "final_loss": _finite_metric("final_loss", history[-1][1]),
+               "final_grad_norm": _finite_metric("final_grad_norm", history[-1][2]),
+               "loss_increased": MetricValue.measured(1.0 if loss_increased else 0.0)}
+    config = _hash_json(
+        {"steps": steps, "lr": lr, "eta": eta, "rescale": rescale, "normalization": normalization,
+         "mask": list(mk), "teacher": {k: list(v) for k, v in teacher.params.items()}})
     prov = RunProvenance(
-        run_id=f"toy-teacher-student-seed{seed}", timestamp_utc=timestamp_utc, seed=seed,
+        # run_id embeds a config digest so differing configs of one seed do not share a run_id.
+        run_id=f"toy-teacher-student-seed{seed}-{config[:12]}", timestamp_utc=timestamp_utc, seed=seed,
         code_version=CODE_VERSION, python_version=current_python_version(), toy_only=True,
-        input_hashes={"x": _hash_json(xm), "config": _hash_json(
-            {"steps": steps, "lr": lr, "eta": eta, "rescale": rescale, "normalization": normalization,
-             "mask": list(mk), "teacher": {k: list(v) for k, v in teacher.params.items()}})})
+        input_hashes={"x": _hash_json(xm), "config": config})
     record = ExperimentRecord(
         name="toy-teacher-student", provenance=prov, metrics=metrics,
         evidence_class=EvidenceClass.TOY_RESULT,
-        notes=TOY_LABEL + " Abstract numeric analogue only; no claim about any real system.")
-    return TrainResult(tuple(history), tuple(student.params), before, after, record)
+        notes=TOY_LABEL + " Abstract numeric analogue only; no claim about any real system."
+        + (" WARNING: final loss exceeds initial loss (loss_increased=1.0); this run diverged or"
+           " was not a converged training result." if loss_increased else ""))
+    return TrainResult(tuple(history), tuple(student.params), before, after, record, loss_increased)

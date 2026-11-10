@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from toy.erasure_demo import ToyPrediction, toy_target
 from toy.schema import EvidenceClass, derive_seed, make_rng
-from toy.teacher_student import (Student, Teacher, predict, as_matrix, erasure_target, make_inputs, make_teacher,
+from toy.teacher_student import (Student, Teacher, TeacherOutput, predict, as_matrix, erasure_target, make_inputs, make_teacher,
                                  masked_mse_loss_and_grad, train)
 
 # Hand fixture. x=((1,2),(3,4)), params scale=(1,1), bias=(0,0) so pred == x.
@@ -337,6 +337,76 @@ class DefaultsAndInternals(unittest.TestCase):
         x2 = make_inputs(9)
         self.assertNotEqual(train(**{**base, "x": x2}).record.provenance.input_hashes["x"],
                             train(**base).record.provenance.input_hashes["x"])
+
+
+class _StatefulTeacher(Teacher):
+    """Probe: a Teacher subclass whose outputs drift after the first call (violates freezing)."""
+    calls = 0
+
+    def outputs(self, x):
+        type(self).calls += 1
+        out = super().outputs(x)
+        if type(self).calls > 1:
+            return TeacherOutput(tuple(tuple(v + 1.0 for v in r) for r in out.conditioned), out.unconditioned)
+        return out
+
+
+class _DuckTeacher:
+    params = {}
+
+    def outputs(self, x):
+        return None
+
+
+class Integrity(unittest.TestCase):
+    P = {"cond_scale": (2.0, 1.0), "cond_bias": (0.0, 1.0), "uncond_scale": (1.0, 0.5), "uncond_bias": (0.5, 0.0)}
+    X = ((1.0, 2.0), (3.0, -4.0))
+
+    def test_non_teacher_object_rejected(self):
+        for bad in (_DuckTeacher(), object(), {"cond_scale": (1.0,)}):
+            with self.assertRaisesRegex(ValueError, "must be a Teacher"):
+                train(seed=1, x=self.X, teacher=bad)
+
+    def test_mutating_teacher_is_caught_not_recorded(self):
+        _StatefulTeacher.calls = 0
+        with self.assertRaisesRegex(ValueError, "teacher changed during training"):
+            train(seed=1, x=self.X, teacher=_StatefulTeacher(self.P), timestamp_utc=TS)
+
+    def test_well_behaved_subclass_still_accepted(self):
+        class Plain(Teacher):
+            pass
+        self.assertEqual(len(train(seed=1, x=self.X, teacher=Plain(self.P)).history), 51)
+
+    def test_eta_int_and_float_agree(self):
+        a, b = train(seed=2, eta=1, timestamp_utc=TS), train(seed=2, eta=1.0, timestamp_utc=TS)
+        self.assertEqual(a.history, b.history)
+        self.assertEqual(a.record.content_hash(), b.record.content_hash())
+        self.assertEqual(a.record.provenance.input_hashes, b.record.provenance.input_hashes)
+
+    def test_run_id_distinguishes_configs(self):
+        a = train(seed=2, lr=0.05, timestamp_utc=TS).record.provenance.run_id
+        b = train(seed=2, lr=0.04, timestamp_utc=TS).record.provenance.run_id
+        self.assertNotEqual(a, b)
+        self.assertEqual(a, train(seed=2, lr=0.05, timestamp_utc=TS).record.provenance.run_id)
+        self.assertTrue(a.startswith("toy-teacher-student-seed2-"))
+
+    def test_runaway_finite_lr_is_flagged(self):
+        bad = train(seed=2, lr=3.0, timestamp_utc=TS)
+        self.assertGreater(bad.history[-1][1], bad.history[0][1])
+        self.assertTrue(bad.loss_increased)
+        self.assertEqual(bad.record.metrics["loss_increased"].value, 1.0)
+        self.assertIn("WARNING", bad.record.notes)
+        good = train(seed=2, timestamp_utc=TS)
+        self.assertFalse(good.loss_increased)
+        self.assertEqual(good.record.metrics["loss_increased"].value, 0.0)
+        self.assertNotIn("WARNING", good.record.notes)
+
+    def test_huge_finite_x_gives_named_cause(self):
+        for big in (1e100, 1e160):
+            with self.assertRaises(ValueError) as cm:
+                train(seed=1, x=((big, 1.0, 2.0), (1.0, 1.0, 1.0)), timestamp_utc=TS)
+            self.assertRegex(str(cm.exception), "overflow|too large")
+            self.assertNotIn("metric value must be finite", str(cm.exception))
 
 
 class Hardening(unittest.TestCase):

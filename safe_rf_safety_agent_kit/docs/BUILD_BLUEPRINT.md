@@ -11,7 +11,7 @@ All tasks begin unchecked. An agent may mark `[x]` only after actual commands ra
 
 ## Safe computational-method replication (synthetic non-biological only)
 - [x] **SR-04** — Formalize strict typed experiment schema, run provenance and deterministic seeds. **Depends:** SR-00. **Verify:** JSON/typed validation tests include invalid inputs and missing evidence.
-- [ ] **SR-05** — Implement an abstract teacher–student demo on small 2D numeric arrays. Keep all examples non-biological. **Depends:** SR-04. **Verify:** unit tests show deterministic outputs, frozen teacher and mutable student state.
+- [x] **SR-05** — Implement an abstract teacher–student demo on small 2D numeric arrays. Keep all examples non-biological. **Depends:** SR-04. **Verify:** unit tests show deterministic outputs, frozen teacher and mutable student state.
 - [ ] **SR-06** — Implement generic stability checks for finite values, masked losses, empty-mask errors and gradient-validity assertions. **Depends:** SR-05. **Verify:** adversarial numeric unit cases fail safely.
 - [ ] **SR-07** — Write non-in-place numerical operations and optional device/precision comparison tests for generic tensors; do not modify or run RFdiffusion inference. **Depends:** SR-05. **Verify:** tests demonstrate behavior, document optional GPU skips.
 - [ ] **SR-08** — Add toy checkpoint metadata, provenance hashes and safe reload (no untrusted pickles). **Depends:** SR-05. **Verify:** round-trip and corrupted-checkpoint tests; no real protein weights.

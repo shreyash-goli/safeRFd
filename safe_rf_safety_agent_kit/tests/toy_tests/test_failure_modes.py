@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import unittest
+from fractions import Fraction
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,6 +20,7 @@ class TestStdlibPatterns(unittest.TestCase):
     def test_bare_exception_is_noop_and_unboundlocalerror(self):
         r = fm.bare_exception_statement_is_a_no_op()
         self.assertFalse(r["bare_statements_raised"])
+        self.assertEqual(r["bare_statements_evaluated"], 2)  # the exec demos really ran
         self.assertEqual(r["bare_pattern_exception_type"], "UnboundLocalError")
         self.assertIn("loss", r["bare_pattern_message"])
         self.assertFalse(r["bare_pattern_is_runtime_error"])
@@ -49,6 +51,13 @@ class TestStdlibPatterns(unittest.TestCase):
         self.assertEqual(f["sum_by_multiplication"], f["sum_by_selection"])
         with self.assertRaises(ValueError):
             fm.nan_times_zero_is_nan((1.0,), (True, False))
+        if fm.TORCH_AVAILABLE:
+            tc = r["torch_check"]
+            self.assertTrue(tc["mult_sum_is_nan"])
+            self.assertEqual(tc["selection_sum"], 4.0)
+            self.assertTrue(tc["clamp_preserves_nan"])
+        else:
+            self.assertIsNone(r["torch_check"])
 
     def test_normalization_mismatch_factor(self):
         for leading, trailing, k in [(4, (14, 3), 42), (1, (2,), 2), (7, (5, 1, 3), 15),
@@ -59,8 +68,17 @@ class TestStdlibPatterns(unittest.TestCase):
                 self.assertEqual(r["observed_factor"], k)
                 self.assertTrue(r["observed_factor_equals_expected_exactly"])
                 self.assertEqual(r["inflated_mean"], r["true_element_mean"] * k)
+        # configurations where the identity is NOT exact in plain floats: kills a float mutant
+        for leading, trailing, k in [(7, (14, 3), 42), (1, (7,), 7), (9, (3, 3, 3), 27)]:
+            with self.subTest(inexact_in_float=(leading, trailing)):
+                r = fm.normalization_mismatch_scale_factor(leading, trailing)
+                self.assertIsInstance(r["observed_factor"], Fraction)
+                self.assertEqual(r["observed_factor"], k)
+                self.assertTrue(r["observed_factor_equals_expected_exactly"])
         with self.assertRaises(ValueError):
             fm.normalization_mismatch_scale_factor(0, (2,))
+        with self.assertRaises(ValueError):
+            fm.normalization_mismatch_scale_factor(2, (3, 0))
 
     def test_mask_polarity_inversion_is_silent(self):
         r = fm.mask_polarity_inversion()
@@ -75,6 +93,12 @@ class TestStdlibPatterns(unittest.TestCase):
         # degenerate mask: one reading is empty, reported as None rather than raised
         d = fm.mask_polarity_inversion((1.0, 2.0), (True, True))
         self.assertIsNone(d["loss_false_means_include"])
+        with self.assertRaises(ValueError):
+            fm.mask_polarity_inversion((1.0, 2.0, 3.0), (True, False))
+        # equal losses under both readings: losses_differ must be False
+        e = fm.mask_polarity_inversion((2.0, 2.0), (True, False))
+        self.assertEqual((e["loss_true_means_include"], e["loss_false_means_include"]), (2.0, 2.0))
+        self.assertFalse(e["losses_differ"])
 
     def test_gradient_clipping_hides_magnitude(self):
         r = fm.gradient_clipping_hides_magnitude()
@@ -146,14 +170,16 @@ class TestTorchGuardWiring(unittest.TestCase):
     def test_blocked_torch_import_skips_torch_tests_and_passes_rest(self):
         """Child process with torch import blocked: module imports, torch tests are SKIPPED."""
         code = (
-            "import sys, unittest\n"
+            "import os, sys, unittest\n"
             "sys.modules['torch'] = None\n"            # makes `import torch` raise ImportError
             f"sys.path[:0] = [{str(ROOT / 'src')!r}, {str(ROOT / 'tests')!r}]\n"
             "from toy import failure_modes as fm\n"
             "assert fm.TORCH_AVAILABLE is False\n"
             "from toy_tests import test_failure_modes as t\n"
-            "res = unittest.TextTestRunner(stream=open('/dev/null','w')).run(\n"
-            "    unittest.defaultTestLoader.loadTestsFromModule(t))\n"
+            "L = unittest.defaultTestLoader\n"
+            "suite = unittest.TestSuite([L.loadTestsFromTestCase(t.TestStdlibPatterns),\n"
+            "                            L.loadTestsFromTestCase(t.TestTorchPatterns)])\n"
+            "res = unittest.TextTestRunner(stream=open(os.devnull, 'w')).run(suite)\n"
             "print('RESULT', res.testsRun, len(res.skipped), len(res.failures), len(res.errors))\n"
         )
         env = dict(os.environ, SR03_CHILD="1")
@@ -162,11 +188,57 @@ class TestTorchGuardWiring(unittest.TestCase):
         self.assertIsNotNone(m, p.stdout + p.stderr)
         run, skipped, failures, errors = map(int, m.groups())
         self.assertEqual((failures, errors), (0, 0), p.stdout + p.stderr)
-        # 2 torch pattern tests + 1 torch-present-only skip + 1 child-only skip of this test
-        self.assertGreaterEqual(skipped, 2)
+        # child runs only the stdlib and torch pattern classes: exactly the 2 torch tests skip
+        self.assertEqual(skipped, 2)
+
+
+    @unittest.skipIf(os.environ.get("SR03_CHILD") == "1", "inside child process")
+    def test_broken_torch_install_non_importerror_still_imports_module(self):
+        """A torch whose import raises OSError/RuntimeError (ABI mismatch) must not break import."""
+        for exc in ("OSError", "RuntimeError"):
+            with self.subTest(exc=exc):
+                code = (
+                    "import sys, importlib.abc\n"
+                    "class F(importlib.abc.MetaPathFinder):\n"
+                    "    def find_spec(self, name, path, target=None):\n"
+                    f"        if name == 'torch': raise {exc}('simulated broken install')\n"
+                    "sys.meta_path.insert(0, F())\n"
+                    f"sys.path[:0] = [{str(ROOT / 'src')!r}]\n"
+                    "from toy import failure_modes as fm\n"
+                    "assert fm.TORCH_AVAILABLE is False\n"
+                    "try:\n    fm.detach_severs_gradient()\nexcept fm.TorchUnavailable:\n    print('OK')\n"
+                )
+                p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+                self.assertEqual(p.stdout.strip(), "OK", p.stdout + p.stderr)
 
 
 class TestRegisterConsistency(unittest.TestCase):
+    SECTION_FIELDS = ("**Where:**", "**Classification:**", "**Severity", "**Does not establish:**",
+                      "**To settle:**")
+    LABELS = ("CONFIRMED-IN-SOURCE", "PATTERN-DEMONSTRATED", "UNKNOWN-NEEDS-EXECUTION",
+              "STATIC-ANALYSIS-ONLY")
+
+    def _sections(self):
+        doc = (ROOT / "docs" / "ERROR_REGISTER.md").read_text()
+        parts = re.split(r"^## (ER-\d\d)[: ]", doc, flags=re.M)
+        return doc, dict(zip(parts[1::2], parts[2::2]))
+
+    def test_pattern_function_keys_pinned(self):
+        self.assertEqual(set(fm.PATTERN_FUNCTIONS), {f"ER-0{i}" for i in range(1, 8)})
+
+    def test_register_structure(self):
+        doc, secs = self._sections()
+        self.assertEqual(set(secs), {f"ER-{i:02d}" for i in range(1, 12)})
+        for er, body in secs.items():
+            for field in self.SECTION_FIELDS:
+                self.assertIn(field, body, f"{er} missing {field}")
+            cls = body.split("**Classification:**")[1].split("\n")[0]
+            self.assertTrue(any(l in cls for l in self.LABELS), er)
+        self.assertIn("UNKNOWN-NEEDS-EXECUTION", secs["ER-09"].split("**Classification:**")[1].split("\n")[0])
+        self.assertIn("STATIC-ANALYSIS-ONLY", secs["ER-08"].split("**Classification:**")[1].split("\n")[0])
+        # sentence-initial overclaims only (the register legitimately says "no claim that the method is broken")
+        self.assertIsNone(re.search(r"(^|[.!?]\s+|\n\s*)the method is (broken|safe)", doc.lower()))
+
     def test_every_function_and_test_is_named_in_the_register(self):
         doc = (ROOT / "docs" / "ERROR_REGISTER.md").read_text()
         for er_id, fn in fm.PATTERN_FUNCTIONS.items():
