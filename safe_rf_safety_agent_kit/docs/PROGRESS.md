@@ -1775,3 +1775,93 @@ pinned out of band. **Status: PASS — blueprint checkbox marked `[x]`.**
 Outstanding: SR-07 and SR-10 QA in progress; SR-13 fixed after a second FAIL, awaiting a third
 review; SR-15 built, awaiting QA; SR-12 and SR-16 not started; SR-17 out of autonomous scope by
 design.
+
+---
+
+# SR-12 — Independent capstone review: **FAIL**. Four orchestrator failures found.
+
+**Date:** 2026-11-09. Deliverable: `docs/SR12_INDEPENDENT_REVIEW.md`. This review was scoped
+deliberately at the cross-cutting question the per-task QA passes could not answer: *taken as a
+whole, does this kit misrepresent anything?* It found that it does. **Several of the findings are
+failures of the orchestrator's own process, not of any builder**, and they are recorded here in full
+because the point of the review was to catch exactly this.
+
+## Method fidelity: PASS
+Script hash and diff match; the 691 added diff lines are byte-identical to the script; per-file
+counts recompute to 914/138; every spot-checked citation matched; the hand-worked clamp cases
+recompute correctly; and `METHOD_AUDIT.md`, `ERROR_REGISTER.md` and `DIFF_EVIDENCE.md` agree with each
+other with **no claim stronger than its evidence**. The reviewer did not execute the fork script —
+only hashed, compared and grepped it.
+
+Measured skip counts by environment (which also **corrects** the SR-15 builder's *reasoned* 86):
+nothing installed → **86**; PyYAML only → 85; torch blocked with numpy present → 84; both present → 2.
+
+## Orchestrator failure 1 — the protocol and the scorer now disagree on a verdict rule (F2)
+`docs/EVALUATION_PROTOCOL.md:122` states a failed control-adequacy gate scopes to **H1/H2 only**, and
+`:139` still carries the "Open issue for QA (not resolved by this document)" paragraph saying the
+implementation scopes it that way. But `src/toy/benchmark.py:83` has
+`"control_adequacy": "all"` — global, so H3 and JOINT also become INCONCLUSIVE.
+**This is the orchestrator's doing.** It made the decision to extend gate 11 to H3, routed the
+*implementation* to SR-10, and never routed the corresponding *protocol amendment* to SR-09 — so
+commit `ff451e1` changed the code while leaving the protocol and its amendment log untouched. For a
+kit whose entire thesis is that a pre-registered protocol must determine the analysis, an
+undocumented divergence between protocol and scorer is the most serious possible finding. Routed for
+fix.
+
+## Orchestrator failure 2 — a checkbox marked without a recorded attestation
+**SR-05** was marked `[x]` but `docs/PROGRESS.md` contains **no `## SR-05 — QA verdict` section**
+(verified: zero matches). Its PASS exists only as a phrase inside a rework heading and in a commit
+message, and the six residual defects fixed *after* that PASS were never re-attested. CLAUDE.md
+requires that QA independently attest a task's acceptance criteria before it is marked. **Checkbox
+reverted to `[ ]`.**
+
+## Orchestrator failure 3 — two tasks marked while their dependencies were unverified
+**SR-11** was `[x]` while its dependency **SR-10** is `[ ]`; **SR-14** was `[x]` while its dependency
+**SR-13** is `[ ]`. The blueprint's completion semantics are explicit: a task may be completed only
+when its dependencies pass. Both QA PASSes are genuine, but marking them was premature.
+**Both checkboxes reverted to `[ ]`** pending their dependencies.
+
+## Orchestrator failure 4 — an attestation that no longer matches the artifact
+**SR-09** was `[x]` on the strength of a QA PASS against protocol **v1-DRAFT-r2**, but the live
+document is **r3** (revised at `12bc490`, after that PASS, at the orchestrator's request) and r3 has
+**never been reviewed**. An attestation of a superseded version is not an attestation.
+**Checkbox reverted to `[ ]`.**
+
+## Other findings routed for fix
+- **F1 — a claim contradicted by the source it cites.** `src/toy/checkpoint.py:13,45` calls the
+  `student_model_state_dict` vs `model_state_dict` key mismatch "silently incompatible". Upstream reads
+  `self.ckpt['model_state_dict']` at `model_runners.py:234`, which raises `KeyError` — so the failure
+  is **loud**, not silent. The mismatch is also inference, never executed. This is the same class of
+  overstatement the kit was built to catch, inside the kit itself.
+- **F4 — the dashboard cannot distinguish an oracle fixture from a real result.** It renders
+  "H1 Suppression … SUPPORTED" and "JOINT_SUPPORTED" with mean 1.1257, qualified only by a small grey
+  "(toy fixture; conditional; not a safety finding)". `JointResult` carries **no field recording the
+  fixture kind**, so the page can never state that the answer was known by construction. It also
+  shows **H3 SUPPORTED** even though the protocol registers H3 as expected to fail for the affine toy.
+- **F5 — `.env.example` flags are inert.** `CLEAN_CLONE.md` says flags such as
+  `BIOLOGICAL_TRAINING_ENABLED=false` "govern" the application; **no code reads any of them**. A
+  safety flag that governs nothing is worse than no flag, because a reader may rely on it.
+- **`src/toy/stability.py:29`** treats the NaN×0 hazard as a property of the source ("the thing it
+  mimics") when whether NaN is even present is UNKNOWN.
+- **Commit messages `d87b48f` and `e436d93`** use "direct evidence", "confirms" and "load-bearing"
+  about results that are inference. Commits are immutable, so these can only be noted — which is
+  itself a reason to be more careful in commit prose than the orchestrator was.
+- **`docs/ERROR_REGISTER.md:3,193`** still says "nothing here is QA-attested yet" while SR-03 is
+  `[x]` with a third-pass PASS.
+
+## Guards assessed against an *ordinary user*, not an attacker
+- The dashboard has no confirmed style, and user text saying "model is safe" is boxed and captioned
+  untrusted — **but it is still displayed**, with the kit's own non-claim label prepended.
+- `is_safety_claim: False` is a literal. **A single reviewer can take the claim
+  "safeRFdiffusion is safe and removes hazardous capability." to SUPPORTED** under any evidence class,
+  including SOURCE_OBSERVED, citing a hash of "nothing at all" — and the summary still reports
+  `is_safety_claim: false`. The module docstring discloses the hollow-SUPPORTED route, and the
+  dashboard does not render the ledger, but this is the kit's weakest point against ordinary misuse.
+
+## What the review did NOT find
+Nothing material is marked UNKNOWN that is actually established. **Nothing is marked `[x]` on a build
+alone.** The consolidated unknowns register (49 entries) and a ranked list of 14 quotable-out-of-context
+risks are in `docs/SR12_INDEPENDENT_REVIEW.md`.
+
+**Verified count corrected: 7 of 17** — SR-00, SR-01, SR-02, SR-03, SR-04, SR-06, SR-08.
+The previously claimed 11 was wrong, and the four reverted checkboxes are the reason.
