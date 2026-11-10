@@ -4632,3 +4632,130 @@ only reason this was found, and it is now the standing way to measure a clean-cl
 ambient `PATH` is part of the development environment, so a measurement taken on it cannot attest a
 clean clone.** It also correctly declined to re-measure two full runs once the criterion had already
 failed on a reproduced documented command, and said so rather than padding.
+
+---
+
+# SR-10 third attestation: FAIL — I fixed one operand of the inequality and left the other
+
+**Date:** 2026-11-10. SR-11 **PASS** (unmarked, blocked on SR-10). 219 / 94 tests OK, 38 mutants with
+32 killed.
+
+## The FAIL, and the pattern is now three-for-three
+`IntervalPair._bound`, which I added last round, requires a finite float on each **bound** — the
+**left** operand of `lo > margin`. **The right operand, in the same inequality, in the same call
+chain, still has the identical `is_measured`-only gate** (`benchmark.py:1561-1566`,
+`verdict_from_records.comp()`: `if not mg.is_measured: raise`, then `mg.value` straight into
+`ComponentResult`).
+
+Reproduced with **no `object.__setattr__` at all** — only `MetricValue.measured` and
+`dataclasses.replace`:
+```
+HONEST degrader study: joint=JOINT_UNSUPPORTED  h1=SUPPORTED h2=UNSUPPORTED h3=UNSUPPORTED
+FORGED margin := -/+1.7976931348623157e308 (FINITE, so MetricValue accepts it):
+  joint=JOINT_SUPPORTED  h1=h2=h3=SUPPORTED  reasons=()  config_hash STILL MATCHES
+```
+`reasons=()` makes it **indistinguishable from a clean recompute** —
+`test_a_clean_recompute_never_carries_a_reason` asserts exactly that signature. **Deleting the check
+entirely survives all 313 tests.** The one margin-forgery test uses `margin=9.0` and asserts the
+*unfavourable* direction; the favourable direction was never tested.
+
+**Three sequential rounds, one mistake:**
+1. round 2, dashboard: `_interval` unchecked while `_metric_cell` checked. Fixed with a "shared" helper.
+2. round 3, dashboard: the shared helper's consumer list was **asserted, not performed** — `pair.n` had
+   two consumers that disagreed.
+3. round 3, benchmark, **mine**: I validated the bound and not the margin it is compared against.
+
+The first two I diagnosed as other people's incomplete enumerations and wrote a standing rule about.
+Then I made the same error in the next fix I wrote, in the narrowest possible form — **one inequality,
+two operands, one of them checked.** The rule I wrote says "enumerate the type's consumers"; what I
+actually did was fix the consumer the reviewer had named. Routed as a structural requirement: one
+checked reader for every stored-`MetricValue` read, with a test that fails when an unchecked one is
+added, and the builder must state **how a future reader is prevented** rather than listing today's
+sites.
+
+**Three written statements falsified**, all of which must be corrected and not merely patched around:
+`Margins.__doc__`'s "the margin a recompute uses is always the margin that produced the record";
+`verdict_from_records.__doc__`'s "no margin a recompute uses can come from the caller at all" — a
+**provenance** argument offered as a **validity** argument, with no bound on the value; and the
+disclosed config-hash route's claim that tampering "grants nothing over forging the `gate_*` metrics
+directly", which is **false** — forging gates can only make gates pass, never make a component
+SUPPORTED, whereas this inverts a genuine UNSUPPORTED.
+**Sharper than documented:** a **legal** `Margins(-1.797e308, +1.797e308, -1.797e308)` does the same
+with a byte-identical `config_hash` and `reasons=()`, because `Margins.__post_init__` bounds neither
+sign nor magnitude. The margins-outside-the-hash gap is documented; its illustration
+(`delta_S=5.0, delta_R=-5.0`) badly understates it.
+
+## Four more of the same class, from the same sweep
+- **D2** forged **`nan`** `ci_level` passes `abs(lv.value - want_level) > 1e-12`, because `nan > 1e-12`
+  is False — and this is the cross-check the docstring credits with historically pinning `alpha`.
+- **D3** `evaluate_gates` forged `-inf` makes **gate 11 and gate 12 both PASS** where honest values
+  (0.9, 1.0) fail both.
+- **D4** `_pair_from_record` has **no `is_measured` check at all**: a forged `n_seeds=1e9` is silently
+  accepted and clears `min_n`; a forged `nan` escapes as a bare
+  `ValueError: cannot convert float NaN to integer`, outside the module's error contract.
+- **D5** a `gate_*` metric forged to the **bool `True`** reads as PASSED, since `True != 1.0` is False.
+  `GateResult.__post_init__` is strict about bools; the records path is not.
+
+## D6 — the repeatability criterion itself, unpinned
+**Dropping `sort_keys=True` from `config_hash` survives all 313 tests.** The docstring says "canonical
+JSON", and `sort_keys` is the only thing making it canonical: without it a pure field *reorder*
+changes every hash (`9eaf4bfefc57` vs `08d7772419c5`), silently breaking the binding of every stored
+record. "Repeatability" is the literal acceptance criterion and this is the property it names.
+
+## Two SR-11 follow-ups, both about text I wrote last round
+- **`DEFAULT_MIN_SEEDS = 10` is pinned by nothing.** All five test references are self-referential
+  (`assertEqual(x.min_seeds, rb.DEFAULT_MIN_SEEDS)`), so a 10→3 mutant passes everything. **This is
+  exactly the exposure the docstring I corrected last round names** — "silently lowering the policy
+  minimum from 10 into 3-9" — left unpinned in the same breath as being written down. SR-10's
+  equivalent defaults *are* pinned by value and type.
+- **The figures in that corrected docstring do not reproduce on the fixture beside them.** It says
+  "`3 -> summary n=4`; `5, 9, 10 -> INSUFFICIENT_EVIDENCE`", true only of a 4-measured-value fixture
+  it does not name; on the 12-seed `SEEDS` fixture in the same test, all four give `summary n=12`. And
+  the two `assertRaises(ValueError)` lines it points at pass a **dict** as `per_seed`, so they would
+  still raise from the "must be MetricValues" check even with the floor removed. Nothing is
+  unprotected, but **the assertion offered as the measurement does not pin the mechanism** — which is
+  the masked-test shape, in a correction I made to fix a false claim.
+
+## D9 — my fix rotted a rationale in someone else's file
+`dashboard.py:582` and `test_dashboard.py:2094` now assert something **false** about `benchmark.py`:
+"`IntervalPair.boot()`/`tint()` gate on `is_measured` alone, so a forged non-finite bound reaches
+`interval_verdict` AS A NUMBER." That stopped being true the moment I added `_bound`.
+`_pair_numbers_ok` remains correct defence in depth; only its stated reason has rotted. **A fix that
+makes another module's comment false is an unrecorded coupling**, and nothing detected it but a
+reviewer reading both.
+
+## Two more corrections to my own briefs
+- I told the reviewer `_contract_problems` was the newest code in `benchmark.py`. **It is in
+  `dashboard.py`** — I attributed a symbol to the wrong module.
+- I said `SEED_FLOOR` is "defended three times". It is **four** direct sites plus two policy-minimum
+  enforcements. **Three different counts are now in circulation** — the test docstring says "three
+  times over", this journal said "five independent points", the direct count is four. Routed to be
+  reconciled to one number with a statement of what it counts.
+
+## SR-11 — PASS, and the attestation was thorough
+Immutability: a recursive walk of **every field to depth 8** found **zero reachable
+`list`/`dict`/`set`/`bytearray`**; 12/12 `setattr` and 12/12 `delattr` refused; `dataclasses.replace`
+re-validates the nested summary; `to_dict()` is a true defensive copy; the two reachable routes
+(`object.__setattr__`, `gc.get_referents`) are both **named in the docstring as honest limits**, so
+the documentation is accurate. Nine mutants killed.
+Single-example criterion: enforced across **all 12 public probe entry points** at n ∈ {0,1,2} →
+`INSUFFICIENT_EVIDENCE`, `summary is None`, and **no statistic leaking into `details`**. Five mutants
+killed.
+Validity against the changed `benchmark.py` established **structurally**: a docstring-stripped AST
+comparison across `f570148..HEAD` shows SR-11's entire import surface
+(`quantile`, `sample_sd`, `mean`, `seed_list_digest`, `score_seed`, `BenchmarkConfig`) **unchanged**,
+and the three changed symbols (`IntervalPair`, `_bound`, `verdict_from_records`) **disjoint** from it —
+so **D1 does not reach SR-11**.
+Two survivors proved genuinely equivalent **by running the mutant**: dropping `from_values`' floor
+(every n<3 still raises, only the message changes) and dropping `_recheck_summary`'s floor
+(`Scorecard.__post_init__` refuses the forged 2-value summary anyway).
+
+## Statistical fixtures: genuine independent oracles, re-derived a second time
+The reviewer deliberately avoided the previous reviewer's three and derived five of its own: df=2 and
+**df=4 closed forms by hand** (`t=2tanθ` → `2∫cos³θ`), inverted by exact bisection, agreeing to
+1e-13/1e-9; `_betainc` via the **exact binomial `Fraction` identity** at 25 (a,b,x) points to 2e-14;
+`mean`/`sample_sd`/`quantile` in exact rationals including `[1e16, 1, -1e16, 1]`, with `mean`
+**bit-exact**; the bootstrap by **exhaustive enumeration of all 4⁴ = 256 ordered resamples** against
+the exact 24-mean support; and `required_n` against an independent `math.erf` bisection. The one
+`FAIL` it printed was its **own** tolerance — 1.5 ulp at 1e16 magnitude — and it said so.
+Repeatability verified **byte-identical across four processes at `PYTHONHASHSEED=0,1,12345,random`**.
