@@ -30,4 +30,16 @@ This starter includes a source-grounded change audit, dependency-aware task plan
 **Correction (SR-12 finding F5).** An earlier version of this line said the `ALLOW_EXTERNAL_NETWORK=false` environment flag "applies to the toy application". That was an overstatement: **no code in this kit reads that flag, or any of the other flags in `.env.example`.** They are declarative markers for a human reader, and setting them changes no behaviour. The kit's actual offline guarantees are structural, not flag-driven — `src/toy/` is standard-library only and imports no network module (enforced by `scripts/lint.sh` and `tests/toy_tests/test_scripts.py`), `scripts/run_tests.sh` runs the suite under a socket guard that makes connections and DNS lookups raise, and no model weights exist anywhere in the tree. See `docs/CLEAN_CLONE.md` for the full statement.
 
 ## Offline CI, scripts and clean-clone check (SR-15)
-`./scripts/lint.sh`, `./scripts/run_tests.sh --expect none --twice` and `python3 scripts/demo.py` need only Python 3.12+ and no network or credentials. See `docs/CLEAN_CLONE.md` for exact steps, expected test/skip counts and how to read skips. The demo output is a toy tooling check, not evidence about RFdiffusion or any real capability.
+`./scripts/lint.sh`, `./scripts/run_tests.sh` and `python3 scripts/demo.py` need only Python 3.12+ and no network or credentials.
+
+**`--expect none` asserts that nothing third-party is installed**, so use it only on a bare interpreter — a clean clone, CI, or a throwaway `python3 -m venv --without-pip` (which needs no network). Run verbatim on a machine that already has torch, numpy, pytest or PyYAML importable, it fails with 8 policy failures — **by design, not a bug.** An earlier version of this section prescribed `--expect none` with no stated precondition, which made the documented sequence fail on most developer machines.
+
+```sh
+./scripts/lint.sh
+./scripts/run_tests.sh --expect none  --twice   # bare interpreter only (clean clone / CI)
+./scripts/run_tests.sh --expect any   --twice   # if those packages ARE installed on this interpreter
+./scripts/run_tests.sh --expect torch --twice   # if torch, numpy, pytest and PyYAML are ALL installed
+python3 scripts/demo.py
+```
+
+See `docs/CLEAN_CLONE.md` for the full precondition, how to obtain the current test and skip counts, and how to read skips. **Do not take a test total from the documentation** — a hard-coded count there has gone stale three times and is now deliberately absent; obtain it from a run. The demo output is a toy tooling check, not evidence about RFdiffusion or any real capability.

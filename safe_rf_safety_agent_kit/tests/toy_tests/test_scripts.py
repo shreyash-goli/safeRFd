@@ -10,8 +10,27 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
-BANNED = {"socket", "urllib", "urllib2", "urllib3", "http", "httplib", "requests", "httpx", "aiohttp", "ftplib",
-          "smtplib", "poplib", "imaplib", "telnetlib", "xmlrpc", "ssl", "websocket", "websockets"}
+
+
+def _lint_blocklists():
+    """Read the network blocklists OUT OF scripts/lint.sh instead of restating them.
+
+    They used to be two hand-maintained copies and they diverged: lint.sh named 27 modules, this file named 18, so
+    `import asyncio` in src/toy/ was rejected by the script and missed by the test that docs/CLEAN_CLONE.md cites
+    as co-enforcing the rule. Parsing makes divergence impossible rather than merely noticed.
+    """
+    text = (SCRIPTS / "lint.sh").read_text(encoding="utf-8")
+    out = []
+    for name in ("BANNED", "BANNED_FULL"):
+        m = re.search(rf"(?m)^{name} = (\{{.*?\}})\n", text, re.S)
+        if m is None:
+            raise AssertionError(f"scripts/lint.sh no longer defines {name} as a plain set literal; this file "
+                                 f"parses it (see _lint_blocklists) and must be updated together with it")
+        out.append(frozenset(ast.literal_eval(m.group(1))))
+    return out
+
+
+BANNED, BANNED_FULL = _lint_blocklists()
 
 
 def _env(**extra):
@@ -166,6 +185,15 @@ class TestCiWorkflow(unittest.TestCase):
 
 
 class TestNoNetworkImports(unittest.TestCase):
+    def test_blocklist_is_parsed_from_lint_sh_and_holds_the_known_names(self):
+        """Pins the single-source-of-truth parse in _lint_blocklists(). A silently empty or short set would make
+        every network-import assertion in this module vacuous, which is exactly how the 27-vs-18 divergence hid."""
+        self.assertGreaterEqual(len(BANNED), 27)
+        for m in ("socket", "urllib", "http", "requests", "ssl", "_socket", "socketserver", "asyncio", "selectors",
+                  "webbrowser", "nntplib", "smtpd", "wsgiref", "cgi", "pydoc", "antigravity"):
+            self.assertIn(m, BANNED, m)
+        self.assertIn("logging.config", BANNED_FULL)
+
     def test_src_toy_has_no_network_imports(self):
         found = []
         for p in sorted((ROOT / "src" / "toy").rglob("*.py")):
@@ -174,11 +202,28 @@ class TestNoNetworkImports(unittest.TestCase):
                 if isinstance(node, ast.Import):
                     mods = [a.name for a in node.names]
                 elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                    mods = [node.module]
-                found += [f"{p.name}:{node.lineno}: {m}" for m in mods if m.split(".")[0] in BANNED]
+                    mods = [node.module] + [f"{node.module}.{a.name}" for a in node.names]
+                found += [f"{p.name}:{node.lineno}: {m}" for m in mods
+                          if m.split(".")[0] in BANNED or m in BANNED_FULL]
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "__import__":
                     found.append(f"{p.name}:{node.lineno}: __import__")
         self.assertEqual(found, [])
+
+    def test_src_toy_imports_only_the_standard_library(self):
+        """docs/CLEAN_CLONE.md claims src/ is standard-library only. Nothing used to check it: `import numpy`,
+        `pandas`, `scipy` and `yaml` in src/toy/ all passed lint with rc=0 and 0 errors. The only non-stdlib names
+        allowed are the kit's own `toy` package and the documented, guarded, optional `torch`."""
+        allowed = set(sys.stdlib_module_names) | {"toy", "torch"}
+        found = []
+        for p in sorted((ROOT / "src").rglob("*.py")):
+            for node in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
+                mods = []
+                if isinstance(node, ast.Import):
+                    mods = [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    mods = [node.module]
+                found += [f"{p.name}:{node.lineno}: {m}" for m in mods if m.split(".")[0] not in allowed]
+        self.assertEqual(found, [], "non-stdlib import in src/")
 
     def test_demo_script_has_no_network_imports(self):
         tree = ast.parse((SCRIPTS / "demo.py").read_text(encoding="utf-8"))
@@ -207,6 +252,51 @@ class TestNoNetworkImports(unittest.TestCase):
         doc = (ROOT / "docs" / "CLEAN_CLONE.md").read_text(encoding="utf-8")
         for needle in ("has never been executed", "untested as a combination", "tag, not commit SHA", "stand-in", "case-sensitive", "has never been observed"):
             self.assertIn(needle, doc)
+
+    def test_filesystem_case_skip_count_in_the_docs_matches_the_actually_gated_tests(self):
+        """F1 was a NUMBER that disagreed with reality in the same document (it said both "1 filesystem-case" and
+        "four tests skip this way") and a FALSE cause for the disagreement ("the dashboard tests were since
+        changed" -- the three `need_ci()` call sites were never touched; the stand-in measured 1 because its
+        `TMPDIR` sat on the case-insensitive system volume while only the repo was case-sensitive).
+
+        So this is not a doc grep: it counts the tests that really gate on a case-sensitivity probe and requires
+        the documented figure to equal it."""
+        dash = (ROOT / "tests" / "toy_tests" / "test_dashboard.py").read_text(encoding="utf-8")
+        # split so this expression does not match itself when it reads this very file
+        own_needle = 'self.skipTest("filesystem is ' + 'case-sensitive'
+        gated = dash.count("self.need_ci()") + Path(__file__).read_text(encoding="utf-8").count(own_needle)
+        self.assertEqual(gated, 4, "the number of case-sensitivity-gated tests changed: update the '4' in "
+                                   "docs/CLEAN_CLONE.md (and the FS_CAP of 8 if it grew)")
+        doc = (ROOT / "docs" / "CLEAN_CLONE.md").read_text(encoding="utf-8")
+        self.assertIn("**4** filesystem-case skips on Linux", doc)
+        self.assertIn("TMPDIR", doc)                                   # the real cause is recorded
+        self.assertNotIn("dashboard tests were since changed", doc)     # the false cause is gone
+        self.assertNotIn("only 1 remains", doc)
+
+    def test_docs_describe_the_lint_check_as_an_incomplete_blocklist(self):
+        """F5: the "Not covered" list named only getattr-style tricks, runtime-built names, things outside src/ and
+        third-party packages -- and none of the nineteen plain static attribute calls that passed fell into any of
+        those four buckets, so the enumeration implied they were covered."""
+        doc = (ROOT / "docs" / "CLEAN_CLONE.md").read_text(encoding="utf-8")
+        for needle in ("blocklist", "are tripwires", "pkgutil.resolve_name", "Still not covered",
+                       "positive standard-library-only check", "not evidence that `src/` cannot execute code"):
+            self.assertIn(needle, doc.replace("\n", " "), needle)   # doc is hard-wrapped; match across wraps
+
+    def test_docs_state_the_baseline_slack_policy(self):
+        """F4: the baseline was presented as "the sharp check" with no mention that it is a floor, that it goes
+        stale the moment a test is added, or that the stale gap is exactly the deletable surface."""
+        doc = (ROOT / "docs" / "CLEAN_CLONE.md").read_text(encoding="utf-8")
+        for needle in ("is a FLOOR", "goes stale", "deletable surface", "sharp only immediately after"):
+            self.assertIn(needle, doc, needle)
+
+    def test_docs_steps_state_the_bare_environment_precondition(self):
+        """F6: the documented sequence `./scripts/run_tests.sh --expect none --twice` fails with 8 policy failures
+        on any machine where torch/numpy/pytest/PyYAML are importable, and the bare-environment requirement
+        appeared only parenthetically inside a table cell, never in the Steps."""
+        doc = (ROOT / "docs" / "CLEAN_CLONE.md").read_text(encoding="utf-8")
+        steps = doc.split("## Steps", 1)[1].split("\n## ", 1)[0]
+        for needle in ("--without-pip", "--expect any", "asserts", "--expect none", "--expect torch"):
+            self.assertIn(needle, steps, f"Steps section does not mention {needle}")
 
     def test_socket_guard_blocks_connections(self):
         """The guard run_tests.sh installs must make connection attempts fail (checked in a child process)."""
@@ -274,6 +364,30 @@ class _SyntheticBase(unittest.TestCase):
         if not pytest:
             cmd.append("--no-pytest")
         return subprocess.run(cmd, capture_output=True, text=True, env=e, cwd=ROOT, timeout=180)
+
+    def synth_root(self, test_body, files=None):
+        """A throwaway repo root holding a COPY of the LIVE run_tests.sh, so the DEFAULT (no --tests-dir) code path
+        can be driven without running the real ~900-test suite. The script derives ROOT from its own location, so
+        the copy treats this directory as "the repo": its whole-tree bytecode clearing happens in here only."""
+        root = self.dir / "synthroot"
+        (root / "scripts").mkdir(parents=True)
+        (root / "tests").mkdir()
+        shutil.copy2(RUN_TESTS, root / "scripts" / "run_tests.sh")      # copy2 keeps the executable bit
+        (root / "tests" / "test_a.py").write_text(test_body, encoding="utf-8")
+        for rel, body in (files or {}).items():
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(body) if isinstance(body, bytes) else p.write_text(body, encoding="utf-8")
+        return root
+
+    def run_default(self, root, *args, cwd=None, env=None):
+        """Run the copied script with NO --tests-dir: that is the DEFAULT, unscoped code path (SCOPED=0)."""
+        e = _env(PATH=f"{self.shim}:{os.environ.get('PATH', '')}", MIN_TESTS="1")
+        for k in ("PYTHONHASHSEED", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE"):   # the SCRIPT must set these
+            e.pop(k, None)
+        e.update(env or {})
+        return subprocess.run([str(root / "scripts" / "run_tests.sh"), "--baseline", "none", "--no-pytest", *args],
+                              capture_output=True, text=True, env=e, cwd=str(cwd or root), timeout=180)
 
     def ok(self, r):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -411,6 +525,46 @@ class TestRunTestsFloorsAndBaseline(_SyntheticBase):
         r2 = self.rt({"test_a.py": self._suite3(3)}, "--update-baseline", expect="torch", baseline=str(b))
         self.assertEqual(r2.returncode, 2)
 
+    def test_update_baseline_refuses_a_failing_run_and_leaves_the_file_untouched(self):
+        """`--update-baseline` used to write unconditionally. It did: a real 14-minute bare run went
+        red with three false failures (a module read mid-edit by another process) and the baseline
+        was rewritten from that red run anyway. A baseline recorded from a red or mid-refactor tree
+        encodes whatever was broken at that moment as the permanent floor -- the exact defect the
+        per-module baseline exists to catch. The run's own non-zero exit is no protection, because
+        the write happened before the exit code was decided."""
+        b = self.dir / "refuse_baseline.txt"
+        b.write_text("test_a 5 3\n", encoding="utf-8")   # pre-existing content that must SURVIVE
+        before = b.read_text(encoding="utf-8")
+        failing = ("import unittest\nclass F(unittest.TestCase):\n"
+                   "    def test_boom(self):\n        self.fail('deliberate')\n")
+        r = self.rt({"test_a.py": self._suite3(3) + "\n" + failing}, "--update-baseline",
+                    expect="none", baseline=str(b), env={"MIN_NONE_SKIPS": "1"})
+        self.bad(r, "POLICY:BASELINE_REFUSED")
+        self.assertIn("baseline is UNCHANGED", r.stdout)
+        self.assertIn("did not end in OK", r.stdout)
+        # the file is byte-identical: not rewritten, not truncated, not deleted
+        self.assertEqual(b.read_text(encoding="utf-8"), before)
+        self.assertNotIn("baseline written", r.stdout)
+        # and the refusal does not ALSO emit comparison failures, which would bury the real cause
+        self.assertNotIn("POLICY:BASELINE_TESTS", r.stdout)
+        self.assertNotIn("POLICY:BASELINE_SKIPS", r.stdout)
+
+    def test_update_baseline_refuses_when_only_the_skip_policy_fails(self):
+        """The other half: the tests can all pass while the skip policy fails. That is still not a
+        tree to record a floor from, because a policy failure means the skip accounting itself is
+        not trustworthy -- and the skip counts are half of what the baseline records."""
+        b = self.dir / "refuse_baseline2.txt"
+        b.write_text("test_a 5 3\n", encoding="utf-8")
+        before = b.read_text(encoding="utf-8")
+        # all green, but an unexplained skip reason trips POLICY:NONE_REASON
+        bad_reason = ("import unittest\nclass U(unittest.TestCase):\n"
+                      "    @unittest.skip('just because')\n    def test_u(self):\n        pass\n")
+        r = self.rt({"test_a.py": self._suite3(3) + "\n" + bad_reason}, "--update-baseline",
+                    expect="none", baseline=str(b), env={"MIN_NONE_SKIPS": "1"})
+        self.bad(r, "POLICY:BASELINE_REFUSED")
+        self.assertIn("skip-policy failure(s)", r.stdout)
+        self.assertEqual(b.read_text(encoding="utf-8"), before)
+
     def test_repo_baseline_exists_and_covers_every_test_module(self):
         lines = [l.split() for l in (SCRIPTS / "test_baseline.txt").read_text(encoding="utf-8").splitlines()
                  if l.strip() and not l.startswith("#")]
@@ -479,10 +633,63 @@ class TestRunTestsMechanics(_SyntheticBase):
         self.assertTrue(sentinel.exists(), "scoped run deleted bytecode in the real repo")
         self.assertTrue((outside / "keep.pyc").exists(), "scoped run deleted bytecode outside its tests dir")
 
-    def test_unscoped_default_run_clears_whole_tree_by_construction(self):
-        t = RUN_TESTS.read_text(encoding="utf-8")
-        self.assertIn('if [ "$SCOPED" = 0 ]; then', t)
-        self.assertIn("SCOPED=1", t)
+    def test_default_run_clears_bytecode_in_the_whole_tree_not_only_under_tests(self):
+        """BEHAVIOURAL. This replaced a grep for `if [ "$SCOPED" = 0 ]; then` and `SCOPED=1`, which was vacuous:
+        a mutant that inserts `SCOPED=1` immediately above the top-level clear_bytecode call keeps both literals,
+        so the grep passed while the default run stopped clearing anything outside tests/ (canary survived:
+        unmutated=False, mutant=True) -- and the two other bytecode tests passed too, because one drives the
+        SCOPED path via --tests-dir and the other asserts only that the scoped path does NOT delete.
+
+        Canaries are planted OUTSIDE tests/. They must be gone BEFORE the suite starts (the in-suite assertion,
+        which also kills a mutant that only clears at the end) and still gone afterwards.
+        """
+        body = textwrap.dedent("""
+            import os, unittest
+            class T(unittest.TestCase):
+                def test_canaries_were_cleared_before_the_suite_started(self):
+                    for p in os.environ["SR15_CANARIES"].split(os.pathsep):
+                        self.assertFalse(os.path.exists(p), "bytecode outside tests/ survived into the run: " + p)
+        """)
+        root = self.synth_root(body, files={"pkg/__pycache__/canary.cpython-312.pyc": b"\0",
+                                            "pkg/sub/loose_canary.pyc": b"\0"})
+        canaries = [root / "pkg" / "__pycache__", root / "pkg" / "sub" / "loose_canary.pyc"]
+        self.assertTrue(all(p.exists() for p in canaries), "canaries were not planted")
+        r = self.run_default(root, env={"SR15_CANARIES": os.pathsep.join(str(p) for p in canaries)})
+        self.ok(r)
+        for p in canaries:
+            self.assertFalse(p.exists(), f"default run left bytecode outside tests/: {p}")
+
+    def test_default_tests_dir_is_the_scripts_own_repo_from_any_cwd(self):
+        """TESTS_DIR used to be resolved against $PWD *before* the cd to ROOT, so the documented
+        `./scripts/run_tests.sh ...` died with `tests dir not found: <cwd>/tests` from any other directory. An
+        explicit RELATIVE --tests-dir still means "relative to the caller's cwd"."""
+        root = self.synth_root("import unittest\nclass T(unittest.TestCase):\n    def test_x(self): pass\n")
+        r = self.run_default(root, cwd=self.dir)                       # deliberately NOT the synthetic repo root
+        self.assertNotIn("tests dir not found", r.stdout + r.stderr)
+        self.ok(r)
+        self.assertIn("ran=1", r.stdout)
+        r2 = self.run_default(root, "--tests-dir", "tests", cwd=root)  # explicit + relative -> caller's cwd
+        self.ok(r2)
+        r3 = self.run_default(root, "--tests-dir", "tests", cwd=self.dir)
+        self.assertEqual(r3.returncode, 2, r3.stdout + r3.stderr)      # no ./tests under self.dir
+        self.assertIn("tests dir not found", r3.stderr)
+
+    def test_help_prints_the_whole_comment_header_including_the_network_section(self):
+        """--help was `sed -n '2,42p'` while the header had grown to 53 lines, so the entire NETWORK paragraph --
+        the one that says the guard is Python-level only and lists what it does not stop -- was silently cut off."""
+        r = subprocess.run([str(RUN_TESTS), "--help"], capture_output=True, text=True, env=_env(), cwd=ROOT,
+                           timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for needle in ("--expect none", "--tests-dir", "PYTHONHASHSEED", "WHY bytecode caching is disabled",
+                       "NETWORK", "PYTHON-LEVEL ONLY", "children (curl)", "docs/DIFF_EVIDENCE.md"):
+            self.assertIn(needle, r.stdout, needle)
+        header = []
+        for line in RUN_TESTS.read_text(encoding="utf-8").splitlines()[1:]:   # skip the shebang
+            if not line.startswith("#"):
+                break
+            header.append(line)
+        self.assertEqual(r.stdout.splitlines(), header, "--help is not exactly the leading comment header")
+        self.assertNotIn("set -u", r.stdout)                                  # and stops before the code
 
     def test_network_guard_blocks_each_entry_point(self):
         body = textwrap.dedent("""
@@ -503,6 +710,10 @@ class TestRunTestsMechanics(_SyntheticBase):
                 test_connect_ex = blocked(lambda: _sock().connect_ex(("192.0.2.1", 9)))
                 test_getaddrinfo = blocked(lambda: socket.getaddrinfo("localhost", 80))
                 test_gethostbyname = blocked(lambda: socket.gethostbyname("localhost"))
+                # Added after review found getnameinfo was an UNDISCLOSED bypass (gethostbyname_ex was a disclosed
+                # one). Both are name-resolution entry points on the socket module itself, so both are now patched.
+                test_gethostbyname_ex = blocked(lambda: socket.gethostbyname_ex("localhost"))
+                test_getnameinfo = blocked(lambda: socket.getnameinfo(("127.0.0.1", 80), 0))
         """)
         self.ok(self.rt({"test_a.py": body}))
         r = self.rt({"test_a.py": body}, "--no-network-guard")
@@ -747,6 +958,63 @@ class TestLintPolicy(unittest.TestCase):
         }
         errs = self.batch({f"src/toy/ev_{k}.py": v for k, v in cases.items()})
         self.assertGreaterEqual(len(errs), len(cases))
+
+    def test_stdlib_code_execution_and_server_modules_are_blocked_in_src(self):
+        """Every case here PASSED lint with rc=0 and 0 errors before SR-15 closed it, and none of them is a
+        runtime-name trick: they are plain static imports with literal attribute calls. `pkgutil.resolve_name`
+        is first because it defeats the entire DANGEROUS_ATTR check in one line."""
+        cases = {
+            "pkgutil_resolve_name": ("import pkgutil\npkgutil.resolve_name('os:system')('echo pwned')\n", "resolve_name"),
+            "pkgutil_from": ("from pkgutil import resolve_name\nprint(resolve_name)\n", "from pkgutil import"),
+            "code_runsource": ("import code\ncode.InteractiveInterpreter().runsource('x=1')\n", "process/dynamic"),
+            "runpy": ("import runpy\nrunpy.run_module('json')\n", "process/dynamic"),
+            "runpy_from": ("from runpy import run_module\nrun_module('json')\n", "from runpy import"),
+            "pdb": ("import pdb\npdb.run('x=1')\n", "process/dynamic"),
+            "cprofile": ("import cProfile\ncProfile.run('x=1')\n", "process/dynamic"),
+            "trace": ("import trace\ntrace.Trace().run('x=1')\n", "process/dynamic"),
+            "timeit": ("import timeit\ntimeit.timeit('x=1')\n", "process/dynamic"),
+            "marshal": ("import marshal\nprint(marshal.loads(b''))\n", "process/dynamic"),
+            "types_functiontype": ("import types\nprint(types.FunctionType)\n", ".FunctionType"),
+            "zipimport": ("import zipimport\nzipimport.zipimporter('p').load_module('m')\n", "process/dynamic"),
+            "doctest": ("import doctest\ndoctest.testmod()\n", "process/dynamic"),
+            "pickle": ("import pickle\npickle.loads(b'')\n", "process/dynamic"),
+            "shelve": ("import shelve\nshelve.open('db')\n", "process/dynamic"),
+            "venv": ("import venv\nvenv.EnvBuilder(with_pip=True).create('/tmp/d')\n", "process/dynamic"),
+            "site_addsitedir": ("import site\nsite.addsitedir('/tmp')\n", "process/dynamic"),
+            "ensurepip": ("import ensurepip\nensurepip.bootstrap()\n", "process/dynamic"),
+            "sqlite3_extension": ("import sqlite3\nsqlite3.connect(':memory:').load_extension('x.so')\n", "process/dynamic"),
+            "ctypes_private": ("import _ctypes\nprint(_ctypes)\n", "process/dynamic"),
+            "tkinter_tcl_exec": ("import tkinter\ntkinter.Tk().tk.call('exec', 'id')\n", "process/dynamic"),
+            "operator_attrgetter": ("import operator, os\noperator.attrgetter('system')(os)('id')\n", ".attrgetter"),
+            "operator_methodcaller": ("import operator, os\noperator.methodcaller('system', 'id')(os)\n", ".methodcaller"),
+            "procpool": ("import concurrent.futures\nconcurrent.futures.ProcessPoolExecutor()\n", "ProcessPoolExecutor"),
+            "procpool_from": ("from concurrent.futures import ProcessPoolExecutor\nProcessPoolExecutor()\n", "process/dynamic"),
+            "uuid_getnode": ("import uuid\nprint(uuid.getnode())\n", ".getnode"),
+            "uuid1": ("import uuid\nprint(uuid.uuid1())\n", ".uuid1"),
+            # network / server capability
+            "logging_config": ("import logging.config\nlogging.config.listen(9999)\n", "network-capable"),
+            "logging_config_from": ("from logging import config\nprint(config)\n", "network-capable"),
+            "logging_handlers": ("import logging.handlers\nprint(logging.handlers)\n", "network-capable"),
+            "pydoc_browse": ("import pydoc\npydoc.browse(port=8080)\n", "network-capable"),
+            "antigravity": ("import antigravity\nprint(antigravity)\n", "network-capable"),
+        }
+        errs = self.batch({f"src/toy/x_{k}.py": v for k, v in cases.items()})
+        self.assertGreaterEqual(len(errs), len(cases))
+
+    def test_non_stdlib_imports_in_src_are_rejected(self):
+        """The positive check behind the "src/ is standard-library only" claim. `import numpy` / `pandas` /
+        `scipy` / `yaml` in src/toy/ used to lint with rc=0 and 0 errors, so the claim was true only by
+        inspection. The blocklists above cannot establish it: they are a tripwire and name a finite set."""
+        self.batch({f"src/toy/t_{m}.py": (f"import {m}\nprint({m})\n", "non-stdlib import")
+                    for m in ("numpy", "pandas", "scipy", "yaml", "sklearn", "biopython")})
+        self.fails({"src/toy/t_from.py": "from numpy import array\nprint(array)\n"}, "non-stdlib import")
+        # the two allowed non-stdlib names still pass: the kit's own package and the documented optional torch
+        r = _lint(self.tree({"src/toy/t_ok.py": "import torch\nfrom toy.schema import X\nprint(torch, X)\n"}))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # ...and the check is src/-only: tests/ and scripts/ legitimately use numpy, pytest and yaml
+        r2 = _lint(self.tree({"tests/test_np.py": "import numpy, yaml\nprint(numpy, yaml)\n",
+                              "scripts/s.py": "import numpy\nprint(numpy)\n"}))
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
 
     def test_exec_outside_src_is_not_flagged(self):
         r = _lint(self.tree({"tests/test_x.py": "exec('1')\n", "scripts/x.py": "eval('1')\n"}))

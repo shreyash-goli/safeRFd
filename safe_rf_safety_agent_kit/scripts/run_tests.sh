@@ -12,7 +12,8 @@
 #   --twice         run the unittest suite a second time and require identical per-module counts and an
 #                   identical skip list (determinism check).
 #   --no-pytest     do not run pytest even if installed (used by the script's own tests for speed).
-#   --tests-dir D   test directory (default: tests). Exists so the policy can be driven by synthetic suites. A run
+#   --tests-dir D   test directory (default: <repo>/tests, so the command works from any cwd; an explicit relative
+#                   D is taken relative to the caller's cwd). Exists so the policy can be driven by synthetic suites. A run
 #                   with --tests-dir clears bytecode ONLY under D; the default run clears the whole repo tree.
 #   --baseline F    per-module baseline (default scripts/test_baseline.txt; "none" disables). One line per
 #                   module: "<module> <tests> <bare-environment skips>". A module with FEWER tests than recorded
@@ -47,16 +48,18 @@
 #
 # NETWORK (the .env.example flags are inert markers read by no code; this guard is the real mechanism, and it is
 #   PYTHON-LEVEL ONLY): a sitecustomize shim makes socket.socket.connect / connect_ex, socket.create_connection,
-#   getaddrinfo and gethostbyname raise for the run, children included while they inherit PYTHONPATH. It does NOT
-#   stop _socket.socket().connect, UDP sendto, gethostbyname_ex, `python -I` children, or non-Python children
-#   (curl). See docs/CLEAN_CLONE.md. The manual `curl` commands in docs/DIFF_EVIDENCE.md are documentation for a
-#   human and are never executed here.
+#   getaddrinfo, gethostbyname, gethostbyname_ex and getnameinfo raise for the run, children included while they
+#   inherit PYTHONPATH. It does NOT stop _socket.socket().connect, UDP sendto, `python -I` children, or non-Python
+#   children (curl). See docs/CLEAN_CLONE.md for the full known-bypass list. The manual `curl` commands in
+#   docs/DIFF_EVIDENCE.md are documentation for a human and are never executed here.
 set -u -o pipefail
 
+INVOKED_FROM="$PWD"   # saved before the cd to ROOT: a relative --tests-dir/--baseline means the CALLER's cwd
 EXPECT=any
 TWICE=0
 GUARD=1
-TESTS_DIR=tests
+TESTS_DIR=""   # empty = not given; resolved to $ROOT/tests AFTER cd (it used to be resolved against $PWD BEFORE
+               # the cd, so the documented default run failed with "tests dir not found" from any other cwd)
 SCOPED=0     # --tests-dir given: a nested/driven run must NOT touch the rest of the repo
 BASELINE=""
 UPDATE=0
@@ -70,17 +73,26 @@ while [ $# -gt 0 ]; do
     --tests-dir) TESTS_DIR="${2:-}"; SCOPED=1; shift 2 ;;
     --baseline) BASELINE="${2:-}"; shift 2 ;;
     --update-baseline) UPDATE=1; shift ;;
-    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
+    # Print the WHOLE leading comment header (was `sed -n '2,42p'`, which silently truncated the NETWORK section
+    # when the header grew past line 42; awk stops at the first non-comment line, so it cannot go stale again).
+    -h|--help) awk 'NR == 1 { next } /^#/ { print; next } { exit }' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 case "$EXPECT" in none|torch|any) ;; *) echo "--expect must be none|torch|any" >&2; exit 2 ;; esac
 if [ "$UPDATE" = 1 ] && [ "$EXPECT" != none ]; then echo "--update-baseline requires --expect none" >&2; exit 2; fi
-case "$TESTS_DIR" in /*) ;; *) TESTS_DIR="$PWD/$TESTS_DIR" ;; esac
-[ -d "$TESTS_DIR" ] || { echo "tests dir not found: $TESTS_DIR" >&2; exit 2; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-[ -n "$BASELINE" ] || BASELINE="$ROOT/scripts/test_baseline.txt"
+# Paths are resolved HERE, after ROOT is known: the DEFAULT tests dir and baseline belong to the repo the script
+# lives in (so the documented commands work from any cwd), while an explicit RELATIVE path is resolved against the
+# caller's cwd, which is what the caller means by it.
+if [ -z "$TESTS_DIR" ]; then TESTS_DIR="$ROOT/tests"
+else case "$TESTS_DIR" in /*) ;; *) TESTS_DIR="$INVOKED_FROM/$TESTS_DIR" ;; esac
+fi
+if [ -z "$BASELINE" ]; then BASELINE="$ROOT/scripts/test_baseline.txt"
+elif [ "$BASELINE" != none ]; then case "$BASELINE" in /*) ;; *) BASELINE="$INVOKED_FROM/$BASELINE" ;; esac
+fi
+[ -d "$TESTS_DIR" ] || { echo "tests dir not found: $TESTS_DIR" >&2; exit 2; }
 cd "$ROOT" || exit 2
 
 export PYTHONDONTWRITEBYTECODE=1
@@ -132,6 +144,8 @@ _s.socket.connect_ex = _blocked
 _s.create_connection = _blocked
 _s.getaddrinfo = _blocked
 _s.gethostbyname = _blocked
+_s.gethostbyname_ex = _blocked
+_s.getnameinfo = _blocked
 PY
 fi
 export PYTHONPATH="$TMP/guard${PYTHONPATH:+:$PYTHONPATH}"
@@ -206,12 +220,29 @@ elif mode == "torch":
     if len(pkg) > 12: bad.append(f"POLICY:TORCH_CAP {len(pkg)} skips with torch present; at most 12 (CUDA/MPS/wiring) are allowed")
 # per-module baseline
 if update and mode == "none":
-    rows = sorted((k, ran_mod[k], sum(1 for e in skips if mod(e["id"]) == k and not re.search("yaml|case[- ]sensitive", e["reason"], re.I))) for k in ran_mod)
-    with open(base, "w", encoding="utf-8") as f:
-        f.write("# module  tests  bare-environment-skips   (generated: scripts/run_tests.sh --expect none --update-baseline)\n")
-        f.write("# Fewer tests, or (bare mode) fewer skips, than recorded here fails the run. Raise only by regenerating.\n")
-        for k, r, s_ in rows: f.write(f"{k} {r} {s_}\n")
-    print(f"baseline written: {base} ({len(rows)} modules)")
+    # REFUSE to record a baseline from a run that is not clean. This used to write unconditionally,
+    # and it did: a 14-minute bare run went red with three false failures (a module read mid-edit by
+    # another process) and the baseline was rewritten from it anyway. A baseline captured from a red
+    # or mid-refactor tree silently encodes whatever was broken at that moment as the floor, which is
+    # the exact defect the per-module baseline exists to catch. The run's own failure is not enough
+    # to stop it, because the write happens before the exit code is decided.
+    # A refused update does NOT fall through to the comparison branch below: it is still an update
+    # attempt, and comparing a red run against the old baseline would pile POLICY:BASELINE_* failures
+    # on top of the real cause and bury it.
+    run_ok = re.search(r"^OK\b", text, re.M) is not None and re.search(r"^FAILED\b", text, re.M) is None
+    if bad or not run_ok:
+        why = []
+        if not run_ok: why.append("the test run did not end in OK")
+        if bad: why.append(f"{len(bad)} skip-policy failure(s)")
+        bad.append("POLICY:BASELINE_REFUSED --update-baseline refused and the baseline is UNCHANGED: "
+                   + "; ".join(why) + ". Regenerate only on a quiet, green tree.")
+    else:
+        rows = sorted((k, ran_mod[k], sum(1 for e in skips if mod(e["id"]) == k and not re.search("yaml|case[- ]sensitive", e["reason"], re.I))) for k in ran_mod)
+        with open(base, "w", encoding="utf-8") as f:
+            f.write("# module  tests  bare-environment-skips   (generated: scripts/run_tests.sh --expect none --update-baseline)\n")
+            f.write("# Fewer tests, or (bare mode) fewer skips, than recorded here fails the run. Raise only by regenerating.\n")
+            for k, r, s_ in rows: f.write(f"{k} {r} {s_}\n")
+        print(f"baseline written: {base} ({len(rows)} modules)")
 elif base != "none" and os.path.exists(base):
     for line in open(base, encoding="utf-8"):
         if not line.strip() or line.startswith("#"): continue

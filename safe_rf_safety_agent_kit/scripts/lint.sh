@@ -3,8 +3,19 @@
 # AST-based check written inline below. Optional linters (ruff, pyflakes) are used only if present and their
 # findings are advisory (set LINT_STRICT=1 to make them fatal). A missing tool never fails this script.
 #
-# KNOWN GAPS (this is hygiene, not a sandbox): network use via getattr/string tricks, ctypes loaded under another
-# name, `exec` of a string built at runtime, and a literal `os.system("curl ...")` OUTSIDE src/ are not caught.
+# WHAT THIS IS: a module-name BLOCKLIST plus an attribute-name blocklist, plus (in src/ only) a positive
+# standard-library-only check. A blocklist is a TRIPWIRE and is inherently INCOMPLETE: the Python standard library
+# contains many more ways to execute code or open a socket than any list will name. Do not read a passing run as
+# proof that src/ cannot execute code or reach the network.
+#
+# KNOWN GAPS (this is hygiene, not a sandbox):
+#   * runtime-name tricks: getattr(os, "sys" + "tem"), a module aliased through importlib's internals, `exec` of a
+#     string built at runtime;
+#   * a literal os.system("curl ...") OUTSIDE src/ (the process rules are src/-only by design);
+#   * anything in a third-party package;
+#   * and, most importantly, every stdlib code-execution or server entry point NOT named in the lists below. The
+#     lists were extended after review found many that passed: see docs/CLEAN_CLONE.md "Lint scope" for the
+#     enumeration of what is and is not named, and for the ones still known to pass.
 # In src/ the rules below (including aliasing like `import os as o`, `f = os.system`, `e = eval`, `builtins.exec`,
 # `from os import system`, and the exec*/spawn*/posix_spawn* family) ban network/process modules, __import__, importlib, os.system/popen and any eval/exec
 # except the two literal strings allow-listed by (file, exact text). The runtime socket guard in run_tests.sh is
@@ -29,14 +40,39 @@ echo "== AST checks =="
 python3 - <<'PY' || FAIL=1
 import ast, pathlib, sys
 ROOT = pathlib.Path(".")
+# Network/browser-capable module names, banned in src/, tests/ AND scripts/. `pydoc` starts an HTTP server
+# (pydoc.browse); `antigravity` opens a web browser on import.
 BANNED = {"socket", "urllib", "urllib2", "urllib3", "http", "httplib", "requests", "httpx", "aiohttp",
           "ftplib", "smtplib", "poplib", "imaplib", "telnetlib", "xmlrpc", "ssl", "websocket", "websockets",
-          "_socket", "socketserver", "asyncio", "selectors", "webbrowser", "nntplib", "smtpd", "wsgiref", "cgi"}
-PROC = {"subprocess", "ctypes", "importlib", "multiprocessing", "pty", "posix", "nt", "builtins"}
+          "_socket", "socketserver", "asyncio", "selectors", "webbrowser", "nntplib", "smtpd", "wsgiref", "cgi",
+          "pydoc", "antigravity"}
+# Dotted names whose PARENT module is legitimate, so BANNED (which matches the top-level name) cannot hold them.
+# logging.config.listen() runs a socket server that exec()s the configuration it receives; logging.handlers has
+# SocketHandler/HTTPHandler/SMTPHandler.
+BANNED_FULL = {"logging.config", "logging.handlers"}
+# Process start / dynamic code loading, banned in src/ only. The second group is stdlib code EXECUTION: every one of
+# these was found by review to pass this lint as a plain static import with a literal attribute call.
+PROC = {"subprocess", "ctypes", "_ctypes", "importlib", "multiprocessing", "pty", "posix", "nt", "builtins"} | \
+       {"runpy", "code", "codeop", "pdb", "bdb", "cProfile", "profile", "trace", "timeit", "doctest",
+        "marshal", "pickle", "shelve", "zipimport", "pkgutil", "site", "venv", "py_compile", "compileall",
+        "modulefinder"} | \
+       {"ensurepip", "sqlite3", "tkinter", "turtle"}   # pip (network); sqlite3 loads native extensions; Tcl exec
+PROC_FULL = {"concurrent.futures"}        # ProcessPoolExecutor is the same capability as multiprocessing
+# src/ is standard-library only. This is the POSITIVE check (the blocklists above are negative and incomplete):
+# any top-level import that is not a stdlib module, not the kit's own `toy` package and not the one documented
+# optional dependency is an error.
+SRC_IMPORT_OK = set(sys.stdlib_module_names) | {"toy", "torch"}
 # Attribute names that start processes or execute/load code. Banned in src/ on ANY base object (this catches
 # `import os as o; o.system(..)`, `f = os.system`, `builtins.exec(..)`) and as `from os import <name>`.
-DANGEROUS_ATTR = {"system", "popen", "fork", "forkpty", "startfile", "import_module", "exec", "eval", "__import__",
-                  "posix_spawn", "posix_spawnp", "Popen"} | \
+# `resolve_name` is listed first because pkgutil.resolve_name("os:system") defeats every other entry in this set
+# in a single line: it returns the function without ever naming it as an attribute.
+DANGEROUS_ATTR = {"resolve_name", "system", "popen", "fork", "forkpty", "startfile", "import_module", "exec",
+                  "eval", "__import__", "posix_spawn", "posix_spawnp", "Popen", "check_output", "check_call",
+                  "runsource", "runcode", "interact", "run_module", "run_path", "runctx",
+                  "load_module", "exec_module", "create_module", "find_module",
+                  "FunctionType", "CodeType", "addsitedir", "getnode", "uuid1", "browse", "listen",
+                  "testmod", "testfile", "ProcessPoolExecutor", "EnvBuilder", "bootstrap",
+                  "load_extension", "enable_load_extension", "attrgetter", "methodcaller"} | \
                  {f"{p}{s}" for p in ("exec", "spawn") for s in ("l", "le", "lp", "lpe", "v", "ve", "vp", "vpe")}
 DANGEROUS_NAMES = {"eval", "exec", "__import__", "compile", "__builtins__"}   # banned in src/ only
 # eval/exec allowed in src/ ONLY for these exact (file, literal text) pairs: the demonstration of a bare-exception
@@ -79,18 +115,31 @@ for path in files:
                     allowed_names.add(id(fn))
         if in_src and isinstance(node, ast.Attribute) and node.attr in DANGEROUS_ATTR:
             errors.append(f"{loc}: attribute '.{node.attr}' (process start / dynamic code) in src/")
-        if in_src and isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in ("os", "posix", "nt", "builtins", "importlib") \
+        # `from <anything> import <dangerous name>` in src/. No longer limited to os/posix/nt/builtins/importlib:
+        # `from pkgutil import resolve_name`, `from runpy import run_module` and `from types import FunctionType`
+        # all have to be caught, and a star-import hides any of them.
+        if in_src and isinstance(node, ast.ImportFrom) and node.level == 0 \
                 and any(a.name in DANGEROUS_ATTR or a.name in DANGEROUS_NAMES or a.name == "*" for a in node.names):
             errors.append(f"{loc}: 'from {node.module} import ...' of a process/dynamic-code function in src/")
-        mods = []
+        mods, submods = [], []
         if isinstance(node, ast.Import):
             mods = [a.name for a in node.names]
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
             mods = [node.module]
+            submods = [f"{node.module}.{a.name}" for a in node.names]   # catches `from logging import config`
         for m in mods:
-            if m.split(".")[0] in BANNED:
+            top = m.split(".")[0]
+            if top in BANNED or m in BANNED_FULL:
                 errors.append(f"{loc}: network-capable import '{m}' (offline-only kit)")
-            if in_src and m.split(".")[0] in PROC:
+            if in_src and (top in PROC or m in PROC_FULL):
+                errors.append(f"{loc}: process/dynamic-loading import '{m}' in src/")
+            if in_src and top not in SRC_IMPORT_OK:
+                errors.append(f"{loc}: non-stdlib import '{m}' in src/ (src/ is standard-library only; the only "
+                              f"allowed non-stdlib name is the documented optional 'torch')")
+        for m in submods:   # dotted submodule of a legitimate parent; the loop above cannot see these
+            if m in BANNED_FULL:
+                errors.append(f"{loc}: network-capable import '{m}' (offline-only kit)")
+            if in_src and m in PROC_FULL:
                 errors.append(f"{loc}: process/dynamic-loading import '{m}' in src/")
         if isinstance(node, (ast.Import, ast.ImportFrom)) and node.col_offset == 0:
             for a in node.names:
