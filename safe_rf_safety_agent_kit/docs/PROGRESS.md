@@ -4232,3 +4232,97 @@ unobserved. Stated in the document next to the claim.
 ### Not landed, recorded as a candidate
 An advisory line printing the baseline slack on every run — about four lines, cannot fail a run, and
 would make every stale-count figure in this project self-correcting. Deferred rather than bolted on.
+
+---
+
+# SR-13 re-attestation: FAIL again — and the root cause is a reviewing habit, not a line of code
+
+**Date:** 2026-11-10. Second FAIL. 150 tests OK, smoke test passes, 31 of 33 mutants killed, and the
+entire gate-set and floor architecture verified sound with no false fire — but the **literal
+acceptance criterion is still breached**, by a path none of the three people who checked that
+criterion ever looked at.
+
+## D1 — `_interval` renders an unknown value as a measured `[0.0, 0.0]`
+`dashboard.py:440-443`. `_interval` gates only on `MetricValue.is_measured`, which is merely
+`value is not None` (`schema.py:191`). It never checks float-ness or finiteness, then calls
+`_num` = `repr(float(x))`:
+
+| forged `value` | `_interval` | `_metric_cell`, same value |
+|---|---|---|
+| `0` (int) | `[0.0, 0.0]` in `.measured` | `UNKNOWN / malformed measured value` |
+| `False` / `"0"` | `[0.0, 0.0]` | `UNKNOWN` |
+| `nan` / `inf` | `[nan, nan]` | `UNKNOWN` |
+| `""` / `[]` / `{}` | **`render_dashboard` RAISES** | `UNKNOWN` |
+
+One rendered row contradicts itself: `mean` says UNKNOWN while the bootstrap and t intervals print
+`[0.0, 0.0]`. The crash cases additionally falsify `render_dashboard`'s own docstring, which says it
+is pure and refuses a malformed object with **no figures**. The same unchecked-`_num` gap reaches
+`pair.level` and `SUBJECT_KIND_CODE`. No false SUPPORTED is bought — a mismatch warning fires and the
+joint verdict is withheld — but the **figures** breach the criterion, and the self-contradiction
+inside a single row makes it indefensible.
+
+**The lesson is about method, and it is mine.** Three separate passes "confirmed sound" the forged
+`MetricValue.value` cases — `0`, `nan`, `inf`, `""`, `"0"`, `False`, `True`, `[]`, `{}` — and every
+one of them checked those cases against **`_metric_cell` only**. `_interval` consumes the **same
+type** and was never asked. We enumerated the attack's *cases* and never enumerated the type's
+*consumers*. **Standing rule: when a type is the attack surface, enumerate its consumers, not its
+inputs.** The fix is routed as one shared helper for all four consumers, because the root cause is
+that there were four.
+
+## D2 — the wording defect I predicted, in the direction I did not
+I told the reviewer `_weaker_than_protocol` was the likeliest regression site. It is one, inverted:
+
+| case | gets the tampering wording | gets "NOT evidence of tampering" | joint shown |
+|---|---|---|---|
+| **HONEST** `min_seeds=10/15/20/25/29` | **YES** | yes | INCONCLUSIVE |
+| **FORGED** `min_n` 30→1 on a real n=30 run | **NO** | **YES** | JOINT_SUPPORTED |
+| **FORGED** `width_tol` 0.25→1e9 | **NO** | **YES** | JOINT_SUPPORTED |
+
+An honest weak run receives the accusation; a genuine forgery receives only the exculpation. The page
+prints *"The recomputation used the protocol values, so any decisive verdict is withheld"* directly
+above **Joint verdict: JOINT_SUPPORTED** — two false sentences in one panel.
+**Precision matters here and the reviewer supplied it:** the *guard* is sound. The one-sided floor
+made the forgery unable to change anything, and `JOINT_SUPPORTED` is the honest answer for a run
+whose real `pair.n` is 30. **Nothing is laundered; this is purely a labelling defect** — which in a
+kit whose product is honest labelling is still a FAIL. The fix must not withhold a verdict that
+should stand.
+
+## Severity calibration: two more prior claims that do not survive
+The round-3 reviewer's finding 2 has now been checked twice, and both halves were mis-stated:
+- **"An honest n=29 run is laundered into JOINT_SUPPORTED"** — does not reproduce, and **the severity
+  was inverted**. An honest `min_seeds=29`, n=29 run is correctly refused. HEAD's real failing is the
+  *opposite*: it **over-flags** that run with the tampering wording (D2).
+- **"A genuine width-disagreement INCONCLUSIVE at the default `width_tol`"** — not reproducible at the
+  default 0.25 by either reviewer who tried. It does occur at an honest stricter `width_tol=0.10`,
+  correctly and with no alarm. The claim was mis-stated as to the parameter value.
+
+**That is three falsified measurements from one finding**, across two independent re-measurements.
+The defects were real and are fixed; the severities were not. I struck the first claim in the round-3
+entry when the builder refused it and am now recording that the second re-measurement agrees.
+
+## Other findings
+- **M27 survived**: ignoring `ok_totals` on `changed_files` makes the total row print
+  `total (2 files) | 10 | 23` — **a wrong number presented as a measured total** — where HEAD
+  correctly gives `UNKNOWN / some counts missing`. Correct at HEAD, pinned by nothing.
+- **D3**: `_protocol_params`' docstring says a missing default is reported on the page by
+  `_contract_problems`. It is not — that function checks parameter **names** only, so an unreadable
+  protocol-parameter set shows no specific message at all.
+- `pair.n = True` renders `True`, unlike every sibling cell.
+
+## What the re-attestation confirmed sound, so it is not churned again
+Gate-set completeness, with **no false fire across ten honest fixture variations**; reorder and a
+full shuffle correctly silent; `bm.GATE_SCOPES` patched to `{}`/`None`/non-dict/`[]` all **fail
+closed**. The one-sided floor: forged *stricter* values honoured, honest `width_tol=0.10` kept with
+no false alarm, no hard-coded 30/0.25 (`_protocol_params()` tracks a patched signature). All three
+margin rows with distinct bad-field and absent-attribute messages. Snapshot and training panels
+clean. `_int_or_unk`, `_verdict_cell(None)`, D5/D8/D11/D20/C2b all now die under mutation. SR-12 F4
+verified **without** overclaim — the panel is headed "what the result claims about itself" and says
+PRODUCER-ASSERTED, and `_subject_kind.__doc__` enumerates routes (a)–(f) and states "It is not
+authentication". No `<form>`, `<script>`, `<input>`, `<button>`, `onclick`, `fetch(` or any URL in the
+output; CSP `default-src 'none'`. The documented same-name-forged-pair residual is **unchanged**,
+neither closed nor widened.
+
+**One claim the builder understated, in the safe direction:** `JointResult.__post_init__` filters
+`isinstance(g, GateResult)`, so seven real gates **plus a duck-typed extra constructs fine** and is
+caught downstream by `_gate_set_ok` at eight names. The gate-set check is therefore *more*
+load-bearing than the builder claimed, not less.
