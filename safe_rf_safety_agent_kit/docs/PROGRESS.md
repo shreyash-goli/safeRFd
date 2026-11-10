@@ -2945,3 +2945,68 @@ likewise confirms it cannot re-verify QA's list from QA. **The accurate status:*
 sent to the *builder* in an earlier round and the builder reported all thirteen killed — so they are
 **builder-verified but not independently QA-verified**. That distinction is recorded rather than
 blurred, and the cause was the orchestrator omitting the list from the reviewer's brief.
+
+---
+
+## SR-09 → r8: the owner refused an orchestrator instruction, correctly
+
+**Date:** 2026-11-10. **Orchestrator verified:** `v1-DRAFT-r8` present; "zero measured results" still
+appearing twice; the gate-leak phrase **gone** (zero matches); **two** A-2 revision notes present; and
+**no** asserted outcome in the document (zero matches for the sentence the orchestrator asked for).
+
+### The refusal, which was right and which the orchestrator accepts
+The orchestrator asked the owner to add a sentence stating that the bracket's **known-good side
+currently fails** on two base seeds. **The owner declined**, on the grounds that this asserts an
+observed gate outcome **in prose** — precisely what the orchestrator itself ruled out one round
+earlier, when it overruled the owner's labelled-exception approach and insisted the document keep
+"zero measured results" literally true "in numbers or in prose". The owner noted that stating the
+outcome would require **lifting that rule**, and advised against it. Instead the bracket paragraph now
+says both sides are testable and that **where each side holds at the placeholder values is recorded in
+`docs/PROGRESS.md`**, with neither outcome asserted in the protocol.
+**The orchestrator was inconsistent with its own ruling and the owner caught it.** This is the
+correct direction for a disagreement to run: the instruction was wrong, the refusal was reasoned, and
+the reason was the orchestrator's own stated principle.
+
+### The figures the protocol correctly declines to carry — recorded here instead
+Measured by the **SR-09-r7 / SR-10-delta-3 reviewer** on the ORACLE_GATED fixture, 5 base seeds,
+30 seeds each, `n_boot=2000` — **not** the registered configuration (`B`=10,000, `n_planned` ≥ 100),
+so **not a registered run of anything**. Label: **TOY SCORER-VALIDATION OBSERVATION; not a result
+about any method.** Neither the orchestrator nor the SR-09 owner reproduced these.
+- **Known-bad side** (`steps_conv` = 300 = `steps`): **gate 12 fires on all five seeds**, worst
+  final/initial gradient ratios **0.0042, 0.0047, 0.0081, 0.0069, 0.0074** against
+  `tau_conv = 1e-3`. So §4.1's premise — that the registered finite budget is *not* converged — is
+  **confirmed by test rather than assumed**, which is what the `steps_bad` rule was designed to make
+  checkable.
+- **Known-good side** (`steps_conv` = 1000): gate 12 **passes** on base seeds 7, 11 and 99 and
+  **fails** on 23 (ratio 0.00178) and 5 (ratio 0.00108).
+- **Consequence:** the placeholder `tau_conv`/`steps_conv` fail the protocol's **own** known-good
+  side on two of five seeds. That is exactly the "registration must revisit the thresholds" case the
+  rule anticipates, and it remains **UNKNOWN until registration**. The two-sided bracket is doing its
+  job: it has been exercised, and the side that fails is the one that constrains the thresholds.
+
+### The A-2 breach, now named — and the owner caught itself repeating it
+The r7 defect was that A-2's `reason` line had been rewritten **in place again**, with the revision
+note disclaiming it only indirectly. A second, newly dated note now says **outright** that the
+`reason` line was rewritten in place **twice** (r6, and again in r7 for the pin change), points to
+`git log -p` for the earlier wordings, and states this **breached the append-only rule**. It also
+records honestly that the owner **recalls a still earlier rewrite** (replacing the figures), so **the
+count may be higher** — uncertainty about its own record, stated rather than smoothed.
+**Most notably: the owner's first r8 attempt edited the existing revision note in place — the same
+breach a third time — and it caught that on the re-read**, restored the note to its r7 wording, and
+moved the new content into a fresh note. **This was its first genuine full re-read after editing**,
+and it immediately caught a self-inflicted repeat.
+
+### 11(c) is now isolating, with its limits marked UNKNOWN
+The known-bad case is now a variant with **`E` declared a trained student and degraded alone** so its
+loss ratio violates `loss_factor`, while `C0` trains normally so (a) and (b) pass — with the fire
+criterion that **only (c) is named**. The all-arms `steps = 0` case is explicitly labelled
+**confounded and not sufficient**. Two honest UNKNOWNs: whether 11(c) is isolated awaits the variant
+being run, and **whether the implementation can degrade `E` alone was not checked**.
+
+### Fixes the re-read surfaced that nobody had asked for
+- §8.3.1's consequence item 1 listed only **two** of the five registration-time placeholders; it now
+  lists all five.
+- The phrase **"11(b) in particular, and 12"** is removed from the reference paragraph — it **leaked
+  which gates the observation concerned**, a prose leak the orchestrator had not spotted even while
+  enforcing the no-prose-outcome rule.
+- A grammar slip in the trailer; header and changelog updated with r8 and the r7 review result.
