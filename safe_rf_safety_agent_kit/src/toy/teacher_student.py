@@ -13,6 +13,10 @@ Structure mirrored (abstractly):
   * optional magnitude rescale (off by default)
   * masked MSE with a per-row mask and two named normalizations
 
+Norm difference (stated explicitly): the toy rescale uses ONE Frobenius norm
+over the whole matrix, whereas the audited source takes per-atom norms along
+dim=-1. This is a structural analogue only, not a faithful reproduction.
+
 Reproducibility vs honesty of time: `train()` records the real UTC time by
 default, so an unpinned record's `content_hash` differs between runs (it is
 honest about when it ran). Pass `timestamp_utc=` explicitly to get a
@@ -28,13 +32,12 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
-from toy.schema import (EvidenceClass, ExperimentRecord, MetricValue, RunProvenance,
+from toy.schema import (TOY_LABEL, EvidenceClass, ExperimentRecord, MetricValue, RunProvenance,
                         current_python_version, derive_seed, make_rng)
 
 Matrix = tuple[tuple[float, ...], ...]
 NORMALIZATIONS = ("per_masked_element", "per_mask_entry")
 RESCALE_MIN, RESCALE_MAX, RESCALE_EPS = 0.1, 2.0, 1e-8
-TOY_LABEL = "TOY RESULT (synthetic, non-biological; not a safety claim)"
 CODE_VERSION = "toy-teacher-student-v1"
 
 
@@ -53,12 +56,18 @@ def as_matrix(name: str, m: Sequence[Sequence[float]]) -> Matrix:
         raise ValueError(f"{name} is ragged: rows must all have the same width")
     out = []
     for r in rows:
+        conv = []
         for v in r:
             if isinstance(v, bool) or not isinstance(v, (int, float)):
                 raise ValueError(f"{name} contains a non-numeric value {v!r}")
-            if not math.isfinite(v):
+            try:
+                f = float(v)
+            except OverflowError:
+                raise ValueError(f"{name} contains a non-finite value (integer too large for float)") from None
+            if not math.isfinite(f):
                 raise ValueError(f"{name} contains a non-finite value")
-        out.append(tuple(float(v) for v in r))
+            conv.append(f)
+        out.append(tuple(conv))
     return tuple(out)
 
 
@@ -197,10 +206,14 @@ class Student:
     def step(self, grad: Sequence[float], lr: float) -> None:
         """Explicit gradient descent: params -= lr * grad (in place)."""
         lr = _check_lr(lr)
-        if len(grad) != len(self.params) or not all(math.isfinite(g) for g in grad):
-            raise ValueError("grad must be finite and match params length")
-        for i, g in enumerate(grad):
-            self.params[i] -= lr * g
+        if len(grad) != len(self.params):
+            raise ValueError(f"grad length {len(grad)} != params length {len(self.params)}")
+        if not all(math.isfinite(g) for g in grad):
+            raise ValueError("grad must be finite")
+        new = [p - lr * g for p, g in zip(self.params, grad)]
+        if not all(math.isfinite(p) for p in new):
+            raise ValueError("diverged: update produced non-finite parameters (learning rate too large?)")
+        self.params[:] = new
 
 
 def predict(params: Sequence[float], x: Matrix) -> Matrix:
@@ -250,7 +263,10 @@ def masked_mse_loss_and_grad(params: Sequence[float], x: Sequence[Sequence[float
             sse += e * e
             grad[j] += 2.0 * e * xm[i][j]
             grad[w + j] += 2.0 * e
-    return sse / denom, tuple(g / denom for g in grad)
+    loss, grad = sse / denom, tuple(g / denom for g in grad)
+    if not math.isfinite(loss) or not all(math.isfinite(g) for g in grad):
+        raise ValueError("non-finite loss or gradient (numeric overflow)")
+    return loss, grad
 
 
 # ------------------------------------------------------------------ train
@@ -273,7 +289,7 @@ def make_inputs(seed: int, rows: int = 4, width: int = 3) -> Matrix:
 
 
 def train(seed: int, steps: int = 50, lr: float = 0.05, eta: float = 0.5, rescale: bool = False,
-          normalization: str = "per_masked_element", rows: int = 4, width: int = 3,
+          normalization: str = "per_masked_element", rows: int | None = None, width: int | None = None,
           mask: Sequence[bool] | None = None, x: Sequence[Sequence[float]] | None = None,
           teacher: Teacher | None = None,
           timestamp_utc: str | None = None) -> TrainResult:
@@ -293,7 +309,18 @@ def train(seed: int, steps: int = 50, lr: float = 0.05, eta: float = 0.5, rescal
         raise ValueError("steps must be a nonnegative int")
     lr = _check_lr(lr)
     _check_eta(eta)
-    xm = as_matrix("x", x) if x is not None else make_inputs(seed, rows, width)
+    if x is not None:
+        xm = as_matrix("x", x)
+        if rows is not None and rows != len(xm):
+            raise ValueError(f"rows={rows} contradicts supplied x with {len(xm)} rows")
+        if width is not None and width != len(xm[0]):
+            raise ValueError(f"width={width} contradicts supplied x with width {len(xm[0])}")
+    else:
+        rows, width = 4 if rows is None else rows, 3 if width is None else width
+        for nm, v in (("rows", rows), ("width", width)):
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                raise ValueError(f"{nm} must be a positive int")
+        xm = make_inputs(seed, rows, width)
     teacher = teacher if teacher is not None else make_teacher(seed, len(xm[0]))
     mk = _check_mask(mask if mask is not None else (True,) * len(xm), len(xm))
     before = teacher.outputs(xm)
@@ -303,10 +330,20 @@ def train(seed: int, steps: int = 50, lr: float = 0.05, eta: float = 0.5, rescal
     init_params = tuple(student.params)
     history = []
     for k in range(steps + 1):
-        loss, grad = masked_mse_loss_and_grad(student.params, xm, target, mk, normalization)
+        try:
+            loss, grad = masked_mse_loss_and_grad(student.params, xm, target, mk, normalization)
+        except ValueError as e:
+            if k == 0:
+                raise
+            raise ValueError(f"training diverged at step {k} (learning rate too large?): {e}") from None
         history.append((k, loss, math.sqrt(sum(g * g for g in grad))))
         if k < steps:
-            student.step(grad, lr)
+            try:
+                student.step(grad, lr)
+            except ValueError as e:
+                if str(e).startswith("diverged"):
+                    raise ValueError(f"training diverged at step {k + 1} (learning rate too large?)") from None
+                raise
     after = teacher.outputs(xm)
     metrics = {"initial_loss": MetricValue.measured(history[0][1]),
                "final_loss": MetricValue.measured(history[-1][1]),

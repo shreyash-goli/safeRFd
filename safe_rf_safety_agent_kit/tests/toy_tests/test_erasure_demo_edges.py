@@ -44,14 +44,38 @@ class MaskedMseEdges(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "nonfinite"):
             masked_mse((math.nan, 1.0), (0.0, 1.0), (True, True))
 
-    def test_nonfinite_under_false_mask_is_ignored_current_behaviour(self):
-        # Pins ACTUAL behaviour: masked-out elements are filtered BEFORE the finiteness
-        # check, so a NaN/inf under a False mask is silently ignored.
-        # Opinion: defensible for a loss (masked-out values do not enter it), but it can
-        # hide an upstream NaN that later becomes unmasked; reported to the orchestrator as
-        # a low-severity observation, not changed here.
-        self.assertEqual(masked_mse((math.nan, 3.0), (0.0, 1.0), (False, True)), 4.0)
-        self.assertEqual(masked_mse((1.0, 3.0), (math.inf, 1.0), (False, True)), 4.0)
+    # CHANGED in SR-05 rework following QA: these tests originally PINNED lenient behaviour
+    # (NaN under a False mask ignored; truthy non-bool mask entries accepted; overflow to
+    # inf from finite inputs). That was more lenient than the audited source, which
+    # multiplies by the mask so NaN * 0 stays NaN. erasure_demo now fails closed.
+    def test_nonfinite_under_false_mask_now_raises(self):
+        with self.assertRaisesRegex(ValueError, "nonfinite"):
+            masked_mse((math.nan, 3.0), (0.0, 1.0), (False, True))
+        with self.assertRaisesRegex(ValueError, "nonfinite"):
+            masked_mse((1.0, 3.0), (math.inf, 1.0), (False, True))
+
+    def test_non_bool_mask_entries_raise(self):
+        for bad in ((0, "no"), (1, 1), (True, None), ("x", True)):
+            with self.assertRaisesRegex(ValueError, "strictly bool"):
+                masked_mse((1.0, 2.0), (1.0, 0.0), bad)
+
+    def test_loss_overflow_raises(self):
+        with self.assertRaisesRegex(ValueError, "overflow"):
+            masked_mse((1e200,), (-1e200,), (True,))
+
+
+class ToyTargetFailClosed(unittest.TestCase):
+    def test_bool_strength_rejected(self):
+        for s in (True, False):
+            with self.assertRaisesRegex(ValueError, "bool"):
+                toy_target(REF, s)
+
+    def test_output_overflow_from_finite_inputs_raises(self):
+        with self.assertRaisesRegex(ValueError, "overflow"):
+            toy_target(ToyPrediction((1e308,), (-1e308,)), 10.0)
+
+    def test_valid_case_unchanged(self):
+        self.assertEqual(toy_target(ToyPrediction((3.0, 1.0), (1.0, 2.0)), 0.5), (0.0, 2.5))
 
 
 if __name__ == "__main__":

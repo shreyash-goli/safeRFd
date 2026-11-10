@@ -187,6 +187,23 @@ class InvalidInputs(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "label"):
                 ExperimentRecord.from_json(json.dumps(d))
 
+    def test_label_near_misses_rejected(self):
+        good = "TOY RESULT (synthetic, non-biological; not a safety claim)"
+        near = [good + " ", " " + good, good + "\n", good.lower(), "TOY RESULT",
+                good[:10] + "\u200b" + good[10:], good.replace("not a safety claim", "a safety claim"),
+                good + " validated safe"]
+        d = json.loads(record().to_json())
+        for bad in near:
+            self.assertNotEqual(bad, good)
+            d["label"] = bad
+            with self.assertRaisesRegex(ValueError, "label", msg=repr(bad)):
+                ExperimentRecord.from_json(json.dumps(d))
+
+    def test_deep_nesting_is_valueerror(self):
+        for text in ("[" * 100000, '{"a":' * 100000):
+            with self.assertRaisesRegex(ValueError, "nesting too deep"):
+                ExperimentRecord.from_json(text)
+
     def test_roundtrip_identity_on_text(self):
         for r in (record(), record(metrics={}, notes=None)):
             t = r.to_json()

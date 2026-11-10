@@ -7,6 +7,9 @@ Caveats stated plainly:
 - `RunProvenance.toy_only` is a producer-asserted flag, not a verified property
   of the data. The constructor refuses False, but like any Python dataclass it
   can be bypassed (e.g. via `object.__setattr__`).
+- Free-text fields (`name`, `notes`, `code_version`, `run_id`) are unconstrained
+  and can carry claim-like strings; downstream consumers (SR-14, renderers) must
+  never treat them as evidence.
 - Rule: an `ExperimentRecord` (a run record) can never be `SOURCE_OBSERVED`.
   That class belongs to audit/claim records (SR-14), not run records, and is
   rejected at construction. It stays in `EvidenceClass` for those consumers.
@@ -285,3 +288,5 @@ def _strict_loads(text: str) -> Any:
         return json.loads(text, object_pairs_hook=no_dupes, parse_constant=bad_const)
     except json.JSONDecodeError as e:
         raise ValueError(f"invalid JSON: {e}") from None
+    except RecursionError:
+        raise ValueError("invalid JSON: nesting too deep") from None

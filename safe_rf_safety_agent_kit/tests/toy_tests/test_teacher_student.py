@@ -1,4 +1,5 @@
 """SR-05 tests. TOY RESULT only: abstract numbers, no biological content, no safety claims."""
+import copy
 import dataclasses
 import re
 from datetime import datetime, timezone
@@ -10,8 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from toy.erasure_demo import ToyPrediction, toy_target
-from toy.schema import EvidenceClass
-from toy.teacher_student import (Student, erasure_target, make_inputs, make_teacher,
+from toy.schema import EvidenceClass, derive_seed, make_rng
+from toy.teacher_student import (Student, Teacher, predict, as_matrix, erasure_target, make_inputs, make_teacher,
                                  masked_mse_loss_and_grad, train)
 
 # Hand fixture. x=((1,2),(3,4)), params scale=(1,1), bias=(0,0) so pred == x.
@@ -75,18 +76,24 @@ class FrozenTeacher(unittest.TestCase):
             t.params["cond_scale"][0] = 9.0  # tuple is immutable
 
     def test_outputs_unchanged_by_training(self):
-        res = train(seed=5, steps=100, timestamp_utc=TS)
-        self.assertEqual(res.teacher_before, res.teacher_after)
-        t = make_teacher(5)
-        x = make_inputs(5)
-        self.assertEqual(t.outputs(x), res.teacher_before)
-        # actual values are nontrivial and equal after a second call
-        self.assertNotEqual(res.teacher_before.conditioned, res.teacher_before.unconditioned)
-        self.assertEqual(t.outputs(x).conditioned, res.teacher_after.conditioned)
+        # Explicit teacher + independent snapshot taken BEFORE training, compared AFTER.
+        teacher = Teacher({"cond_scale": (2.0, 1.0), "cond_bias": (0.0, 1.0),
+                           "uncond_scale": (1.0, 0.5), "uncond_bias": (0.5, 0.0)})
+        x = ((1.0, 2.0), (3.0, -4.0))
+        params_snap = copy.deepcopy(dict(teacher.params))
+        out_snap = copy.deepcopy(teacher.outputs(x))
+        # hand-computed literals: cond = x*scale+bias, uncond = x*scale+bias
+        self.assertEqual(out_snap.conditioned, ((2.0, 3.0), (6.0, -3.0)))
+        self.assertEqual(out_snap.unconditioned, ((1.5, 1.0), (3.5, -2.0)))
+        res = train(seed=5, steps=100, x=x, teacher=teacher, timestamp_utc=TS)
+        self.assertEqual(dict(teacher.params), params_snap)
+        self.assertEqual(teacher.outputs(x), out_snap)
+        self.assertEqual(res.teacher_before, out_snap)
+        self.assertEqual(res.teacher_after, out_snap)
+        self.assertNotEqual(out_snap.conditioned, out_snap.unconditioned)
 
     def test_param_copy_is_isolated_from_input(self):
         src = {"cond_scale": [1.0], "cond_bias": [0.0], "uncond_scale": [1.0], "uncond_bias": [0.0]}
-        from toy.teacher_student import Teacher
         t = Teacher(src)
         src["cond_scale"][0] = 7.0
         self.assertEqual(t.params["cond_scale"], (1.0,))
@@ -278,6 +285,121 @@ class Gradient(unittest.TestCase):
                 fd = (masked_mse_loss_and_grad(up, x, t, mask, norm)[0]
                       - masked_mse_loss_and_grad(dn, x, t, mask, norm)[0]) / (2 * h)
                 self.assertAlmostEqual(g[i], fd, delta=1e-7)  # quadratic loss: error ~ roundoff only
+
+
+class DefaultsAndInternals(unittest.TestCase):
+    def test_default_normalization_is_per_masked_element(self):
+        # T1: the default a caller silently gets must be the correct count.
+        res = train(seed=2, timestamp_utc=TS)
+        teacher, x = make_teacher(2, 3), make_inputs(2)
+        out = teacher.outputs(x)
+        target = erasure_target(out.conditioned, out.unconditioned, 0.5)
+        rng = make_rng(derive_seed(2, "student_init"))
+        p0 = [rng.uniform(-0.5, 0.5) for _ in range(6)]
+        mask = (True,) * 4
+        good, _ = masked_mse_loss_and_grad(p0, x, target, mask, "per_masked_element")
+        bad, _ = masked_mse_loss_and_grad(p0, x, target, mask, "per_mask_entry")
+        self.assertEqual(res.history[0][1], good)
+        self.assertNotEqual(res.history[0][1], bad)
+        self.assertAlmostEqual(bad / good, 3.0, places=12)
+        self.assertEqual(train(seed=2, normalization="per_mask_entry", timestamp_utc=TS).history[0][1], bad)
+
+    def test_history_grad_norm_is_l2_and_step_index(self):
+        res = train(seed=2, steps=5, timestamp_utc=TS)
+        teacher, x = make_teacher(2, 3), make_inputs(2)
+        out = teacher.outputs(x)
+        target = erasure_target(out.conditioned, out.unconditioned, 0.5)
+        rng = make_rng(derive_seed(2, "student_init"))
+        s = Student([rng.uniform(-0.5, 0.5) for _ in range(6)])
+        self.assertEqual([h[0] for h in res.history], [0, 1, 2, 3, 4, 5])
+        for k, (step, loss, gn) in enumerate(res.history):
+            l, g = masked_mse_loss_and_grad(s.params, x, target, (True,) * 4)
+            self.assertEqual(loss, l)
+            self.assertAlmostEqual(gn, math.sqrt(sum(v * v for v in g)), places=12)
+            self.assertGreater(abs(sum(abs(v) for v in g) - gn), 1e-6)  # L1 would differ
+            if k < 5:
+                s.step(g, 0.05)
+        self.assertEqual(res.final_params, tuple(s.params))
+
+    def test_config_hash_covers_every_field(self):
+        base = dict(seed=2, steps=5, lr=0.05, eta=0.5, rescale=False, normalization="per_masked_element",
+                    mask=(True, True, True, True), timestamp_utc=TS)
+        h0 = train(**base).record.provenance.input_hashes["config"]
+        self.assertEqual(h0, train(**base).record.provenance.input_hashes["config"])
+        variants = dict(steps=6, lr=0.04, eta=0.6, rescale=True, normalization="per_mask_entry",
+                        mask=(True, True, True, False),
+                        teacher=Teacher({"cond_scale": (1.0,) * 3, "cond_bias": (0.0,) * 3,
+                                         "uncond_scale": (1.0,) * 3, "uncond_bias": (0.1,) * 3}))
+        for k, v in variants.items():
+            h = train(**{**base, k: v}).record.provenance.input_hashes["config"]
+            self.assertNotEqual(h, h0, k)
+        # input x is hashed separately
+        x2 = make_inputs(9)
+        self.assertNotEqual(train(**{**base, "x": x2}).record.provenance.input_hashes["x"],
+                            train(**base).record.provenance.input_hashes["x"])
+
+
+class Hardening(unittest.TestCase):
+    def test_bad_rows_width_steps(self):
+        for kw in ({"rows": 0}, {"rows": -1}, {"width": 0}, {"rows": True}):
+            with self.assertRaises(ValueError):
+                train(seed=1, **kw)
+        for steps in (-1, True, 1.5):
+            with self.assertRaisesRegex(ValueError, "steps"):
+                train(seed=1, steps=steps)
+
+    def test_zero_steps_ok(self):
+        self.assertEqual(len(train(seed=1, steps=0).history), 1)
+
+    def test_huge_int_is_validation_error(self):
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            as_matrix("x", [[10 ** 400]])
+
+    def test_width_rows_contradicting_x_raise(self):
+        x = ((1.0, 2.0), (3.0, 4.0))
+        teacher = make_teacher(1, 2)
+        with self.assertRaisesRegex(ValueError, "width=3 contradicts"):
+            train(seed=1, x=x, width=3, teacher=teacher)
+        with self.assertRaisesRegex(ValueError, "rows=4 contradicts"):
+            train(seed=1, x=x, rows=4, teacher=teacher)
+        self.assertEqual(len(train(seed=1, x=x, width=2, rows=2, teacher=teacher).history), 51)
+
+    def test_divergence_reported_honestly(self):
+        with self.assertRaisesRegex(ValueError, "diverged"):
+            train(seed=1, lr=1e200, steps=50)
+        with self.assertRaisesRegex(ValueError, "diverged"):
+            Student([1e300, 1e300]).step((1e300, 1e300), 1e10)
+        try:
+            train(seed=1, lr=1e200, steps=50)
+        except ValueError as e:
+            self.assertNotIn("match params length", str(e))
+
+    def test_mask_must_be_bool(self):
+        for bad in ((1, 1, 1, 1), (True, True, True, "no"), (True, True, True, None)):
+            with self.assertRaisesRegex(ValueError, "must be bool"):
+                train(seed=1, mask=bad)
+        with self.assertRaisesRegex(ValueError, "must be bool"):
+            masked_mse_loss_and_grad(P, X, T, (1, True))
+
+    def test_predict_width_check(self):
+        with self.assertRaisesRegex(ValueError, "params length"):
+            predict((1.0, 0.0, 0.0), as_matrix("x", X))
+        with self.assertRaisesRegex(ValueError, "params length"):
+            masked_mse_loss_and_grad((1.0,) * 3, X, T, (True, True))
+
+    def test_step_grad_length_check(self):
+        s = Student([1.0, 2.0])
+        with self.assertRaisesRegex(ValueError, "grad length"):
+            s.step((0.1,), 0.1)
+        with self.assertRaisesRegex(ValueError, "grad length"):
+            s.step((0.1, 0.1, 0.1), 0.1)
+        with self.assertRaisesRegex(ValueError, "grad must be finite"):
+            s.step((math.nan, 0.0), 0.1)
+        self.assertEqual(s.params, [1.0, 2.0])  # failed steps leave state untouched
+
+    def test_label_is_schema_label(self):
+        import toy.schema as sch, toy.teacher_student as ts
+        self.assertIs(ts.TOY_LABEL, sch.TOY_LABEL)
 
 
 if __name__ == "__main__":
