@@ -3190,3 +3190,108 @@ the scripts. That is the kind of hazard this session has repeatedly been bitten 
 moving baselines) and it anticipated it.
 
 **CI remains unexecuted**, as the owner states and as the BLOCKED verdict recorded.
+
+---
+
+# Batch attestation round 1: SR-11 PASS; SR-09 and SR-10 FAIL (narrow)
+
+**Date:** 2026-11-10. Baseline held at **874 tests, OK (2 skipped)**; `scripts/run_tests.sh --expect
+any --twice` reported `deterministic: run1 == run2 (ran=874 skipped=2 failed=0, identical per-module
+counts and skip list)` and `RESULT: OK`. Repo untouched by the reviewer; every mutant checked for a
+docstring-stripped AST change before running.
+
+## SR-11 — PASS
+The `OverflowError` wrap verified across **28 swept inputs** with no raw exception
+(`10**400`, `-10**400`, `None`, a bare object, `[Decimal('1e400')]`). **The floor analysis the
+orchestrator asked for was independently confirmed:** `zero_variance_warning` is
+`len(set(vals)) == 1` at `robustness.py:467`; outside `_stats`, `sd` is read only in
+`scorecard_to_record`; by probe, **29 zeros plus one `5e-324` gives `sd == 0.0` with the warning
+False**, while a constant `5e-324` gives True. The `SeedSummary` docstring states the O(1)-scale
+assumption and cites the floor. The "Keep the cast" comment sits at `robustness.py:185-187` with the
+cast at 189.
+
+**Two residuals, both non-equivalent mutants surviving the suite — shipped code correct, tests weak:**
+- **R8b is the cross-task claim, and nothing pins it.** Replacing the warning's implementation with
+  `sample_sd(vals) == 0.0` **survives all 87 tests** and is **not** equivalent: for 29 zeros plus one
+  `5e-324` the shipped version gives **False** and the SD version gives **True**. So the property the
+  orchestrator specifically asked to be established — that the floor cannot make the warning misfire,
+  because the warning never consults the SD — is **verified by reading and probing but protected by no
+  test.** A later "simplification" to use the SD would break the cross-task guarantee with the suite
+  green. Routed for a regression test on exactly that fixture.
+- **R12:** `abs(float(v))` **survives all 874 tests** and changes behaviour for **any negative
+  outcome** — a sign-stripping bug in a measurement pipeline would go undetected. Pre-existing code.
+
+## SR-09 r8 — FAIL (three accuracy defects)
+**All six named fixes verified, and the owner's refusal was confirmed correct:** the document asserts
+no gate or fixture outcome, the bracket paragraph defers outcomes to the journal, and this is
+consistent with the unconditional property. Numeric scan: every token a parameter, section reference,
+hash, timestamp or count — **zero measured results**. Prose scan: **82 sentences matched, none
+asserting an observed outcome**, and the gate-leak phrase is gone. **Byte comparisons against
+`577099d`:** A-1 byte-identical to `577099d` and HEAD; A-2 differs in **exactly one line** (the
+disclosed r7 pin edit) and is **byte-identical between r7 and r8**, so r8 did not touch it; and **the
+owner's revert of the r7 revision note was real** — byte-identical to its r7 text. §8.3.1 item 1
+lists all five placeholders; Level B (§9–10) and §11 byte-identical to `c9f52d8`.
+
+1. **A second false pin from the orchestrator.** The bracket paragraph cites the reference
+   paragraph's pin — **`3620de2`** — for figures that first appear in **`0507399`**. At `3620de2` the
+   journal holds only a gate-12 range, with **no known-bad or known-good sides**. This is the
+   **second** pin the orchestrator supplied that verifies the wrong thing (the first was `2b06fff`),
+   two rounds apart. Routed: state the two pins separately rather than letting one stand for two
+   claims.
+2. **Incomplete r8 accounting:** the header calls r8 "the single defect fix of the r7 review" and the
+   changelog's "Also:" list omits the §8.3.1 item 1 expansion, the removal of "11(b) in particular,
+   and 12", and the trailer rewrite.
+3. **The breach is understated:** the second note names only the `reason` line, but git shows r6 also
+   rewrote A-2's `changed_item`, `known_residual`, `data_seen_before` **and the trailing paragraph**;
+   only r7's rewrite was `reason`-only.
+
+**Three soft telegraphs left in place deliberately** (all conditional, not assertions): A-2's
+`changed_item` naming the three parameters, the r5 changelog row repeating that list, and §8.3.1's
+"Interpretation" saying a convergence gate "can fire on a fixture". The first **cannot be fixed
+without breaching append-only again**, which the orchestrator accepts.
+
+**A standing UNKNOWN is now determined: `E` cannot be degraded alone by configuration.**
+`BenchmarkConfig` is shared across arms and `C0` uses the same `steps`/`lr`; raising `eta_star` to
+5, 50 and 1000 left gate 11(c) **passing**. The only isolation route is a **public-API
+substitution** — declaring a factory with `trained_student=True`, `arm_name="C_init"` as the subject —
+under which `control_adequacy` failed with *"E training loss did not fall by factor 2.0 … (worst
+ratio 1.0)"* **and nothing else**, so 11(c) does isolate. But gate 12 also fires (grad ratio 1.0) and
+**the subject is `C_init`, not `E`**, at a non-registered configuration. The protocol's UNKNOWN was
+honest; the precise statement is "not implementable as per-arm config — substitution only".
+
+## SR-10 — FAIL (two defects)
+**Verified hard:** the defaults pin killed **25 of 26** mutants (all 18 `BenchmarkConfig` fields, the
+three margins, `eta_star` at 0.6 / 0.5000001 / int 0, type-only changes, an added unpinned field; the
+26th failed at import and proves nothing). Dropping the `isfinite` guard, narrowing it to `isnan`,
+and dropping the `OverflowError` handler were each killed; mocked `inf`, `nan`, `-inf` and
+`OverflowError` all give `ValueError`. Text-pins hold; the stale `2.2e-324` comment is gone from the
+test file; no `robustness.py:NN` line citation remains in `src/` or `tests/`.
+
+1. **`t_interval` leaks raw exceptions, contradicting its own docstring.** `_mean` runs **before** any
+   finite check: `t_interval([1.0, None, 2.0], .95)` raises a raw `TypeError` (likewise `str`, nested
+   list, complex), and `t_interval([10**400, 1], .95)` a raw `OverflowError`. `bootstrap_means(...,
+   rng=None)` raises `AttributeError`. The `_as_list` docstring promises "never a raw TypeError", and
+   **no test covers any of it**. Same contract class that failed SR-06 and that `mean`/`sample_sd`
+   were already fixed for — `t_interval` was missed.
+2. **The enumeration test is named `…IsComplete` and is not.** A full grid sweep (code ∈ {deleted,
+   unmeasured, 0, 1, 2, 7, −1} × flag ∈ {deleted, unmeasured, 0, 1, 0.5, 2}, both subject kinds) gave
+   **22 accepted / 20 rejected**, with several accepted combinations unenumerated. The docstring's
+   "Only a relabel that leaves the flag at 1.0 is caught" also ignores that **malformed** flags (0.5,
+   2.0) are rejected.
+
+**A narrower claim than stated, to be documented:** substituting `sum` for `fsum` in `_sum_sq` **is**
+overflow-equivalent (a real n=2e8 input raises `ValueError` either way) but is **not proven
+value-equivalent** — 0 differences in 220k random trials on 3.12.4, and **below 3.12 the built-in
+`sum` is uncompensated**.
+
+## Orchestrator retraction: the citation guard does not have "exactly the right semantics"
+The orchestrator praised the symbol-citation guard in those words. The reviewer showed otherwise:
+- **False red:** moving the cast to a **module-level helper** turns the guard red while
+  `test_robustness` stays green — contradicting the guard's own docstring that a mere move is
+  harmless. `map(float, values)` also turns it red.
+- **False green:** a `# float(v)` **comment decoy** satisfies it, and so does **dead-code**
+  `float(v)`.
+It does correctly fail when the cast is **removed**, which was the main objective — but it is a
+**text** tripwire presented as a semantic one, and the orchestrator endorsed it on the builder's
+description without probing it. Routed: tighten it to inspect live code, or correct the docstring to
+say what it actually is.
