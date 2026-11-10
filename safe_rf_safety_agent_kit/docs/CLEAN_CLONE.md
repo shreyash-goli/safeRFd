@@ -72,6 +72,8 @@ total is normal and is never a failure. A *smaller* per-module count is what the
 |---|---|---|---|---|
 | Nothing installed (`venv --without-pip`), Python 3.12.13 | 914 run, 89 skipped, 0 failed | not run (not installed) | `none` | pre-SR-15 (`86a52ed` era) |
 | Nothing installed (`venv --without-pip`), Python 3.12.4 | 1000 run, 89 skipped, 0 failed | not run (not installed) | `none` | SR-15 — see below |
+| Nothing installed (`venv --without-pip`), Python 3.12.4 | 1002 run, 89 skipped, 0 failed; deterministic across `--twice` | not run (not installed) | `none` | `209adfc` (baseline regeneration) |
+| Nothing installed (`venv --without-pip`), **Python 3.13.11** | 1002 run, 89 skipped, 0 failed; deterministic across `--twice` | not run (not installed) | `none` | `209adfc` — **first 3.13 measurement**, see below |
 | Nothing but PyYAML | one fewer skip than bare; 87 at a 874-test tree, **never re-measured since** | not run | `none` | stale |
 | torch + numpy + pytest + PyYAML (macOS, MPS available) | 914 run, 2 skipped (identical in two full runs) | 912 passed, 2 skipped | `torch` | pre-SR-15 |
 | Case-sensitive APFS stand-in, bare | 914 run, 90 skipped (**1** filesystem-case — an artefact; see below) | not run | `none` | pre-SR-15 |
@@ -367,8 +369,15 @@ This is hygiene, not a sandbox; the runtime socket guard is a second, partial la
 ## Known limits of this documentation (read before trusting CI)
 
 - **The CI workflow has never been executed.** Its two jobs were never run on a hosted runner (none was available);
-  the commands they invoke were run locally and the YAML parses. A reviewer expects `core-no-deps` to pass given
-  bare Python 3.12 and 3.13 local runs, and considers `optional-deps` unverifiable here.
+  the commands they invoke were run locally and the YAML parses. `optional-deps` remains unverifiable here.
+  **The Python-version basis for expecting `core-no-deps` to pass is now measured rather than assumed.** This bullet
+  previously said "given bare Python 3.12 and 3.13 local runs" while the SR-15 reviewer had measured 3.12.4 only and
+  listed 3.13 as explicitly unestablished; the 3.13 mention below was about *torch* versions, not a bare suite run.
+  Both legs of the `["3.12", "3.13"]` matrix have now been run bare at `209adfc`:
+  **3.12.4 and 3.13.11 each give `Ran 1002 tests` / `OK (skipped=89)`, with identical per-module counts and an
+  identical skip list, and each is deterministic across `--twice`.** So the interpreter version is no longer a
+  source of doubt about that job. **What this does NOT establish:** anything about Linux, which is a separate
+  variable and still unobserved (next bullet).
 - **Real Linux behaviour of `run_tests.sh` and the tests has never been observed.** Everything ran on macOS; a case-sensitive-APFS stand-in found one failure (above) and may hide others.
 - **The torch/numpy pin is untested as a combination.** `constraints.txt` pins torch 2.7.1 + numpy 1.26.4 on Python
   3.12. Locally the suite passes on torch 2.7.1 + numpy 2.4.6 (framework Python 3.12) and torch 2.11.0 + numpy 2.4.4

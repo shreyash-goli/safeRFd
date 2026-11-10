@@ -4137,3 +4137,98 @@ via `RecomputedVerdict.config_hash`, which is the piece a renderer would need. *
 not forgotten:** the dashboard's one-sided floor already makes it structurally immune to the specific
 defect, so consuming the hash would buy "which config produced this?" rather than closing a hole. It
 is a public-API change and belongs in a considered round, not bolted onto a FAIL fix.
+
+---
+
+## SR-15 rework landed; baseline regenerated; first Python 3.13 measurement
+
+**Date:** 2026-11-10. Suite **1002** tests. Measured by me on a bare `venv --without-pip` with torch,
+numpy, pytest and PyYAML all confirmed absent: **`RESULT: OK (unittest ran=1002 skipped=89)`**,
+deterministic across `--twice`, on **both** Python 3.12.4 and **3.13.11**.
+
+### The Linux skip count, settled by experiment instead of inference
+The owner built a case-sensitive APFS image and varied **one volume at a time**:
+
+| repo volume | `TMPDIR` | `test_dashboard` | `test_scripts` | total |
+|---|---|---|---|---|
+| case-sensitive | case-INsensitive | 0 | 1 | **1** ← the old stand-in |
+| case-INsensitive | case-sensitive | 3 | 0 | **3** |
+| both case-sensitive | | 3 | 1 | **4** ← Linux |
+
+**The three dashboard skips appear from moving `TMPDIR` alone, with the repo untouched.** That is
+direct proof that nothing about those tests changed, which is what the false explanation claimed.
+The document now says 4 everywhere, carries that table, and the false cause is deleted. Its pin is
+**not a doc grep**: it counts the actually-gated tests and requires the documented number to equal
+them, and asserts the deleted sentence stays deleted. `_fs_case_insensitive` was left untouched —
+it is in another owner's file and is arguably correct, since it probes where the dashboard writes.
+
+### Masked test #11 closed with a behavioural test
+The grep-based `test_unscoped_default_run_clears_whole_tree_by_construction` is replaced by a test
+that drives the **default** path against a throwaway repo root and asserts canaries outside `tests/`
+are gone **before the suite starts** as well as after — so a clear-only-at-the-end mutant dies too.
+Mutant H is killed, and the owner verified the kill comes from the intended inner test rather than an
+incidental return code.
+
+### A defect the owner found, declined to land, and was right to decline
+**`--update-baseline` wrote the baseline even from a FAILING run** — and did: the owner's own
+regeneration run came back rc=1 with three **false** failures (a module read mid-edit by another
+process), and the file was rewritten from that red run anyway. It did not commit it. Recording a
+floor from a red or mid-refactor tree encodes whatever was broken at that moment as the permanent
+floor, which is the exact defect the per-module baseline exists to catch. It also declined to add the
+fix itself, on the honest ground that adding a test after regeneration re-stales the file.
+**I landed the fix, which resolves that ordering problem by doing it first.** `--update-baseline` now
+refuses unless the run ended in `OK` with no skip-policy failures, states that the baseline is
+**UNCHANGED** and why, and **does not fall through to the comparison branch** — which would pile
+`POLICY:BASELINE_*` failures on top of the real cause and bury it. The run's own non-zero exit was
+never protection, because the write happens before the exit code is decided.
+Two tests pin it (a failing suite; an all-green-but-policy-failing suite), both verified able to
+fail. The mutant's output shows the defect in a single line: `baseline written: ...` printed directly
+beside `FAIL: POLICY:NONE_REASON` and `RESULT: FAIL`.
+
+### Baseline regenerated: 874 → 1002, and the skip column mattered
+`test_benchmark` 182→214, `test_dashboard` 103→150, `test_claim_ledger` 87→100, `test_scripts` 71→99,
+`test_robustness` 87→93, `test_teacher_student` 53→55. **The deletable-without-detection surface drops
+from 126 tests to 0.** The *skip* column was stale too, which nobody had counted: `test_scripts`
+recorded 2 bare-environment skips against 3 live, so a guarded test could have begun passing silently
+without tripping `POLICY:BASELINE_SKIPS`.
+This was the refusal guard's first live exercise, and **it stayed quiet on a green run** — the
+behaviour it has to have, since a guard that fires on a clean tree gets switched off.
+
+### Lint: 19 reported evasions closed, plus 7 the owner found itself
+All 19 were reproduced at rc=0 before being closed. The owner added `sqlite3` extension loading,
+`ensurepip.bootstrap`, `_ctypes`, `operator.attrgetter`/`methodcaller`, `uuid.uuid1` and `tkinter`'s
+Tcl `exec`. **`pkgutil.resolve_name('os:system')` was the one that mattered most** — it defeated the
+entire attribute check in one line.
+**The two divergent BANNED lists are reconciled structurally, not by copying:** `test_scripts.py` now
+*parses* `BANNED`/`BANNED_FULL` out of `lint.sh` rather than restating them, with a test pinning the
+parse against known names so it cannot silently return an empty set. The document now describes the
+check as an **inherently incomplete** blocklist-plus-attribute-check, names what still passes
+(`select`, `mmap`, `threading`, `gc`, `platform`, `tarfile`/`zipfile`, non-`xmlrpc` `xml`), and the
+false "AST check in both places" claim for stdlib-only is **dropped** — neither mechanism checked it,
+and `import numpy`/`pandas`/`scipy`/`yaml` in `src/toy/` all passed.
+
+### First Python 3.13 measurement — an unknown closed rather than disclosed
+CI's `core-no-deps` job runs a **`["3.12", "3.13"]`** matrix, and every figure in this kit had been
+measured on 3.12 only. `CLEAN_CLONE.md` nonetheless said a reviewer expects that job to pass "given
+bare Python 3.12 **and 3.13** local runs" — while the SR-15 reviewer had measured **3.12.4 only** and
+listed 3.13 as explicitly unestablished. The 3.13 mention elsewhere in that file is about *torch*
+versions, not a bare suite run. So the bullet was resting on a run nobody had done.
+**Now measured:** bare 3.13.11 gives `Ran 1002 tests` / `OK (skipped=89)`, **identical per-module
+counts and an identical skip list to 3.12.4**, and deterministic across `--twice`. The interpreter
+version is no longer a source of doubt about that job, and the document says so with its basis.
+**What it does not establish:** anything about Linux, which is a separate variable and still
+unobserved. Stated in the document next to the claim.
+
+### Corrections the owner made to my brief
+- **The `need_ci()` line numbers were off by one** (551/559/567, not 550/558/566) and have moved again
+  since the dashboard commit.
+- **My budget was not achievable as stated.** "At most two full runs" cannot coexist with
+  "regenerate the baseline in a bare environment" *and* "give a verbatim `--twice` tail" — three
+  invocations minimum. It used three and flagged it rather than hiding it.
+- **My F4 slack figures were stale and so was my correction to them:** I said +40, corrected to +60;
+  the measured answer was **+126**. The instruction to distrust my figures was the right instruction,
+  and measuring is what caught it.
+
+### Not landed, recorded as a candidate
+An advisory line printing the baseline slack on every run — about four lines, cannot fail a run, and
+would make every stale-count figure in this project self-correcting. Deferred rather than bolted on.
