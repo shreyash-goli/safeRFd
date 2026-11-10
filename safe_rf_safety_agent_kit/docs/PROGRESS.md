@@ -2232,3 +2232,77 @@ above stands.
 **Suite: 768 tests, OK (2 skipped)** under `unittest discover -s tests` with bytecode caching
 disabled. `tests/toy_tests/test_benchmark.py` remains modified in the working tree by the in-flight
 SR-10 work and is not part of this change.
+
+---
+
+## SR-10 rework: `subject_kind`, gate pins, strict contracts — plus concrete harm from the commit-trail failure
+
+**Date:** 2026-11-10. `test_benchmark.py` is now 139 tests; suite **769, OK (2 skipped)**.
+
+### Orchestrator failure 5, continued — the concrete damage, not just mislabelled titles
+Earlier this journal recorded that `git add -A` produced commit titles that misdescribe their
+contents. Verifying this rework exposed a sharper consequence:
+`git log -S'subject_kind' -- src/toy/benchmark.py` returns exactly one commit — **`d96ec22`, titled
+"SR-09 r4: amendment A-1 records the gate-11 change the orchestrator failed to log"**. That commit
+carried `src/toy/benchmark.py` **but not `tests/toy_tests/test_benchmark.py`**, because the tests had
+not been written yet. So a commit whose title is about a *protocol amendment* silently shipped a new
+**source feature with no tests**, and nothing in its message hints that the feature is in there.
+This is the real cost of committing whatever happens to be on disk while teammates are mid-task: not
+merely poor labels, but **source landing divorced from the tests that justify it**. The forward-only
+rule already recorded — one commit per coherent change, title describing its own diff, verified with
+`git show --stat` — would have prevented it. Added to that rule: **never commit a source change whose
+tests are still in flight**; wait for the pair, or commit neither.
+
+### Priority 1 — `subject_kind`, and a better fix than was asked for
+`JointResult` now carries `subject_kind` (`trained` / `fixture` / `unknown`, default `unknown`) and
+`fixture_name`, with a name **required** for `fixture` and **forbidden** otherwise. The three
+scorer-validation fixtures are declared by name (`oracle_gated`, `identity_uncond`,
+`global_degrader`); `run_study` fills both fields from the treatment; every aggregate, JOINT and
+per-seed record carries a `subject_kind_code` metric (0/1/2) with the notes mentioning it as
+information only; and `verdict_from_records` decodes it and returns it as
+`RecomputedVerdict.subject_kind`. This is the data SR-12's finding F4 needed — the dashboard
+previously **could not distinguish an oracle result from a real one** because no such field existed.
+
+**The builder went further than instructed, in the right direction.** Rather than merely documenting
+the abuse route QA had demonstrated, it **deleted `analyze_scores(loss_check_exempt=…)` entirely**, so
+the gate-11(c) exemption can now arise *only* from `subject_kind="fixture"`. The consequence is that
+the abuse is now **self-labelling**: anyone taking that route leaves a visible `fixture` kind and name
+in every record. Orchestrator verified: `grep -c loss_check_exempt src/toy/benchmark.py` → **0**.
+`evaluate_gates` takes `subject_kind` defaulting to `"unknown"`, which is **not** exempt. The builder
+also confirmed the untrained control `C_init`, run as a throwaway subject, is labelled `trained` and
+cannot pass gate 11(c) — and stated plainly that the run checked plumbing only and was not
+interpreted. Arm **E** still has no in-repo study path.
+
+### Priority 2 — the gate conditions QA found unpinned are now pinned
+Gate 11's A condition (strict `>` against `delta_A` on the lower bound), F condition (strict `<`
+against `eps_fit` on the upper bound), and loss ratio (worst run decides; exactly `1/loss_factor`
+passes); missing values at the start, middle **and** end of the seeds each failing the gate, with
+failed seeds excluded and the one-ok-seed-cannot-form-an-interval boundary tested; gate 12's worst-run
+rule, the exact `tau_conv` boundary, and a missing ratio failing. The `JointResult` invariant is now
+tested for **each** hypothesis left decisive beside a failed global gate, not just H1 — closing the
+mutant QA found. `evaluate_gates`' default is tested directly, and an unknown kind raises.
+
+### Priority 3 — contracts tightened
+`GateResult` is strict: `passed` must be exactly `True`/`False`, the name must be a known gate, and
+`reason` must be a string — **closing the truthy-string route to JOINT_SUPPORTED** that QA
+demonstrated with `GateResult(passed='False')`. `treatment_kind` now also requires a valid `arm_name`
+for trained students and a non-empty `fixture_name` for fixtures, raising `ValueError` instead of a
+bare `AttributeError`. `verdict_from_records` validates every component record's `ci_level` against
+0.9875, with tests for each gate dropped or zeroed. `sample_sd([1e200,-1e200])` and
+`mean([1e308,1e308,1.0])` now return correct values via a scaled fallback, while a genuinely
+unrepresentable result raises `ValueError` (e.g. the SD of `[1.7e308,-1.7e308]`). Four new tests cover
+the fixture guards QA found untested: mask size and distinctness, TRAIN/T/U overlap, region
+violations, and that the flags reach the gates. The `bonferroni_level` docstring now says m=4 → 0.9875.
+
+### Mutation discipline improved on the orchestrator's suggestion
+The builder ran **37 mutants scoped to the benchmark module** (~15 s each) instead of paying for a
+full-suite pass per mutant — the saving the orchestrator flagged after QA's earlier 111-mutant run
+took ~55 minutes. 33 killed outright; three survivors (`disjoint ignores U-train`, `mask_ok ignores
+T`, `disjoint ignores T-U`) **killed after adding tests**; and one (`mask_ok ignores U`) re-done
+because its first form was a syntax error rather than a valid mutation — a contamination the builder
+caught and corrected itself. Two left as **argued** equivalents: `combine_joint(..., True)` in
+`verdict_from_records` (the hypotheses already carry `blocking`, so verdicts are identical), and
+`sum(mask) < 2` → `< 1` (the distinct-values check already rejects a single masked row).
+
+**SR-10 remains unmarked.** Its QA PASS covered the pre-rework state; this substantially changed
+file needs its own review before the checkbox is earned.

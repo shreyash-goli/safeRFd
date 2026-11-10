@@ -946,6 +946,349 @@ class ConstantSampleExactness(unittest.TestCase):
         self.assertAlmostEqual(bm.sample_sd([1.0, 2.0, 3.0, 4.0]), math.sqrt(5 / 3), places=12)   # hand: var 5/3
 
 
+# ===================================================== QA round 2: subject_kind, gate pins, contract gaps
+def _col(x, i):
+    return x(i) if callable(x) else x[i] if isinstance(x, (list, tuple)) else x
+
+
+def gate_scores(seeds=None, A=0.5, F=0.005, loss=0.01, gr=1e-5, flags=True):
+    """Per-seed values for gate 11/12 inputs; each column is a scalar, a list, or a function of the index.
+    None in a column means 'not measured'. Inputs to test the gate logic, not measurements."""
+    seeds = FZ.seeds if seeds is None else seeds
+    return [bm.SeedScores.from_values(s, 1.0, -0.01, 1.0, 1.0, A=_col(A, i), F=_col(F, i), E_loss_ratio=_col(loss, i),
+                                      delta_conv=1.0, delta_minus_shuf_conv=1.0, conv_grad_ratio=_col(gr, i),
+                                      rowsets_disjoint=flags, mask_ok=flags) for i, s in enumerate(seeds)]
+
+
+def gate(name, kind="unknown", **cols):
+    return next(g for g in bm.evaluate_gates(gate_scores(**cols), FZ, FZ.digest, SMALL, kind) if g.name == name)
+
+
+class Gate11Conditions(unittest.TestCase):
+    """Pins every condition of gate 11 (a global gate: it can force the whole family INCONCLUSIVE)."""
+    G = staticmethod(lambda **c: gate("control_adequacy", **c).passed)
+
+    def test_A_strictly_above_delta_a_using_the_LOWER_bound(self):
+        d = SMALL.delta_A
+        self.assertFalse(self.G(A=d))                      # equality fails: need lower > delta_A
+        self.assertTrue(self.G(A=d + 1e-9))
+        self.assertFalse(self.G(A=[0.0, 0.1] * 15))        # mean == delta_A: lower < d < upper -> fails (hi would pass)
+        self.assertTrue(self.G(A=[0.1, 0.2] * 15))
+        self.assertFalse(self.G(A=[-1.0] * 30))
+
+    def test_F_strictly_below_eps_fit_using_the_UPPER_bound(self):
+        e = SMALL.eps_fit
+        self.assertFalse(self.G(F=e))                      # equality fails: need upper < eps_fit
+        self.assertTrue(self.G(F=e - 1e-9))
+        self.assertFalse(self.G(F=[0.0, 0.1] * 15))        # mean == eps_fit: upper > e (lower would pass)
+        self.assertTrue(self.G(F=[0.0, 0.01] * 15))
+
+    def test_loss_ratio_uses_the_WORST_run_and_non_strict_boundary(self):
+        lim = 1.0 / SMALL.loss_factor
+        self.assertTrue(self.G(loss=lim))                  # exactly at the limit passes
+        self.assertFalse(self.G(loss=lim + 1e-7))
+        self.assertFalse(self.G(loss=[0.9] + [0.01] * 29))   # one bad run is enough (min would pass)
+        self.assertFalse(self.G(loss=[0.01] * 29 + [0.9]))
+        self.assertTrue(self.G(loss=[0.01] * 30))
+
+    def test_loss_check_exempt_only_for_fixture_kind(self):
+        bad = dict(loss=0.99)
+        self.assertFalse(self.G(**bad))
+        self.assertFalse(gate("control_adequacy", "trained", **bad).passed)
+        self.assertTrue(gate("control_adequacy", "fixture", **bad).passed)
+        self.assertFalse(gate("control_adequacy", "unknown", loss=None).passed)
+
+    def test_missing_values_are_never_tolerated(self):
+        for col in ("A", "F", "loss"):
+            for pos in (0, 14, 29):
+                vals = [0.5 if col == "A" else 0.005 if col == "F" else 0.01] * 30
+                vals[pos] = None
+                self.assertFalse(self.G(**{col: vals}), (col, pos))
+
+    def test_failed_seeds_do_not_enter_gate11_but_too_few_ok_seeds_fail_it(self):
+        fz = bm.freeze_seed_list(7, 31)
+        sc = gate_scores(fz.seeds[:30]) + [bm.SeedScores.failed(fz.seeds[30], "x", True, True)]
+        g = next(g for g in bm.evaluate_gates(sc, fz, fz.digest, SMALL) if g.name == "control_adequacy")
+        self.assertTrue(g.passed)                        # the failed seed is excluded; loss is measured on every ok seed
+        g2 = next(g for g in bm.evaluate_gates(sc, fz, fz.digest, SMALL, "fixture") if g.name == "control_adequacy")
+        self.assertTrue(g2.passed)
+        one = [gate_scores(fz.seeds[:1])[0]] + [bm.SeedScores.failed(s, "x", True, True) for s in fz.seeds[1:4]]
+        g3 = next(g for g in bm.evaluate_gates(one, bm.freeze_seed_list(7, 4), bm.freeze_seed_list(7, 4).digest,
+                                               SMALL, "fixture") if g.name == "control_adequacy")
+        self.assertFalse(g3.passed)                      # a single ok seed cannot form an interval
+        self.assertIn("not measured", g3.reason)
+        two = gate_scores(FZ.seeds[:2])
+        g4 = next(g for g in bm.evaluate_gates(two, FZ, FZ.digest, SMALL, "fixture") if g.name == "control_adequacy")
+        self.assertTrue(g4.passed)                       # two ok seeds can (min_seeds is a separate gate)
+
+    def test_evaluate_gates_default_is_not_exempt(self):
+        sc = gate_scores(loss=None)
+        g = next(g for g in bm.evaluate_gates(sc, FZ, FZ.digest, SMALL) if g.name == "control_adequacy")
+        self.assertFalse(g.passed)
+        with self.assertRaises(ValueError):
+            bm.evaluate_gates(sc, FZ, FZ.digest, SMALL, "bogus")
+
+
+class Gate12Conditions(unittest.TestCase):
+    G = staticmethod(lambda **c: gate("convergence", **c).passed)
+
+    def test_worst_run_and_non_strict_boundary(self):
+        t = SMALL.tau_conv
+        self.assertTrue(self.G(gr=t))
+        self.assertFalse(self.G(gr=t * 1.0000001))
+        self.assertFalse(self.G(gr=[1e-5] * 29 + [0.5]))     # one unconverged run (min would pass)
+        self.assertFalse(self.G(gr=[0.5] + [1e-5] * 29))
+        self.assertTrue(self.G(gr=[1e-5] * 30))
+
+    def test_missing_ratio_fails(self):
+        for pos in (0, 29):
+            v = [1e-5] * 30
+            v[pos] = None
+            self.assertFalse(self.G(gr=v))
+        self.assertFalse(bm.evaluate_gates([], FZ, FZ.digest, SMALL)[-1].passed)
+
+
+class SubjectKindField(unittest.TestCase):
+    def test_fixtures_are_marked_with_their_names(self):
+        for fac, name in ((bm.fixture_oracle_gated, "oracle_gated"), (bm.fixture_identity_uncond, "identity_uncond"),
+                          (bm.fixture_global_degrader(0.5), "global_degrader")):
+            r = oracle() if name == "oracle_gated" else study(fac, name)
+            self.assertEqual((r.subject_kind, r.fixture_name), ("fixture", name))
+
+    def test_trained_treatment_is_not_marked_fixture_and_cannot_pass_gate11c_with_unchanged_loss(self):
+        # C_init (an untrained student, loss ratio exactly 1) as the subject: a control-arm plumbing check, not E
+        r = bm.run_study(FZ, bm.ARM_FACTORIES["C_init"], subject="C_init", registered_digest=FZ.digest, cfg=SMALL)
+        self.assertEqual((r.subject_kind, r.fixture_name), ("trained", None))
+        self.assertFalse(next(g for g in r.gates if g.name == "control_adequacy").passed)
+        self.assertEqual(r.verdict, J.JOINT_INCONCLUSIVE)
+
+    def test_undeclared_factory_is_unknown(self):
+        r = bm.run_study(FZ, lambda fx, cfg: bm.fixture_oracle_gated(fx, cfg), subject="u", registered_digest=FZ.digest, cfg=SMALL)
+        self.assertEqual((r.subject_kind, r.fixture_name), ("unknown", None))
+
+    def test_construction_rules(self):
+        o = oracle()
+        f = {x.name: getattr(o, x.name) for x in dataclasses.fields(bm.JointResult)}
+        for over in ({"subject_kind": "bogus"}, {"subject_kind": "fixture", "fixture_name": None},
+                     {"subject_kind": "fixture", "fixture_name": "  "}, {"subject_kind": "trained", "fixture_name": "x"},
+                     {"subject_kind": "unknown", "fixture_name": "x"}):
+            with self.assertRaises(ValueError, msg=over):
+                bm.JointResult(**{**f, **over})
+
+    def test_kind_is_stored_as_a_metric_and_recomputed_ignoring_notes(self):
+        ts = "2025-01-02T03:04:05Z"
+        for res, want in ((oracle(), "fixture"),
+                          (bm.run_study(FZ, bm.ARM_FACTORIES["C_init"], subject="C_init", registered_digest=FZ.digest, cfg=SMALL), "trained")):
+            recs = bm.to_experiment_records(res, study_id="f", base_seed=7, timestamp_utc=ts)
+            self.assertTrue(all(r.metrics["subject_kind_code"].value == bm.SUBJECT_KIND_CODE[want] for r in recs))
+            self.assertEqual(bm.verdict_from_records(recs, SMALL).subject_kind, want)
+            self.assertIn(f"subject_kind={want}", recs[-1].notes)                 # informational only
+            lying = [dataclasses.replace(r, notes=r.notes.replace(f"subject_kind={want}", "subject_kind=unknown"))
+                     for r in recs]
+            self.assertEqual(bm.verdict_from_records(lying, SMALL).subject_kind, want)
+            j = recs[-1]
+            flipped = dataclasses.replace(j, metrics={**j.metrics, "subject_kind_code": MetricValue.measured(0.0)})
+            self.assertEqual(bm.verdict_from_records(recs[:-1] + [flipped], SMALL).subject_kind, "unknown")
+        sr = bm.seed_records(oracle(), study_id="f", timestamp_utc=ts)
+        self.assertEqual(sr[0].metrics["subject_kind_code"].value, 2.0)
+
+
+class ContractEdges(unittest.TestCase):
+    def test_gateresult_passed_is_strictly_boolean(self):
+        for bad in ("False", "True", "", 0, 1, None, 0.0):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                bm.GateResult("min_seeds", bad, "r")
+        bm.GateResult("min_seeds", True, "r")
+        bm.GateResult("min_seeds", False, "r")
+        with self.assertRaises(ValueError):
+            bm.GateResult("not_a_gate", True, "r")
+        with self.assertRaises(ValueError):
+            bm.GateResult("min_seeds", True, 5)
+
+    def test_truthy_string_gate_cannot_reach_joint_supported(self):
+        o = oracle()
+        with self.assertRaises(ValueError):
+            bm.JointResult(**{**{x.name: getattr(o, x.name) for x in dataclasses.fields(bm.JointResult)},
+                              "gates": tuple(bm.GateResult(g.name, "False", "x") if g.name == "min_seeds" else g
+                                             for g in o.gates)})
+
+    def test_treatment_kind_declarations_are_strict(self):
+        for val in ("yes", 1, "True", [1]):
+            f = lambda fx, cfg: None
+            f.trained_student = val
+            self.assertEqual(bm.treatment_kind(f), "unknown")
+            g = lambda fx, cfg: None
+            g.scorer_validation_fixture = val
+            self.assertEqual(bm.treatment_kind(g), "unknown")
+        f = lambda fx, cfg: None
+        f.trained_student = True
+        with self.assertRaises(ValueError):                  # no arm_name: not a bare AttributeError
+            bm.treatment_kind(f)
+        with self.assertRaises(ValueError):
+            bm.score_seed(FZ.seeds[0], f, SMALL)
+        f.arm_name = "nonsense"
+        with self.assertRaises(ValueError):
+            bm.treatment_kind(f)
+        g = lambda fx, cfg: None
+        g.scorer_validation_fixture = True
+        with self.assertRaises(ValueError):
+            bm.treatment_kind(g)
+
+    def test_overflow_is_handled_not_raised_raw(self):
+        # true SD of [1e200,-1e200] is sqrt(2)*1e200 = 1.41421356e200 (representable) although the squares overflow
+        self.assertAlmostEqual(bm.sample_sd([1e200, -1e200]) / 1.4142135623730951e200, 1.0, places=12)
+        # true mean of [1e308,1e308,1] is (2e308+1)/3 = 6.6667e307 (representable) although the sum overflows
+        self.assertAlmostEqual(bm.mean([1e308, 1e308, 1.0]) / 6.666666666666667e307, 1.0, places=12)
+        with self.assertRaises(ValueError):                  # true SD sqrt(2)*1.7e308 = 2.4e308 is not representable
+            bm.sample_sd([1.7e308, -1.7e308])
+        with self.assertRaises(ValueError):
+            bm.t_interval([1.7e308, -1.7e308], 0.95)
+
+    def test_ci_level_is_validated_on_recompute(self):
+        recs = bm.to_experiment_records(oracle(), study_id="f", base_seed=7, timestamp_utc="2025-01-02T03:04:05Z")
+        h1 = next(r for r in recs if r.name.endswith("/H1"))
+        for lv in (0.5, 0.95, 0.98333333, 0.9):
+            bad = dataclasses.replace(h1, metrics={**h1.metrics, "ci_level": MetricValue.measured(lv)})
+            with self.assertRaises(ValueError, msg=lv):
+                bm.verdict_from_records([bad if r is h1 else r for r in recs], SMALL)
+        unm = dataclasses.replace(h1, metrics={**h1.metrics, "ci_level": MetricValue.unmeasured("x")})
+        with self.assertRaises(ValueError):
+            bm.verdict_from_records([unm if r is h1 else r for r in recs], SMALL)
+
+    def test_every_missing_or_failed_gate_blocks_recompute(self):
+        recs = bm.to_experiment_records(oracle(), study_id="f", base_seed=7, timestamp_utc="2025-01-02T03:04:05Z")
+        j = next(r for r in recs if r.name.endswith("/JOINT"))
+        self.assertEqual(bm.verdict_from_records(recs, SMALL).joint, J.JOINT_SUPPORTED)
+        for name, scope in bm.GATE_SCOPES.items():
+            for how in ("drop", "zero"):
+                m = {k: v for k, v in j.metrics.items() if k != f"gate_{name}"}
+                if how == "zero":
+                    m[f"gate_{name}"] = MetricValue.measured(0.0)
+                rv = bm.verdict_from_records([dataclasses.replace(j, metrics=m) if r is j else r for r in recs], SMALL)
+                self.assertNotEqual(rv.joint, J.JOINT_SUPPORTED, (name, how))
+                if scope == "all":
+                    self.assertEqual((rv.joint, rv.h1, rv.h2, rv.h3), (J.JOINT_INCONCLUSIVE,) + (V.INCONCLUSIVE,) * 3)
+                else:
+                    self.assertEqual(rv.h3, V.INCONCLUSIVE)
+
+
+class JointInvariantCoversEveryHypothesis(unittest.TestCase):
+    def test_each_decisive_hypothesis_alone_is_refused_with_a_failed_global_gate(self):
+        r = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        gates = tuple(bm.GateResult(g.name, False, "forced") if g.name == "min_seeds" else g for g in r.gates)
+        blk = ("min_seeds (forced)",)
+        mk = {"h1": lambda b: bm.HypothesisResult("H1", r.h1.components, blocking=b),
+              "h2": lambda b: bm.HypothesisResult("H2", r.h2.components, blocking=b),
+              "h3": lambda b: bm.HypothesisResult("H3", r.h3.components, r.h3.converged_components, blocking=b)}
+        f = {x.name: getattr(r, x.name) for x in dataclasses.fields(bm.JointResult)}
+        for open_one in mk:                                     # exactly one hypothesis left un-blocked
+            hs = {k: fn(() if k == open_one else blk) for k, fn in mk.items()}
+            self.assertIs(hs[open_one].verdict, V.SUPPORTED)
+            with self.assertRaises(ValueError, msg=open_one):
+                bm.JointResult(**{**f, "gates": gates, **hs})
+
+
+class FixtureGuards(unittest.TestCase):
+    """Minimum mask size, row-set disjointness and mask correctness are each enforced and each reach the gates."""
+
+    def setUp(self):
+        bm.build_fixture.cache_clear()
+        self.seen = {}
+
+    def tearDown(self):
+        bm.build_fixture.cache_clear()
+
+    def patched(self, train_fn=None, T_fn=None, U_fn=None):
+        orig = bm._rows
+
+        def fake(rng, n, width, want):
+            rows = orig(rng, n, width, want)
+            if want is None:
+                rows = train_fn(rows) if train_fn else rows
+                self.seen["train"] = rows
+                return rows
+            fn = T_fn if want is True else U_fn
+            rows = fn(rows) if fn else rows
+            if want is True:
+                self.seen["T"] = rows
+            return rows
+        return mock.patch.object(bm, "_rows", fake)
+
+    @staticmethod
+    def with_x0(vals):
+        return lambda rows: tuple((vals[i] if i < len(vals) else -0.5 - 0.01 * i, r[1], r[2]) for i, r in enumerate(rows))
+
+    def test_mask_size_and_distinctness(self):
+        s = FZ.seeds[0]
+        for vals in ((0.5,), (0.5, 0.5), ()):
+            bm.build_fixture.cache_clear()
+            with self.patched(train_fn=self.with_x0(vals)):
+                with self.assertRaises(bm.IneligibleSeed, msg=vals):
+                    bm.build_fixture(s, SMALL)
+        bm.build_fixture.cache_clear()
+        with self.patched(train_fn=self.with_x0((0.5, 0.6))):          # exactly two distinct masked rows: eligible
+            fx = bm.build_fixture(s, SMALL)
+        self.assertEqual(sum(fx.train_mask), 2)
+
+    def test_overlap_is_detected_and_fails_the_gate(self):
+        s = FZ.seeds[0]
+
+        def overlap(rows):
+            reg = [r for r in self.seen["train"] if bm.in_region(r)]
+            return tuple(reg[i % len(reg)] for i in range(len(rows)))
+        with self.patched(T_fn=overlap):
+            fx = bm.build_fixture(s, SMALL)
+            sc = bm.score_seed(s, bm.fixture_identity_uncond, SMALL)
+        self.assertFalse(fx.disjoint)
+        self.assertIs(sc.rowsets_disjoint, False)
+        g = next(g for g in bm.evaluate_gates([sc] + gate_scores(FZ.seeds[1:30]), FZ, FZ.digest, SMALL)
+                 if g.name == "rowsets_disjoint")
+        self.assertFalse(g.passed)
+
+    def test_U_train_overlap_and_T_region_violation_each_detected(self):
+        s = FZ.seeds[0]
+
+        def u_overlap(rows):
+            out = [r for r in self.seen["train"] if not bm.in_region(r)]
+            return tuple(out[i % len(out)] for i in range(len(rows)))
+        with self.patched(U_fn=u_overlap):
+            fx = bm.build_fixture(s, SMALL)
+        self.assertFalse(fx.disjoint)                          # only the U/TRAIN overlap can cause this
+        self.assertTrue(fx.mask_ok)
+        bm.build_fixture.cache_clear()
+        with self.patched(T_fn=lambda rows: ((-0.5, rows[0][1], rows[0][2]),) + tuple(rows[1:])):
+            fx2 = bm.build_fixture(s, SMALL)
+        self.assertFalse(fx2.mask_ok)                          # a T row outside the region
+        self.assertTrue(fx2.disjoint)
+
+    def test_T_U_overlap_detected(self):
+        with self.patched(U_fn=lambda rows: (self.seen["T"][0],) + tuple(rows[1:])):
+            fx = bm.build_fixture(FZ.seeds[0], SMALL)
+        self.assertFalse(fx.disjoint)
+
+    def test_region_violation_is_detected_and_fails_the_gate(self):
+        s = FZ.seeds[0]
+        with self.patched(U_fn=lambda rows: ((0.5, rows[0][1], rows[0][2]),) + tuple(rows[1:])):
+            fx = bm.build_fixture(s, SMALL)
+            sc = bm.score_seed(s, bm.fixture_identity_uncond, SMALL)
+        self.assertFalse(fx.mask_ok)
+        self.assertTrue(fx.disjoint)
+        g = next(g for g in bm.evaluate_gates([sc] + gate_scores(FZ.seeds[1:30]), FZ, FZ.digest, SMALL)
+                 if g.name == "mask_correct")
+        self.assertFalse(g.passed)
+
+    def test_one_bad_or_unmeasured_seed_fails_each_flag_gate(self):
+        for attr, gname in (("rowsets_disjoint", "rowsets_disjoint"), ("mask_ok", "mask_correct")):
+            for bad in (False, None):
+                sc = gate_scores()
+                kw = {"rowsets_disjoint": True, "mask_ok": True, attr: bad}
+                sc[7] = bm.SeedScores.from_values(FZ.seeds[7], 1.0, -0.01, 1.0, 1.0, A=.5, F=.005, E_loss_ratio=.01,
+                                                  delta_conv=1.0, delta_minus_shuf_conv=1.0, conv_grad_ratio=1e-5, **kw)
+                g = next(g for g in bm.evaluate_gates(sc, FZ, FZ.digest, SMALL) if g.name == gname)
+                self.assertFalse(g.passed, (attr, bad))
+        self.assertTrue(all(g.passed for g in bm.evaluate_gates(gate_scores(), FZ, FZ.digest, SMALL, "fixture")))
+
+
 class IneligibleVersusFailed(unittest.TestCase):
     """Defect 4: a TRAIN mask with < 2 rows is an ineligible seed (listed, replaced), not a failed run."""
 
