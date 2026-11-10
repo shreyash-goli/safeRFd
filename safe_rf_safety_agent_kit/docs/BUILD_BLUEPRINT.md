@@ -5,7 +5,7 @@ All tasks begin unchecked. An agent may mark `[x]` only after actual commands ra
 
 ## Foundation + fork audit
 - [x] **SR-00** — Scaffold project, version control, scripts, README; preserve fork audit provenance. **Depends:** none. **Verify:** `python3 -m unittest discover -s tests -v`; `git status`; docs exist.
-- [ ] **SR-01** — Recheck the exact fork-only diff against shared ancestor; produce a filename/commit evidence matrix with source URLs and SHA. **Depends:** SR-00. **Verify:** `docs/DIFF_EVIDENCE.md` enumerates all 8 changed files, 2 commits; reviewer independently confirms counts. No unexplained changes.
+- [x] **SR-01** — Recheck the exact fork-only diff against shared ancestor; produce a filename/commit evidence matrix with source URLs and SHA. **Depends:** SR-00. **Verify:** `docs/DIFF_EVIDENCE.md` enumerates all 8 changed files, 2 commits; reviewer independently confirms counts. No unexplained changes.
 - [ ] **SR-02** — Produce method-level architecture audit: teacher, student, loss, masking, checkpoints, config, baseline differences; mark claims as SOURCE/INFERENCE/UNKNOWN. **Depends:** SR-01. **Verify:** traced citations to source sections; no unverified safety claims.
 - [ ] **SR-03** — Produce error/uncertainty register: gradient/NaN/empty-mask/cross-device/baseline-mode concerns with reproducible generic tests or static evidence. **Depends:** SR-02. **Verify:** independent QA reviews every issue classification.
 

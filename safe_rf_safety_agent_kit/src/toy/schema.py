@@ -1,8 +1,15 @@
 """Strict typed schema for TOY experiment records (SR-04).
 
 Standard library only. Everything recorded through this module is a toy,
-synthetic, non-biological result; `RunProvenance.toy_only` must be True and the
-constructor refuses anything else. Nothing here asserts any safety property.
+synthetic, non-biological result. Nothing here asserts any safety property.
+
+Caveats stated plainly:
+- `RunProvenance.toy_only` is a producer-asserted flag, not a verified property
+  of the data. The constructor refuses False, but like any Python dataclass it
+  can be bypassed (e.g. via `object.__setattr__`).
+- Rule: an `ExperimentRecord` (a run record) can never be `SOURCE_OBSERVED`.
+  That class belongs to audit/claim records (SR-14), not run records, and is
+  rejected at construction. It stays in `EvidenceClass` for those consumers.
 """
 from __future__ import annotations
 
@@ -18,8 +25,10 @@ from types import MappingProxyType
 from typing import Any, Mapping, Optional
 
 SCHEMA_VERSION = "1"
-_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", re.ASCII)
+_SHA256_RE = re.compile(r"[0-9a-f]{64}", re.ASCII)
+TOY_LABEL = "TOY RESULT (synthetic, non-biological; not a safety claim)"
+MAX_SEED = 2**64 - 1
 
 
 class EvidenceClass(str, Enum):
@@ -80,6 +89,8 @@ def _check_seed(seed: Any) -> None:
         raise ValueError(f"seed must be an int, got {type(seed).__name__}")
     if seed < 0:
         raise ValueError("seed must be nonnegative")
+    if seed > MAX_SEED:
+        raise ValueError("seed must be <= 2**64 - 1")
 
 
 def current_python_version() -> str:
@@ -100,7 +111,7 @@ class RunProvenance:
     def __post_init__(self) -> None:
         _nonblank("run_id", self.run_id)
         _nonblank("timestamp_utc", self.timestamp_utc)
-        if not _TS_RE.match(self.timestamp_utc):
+        if not _TS_RE.fullmatch(self.timestamp_utc):
             raise ValueError(f"timestamp_utc must match YYYY-MM-DDTHH:MM:SSZ, got {self.timestamp_utc!r}")
         from datetime import datetime
         try:
@@ -116,7 +127,7 @@ class RunProvenance:
             raise ValueError("input_hashes must be a mapping")
         for k, v in self.input_hashes.items():
             _nonblank("input_hashes key", k)
-            if not isinstance(v, str) or not _SHA256_RE.match(v):
+            if not isinstance(v, str) or not _SHA256_RE.fullmatch(v):
                 raise ValueError(f"input_hashes[{k!r}] must be a lowercase 64-char sha256 hex string")
         object.__setattr__(self, "input_hashes", MappingProxyType(dict(sorted(self.input_hashes.items()))))
 
@@ -148,14 +159,14 @@ class MetricValue:
 
     def __post_init__(self) -> None:
         if self.value is None:
-            if self.reason is None:
-                raise ValueError("unmeasured metric requires a reason")
-            _nonblank("reason", self.reason)
+            _nonblank("reason", self.reason)  # also rejects None: unmeasured requires a reason
         else:
             if isinstance(self.value, bool) or not isinstance(self.value, float):
                 raise ValueError(f"metric value must be a float, got {type(self.value).__name__}")
             if not math.isfinite(self.value):
                 raise ValueError("metric value must be finite (no NaN/inf)")
+            if self.value == 0.0:
+                object.__setattr__(self, "value", 0.0)  # normalise -0.0 so equal values hash equally
             if self.reason is not None:
                 raise ValueError("a measured metric must not carry an unmeasured reason")
 
@@ -205,6 +216,8 @@ class ExperimentRecord:
                 raise ValueError(f"metrics[{k!r}] must be a MetricValue, got {type(v).__name__}")
         if not isinstance(self.evidence_class, EvidenceClass):
             raise ValueError("evidence_class must be an EvidenceClass (use EvidenceClass.parse for strings)")
+        if self.evidence_class is EvidenceClass.SOURCE_OBSERVED:
+            raise ValueError("SOURCE_OBSERVED belongs to audit/claim records, not run records")
         if self.notes is not None and not isinstance(self.notes, str):
             raise ValueError("notes must be a string or None")
         object.__setattr__(self, "metrics", MappingProxyType(dict(sorted(self.metrics.items()))))
@@ -212,7 +225,7 @@ class ExperimentRecord:
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
-            "label": "TOY RESULT (synthetic, non-biological; not a safety claim)",
+            "label": TOY_LABEL,
             "name": self.name,
             "provenance": self.provenance.to_dict(),
             "metrics": {k: v.to_dict() for k, v in self.metrics.items()},
@@ -230,6 +243,8 @@ class ExperimentRecord:
     def from_dict(cls, data: Any) -> "ExperimentRecord":
         _check_keys("ExperimentRecord", data, {
             "schema_version", "label", "name", "provenance", "metrics", "evidence_class", "notes"})
+        if data["label"] != TOY_LABEL:
+            raise ValueError(f"label must equal {TOY_LABEL!r}, got {data['label']!r}")
         if data["schema_version"] != SCHEMA_VERSION:
             raise ValueError(f"unsupported schema_version {data['schema_version']!r}")
         if not isinstance(data["metrics"], dict):

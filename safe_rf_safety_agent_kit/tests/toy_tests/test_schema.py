@@ -1,5 +1,7 @@
 """SR-04 schema tests. TOY data only: abstract numbers, no biological content."""
+import dataclasses
 import json
+import math
 import random
 import sys
 import unittest
@@ -138,13 +140,91 @@ class InvalidInputs(unittest.TestCase):
         with self.assertRaises(ValueError):
             ExperimentRecord.from_json(None)
 
-    def test_duplicate_json_keys_and_bad_schema_version(self):
-        with self.assertRaises(ValueError):
-            ExperimentRecord.from_json('{"name":"a","name":"b"}')
+    def test_duplicate_json_keys_top_level(self):
+        text = record().to_json()
+        ExperimentRecord.from_json(text)  # baseline is valid
+        dup = text.replace('"name":"toy-exp"', '"name":"toy-exp","name":"toy-exp"', 1)
+        self.assertNotEqual(dup, text)
+        with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+            ExperimentRecord.from_json(dup)
+
+    def test_duplicate_json_keys_nested(self):
+        text = record().to_json()
+        dup = text.replace('"seed":7', '"seed":7,"seed":8', 1)
+        self.assertNotEqual(dup, text)
+        with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+            ExperimentRecord.from_json(dup)
+
+    def test_bad_schema_version(self):
         d = json.loads(record().to_json())
         d["schema_version"] = "99"
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "schema_version"):
             ExperimentRecord.from_json(json.dumps(d))
+
+    def test_parse_constant_hook_isolated(self):
+        # Call the strict loader directly: only its parse_constant hook can reject these.
+        from toy.schema import _strict_loads
+        for const in ("NaN", "Infinity", "-Infinity"):
+            with self.assertRaisesRegex(ValueError, "non-finite JSON constant"):
+                _strict_loads('{"x": %s}' % const)
+        self.assertEqual(_strict_loads('{"x": 1.5}'), {"x": 1.5})
+
+    def test_sha256_strict(self):
+        for bad in ("a" * 64 + "\n", "a" * 63, "a" * 65, "\n" + "a" * 64):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                prov(input_hashes={"a": bad})
+
+    def test_timestamp_ascii_digits_only(self):
+        for bad in ("\uff12\uff10\uff12\uff15-01-02T03:04:05Z", "2025-01-02T03:04:05Z\n"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                prov(timestamp_utc=bad)
+
+    def test_label_tampering_rejected(self):
+        text = record().to_json()
+        d = json.loads(text)
+        for bad in ("VALIDATED SAFE", None, "", 5):
+            d["label"] = bad
+            with self.assertRaisesRegex(ValueError, "label"):
+                ExperimentRecord.from_json(json.dumps(d))
+
+    def test_roundtrip_identity_on_text(self):
+        for r in (record(), record(metrics={}, notes=None)):
+            t = r.to_json()
+            self.assertEqual(ExperimentRecord.from_json(t).to_json(), t)
+
+    def test_seed_bounds(self):
+        prov(seed=0)
+        prov(seed=2**64 - 1)
+        with self.assertRaises(ValueError):
+            prov(seed=2**64)
+        with self.assertRaises(ValueError):
+            prov(seed=2**200)
+        with self.assertRaises(ValueError):
+            make_rng(2**64)
+        with self.assertRaises(ValueError):
+            derive_seed(2**64, "a")
+
+    def test_negative_zero_normalised(self):
+        a, b = MetricValue.measured(0.0), MetricValue.measured(-0.0)
+        self.assertEqual(a, b)
+        self.assertEqual(math.copysign(1.0, b.value), 1.0)
+        ra = record(metrics={"m": a})
+        rb = record(metrics={"m": b})
+        self.assertEqual(ra.content_hash(), rb.content_hash())
+        self.assertEqual(ra.to_json(), rb.to_json())
+        self.assertNotIn("-0.0", rb.to_json())
+
+    def test_source_observed_rejected_for_run_records(self):
+        with self.assertRaisesRegex(ValueError, "audit/claim records"):
+            record(evidence_class=EvidenceClass.SOURCE_OBSERVED)
+        d = json.loads(record().to_json())
+        d["evidence_class"] = "SOURCE_OBSERVED"
+        with self.assertRaisesRegex(ValueError, "audit/claim records"):
+            ExperimentRecord.from_json(json.dumps(d))
+        self.assertIn("SOURCE_OBSERVED", EvidenceClass.__members__)
+        for ec in EvidenceClass:
+            if ec is not EvidenceClass.SOURCE_OBSERVED:
+                record(evidence_class=ec)
 
     def test_unmeasured_needs_reason_and_measured_forbids_one(self):
         with self.assertRaises(ValueError):
@@ -156,10 +236,13 @@ class InvalidInputs(unittest.TestCase):
 
     def test_frozen(self):
         r = record()
-        with self.assertRaises(Exception):
-            r.name = "x"
+        for obj, attr in ((r, "name"), (r.provenance, "seed"), (r.metrics["loss"], "value")):
+            with self.assertRaises(dataclasses.FrozenInstanceError, msg=type(obj).__name__):
+                setattr(obj, attr, obj.__class__ and getattr(obj, attr))
         with self.assertRaises(TypeError):
             r.metrics["new"] = MetricValue.measured(1.0)
+        with self.assertRaises(TypeError):
+            r.provenance.input_hashes["x"] = H
 
 
 class MissingEvidence(unittest.TestCase):
