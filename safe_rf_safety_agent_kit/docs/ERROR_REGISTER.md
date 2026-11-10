@@ -1,6 +1,6 @@
 # ERROR_REGISTER: error/uncertainty register for the audited fork script (task SR-03)
 
-**Owner:** numerics teammate. **Basis:** `docs/METHOD_AUDIT.md` (SR-02) and `docs/FORK_AUDIT.md`. **Status:** draft pending independent QA review of every classification (SR-03 verify clause); nothing here is QA-attested yet.
+**Owner:** numerics teammate. **Basis:** `docs/METHOD_AUDIT.md` (SR-02) and `docs/FORK_AUDIT.md`. **Status:** **QA-attested** — independent QA reviewed every classification and recorded PASS on its third pass (two prior FAILs, two reworks; `docs/PROGRESS.md`, "SR-03 — QA verdict: PASS (third pass)"). See the QA status section at the end of this file for the scope of that attestation and the two caveats QA attached to it.
 
 ## READ THIS FIRST: what this register is and is not
 
@@ -190,4 +190,25 @@ Torch-dependent tests (ER-03, ER-04) report as **skipped**, never silently passe
 
 ## QA status
 
-All classifications above are the numerics teammate's proposals. Per the SR-03 verification clause, an independent QA reviewer must review each; this file is not marked QA-attested.
+**Attested.** Per the SR-03 verification clause an independent QA reviewer must review every
+classification. One did, over three passes: the first two returned FAIL and forced reworks, and the
+third returned **PASS**, which is the basis on which SR-03 is marked `[x]`. The record is in
+`docs/PROGRESS.md` under "SR-03 — QA verdict: PASS (third pass)".
+
+**What that attestation covers.** Each of the eleven ER entries' classification and severity; the
+internal consistency of the severity scale on a "consequence if reached" basis, with loud failures
+ranked below silent ones; and the source citations, which QA opened individually rather than taking
+on trust (including `S:373/384/425/430-435` for ER-04, the `Track_module` ancestor cites for ER-03,
+and ER-08's `load_checkpoint` at `S:477` having **no call site anywhere in the script**).
+
+**Two caveats QA attached, which the PASS does not remove.**
+1. **ER-09's ~1e-7 figure is unpinned.** QA re-measured it independently on this host (torch 2.7.1,
+   MPS True / CUDA False: sum_squares 6.1e-8, matmul 7.5e-8, normalize 1.44e-7) and found it
+   accurate — but **no test pins it**; `test_tensor_ops.py` only asserts `rel < 1e-5`. It is a
+   point-in-time measurement on one host and it could drift silently.
+2. **There is no written rubric** defining what each severity level means. The scale was judged
+   *internally* consistent, which is a weaker property than being calibrated against a definition.
+
+**What no amount of QA here establishes**, restating the header: that the audited method works, that
+it fails, or that anything is safe. A PASS on this register means the register's mechanical facts and
+labels were checked, nothing more.

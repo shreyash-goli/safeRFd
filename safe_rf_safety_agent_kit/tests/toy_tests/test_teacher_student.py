@@ -471,6 +471,41 @@ class Hardening(unittest.TestCase):
         import toy.schema as sch, toy.teacher_student as ts
         self.assertIs(ts.TOY_LABEL, sch.TOY_LABEL)
 
+    def test_normalization_analogy_discloses_the_opposite_sign(self):
+        """SR-12 finding F6: the docstring stated the toy's inflation without stating that the
+        audited source's net multiplier goes the other way (0.42, a deflation), so a reader
+        comparing toy to source would take the wrong sign. The disclosure is pinned here because
+        nothing pinned it when it was wrong. This pins a *documentation* claim, so it can only
+        ever be as good as the arithmetic in METHOD_AUDIT 2.2 that it points at."""
+        doc = masked_mse_loss_and_grad.__doc__ or ""
+        self.assertIn("THE SIGN DOES NOT CARRY OVER", doc)
+        self.assertIn("0.42", doc)
+        self.assertIn("DEFLATION", doc)
+        # the toy's own direction must still be stated, not replaced by the source's
+        self.assertIn("inflates the loss", doc)
+        # and the analogy must stay bounded to shape, not magnitude or direction
+        self.assertIn("not its magnitude and not its", doc)
+        # the 42 = 14*3 decomposition must be present, since "42" alone would not show its origin
+        self.assertIn("14 atoms", doc)
+
+    def test_the_toy_really_does_inflate_by_the_row_width(self):
+        """The arithmetic behind the docstring claim, so the pin above is not the only evidence.
+        per_mask_entry divides by mask_sum; per_masked_element divides by mask_sum * row_width;
+        so the ratio is exactly the row width, for both the loss and every gradient component."""
+        X = ((1.0, 2.0, 4.0), (3.0, 1.0, 5.0))
+        T = ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        p = (0.3, 0.7, 1.1, 0.2, 0.4, 0.6)
+        mask = (True, True)
+        width = len(X[0])
+        le, ge = masked_mse_loss_and_grad(p, X, T, mask, normalization="per_masked_element")
+        lm, gm = masked_mse_loss_and_grad(p, X, T, mask, normalization="per_mask_entry")
+        self.assertAlmostEqual(lm, le * width, places=12)
+        self.assertEqual(len(ge), len(gm))
+        for a, b in zip(ge, gm):
+            self.assertAlmostEqual(b, a * width, places=12)
+        # and the inflation is strict, so "inflates" is the right word for the toy
+        self.assertGreater(lm, le)
+
 
 if __name__ == "__main__":
     unittest.main()

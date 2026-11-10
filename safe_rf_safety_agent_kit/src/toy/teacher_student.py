@@ -240,6 +240,19 @@ def masked_mse_loss_and_grad(params: Sequence[float], x: Sequence[Sequence[float
           mismatch noted in the audited source (TOY reproduction of an audited
           numerical concern, not a claim about the real code's impact). It
           inflates the loss, and the gradient, by exactly the row width.
+
+          THE SIGN DOES NOT CARRY OVER, and the analogy is misleading if read
+          without this paragraph. Here the mismatch is the whole effect, so the
+          toy INFLATES. In the audited source the same mismatch is a constant
+          factor of 42 (= 14 atoms * 3 coords), but it sits beside a 0.01
+          multiplier that more than cancels it: the net multiplier relative to
+          a per-element MSE is 0.42, a DEFLATION (METHOD_AUDIT 2.2, claim 10).
+          So the toy's gradient goes up where the source's net goes down. The
+          toy reproduces the *shape* of the defect -- a denominator that counts
+          mask entries rather than elements -- not its magnitude and not its
+          direction. Nothing here says the source's net 0.42 is harmful, or
+          that it explains the author's "gradient is high" note; METHOD_AUDIT
+          records that cause as UNKNOWN.
     An empty / all-False mask raises ValueError; it never returns a loss.
     """
     if normalization not in NORMALIZATIONS:
