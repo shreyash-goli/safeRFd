@@ -3296,6 +3296,18 @@ It does correctly fail when the cast is **removed**, which was the main objectiv
 description without probing it. Routed: tighten it to inspect live code, or correct the docstring to
 say what it actually is.
 
+> **CORRECTION (round 3, 2026-11-10). "It does correctly fail when the cast is removed" is FALSE of
+> the current guard, so the one property I credited it with is the one it does not have.** The
+> signature is `def from_values(cls, values: Sequence[float])` and **the annotation supplies the
+> `ast.Name(id="float")` the guard searches for** — so the guard reports True with the cast deleted
+> **entirely** (`tuple(values)`), with `v * 1.0` substituted, and with the cast moved into a helper.
+> It goes red only when the cast is removed *and* the annotation is stripped. The guard is **dead**:
+> green against every removal it was built to catch. See round 3's SR-10 entry below; this is masked
+> test #8. Mitigating fact the reviewer volunteered: the underlying property is not unprotected —
+> full cast removal is still killed by
+> `test_from_values_wraps_unrepresentable_and_bad_types_in_valueerror`, which leaks
+> `OverflowError: int too large to convert to float`. It is the dedicated tripwire that is dead.
+
 ---
 
 ## SR-09 → r9 and SR-11 residuals: both closed, each with a self-caught error
@@ -3397,6 +3409,13 @@ module-scoped mutants, all killed.
   live use passes, `map(float, …)` passes, a comment-only decoy fails, a helper fails, dead code
   passes. Documenting a guard's limits by test is the right pattern; it means the limits cannot be
   forgotten and cannot silently change in either direction.
+  > **CORRECTION (round 3). Three things in this bullet are wrong.** (i) "**moving the cast into a
+  > helper still turns it red**" is false — a helper **passes**, because the annotation supplies the
+  > `float` Name. (ii) The limits test asserts **five** cases, not four. (iii) Most importantly, the
+  > limits test certifies behaviour the real target does not exhibit: it feeds hand-written
+  > **annotation-free** snippets, so it never reproduces the one condition that matters. "Documenting
+  > a guard's limits by test" is still the right pattern — but only when the fixtures resemble the
+  > target. Here the pattern was applied to a fixture set that excluded the defect.
 - **One honest gap the builder reported unprompted:** the AST rewrite itself is **not covered by
   mutation** — the decoy cases pin its behaviour, but it did not mutate the new parsing code.
 
@@ -3634,6 +3653,18 @@ missing-package and "torch present" rules. On the rebuilt case-sensitive APFS st
 the 4 the reviewer measured, because the dashboard tests have changed since; **the stand-in is not
 Linux**; and **real Linux remains unobserved**. The document says all three.
 
+> **CORRECTION (round 3, 2026-11-10). The first of those three "honest bounds" is FALSE, and I
+> repeated it from the owner without checking it.** The count on Linux is **4**, not 1, and the
+> stated cause is not the cause. The three `need_ci()` call sites in `test_dashboard.py` are
+> **intact** (lines 550, 558, 566) — the dashboard tests did *not* change in the relevant respect.
+> They gate on `_fs_case_insensitive(self.tmp)`, which probes **`TMPDIR`, not the repo volume**. The
+> stand-in measured 1 only because its `TMPDIR` stayed on the case-insensitive system volume. On
+> Linux `/tmp` *is* case-sensitive, so **all four fire** — reproduced with repo *and* `TMPDIR` on a
+> case-sensitive volume: 3 skips in `test_dashboard`, 1 in `test_scripts`. The stand-in rows
+> therefore **under-predict Linux**, which is the opposite of the reassurance I recorded. The other
+> two bounds stand. This is the **second** time the Linux skip number has been stated wrongly in this
+> journal, and the first time I propagated a false *causal* explanation for it. Routed for fix.
+
 ## Prose needles replaced with stable tokens
 Every failure line in `run_tests.sh` now carries a `POLICY:<NAME>` token and the tests match the
 **token, not the prose** — the fix for a maintenance cost that had broken the owner's own tests twice.
@@ -3649,6 +3680,18 @@ determinism comparison, so a test failing only on the second run with identical 
 non-deterministic. **Loose end reported rather than glossed:** a weaker mutant (swapping run 2's exit
 code for run 1's) is also killed, though the failed-flag half of the tuple should have covered it, and
 the owner **did not find out why**.
+
+> **CORRECTION (round 3, 2026-11-10). That mutant is NOT killed — it survives, in both forms, and
+> the question "why is it killed" was unanswerable because the premise was false.** Measured:
+> `$UT_RC2` → `$UT_RC` in the comparison only **SURVIVES**; the global rename **SURVIVES** too, and
+> for a reason worth keeping — renaming also makes run 2's `$?` assign into `UT_RC`, so by the time
+> the failure line prints, `UT_RC` already holds `1` and even `assertIn("rc=1", ...)` still passes.
+> **The correct account is the one the owner guessed and then contradicted: the failed-flag half
+> *does* cover it, which is exactly why the mutant survives.** Neither term is pinned individually —
+> dropping the `$BAD`/`$BAD2` terms alone also survives — and only their **conjunction** is pinned
+> (dropping both is KILLED). That is defensible redundancy in the script, since the real U3b scenario
+> moves both terms; the defect was shipping a false kill as the session's one disclosed loose end.
+> **Lesson:** "mutant killed" is a claim like any other and I recorded it without re-running it.
 
 ## All eight lint evasions closed
 `import os as o; o.system(...)`, `from os import system`, `f = os.system`, `e = eval`,
@@ -3671,8 +3714,217 @@ deterministic across `--twice`. **One stale figure disclosed rather than silentl
 PyYAML-only row's 87 skips were measured at 874 tests and **not** re-measured at 914, and the document
 says so.
 
+> **CORRECTION (round 3).** This paragraph says `CLEAN_CLONE.md` "records 3.12.13 measured and
+> **3.12.4 reproduced**". It records only 3.12.13. The 3.12.4 reproduction is real — round 3's
+> reviewer measured the full bare-environment pass on 3.12.4 — but the document never carried it, so
+> the journal credited the document with a disclosure it did not contain. Routed: add the 3.12.4
+> reproduction to the document, which makes the sentence true rather than retracting it.
+
 ## Scratchpad hygiene resolved
 The owner checked `scripts/` and `test_scripts.py` against every mutation pattern it had used: **no
 mutant text remains**, every restore diff was clean, and the four patterns that no longer match were
 rewritten by its own refactors. Its harnesses are now `sr15_scripts_mut.py` and
 `sr15_scripts_mut5.py`, and the shared `mut.py` is **deleted**.
+
+---
+
+# Batch attestation round 3: SR-10 FAIL, SR-11 PASS, SR-13 FAIL, SR-14 PASS, SR-15 FAIL
+
+**Date:** 2026-11-10. Three independent reviewers, run in parallel against `f570148`, each on its own
+pristine `git archive` copy with an owner-scoped mutation harness. **Verified count stays at 10 of 17**
+(SR-00 through SR-09). Two tasks passed and **neither is marked**, because each depends on a task that
+failed — SR-11 on SR-10, SR-14 on SR-13. That is the rule this journal records getting wrong once
+before (SR-12 finding F12), and the reviewers flagged it themselves without being asked to.
+
+**Baseline, measured three times independently.** I measured `f570148` before dispatching:
+`Ran 914 tests` / `OK (skipped=2)`, pytest `912 passed, 2 skipped`. Two reviewers reproduced it
+exactly on their own copies. One also ran `--expect torch --twice` (strictly stronger than what I
+asked for) and `--expect none --twice` in a bare `venv --without-pip`: `914 run / 89 skipped / 0
+failed`, `deterministic: run1 == run2`. **The determinism fix holds under independent measurement.**
+
+## The finding that matters most: the same fail-open exists in two modules, found independently
+
+Two reviewers who never communicated found the same defect class in different files. Both
+`benchmark.py`'s `verdict_from_records` and `dashboard.py`'s `_recompute` **re-derive a verdict using
+threshold parameters taken from a caller-supplied config rather than from the provenanced record.**
+
+In the dashboard it needs `object.__setattr__`: forging `min_n` to 1 on an n=29 component, or
+`width_tol` to 1e9 on a widened interval, turns a correctly-INCONCLUSIVE card into
+all-SUPPORTED/JOINT_SUPPORTED with no alarm — while **the identical forgery with `min_n` left alone is
+caught**. In `benchmark.py` it needs **nothing but an ordinary call**:
+
+```
+registered width_tol = 0.10 ; module default = 0.25
+recompute with the STUDY's own cfg       -> h1=INCONCLUSIVE  joint=JOINT_INCONCLUSIVE
+recompute with NO cfg argument (default) -> h1=SUPPORTED     joint=JOINT_SUPPORTED
+default cfg hash == stored config hash?  False
+```
+
+No tampering. A study registered at a stricter tolerance than the module default is flipped to
+SUPPORTED by the plain no-argument call — and **the record being read already carries the
+`config` hash that would have caught it** (`to_experiment_records` stores
+`hashes = {"seed_list": ..., "config": res.config_hash}`). The function's docstring says the verdict
+is rebuilt "ONLY from stored metrics". `alpha` *is* pinned by a `ci_level` cross-check; `min_seeds` is
+partly shielded by its gate; **`width_tol` is shielded by nothing.** Thirty-odd call sites in the test
+file all pass the study's own config, which is why it survived.
+
+**Why it survived review for so long is the lesson.** Every guard in these modules polices *stored*
+values against *declared* tables. Nobody asked where the **thresholds** came from. A provenance scheme
+that hashes the config and then lets the reader supply its own config is not a provenance scheme. I
+have told both owners about the other's finding so the two fixes anchor on the same thing.
+
+## Masked tests #8 through #11 — the count is now eleven
+
+**#8, the citation guard, is the worst of the session because it is dead and three written statements
+say it works.** `test_the_cited_float_cast_still_exists_in_robustness` searches
+`inspect.getsource(SeedSummary.from_values)` for a live `ast.Name(id="float")`. The signature is
+`def from_values(cls, values: Sequence[float])` — **the annotation supplies that Name.** Measured:
+
+| mutation of `from_values` | guard |
+|---|---|
+| shipped `float(v)` | True |
+| `v * 1.0` | **True** |
+| cast deleted entirely | **True** |
+| cast moved into a helper | **True** |
+| cast deleted **and** annotation stripped | False |
+
+So it is green against every removal it exists to catch. Its companion "limits" test passes only
+because it feeds hand-written **annotation-free** snippets — it certifies behaviour the single real
+target does not exhibit. **That is the mechanism, and it generalises: a limits-by-test fixture that
+does not resemble the target proves nothing about the target.** I had already retracted one overclaim
+about this guard; the weaker claim I accepted in its place was also false. Corrected in place above.
+
+**#9 and #10** sit inside `test_corrupted_files_rejected_with_specific_errors`, whose assertion is
+`isinstance`-tolerant. Dropping the load **size cap** survives, because `json.loads` then raises
+`JSONDecodeError` wrapped as `LedgerFormatError` and the size refusal never runs. Dropping the
+**duplicate-key hook** survives, because the dict collapses and `from_dict` raises `LedgerKeyError` —
+a *subclass* of the expected error. (`test_literal_limits_and_boundaries` asserts the **constant**
+`8 << 20`, not its enforcement.) Both are the same shape: an exception-type assertion loose enough
+that an unrelated failure satisfies it.
+
+**#11 is half the pin on the fix I called the most consequential of the session.**
+`test_unscoped_default_run_clears_whole_tree_by_construction` greps for `'if [ "$SCOPED" = 0 ]; then'`
+and `"SCOPED=1"`. Inserting `SCOPED=1` before the top-level `clear_bytecode` call preserves both
+literals, stops the default path clearing bytecode outside `tests/`, and **passes all three bytecode
+tests** — proven with a planted canary (`survived: unmutated=False, mutant=True`). No behavioural test
+covers the default path at all; the one that looks like it does drives the script with `--tests-dir`,
+which is the *scoped* path. The stale-`.pyc` hazard could silently return.
+
+## Four errors of my own this round
+
+1. **A fourth wrong figure handed to a reviewer.** I wrote "remove `_reindex()` from both `from_dict`
+   and `load_ledger`". `load_ledger` contains no `_reindex()` call — it reindexes via `from_dict`.
+   One mutant, not two. The reviewer corrected it unprompted.
+2. **A wrong attestation window.** I briefed SR-10's reviewer on "three unattested deltas". It is
+   **six commits** (`06ebb3b`, `6d11165`, `b497bcc`, `cbfa730`, `d80e33b`, `da9a7d6`), +102/−14 in the
+   source. Had the reviewer taken my framing, two commits would have gone unexamined.
+3. **Three false claims in this journal**, all corrected in place above: the Linux skip count *and its
+   cause*; a mutant recorded as killed that survives in both forms; and a document credited with a
+   3.12.4 disclosure it does not contain. Common thread: **all three were owner self-reports I
+   recorded without re-measuring.** An "honest bound volunteered unprompted" earns trust in the
+   reporter, not in the number.
+4. **Two SR-12 findings sat open and unrouted since SR-12.** F4 (the dashboard cannot distinguish an
+   oracle/fixture result from a real one: `benchmark.py` has `subject_kind` and `subject_kind_code`,
+   `dashboard.py` reads neither, and instead appends "(toy fixture; ...)" to *every* supported verdict
+   — a blanket label that becomes false the moment a real result is rendered) and F15
+   (`claim_ledger.py:752` emits `"is_safety_claim": False` as a bare literal, pinned by four tests, so
+   a hard-coded constant is tested as though it were behaviour). Both now routed. I found these by
+   auditing SR-12's own findings table rather than by being told.
+
+## SR-12 findings: current status, audited rather than assumed
+
+**Closed:** F1 (`checkpoint.py:17` now says the key mismatch is a **loud** `KeyError`), F2 (protocol
+r9 records amendment A-1 making gate 11 global, matching `"control_adequacy": "all"`), F17
+(`CLEAN_CLONE.md:155` discloses the CI workflow has never been executed), and **F3 and F6, closed by
+me this round** in commit `86a52ed` — F3 by recording what SR-03's attestation actually covers plus
+the two caveats QA attached, F6 by disclosing that the normalization analogy's **sign does not carry
+over** (the toy inflates by the row width; the source's net is 0.42, a *deflation*), bounded to the
+*shape* of the defect and pinned by two tests, since nothing pinned that docstring while it was wrong.
+**Open and routed:** F4, F15.
+
+## Per-task verdicts
+
+**SR-10 — FAIL.** The two findings above. Everything else held well: the three delta claims I could
+have been wrong about were verified *numerically and independently* — the 44/40 relabel grid
+recomputed from the docstring rule alone agrees on **all 84 cells with zero mismatches** on both base
+results, 22 swept bad inputs to `t_interval` produce **zero raw exceptions**, and the `fsum` wording
+survived **240,080** adversarial differential trials with 0 value differences. The two historically
+security-relevant guards (the `isinstance(ComponentResult)` guard and the converged-count guard) now
+**die** under mutation. The statistical fixtures are genuine independent oracles — closed-form Cauchy
+`tan(0.475π)`, textbook t-table values, exact 27-resample combinatorics, `Fraction` plus 60-digit
+`Decimal` — not self-consistency checks. 48 mutants, 40 killed, **0 false kills** (the reviewer
+checked every mutant's docstring-stripped AST actually changed; adopting that check as a standing
+rule). Also found: `config_hash` omits `Margins` entirely, so two studies differing only in margins
+hash identically; `exempt` is read two different ways in two places, making a stated invariant false;
+and `_mv`'s bool guard is reachable and untested.
+
+**SR-11 — PASS, unmarked pending SR-10.** Validity against the changed `benchmark.py` was established
+**structurally, not by re-reading the old verdict**: `robustness.py` is byte-identical to the state the
+round-1 PASS covered, and across the whole `9d83f8c..HEAD` diff only `mean` and `sample_sd` changed
+among its four imported symbols, neither in a way its call sites can hit. Both criteria are enforced
+in code rather than documented — "immutable scorecards" survived eight mutants plus a recursive walk
+of every field finding **zero reachable mutable or opaque node**, and "no single examples" is enforced
+at five independent points with `SEED_FLOOR = 3`, including refusal of a *subclassed* `SeedSummary`
+that skips its own validation. Three small gaps: an undocumented `gc.get_referents` bypass of the
+`MappingProxyType`, no pin on which numeric types `from_values` accepts (`Decimal` works today), and
+`from_values([True, False, True])` silently coercing booleans where `__post_init__` rejects them.
+
+**SR-13 — FAIL.** The gate set is never checked for completeness: a **failed** validity gate can be
+deleted, or swapped for a duplicate of a passing one, and the page shows all-SUPPORTED with no alarm.
+The swap case is the worst — the gate count stays at 7, seven PASS rows render, and no count-based
+check can see it. An honest n=29 run where `min_seeds` genuinely fails is laundered into full
+JOINT_SUPPORTED. Components have had exactly this protection all along; gates never did. Plus the
+`min_n`/`width_tol` fail-open above, and a **literal breach of the acceptance criterion**: a missing,
+`None`, `NaN` or non-numeric margin **vanishes from the uncertainty panel** rather than rendering
+UNKNOWN, on a panel whose own closing sentence reads "UNKNOWN means unmeasured, never zero". Also
+`_int_or_unk`'s UNKNOWN branch is untested — the mutant returning `"0"` survives the entire suite,
+which is the single most on-point thing SR-13 was asked to verify. What held: every rename, drop,
+duplicate, cross-hypothesis and cross-table substitution alarms; patching the `PRIMARY`/`CONVERGED`
+tables to `None`/`{}`/empty fails **closed**; and **reordering a genuine set raises no alarm**, so the
+guard does not false-fire. The five reported C1/C2/F-h/F-i/F-j closures were re-verified by mutation
+and are genuine.
+
+**SR-14 — PASS, unmarked pending SR-13.** Both named criteria exist, are non-vacuous, and were killed
+by mutation: idempotency in both directions (always-noop and never-noop), and
+`test_every_invalid_state_pair_with_every_action_is_rejected` asserting `5*4*5 - 5 == 95` combinations.
+The reviewer independently confirmed every named case refuses **for the stated reason**, and that
+`object.__setattr__` on *every* event field with a genuinely different value is detected — correcting
+its own first pass, which had produced three false "BAD" flags from no-op writes. Both documented
+residuals are exactly as documented, pinned in **both** directions so neither can silently move.
+
+**SR-15 — FAIL.** The acceptance criterion's measurable core is **met** — the complete offline suite
+passes from a pristine clone in a bare environment, determinism genuinely covers all five terms
+(counts, skips, failed flag, run 2's **exit code**, and the canon file), and a suite constructed to
+fail *only on the second run* was correctly reported non-deterministic. It fails on documentation that
+is internally contradictory and on masked test #11. Beyond those: `test_baseline.txt` is **40 tests
+stale** (874 vs 914, 16 of them in SR-15's own test file, added by the rework being attested) while
+the document presents the per-module baseline as its sharp check, so 40 tests can be deleted
+undetected; the documented clean-clone command sequence **fails on any machine with torch/numpy/pytest
+installed**, because the bare-environment precondition appears only parenthetically in a table cell;
+and `socket.getnameinfo` is an undisclosed guard bypass. The reviewer tested the socket guard rather
+than reading it (loopback only) and confirmed connections *and* DNS do raise, as claimed.
+
+**New lint evasions, and a doc that mischaracterises the gap.** The eight previously-closed evasions
+are confirmed closed. But 70 further probes found many that pass `scripts/lint.sh` with rc=0 — and
+they are **plain static imports with literal attribute calls**, not the runtime-name tricks the doc
+excuses: `code.InteractiveInterpreter().runsource`, `runpy.run_module`, `pdb.run`, `cProfile.run`,
+`trace.Trace().run`, `timeit.timeit`, `types.FunctionType(marshal.loads(b), globals())()`,
+`zipimport`, `pickle.loads`, `logging.config.listen` (a socket server that `exec`s what it receives),
+`pydoc.browse`, `venv.EnvBuilder(with_pip=True)` (runs pip, i.e. network), `concurrent.futures`
+(the capability already banned as `multiprocessing`) — and **`pkgutil.resolve_name('os:system')`,
+which defeats the entire attribute check in one line.** `CLEAN_CLONE.md`'s "Not covered" list names
+four buckets and **none of these falls in any of them**, so the enumeration implies static attribute
+calls are covered. Two further overclaims in the same file: "standard-library only" is checked by
+**neither** of the two mechanisms it cites (`import numpy`/`pandas`/`scipy`/`yaml` in `src/toy/` all
+pass), and the two BANNED lists diverge (27 modules in `lint.sh`, 18 in `test_scripts.py`), so the
+test cited as co-enforcing would miss `import asyncio`.
+
+## Standing rules added this round
+- **A mutant's verdict is a measurement.** Never record "killed" or "survived" from a report without
+  re-running it. Two false kills reached this journal that way.
+- **Check the docstring-stripped AST changed**, not just that the file parses — this is what gave one
+  reviewer 0 false kills across 48 mutants.
+- **A limits-by-test fixture must resemble the target.** Masked test #8 existed because the fixtures
+  were annotation-free and the target was not.
+- **Ask where thresholds come from, not only where values come from.** Both fail-opens this round were
+  parameter provenance, in modules whose value provenance was already thorough.
