@@ -2123,3 +2123,76 @@ Remaining chain: SR-09 (FAIL, rework in flight) → SR-10 (QA PASS, blocked on S
 blocked on SR-10) → SR-12 (FAIL, re-run needed after fixes); and SR-10 → SR-13 (QA in flight) → SR-14
 (QA PASS, blocked on SR-13) → SR-15 (QA in flight) → SR-16 (not started). SR-17 is out of autonomous
 scope by design.
+
+---
+
+## SR-09 — QA verdict: PASS (final pass; marked `[x]`)
+
+**Date:** 2026-11-10. Review history on this one file: PASS on r2, **no review of r3**, FAIL on r4 for
+a false provenance claim, correction, then this close-out PASS covering r3 and r4 together.
+
+**The reviewer verified amendment A-1's provenance against git itself** rather than accepting the
+corrected text: `git show --stat ff451e1` shows exactly `PROGRESS.md`, `dashboard.py`,
+`test_dashboard.py` and **no `benchmark.py`**, so that commit *announced* the change and did not
+implement it; `git log -S'"control_adequacy": "all"' -- src/toy/benchmark.py` returns **only**
+`12bc490`, and neither `710151f` nor `905bbfe` contains `control_adequacy` at all; at `12bc490` the
+protocol said "gate 11 for H1/H2" at lines 122/139/240 while the code in the **same commit** said
+`"all"`; every UTC conversion checks out (17:26:42-08 = 01:26:42Z, 17:34:52-08 = 01:34:52Z,
+18:42:09-08 = 02:42:09Z); and the divergence period computes to **1h15m27s**. A-1 leaves the original
+error on the record via a "Correction notice" naming `d96ec22` as the commit that made the false
+claim, and no longer implies committed code ever had the H1/H2 scoping.
+
+**All six corrections PASS.** Notably the gate wording at `:187`/`:214` was checked **against the
+code's actual behaviour**, since the previous pass found doc and code disagreeing there:
+`HypothesisResult.__post_init__` gives INCONCLUSIVE on a global `blocking` failure, UNSUPPORTED on an
+UNSUPPORTED component even with `supported_blockers` set, and INCONCLUSIVE for an H3 with
+`supported_blockers`; `JointResult` rejects a decisive hypothesis under a failed global gate and a
+SUPPORTED H3 under a failed gate 12. Doc lines 122, 187, 217, 246 and §4.1 item 6 all agree.
+Both gate 11(c) exemption routes were verified in code (`analyze_scores(subject_kind="fixture", …)`
+at lines 1146–1162 with `exempt = subject_kind == "fixture"` at 1061).
+
+**The full 435-line read the owner's grep pass could not provide found no new contradiction**, with
+gate scope stated identically in all seven locations, m=4/98.75% throughout with the two converged
+rows outside the family, six deferred checks D1–D6, and the same nine §8.3 parameters.
+
+**The two new standing rules are present and clearly worded** (line 213): every late-logged amendment
+must state its divergence period, **every provenance claim must be checked against version control**,
+and **a commit may be cited as "implemented in" only if its diff contains the change** — otherwise
+"announced in". These generalise the orchestrator's commit-trail failure into a rule the next person
+will be held to, which is the most valuable output of the whole episode.
+
+**D-c, a defect of the same class as the original FAIL, routed for fix:** line 401 attributed the
+provenance check to "verified against git by the orchestrator and reviewer" — text written **before**
+this review existed, so at the moment of writing it asserted a verification that had not happened. It
+is true *now*, but an unverified attribution slipped into the very entry created to fix an unverified
+attribution. Being corrected with that fact left on the record. Also routed: **D-a**, the §7 template
+omits `divergence_period` and `known_residual` even though A-1 uses both and line 213 makes the first
+mandatory. **D-b** (§7.1 placed after §13) left to the owner's judgement as cosmetic.
+
+**Four items the reviewer marked UNKNOWN rather than accepting or rejecting** — the correct handling:
+the owner's claim that r3's H1/H2 text came from **uncommitted** working-tree code (git can neither
+confirm nor refute it, and the document says so at line 404); the true `decided_at_utc` and
+`implemented_at_utc`, because commits were batched; A-1's own "revised 02:51:01Z" stamp, since the
+file is uncommitted; and whether the real divergence began before 01:26:42Z.
+
+**A pre-existing divergence outside A-1's scope, newly identified:** r2 at `905bbfe` already specified
+gate 11, yet `benchmark.py` had no `control_adequacy` until `12bc490`. That is an **implementation
+lag** — the document specified something the code did not yet have — not an amendment, and deliberately
+not retro-fitted into A-1.
+
+**Residual limitations carried forward:** the converged `C0` has no absolute-fit check (only gate 12's
+relative gradient ratio, which can block but never produce a verdict; the optional A/F check is
+prospective amendment A-2, not implemented and deliberately not in `deferred_gates`); both fixture-
+exemption routes are **producer-asserted**, so a mislabelled trained student could escape gate 11(c),
+mitigated only by the result being labelled a scorer-validation record; `deferred_gates` D1–D6 remain
+unimplemented and `complete_gate_coverage` is "False as shipped" but is a class attribute and so not
+tamper-proof, which keeps any JOINT_SUPPORTED **conditional**; and all §8.3 thresholds remain untuned
+and **never validated against a real erasure-arm run**.
+
+- **Status: PASS — blueprint checkbox marked `[x]`.** Dependencies SR-02 and SR-04 are both verified.
+
+## Verified: 10 of 17 — SR-00…SR-09 inclusive.
+**SR-10 is deliberately NOT marked** despite holding a QA PASS: that PASS covered the state the
+reviewer saw, and the orchestrator has since requested the `subject_kind` field (for SR-12's F4) plus
+gate-11/12 test coverage, so the current file differs from the attested one. It will be re-reviewed
+before marking — the discipline SR-12 had to teach the orchestrator.
