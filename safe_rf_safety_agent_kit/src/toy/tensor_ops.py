@@ -149,6 +149,8 @@ def set_indices(x: Any, indices: Sequence[int], values: Any) -> Any:
         else:
             try:
                 v = torch.as_tensor(values)   # natural dtype, so a lossy cast is visible below
+                if v.is_floating_point():     # Python floats are float64; as_tensor would use float32
+                    v = torch.as_tensor(values, dtype=torch.float64)
             except (RuntimeError, TypeError, ValueError, OverflowError) as e:
                 raise TensorOpError(f"values not convertible to a tensor: {e}") from None
         if v.dim() > 0 and v.shape[0] != len(idx):

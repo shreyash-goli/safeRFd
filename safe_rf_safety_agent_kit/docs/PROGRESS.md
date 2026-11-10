@@ -1194,3 +1194,130 @@ a `f = p0² + 3p1²` fixture (killing `numeric = g`, `min`-vs-`max` on both erro
 `check_gradient` raises a specific "step too small" error instead of a misleading mismatch; and the
 docstrings now state that exceptions from the caller's `fn`/`grad_fn` propagate unwrapped and that
 generators are consumed once. 57 tests in-file.
+
+---
+
+## SR-11 / SR-14 built; SR-07, SR-10, SR-13 reworked; SR-09 amended to r3
+
+**SR-11 — robustness probes** (`src/toy/robustness.py`, 64 tests). Single-example claims are blocked
+structurally, not advisorily: `SeedSummary` refuses fewer than 3 values *and recomputes every
+statistic* so a forged mean fails; `ProbeConfig` cannot go below `SEED_FLOOR = 3`; duplicate seeds
+are rejected so one example cannot be repeated to inflate n; and `InsufficientEvidence` carries
+counts only, with no statistic attributes at all. Invariances verified bit-exact on 12 seeds (row
+reordering, masked-out-row replacement, scaling by 2^10), and **five deliberately broken measures
+each fire the matching defect**, so the probe can fail. Precision losses measured against exact
+rational arithmetic: ~2e-16 from 1e-150 to 1e153, degrading through subnormal squares to ~1e-5 at
+1e-158; plain-loop cancellation `[M,b,−M]` from ~1.6e-8 at M=1e8 to **total loss (relative error
+1.0) at M ≥ 1e16**; accumulation ~1.2e-14 at n=1e5. **Honestly flagged by the builder:** the
+stability path's order-invariance holds only because CPython 3.12's `sum()` is compensated — an
+*environmental* property, not a property of `stability.py` — so the probe reports the stability path,
+`math.fsum` and a labelled plain-loop reference separately and records the Python version per card.
+A disclosed deviation from the brief: an insufficient scorecard maps to `EvidenceClass.UNKNOWN`
+rather than `TOY_RESULT`, on the grounds that there is no result to label. The builder also reported
+that its "green at HEAD" baseline **moved underneath it** mid-run — a real cost of this much
+parallelism, recorded rather than smoothed over.
+
+**SR-14 — claim ledger** (`src/toy/claim_ledger.py`, 52 tests). States
+`DRAFT → REVIEWED → SUPPORTED | UNSUPPORTED`, with the full state×target×action matrix tested and
+**95 invalid combinations each raising `InvalidTransitionError`**. `UNSUPPORTED` is truly terminal;
+`SUPPORTED` is terminal except for a named `RETRACT` with its own mandatory justification — sending
+`SUPPORTED → UNSUPPORTED` as an ordinary REJECT is refused. **A claim cannot reach SUPPORTED without
+evidence references**, enforced in a single `_validate_and_build` used by both `append` and the
+load-time replay, so a hand-forged file with a SUPPORT event and no evidence is rejected on load even
+with every hash recomputed. There is deliberately **no promote/advance API**, and a test asserts on
+the method names. Evidence refs must be 64-char lowercase sha256; duplicates and the all-zero
+placeholder are refused. Idempotency is handled correctly in both directions: an identical replay is
+a no-op leaving the head digest unchanged, while the same id with different content raises
+`DuplicateEventIdError` (the timestamp counts as content). Honest limit, demonstrated by a
+deliberate test: a **full rewrite with recomputed digests is accepted** if the rewritten history is
+itself a valid transition sequence — the chain is not a signature and reviewer identity is
+self-asserted; replaying every transition on load is the backstop against impossible histories.
+
+**SR-07 rework.** `_flatten64` now raises on empty, complex and non-floating outputs, so a comparison
+that compared nothing is marked *unmeasured* rather than reporting a measured 0.0 with
+`bitwise_identical=True`. The builder checked and reported that **every determinism claim it had made
+was established on float32 outputs**, so none relied on the broken complex path that could have
+certified a non-repeatable function as repeatable. `normalize` now rescales by the largest absolute
+element, so `[1e200, 1e200]` and f32 `3e38` give correct unit vectors instead of silent zeros, and
+underflowed inputs normalise instead of raising a mislabelled error; only a truly all-zero vector
+raises, with a message naming the cause. The mutation detector now compares builtin scalars by type
+and repr (catching int→float, int→bool, `0.0`→`-0.0`), reports tensor `metadata_changed` for
+`requires_grad`/`.grad`/hooks/`grad_fn`/strides/device, and moves opaque objects into `unchecked`
+instead of falsely reporting them changed. 110 tests in file; 10 mutations proven to kill specific
+new tests. One subtlety the builder caught: removing the complex check *alone* initially survived
+because the non-floating check also rejects complex, so the test was tightened to assert the
+"imaginary" wording.
+
+**SR-10 rework.** `N_PRIMARY = 4` at 98.75%, with an import-time assertion that it equals the number
+of primary intervals. The n≥30 rule moved **inside** `interval_verdict`, so too-few seeds now yield
+INCONCLUSIVE at the component level rather than merely setting a flag. `C_conv` implemented: H3 can
+be SUPPORTED only if the converged-budget components are too, otherwise INCONCLUSIVE with the reason
+"finite-budget only; attributed to partial convergence (not established)". Gates 11 and 12
+implemented; ineligible seeds (fewer than 2 masked TRAIN rows) now raise `IneligibleSeed` and are
+listed and replaced from reserve **without counting toward the 5% failure rate**. Verdict text
+removed from `notes` entirely, with `verdict_from_records` rebuilding the verdict from stored metrics
+alone. `HypothesisResult`/`ComponentResult` now **derive** verdicts from intervals and refuse a
+supplied verdict; `JointResult` refuses an empty or partial gate list; `complete_gate_coverage` is a
+read-only property, always False. All 14 mutations killed, including the H3 `all`→`any` conjunction
+and the exact-equality boundaries that previously survived.
+
+**SR-09 → v1-DRAFT-r3.** Implementing Level A exposed four points on which the protocol was silent,
+so the decisions were living only in `benchmark.py` — precisely the gap pre-registration exists to
+close. Now specified: the converged-budget requirement is **block-only** (it can stop a SUPPORTED but
+never create an UNSUPPORTED, since decision-capable converged intervals would enlarge the family to
+m=6), with the cost written down that H3's expected failure then surfaces as INCONCLUSIVE rather than
+UNSUPPORTED; a §8.1 gate-scope table superseding the old blanket "any gate failure → INCONCLUSIVE";
+gate 11(c)'s N/A exemption restricted to non-trained-student fixtures, declared by the subject's
+constructor and never by the data, with arm `E` never eligible and the N/A required to appear in the
+reason string; and converged-budget runs re-running treatment, `C0` and `C_shuf` all at `steps_conv`,
+with contrasting a converged treatment against a finite-budget control forbidden. Six thresholds
+recorded as v1 registered defaults (`steps_conv` 1000, `tau_conv` 1e-3, `delta_A` 0.05, `eps_fit`
+0.05, `loss_factor` 2.0, `tail_ratio_max` 10) with an explicit provenance statement — and the owner
+recorded honestly that **it cannot verify the "chosen a priori, not tuned" claim** since no tuning
+log exists, that the values are credible only if frozen before the first registered arm runs, and
+that raising `steps_conv` after seeing a gate-12 failure would be a post-data amendment demoting H3
+to exploratory.
+
+**Orchestrator decision — gate 11 extended to H3.** The SR-09 owner surfaced, and deliberately did
+not resolve, that `C0` is subtracted in `Δ` as well as in `S` and `L`, so an undertrained control
+corrupts selectivity just as it corrupts suppression and retention. Under the implemented scoping,
+H3 could be SUPPORTED with gate 11 failed, and — the material case — a **JOINT_UNSUPPORTED could be
+produced by an H3 computed against a control already known to be inadequate**. JOINT_SUPPORTED was
+correctly blocked, so the false-positive direction was safe, but a *verdict* of UNSUPPORTED resting
+on a known-bad control is still an unreliable number presented as a conclusion. Applying this kit's
+consistent standard — an unreliable measurement must come out INCONCLUSIVE, not a verdict in either
+direction — the orchestrator ruled that a failed gate 11 forces H1, H2 **and** H3, and therefore
+JOINT, to INCONCLUSIVE. Kept as a true gate rather than block-only, because block-only is right for
+gate 12 (where the concern is specifically that a finite-budget SUPPORTED would be over-read) whereas
+gate 11 invalidates the contrast itself in both directions. Routed to SR-10 for implementation.
+
+**SR-13 rework — and the most valuable finding of this round.** The three failures were *not*
+mainly the Bonferroni change: `Injection::test_gate_and_reason_text` was a fixture that renamed a
+gate, which `JointResult` now refuses, and the other two failed because gates 11 and 12 did not pass
+since the fixtures never supplied `A`, `F` or `conv_grad_ratio` — missing gate inputs now **fail the
+gate rather than pass silently**, which is correct. Fixtures were rebuilt through `analyze_scores`
+with every level and threshold derived from the scorer's own constants, so no Bonferroni level is
+pinned and **no assertion was weakened, skipped or deleted**.
+**Critically, the orchestrator asked whether the renderer could ever display a confident but wrong
+verdict rather than merely asking for the tests to go green — and the answer was yes.** The original
+recomputation rebuilt hypothesis verdicts from components only and displayed its own result when it
+disagreed with the stored one, so it would have shown **H3 as SUPPORTED while the stored verdict was
+INCONCLUSIVE**, because it knew nothing about converged components or gate scopes. A signature change
+in `interval_verdict` was silently swallowed into INCONCLUSIVE with no warning, and it called
+`bm.combine_joint` just as upstream does, so a bug there would have passed unnoticed. Now: a decisive
+verdict is displayed **only where the stored value and an independent recomputation agree**,
+otherwise the page shows INCONCLUSIVE plus a visible "NOT shown" warning that does not echo the
+stored value; `_contract_problems()` checks the `interval_verdict` signature, the enum members and
+`GATE_SCOPES` at render time and raises a loud "SCORER/RENDERER CONTRACT PROBLEM" banner that
+withholds every decisive verdict; the joint rule is **re-implemented in the renderer** rather than
+delegated to `bm.combine_joint`; and the recomputation is scope-aware and requires converged
+components for H3. Drift tests via `mock.patch` cover a changed signature, a removed function, wrong
+semantics in both the always-SUPPORTED and always-UNSUPPORTED directions, a wrong `combine_joint`,
+a forged H3 without converged components, and missing gate inputs failing closed without a false
+alarm. **Residual limit stated plainly:** if the stored verdict and the recomputation are wrong in
+the *same* way, the renderer cannot tell. The builder also recorded a judgement call it did not test:
+it kept `interval_verdict` rather than `verdict_from_records` as the recomputation basis, because the
+latter rebuilds from the same stored metrics the stored verdict came from and would be a weaker
+independent witness.
+
+**Suite at this point:** 593 tests under unittest (2 skipped), 591 passed under pytest. Green.

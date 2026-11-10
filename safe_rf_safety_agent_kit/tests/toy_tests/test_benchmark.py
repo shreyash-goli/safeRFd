@@ -14,7 +14,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from toy import benchmark as bm
-from toy.schema import EvidenceClass, ExperimentRecord, derive_seed, make_rng
+from unittest import mock
+
+from toy.schema import EvidenceClass, ExperimentRecord, MetricValue, derive_seed, make_rng
 
 V, J = bm.Verdict, bm.JointVerdict
 SMALL = bm.BenchmarkConfig(n_boot=2000)          # smaller B only to keep the suite fast; the default is 10,000
@@ -33,10 +35,16 @@ def oracle():
     return _ORACLE["r"]
 
 
-def synth_scores(seeds, S=1.0, L=-0.01, d=1.0, dms=1.0, noise=0.05, rng_seed=1):
+def synth_scores(seeds, S=1.0, L=-0.01, d=1.0, dms=1.0, noise=0.05, rng_seed=1, A=0.5, F=0.005, loss=0.01,
+                 dc=1.0, dmsc=1.0, gr=1e-5, flags=True):
+    """Synthetic per-seed values (no training). Defaults describe a clear-cut favourable pattern; they are
+    inputs to test the scorer's logic, not measurements."""
     r = random.Random(rng_seed)
-    return [bm.SeedScores.from_values(s, S + r.gauss(0, noise), L + r.gauss(0, noise * 0.1), d + r.gauss(0, noise),
-                                      dms + r.gauss(0, noise), rowsets_disjoint=True, mask_ok=True) for s in seeds]
+    g = lambda m, sd=noise: m + r.gauss(0, sd)
+    return [bm.SeedScores.from_values(s, g(S), g(L, noise * 0.1), g(d), g(dms), A=g(A, 0.01), F=F, E_loss_ratio=loss,
+                                      delta_conv=g(dc), delta_minus_shuf_conv=g(dmsc), conv_grad_ratio=gr,
+                                      rowsets_disjoint=True if flags else None, mask_ok=True if flags else None)
+            for s in seeds]
 
 
 class HandComputedStatistics(unittest.TestCase):
@@ -90,21 +98,31 @@ class HandComputedStatistics(unittest.TestCase):
         m = bm.bootstrap_means([1.0, 2.0, 3.0], 20000, make_rng(5))
         mu = sum(m) / len(m)
         var = sum((x - mu) ** 2 for x in m) / len(m)
-        self.assertAlmostEqual(mu, 2.0, delta=0.012)          # ~5 sigma of sampling noise
-        self.assertAlmostEqual(var, 2 / 9, delta=0.012)
-        self.assertAlmostEqual(sum(x == 1.0 for x in m) / len(m), 1 / 27, delta=0.007)
+        self.assertAlmostEqual(mu, 2.0, delta=0.012)          # 3.6 sigma of the mean's sampling noise (se = sqrt(2/9/20000) = 0.0033)
+        self.assertAlmostEqual(var, 2 / 9, delta=0.012)          # ~5 sigma for the variance
+        self.assertAlmostEqual(sum(x == 1.0 for x in m) / len(m), 1 / 27, delta=0.007)   # se 0.0013: ~5 sigma
         self.assertTrue(all(1.0 <= x <= 3.0 for x in m))
 
     def test_bonferroni(self):
-        self.assertAlmostEqual(bm.bonferroni_level(0.05, 3), 1 - 0.05 / 3, places=15)
-        self.assertAlmostEqual(bm.bonferroni_level(0.05, 3), 0.98333333, places=7)
+        # m=3 would give 1 - 0.05/3 = 0.98333; the family is FOUR intervals, so 1 - 0.05/4 = 0.9875
+        self.assertEqual(bm.N_PRIMARY, 4)
+        self.assertAlmostEqual(bm.bonferroni_level(0.05), 0.9875, places=15)
+        self.assertAlmostEqual(bm.bonferroni_level(0.05, 3), 0.98333333, places=7)   # generic formula still right
         self.assertEqual(bm.bonferroni_level(0.05, 1), 0.95)
+        # family-wise error with m=4 intervals each at 0.0125 miscoverage: <= 4*0.0125 = 0.05 (3-level: 0.0667)
+        self.assertLessEqual(4 * (1 - bm.bonferroni_level()), 0.05 + 1e-15)
+        self.assertGreater(4 * (1 - bm.bonferroni_level(0.05, 3)), 0.05)
+        # N_PRIMARY must equal the number of primary intervals actually produced
+        self.assertEqual(bm.N_PRIMARY, sum(len(v) for v in bm.PRIMARY.values()))
         with self.assertRaises(ValueError):
             bm.bonferroni_level(0.05, 0)
 
     def test_primary_level_used(self):
         h = oracle().h1.components[0].pair
-        self.assertAlmostEqual(h.level, 0.98333333, places=7)
+        self.assertAlmostEqual(h.level, 0.9875, places=12)
+        for hyp in (oracle().h1, oracle().h2, oracle().h3):
+            for c in hyp.components + hyp.converged_components:
+                self.assertAlmostEqual(c.pair.level, 0.9875, places=12)
 
 
 class KnownAnswer(unittest.TestCase):
@@ -169,7 +187,7 @@ class Determinism(unittest.TestCase):
     def test_arms_reproducible_from_seed_alone(self):
         s = FZ.seeds[0]
         before = {a: bm._arm_params(s, a, SMALL) for a in bm.ARM_NAMES}
-        bm._arm_params.cache_clear()
+        bm._arm_fit.cache_clear()
         bm.build_fixture.cache_clear()
         self.assertEqual(before, {a: bm._arm_params(s, a, SMALL) for a in bm.ARM_NAMES})
 
@@ -333,7 +351,7 @@ class ValidityGates(unittest.TestCase):
         self.assertFalse(next(g for g in r.gates if g.name == "seed_list_frozen").passed)
 
     def test_unverified_disjointness_or_mask_fails_gate(self):
-        sc = [bm.SeedScores.from_values(s, 1, -0.01, 1, 1) for s in FZ.seeds]    # flags default None
+        sc = synth_scores(FZ.seeds, flags=False)                                  # flags None = not measured
         r = self.run_synth(sc)
         self.assertEqual(r.verdict, J.JOINT_INCONCLUSIVE)
         failed = {g.name for g in r.gates if not g.passed}
@@ -347,7 +365,13 @@ class ValidityGates(unittest.TestCase):
     def test_deferred_gates_disclosed(self):
         r = oracle()
         self.assertFalse(r.complete_gate_coverage)
-        self.assertTrue(r.deferred_gates)
+        for must in ("gate1_config_shift_sensitivity_arm", "gate2_error_register_crosscheck", "V_set_probes",
+                     "pilot_execution_and_n_cap_width_rule", "amendment_log_hash"):
+            self.assertIn(must, r.deferred_gates)
+        with self.assertRaises(AttributeError):
+            r.complete_gate_coverage = True
+        with self.assertRaises(TypeError):                      # not an init argument any more
+            dataclasses.replace(r, complete_gate_coverage=True)
 
     def test_ineligible_seeds_listed_and_replaced(self):
         fz = bm.freeze_seed_list(7, 3, n_reserve=2)
@@ -373,7 +397,7 @@ class DisagreementRule(unittest.TestCase):
 
     def test_constructed_skewed_case_flips_verdict_to_inconclusive(self):
         # 29 zeros and one 10 (n=30): mean 1/3. The bootstrap lower bound is exactly 0 (P(no 10 drawn)=0.36 >
-        # tail) whereas the t lower bound is below 0 (sd 1.83, se 0.334, t~2.54), so for margin -0.2 the two
+        # tail) whereas the t lower bound is below 0 (sd 1.83, se 0.334, t(df 29) at the 98.75% level ~2.6), so for margin -0.2 the two
         # lower bounds fall on different sides.
         vals = [0.0] * 29 + [10.0]
         level = bm.bonferroni_level()
@@ -450,12 +474,12 @@ class UnmeasuredAndMultiplicity(unittest.TestCase):
 
     def test_exploratory_cannot_yield_verdict(self):
         cfg = SMALL
-        ex = bm.exploratory_interval("H4", [0.5 + 0.01 * i for i in range(40)], cfg, 1)
+        ex = bm.exploratory_interval("H5", [0.5 + 0.01 * i for i in range(40)], cfg, 1)
         self.assertIn("EXPLORATORY", ex.label)
         self.assertFalse(hasattr(ex, "verdict"))
         self.assertAlmostEqual(ex.pair.level, 0.95)                    # unadjusted
         with self.assertRaises(ValueError):
-            bm.evaluate_primary("H4", {"S": [1.0] * 40}, bm.Margins(), cfg, 1)
+            bm.evaluate_primary("H5", {"S": [1.0] * 40}, bm.Margins(), cfg, 1)
         with self.assertRaises(ValueError):
             bm.exploratory_interval("H1", [1.0] * 40, cfg, 1)          # cannot launder a primary id either
         self.assertEqual(set(bm.PRIMARY), {"H1", "H2", "H3"})
@@ -466,7 +490,7 @@ class UnmeasuredAndMultiplicity(unittest.TestCase):
     def test_records_map_to_toy_result_and_roundtrip(self):
         recs = bm.to_experiment_records(oracle(), study_id="fixture", base_seed=7,
                                         timestamp_utc="2025-01-02T03:04:05Z", scorer_validation=True)
-        self.assertEqual(len(recs), 5)       # H1, H2, H3a, H3b, JOINT
+        self.assertEqual(len(recs), 7)       # H1, H2, H3a, H3b, H3a_conv, H3b_conv, JOINT
         for rec in recs:
             self.assertIs(rec.evidence_class, EvidenceClass.TOY_RESULT)
             self.assertIn("TOY RESULT", rec.notes)
@@ -482,6 +506,477 @@ class UnmeasuredAndMultiplicity(unittest.TestCase):
         rec = bm.to_experiment_records(oracle(), study_id="f", base_seed=7)[0]
         with self.assertRaises(ValueError):
             dataclasses.replace(rec, evidence_class=EvidenceClass.SOURCE_OBSERVED)
+
+
+# ===================================================== QA round 1: defects 1-5 and surviving mutants
+class MinimumSeedsAtVerdictLevel(unittest.TestCase):
+    """Defect 2: n < 30 gives no verdict wherever a verdict is produced, not only at the gate."""
+
+    def clear_pair(self, n):
+        return bm.summarize("p", [1.0 + 0.01 * (i % 5) for i in range(n)], 0.9875, 500, 1, min_n=30)
+
+    def test_interval_verdict_refuses_small_n(self):
+        v20, why = bm.interval_verdict(self.clear_pair(20), 0.1, "greater")
+        self.assertEqual(v20, V.INCONCLUSIVE)
+        self.assertIn("below protocol minimum", why)
+        self.assertEqual(bm.interval_verdict(self.clear_pair(30), 0.1, "greater")[0], V.SUPPORTED)   # control
+        self.assertEqual(bm.interval_verdict(self.clear_pair(29), 0.1, "greater")[0], V.INCONCLUSIVE)
+
+    def test_evaluate_primary_with_20_seeds_yields_no_verdict_and_no_joint_support(self):
+        r = random.Random(3)
+        series = {"S": [1 + r.gauss(0, .05) for _ in range(20)], "L": [-.01 + r.gauss(0, .005) for _ in range(20)],
+                  "delta": [1 + r.gauss(0, .05) for _ in range(20)],
+                  "delta_minus_shuf": [1 + r.gauss(0, .05) for _ in range(20)],
+                  "delta_conv": [1.0] * 20, "delta_minus_shuf_conv": [1.0] * 20}
+        hs = [bm.evaluate_primary(h, series, bm.Margins(), SMALL, 1) for h in ("H1", "H2", "H3")]
+        self.assertEqual([h.verdict for h in hs], [V.INCONCLUSIVE] * 3)
+        self.assertNotEqual(bm.combine_joint(*[h.verdict for h in hs], gates_ok=True), J.JOINT_SUPPORTED)
+
+    def test_min_seeds_parameter_is_the_cfg_value(self):
+        cfg10 = dataclasses.replace(SMALL, min_seeds=10)
+        series = {"S": [1.0 + .01 * i for i in range(12)]}
+        self.assertEqual(bm.evaluate_primary("H1", series, bm.Margins(), cfg10, 1).verdict, V.SUPPORTED)
+        self.assertEqual(bm.evaluate_primary("H1", series, bm.Margins(), SMALL, 1).verdict, V.INCONCLUSIVE)
+
+
+class ComponentConjunctionAndBoundaries(unittest.TestCase):
+    def run_h3(self, **kw):
+        sc = synth_scores(FZ.seeds, **kw)
+        return bm.analyze_scores(sc, frozen=FZ, registered_digest=FZ.digest, subject="syn", cfg=SMALL)
+
+    def test_h3_conjunction_inconclusive_component_blocks_support(self):
+        r = self.run_h3(d=1.0, dms=0.1)                 # H3a clearly above margin; H3b centred ON the margin
+        a, b = r.h3.components
+        self.assertEqual((a.verdict, b.verdict), (V.SUPPORTED, V.INCONCLUSIVE))
+        self.assertEqual(r.h3.verdict, V.INCONCLUSIVE)  # 'any' instead of 'all' would say SUPPORTED
+        self.assertEqual(r.verdict, J.JOINT_INCONCLUSIVE)
+
+    def test_h3_one_unsupported_component_makes_h3_unsupported(self):
+        r = self.run_h3(d=1.0, dms=-1.0)
+        self.assertEqual([c.verdict for c in r.h3.components], [V.SUPPORTED, V.UNSUPPORTED])
+        self.assertEqual((r.h3.verdict, r.verdict), (V.UNSUPPORTED, J.JOINT_UNSUPPORTED))
+
+    def test_converged_conjunction(self):
+        r = self.run_h3(dc=1.0, dmsc=0.1)               # finite fine; one converged component spans margin
+        self.assertEqual([c.verdict for c in r.h3.components], [V.SUPPORTED] * 2)
+        self.assertEqual(r.h3.verdict, V.INCONCLUSIVE)
+
+    def pair(self, lo, hi, tlo=None, thi=None):
+        z = bm._mv
+        return bm.IntervalPair("p", 40, 0.98, 100, z((lo + hi) / 2, ""), z(.1, ""), z(.1, ""), z(lo, ""), z(hi, ""),
+                               z(1., ""), z(lo, ""), z(hi, ""), z(lo if tlo is None else tlo, ""),
+                               z(hi if thi is None else thi, ""))
+
+    def test_exact_equality_boundaries(self):
+        iv = bm.interval_verdict
+        # greater: lower == margin is NOT supported; upper == margin IS unsupported
+        self.assertEqual(iv(self.pair(0.5, 0.9), 0.5, "greater")[0], V.INCONCLUSIVE)
+        self.assertEqual(iv(self.pair(0.25, 0.5), 0.5, "greater")[0], V.UNSUPPORTED)
+        self.assertEqual(iv(self.pair(0.25, 0.500001), 0.5, "greater")[0], V.INCONCLUSIVE)
+        # less: upper == margin is NOT supported; lower == margin IS unsupported
+        self.assertEqual(iv(self.pair(0.0, 0.5), 0.5, "less")[0], V.INCONCLUSIVE)
+        self.assertEqual(iv(self.pair(0.5, 0.75), 0.5, "less")[0], V.UNSUPPORTED)
+        self.assertEqual(iv(self.pair(0.499999, 0.75), 0.5, "less")[0], V.INCONCLUSIVE)
+
+    def test_each_bound_side_check_is_independently_effective(self):
+        # equal-ish widths so the width rule cannot be what fires.
+        up = bm.intervals_disagree((0.2, 1.1), (0.2, 0.9), 1.0)       # widths .9 vs .7 (22%): only UPPER sides differ
+        self.assertTrue(up[0])
+        self.assertIn("upper", up[1])
+        lo = bm.intervals_disagree((0.3, 1.2), (0.1, 1.0), 0.2)       # widths .9 vs .9: only LOWER sides differ
+        self.assertTrue(lo[0])
+        self.assertIn("lower", lo[1])
+        self.assertFalse(bm.intervals_disagree((0.3, 1.2), (0.25, 1.15), 0.2)[0])
+
+
+class FailureRateBoundary(unittest.TestCase):
+    def rate(self, n_ok, n_bad):
+        fz = bm.freeze_seed_list(7, n_ok + n_bad)
+        sc = synth_scores(fz.seeds[:n_ok]) + [bm.SeedScores.failed(s, "x", True, True) for s in fz.seeds[n_ok:]]
+        r = bm.analyze_scores(sc, frozen=fz, registered_digest=fz.digest, subject="s", cfg=SMALL)
+        return next(g for g in r.gates if g.name == "failure_rate").passed
+
+    def test_exactly_five_percent_passes_just_above_fails(self):
+        self.assertTrue(self.rate(38, 2))      # 2/40 = 5.0% exactly: limit is 'more than 5%'
+        self.assertFalse(self.rate(37, 3))     # 7.5%
+        self.assertTrue(self.rate(57, 3))      # 3/60 = 5.0%
+        self.assertFalse(self.rate(56, 4))     # 6.7%
+
+
+class ScorerInternals(unittest.TestCase):
+    def test_metrics_are_g_normalised_dimensionless(self):
+        fx = bm.build_fixture(FZ.seeds[3], SMALL)
+        self.assertNotAlmostEqual(fx.G, 1.0, delta=0.02)          # otherwise the check below is vacuous
+        pred, c0 = bm.fixture_oracle_gated(fx, SMALL), bm.ARM_FACTORIES["C0"](fx, SMALL)
+        sc = bm.score_predictor(fx, pred, c0)
+
+        def msq(a, b):   # independent element-mean squared error
+            tot = n = 0
+            for ra, rb in zip(a, b):
+                for x, y in zip(ra, rb):
+                    tot += (x - y) ** 2
+                    n += 1
+            return tot / n
+        o = fx.teacher.outputs(fx.T)
+        want = (msq(pred(fx.T), o.conditioned) - msq(c0(fx.T), o.conditioned)) / fx.G
+        self.assertAlmostEqual(sc.S.value, want, places=12)
+        # and G is the teacher-only normaliser on T u U
+        both = fx.teacher.outputs(fx.T + fx.U)
+        self.assertAlmostEqual(fx.G, msq(both.conditioned, both.unconditioned), places=12)
+
+    def test_degrader_moves_away_from_conditioned_on_T(self):
+        deg = bm.fixture_global_degrader(0.5)
+        for s in FZ.seeds:
+            fx = bm.build_fixture(s, SMALL)
+            o = fx.teacher.outputs(fx.T)
+            e = lambda p: bm._mse(p(fx.T), o.conditioned)
+            self.assertGreater(e(deg(fx, SMALL)), e(bm.fixture_identity_uncond(fx, SMALL)), s)
+
+
+class ConvergedBudgetAndControlGates(unittest.TestCase):
+    """Defect 3: C_conv, gate 11, gate 12 are implemented, and each can fail."""
+
+    def go(self, **kw):
+        exempt = kw.pop("exempt", False)
+        return bm.analyze_scores(synth_scores(FZ.seeds, **kw), frozen=FZ, registered_digest=FZ.digest,
+                                 subject="syn", cfg=SMALL, loss_check_exempt=exempt)
+
+    def test_baseline_has_both_gates_passing(self):
+        r = self.go()
+        self.assertEqual(r.verdict, J.JOINT_SUPPORTED)
+        self.assertEqual({g.name for g in r.gates}, set(bm.GATE_SCOPES))
+
+    def test_finite_budget_only_h3_cannot_be_supported(self):
+        r = self.go(dc=0.0, dmsc=0.0)                  # finite H3a/H3b clearly supported, converged ones not
+        self.assertEqual([c.verdict for c in r.h3.components], [V.SUPPORTED] * 2)
+        self.assertEqual(r.h3.verdict, V.INCONCLUSIVE)
+        self.assertTrue(any("finite-budget only" in x for x in r.h3.reasons))
+        self.assertNotEqual(r.verdict, J.JOINT_SUPPORTED)
+
+    def test_converged_evidence_missing_blocks_support(self):
+        sc = [bm.SeedScores.from_values(x.seed, x.metrics["S"].value, x.metrics["L"].value, x.metrics["delta"].value,
+                                        x.metrics["delta_minus_shuf"].value, A=.5, F=.005, conv_grad_ratio=1e-5,
+                                        rowsets_disjoint=True, mask_ok=True) for x in synth_scores(FZ.seeds)]
+        r = bm.analyze_scores(sc, frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        self.assertEqual(r.h3.verdict, V.INCONCLUSIVE)
+        self.assertNotEqual(r.verdict, J.JOINT_SUPPORTED)
+        self.assertFalse(r.h3.converged_components[0].pair.mean.is_measured)
+
+    def test_gate12_gradient_not_converged(self):
+        r = self.go(gr=0.5)
+        self.assertFalse(next(g for g in r.gates if g.name == "convergence").passed)
+        self.assertEqual(r.h3.verdict, V.INCONCLUSIVE)
+        self.assertEqual((r.h1.verdict, r.h2.verdict), (V.SUPPORTED, V.SUPPORTED))   # gate 12 scopes to H3
+        self.assertEqual(r.verdict, J.JOINT_INCONCLUSIVE)
+
+    def test_gate12_does_not_hide_unsupported(self):
+        r = self.go(gr=0.5, d=-1.0)
+        self.assertEqual(r.h3.verdict, V.UNSUPPORTED)
+
+    def test_gate11_control_undertrained(self):
+        for kw in ({"A": 0.0}, {"F": 0.5}):
+            r = self.go(**kw)
+            self.assertFalse(next(g for g in r.gates if g.name == "control_adequacy").passed, kw)
+            self.assertEqual((r.h1.verdict, r.h2.verdict, r.h3.verdict), (V.INCONCLUSIVE,) * 3, kw)
+
+    def test_gate11_e_loss_must_fall_for_trained_treatment(self):
+        self.assertEqual(self.go(loss=0.1).verdict, J.JOINT_SUPPORTED)
+        r = self.go(loss=0.9)
+        self.assertEqual((r.h1.verdict, r.h2.verdict, r.h3.verdict), (V.INCONCLUSIVE,) * 3)
+        self.assertEqual(r.verdict, J.JOINT_INCONCLUSIVE)
+
+    def test_unmeasured_gate_inputs_fail_not_pass(self):
+        sc = [bm.SeedScores.from_values(x.seed, 1, -.01, 1, 1, rowsets_disjoint=True, mask_ok=True)
+              for x in synth_scores(FZ.seeds)]
+        r = bm.analyze_scores(sc, frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        self.assertEqual({g.name for g in r.gates if not g.passed}, {"control_adequacy", "convergence"})
+
+    def test_c_conv_arm_is_E_at_converged_budget(self):
+        self.assertIn("C_conv", bm.ARM_NAMES)
+        s = FZ.seeds[0]
+        cc = dataclasses.replace(SMALL, steps=SMALL.steps_conv)
+        self.assertEqual(bm._arm_params(s, "C_conv", SMALL), bm._arm_params(s, "E", cc))
+        self.assertNotEqual(bm._arm_params(s, "C_conv", SMALL), bm._arm_params(s, "E", SMALL))
+        self.assertLessEqual(bm._arm_fit(s, "C_conv", SMALL).grad_ratio, SMALL.tau_conv)
+
+    def test_real_fixture_study_has_converged_components_measured(self):
+        h3 = oracle().h3
+        self.assertEqual(len(h3.converged_components), 2)
+        self.assertTrue(all(c.pair.mean.is_measured for c in h3.converged_components))
+
+    def test_i_norm_identity_trajectories(self):
+        """Protocol 4: per_mask_entry at lr/width reproduces per_masked_element at lr (an identity, not a
+        statistical hypothesis). Tolerance: abs 1e-9 + rel 1e-9 (fixed here)."""
+        w = 3
+        for seed in (1, 2, 3, 4):
+            mask = tuple(i % 2 == 0 for i in range(8))
+            a = bm.train(seed, steps=60, lr=0.05, rows=8, width=w, mask=mask, normalization="per_masked_element",
+                         timestamp_utc=bm.PINNED_TS)
+            b = bm.train(seed, steps=60, lr=0.05 / w, rows=8, width=w, mask=mask, normalization="per_mask_entry",
+                         timestamp_utc=bm.PINNED_TS)
+            for pa, pb in zip(a.final_params, b.final_params):
+                self.assertAlmostEqual(pa, pb, delta=1e-9 + 1e-9 * abs(pa))
+            for (_, la, _), (_, lb, _) in zip(a.history, b.history):
+                self.assertAlmostEqual(lb, w * la, delta=1e-9 + 1e-9 * abs(lb))   # loss is exactly width x larger
+
+    def test_required_n_hand_computed(self):
+        # margins 0.10/0.05/0.10 -> hw_max = 0.5*0.05 = 0.025. level 0.9875 -> z = Phi^-1(0.99375) = 2.4977.
+        # SD_max = 0.2: (2.4977*0.2/0.025)^2 = 19.98^2 = 399.2 -> n_req 400.
+        n_planned, n_req, capped = bm.required_n([0.1, 0.2, 0.05], bm.Margins(), 0.9875)
+        self.assertEqual((n_planned, n_req, capped), (400, 400, False))
+        # SD_max = 0.05: (2.4977*0.05/0.025)^2 = 24.95 -> 25 < floor 100
+        self.assertEqual(bm.required_n([0.05], bm.Margins(), 0.9875)[:2], (100, 25))
+        self.assertTrue(bm.required_n([0.2], bm.Margins(), 0.9875, n_cap=300)[2])
+        with self.assertRaises(ValueError):
+            bm.required_n([], bm.Margins(), 0.9875)
+
+    def test_tail_ratio_flag_has_threshold(self):
+        heavy = [0.01] * 29 + [5.0]
+        p = bm.summarize("t", heavy, 0.95, 100, 1, tail_ratio_max=10.0)
+        self.assertTrue(any(f.startswith("heavy tail") for f in p.flags))
+        p2 = bm.summarize("t", [1.0 + .01 * i for i in range(30)], 0.95, 100, 1, tail_ratio_max=10.0)
+        self.assertFalse(any(f.startswith("heavy tail") for f in p2.flags))
+
+
+class Gate11IsGlobal(unittest.TestCase):
+    """Orchestrator decision: a failed gate 11 invalidates the C0 contrast in BOTH directions, so it forces
+    H1, H2 and H3 (and JOINT) to INCONCLUSIVE. It is a true gate, unlike gate 12."""
+    CASES = {"A too small": {"A": 0.0}, "F too large": {"F": 0.5}, "E loss did not fall": {"loss": 0.9}}
+
+    def go(self, **kw):
+        return bm.analyze_scores(synth_scores(FZ.seeds, **kw), frozen=FZ, registered_digest=FZ.digest,
+                                 subject="syn", cfg=SMALL)
+
+    def test_each_failure_mode_makes_each_hypothesis_and_joint_inconclusive(self):
+        for label, kw in self.CASES.items():
+            r = self.go(**kw)
+            self.assertFalse(next(g for g in r.gates if g.name == "control_adequacy").passed, label)
+            for h in (r.h1, r.h2, r.h3):
+                self.assertEqual(h.verdict, V.INCONCLUSIVE, (label, h.hid))
+                self.assertTrue(any("control_adequacy" in x for x in h.reasons), (label, h.hid))
+            self.assertEqual(r.verdict, J.JOINT_INCONCLUSIVE, label)
+            self.assertFalse(r.gates_ok)
+
+    def test_previously_reachable_unsupported_on_bad_control_is_gone(self):
+        # H3 clearly UNSUPPORTED on its own intervals (d = -1) ...
+        ok = self.go(d=-1.0)
+        self.assertEqual((ok.h3.verdict, ok.verdict), (V.UNSUPPORTED, J.JOINT_UNSUPPORTED))   # control: gate 11 passing
+        # ... but with gate 11 failed it must NOT be reported as UNSUPPORTED (nor JOINT_UNSUPPORTED)
+        for kw in self.CASES.values():
+            r = self.go(d=-1.0, **kw)
+            self.assertEqual([c.verdict for c in r.h3.components][0], V.UNSUPPORTED)   # raw interval still says so
+            self.assertEqual(r.h3.verdict, V.INCONCLUSIVE)
+            self.assertEqual(r.verdict, J.JOINT_INCONCLUSIVE)
+
+    def test_degrader_on_inadequate_control_is_inconclusive_not_unsupported(self):
+        bad = dataclasses.replace(SMALL, eps_fit=1e-9)          # F can never pass: control declared inadequate
+        r = bm.run_study(FZ, bm.fixture_global_degrader(0.5), subject="d", registered_digest=FZ.digest, cfg=bad)
+        self.assertFalse(next(g for g in r.gates if g.name == "control_adequacy").passed)
+        self.assertEqual(r.verdict, J.JOINT_INCONCLUSIVE)
+        self.assertEqual(study(bm.fixture_global_degrader(0.5), "d").verdict, J.JOINT_UNSUPPORTED)   # control
+
+    def test_recompute_from_records_treats_gate11_as_global(self):
+        recs = bm.to_experiment_records(study(bm.fixture_global_degrader(0.5), "d"), study_id="f", base_seed=7,
+                                        timestamp_utc="2025-01-02T03:04:05Z")
+        self.assertEqual(bm.verdict_from_records(recs, SMALL).joint, J.JOINT_UNSUPPORTED)
+        j = next(r for r in recs if r.name.endswith("/JOINT"))
+        bad = dataclasses.replace(j, metrics={**j.metrics, "gate_control_adequacy": MetricValue.measured(0.0)})
+        rv = bm.verdict_from_records([bad if r is j else r for r in recs], SMALL)
+        self.assertEqual((rv.joint, rv.h1, rv.h2, rv.h3), (J.JOINT_INCONCLUSIVE,) + (V.INCONCLUSIVE,) * 3)
+
+    def test_only_gate12_remains_scoped(self):
+        self.assertEqual({n for n, sc in bm.GATE_SCOPES.items() if sc != "all"}, {"convergence"})
+
+    def test_gate_levels_are_the_adjusted_bonferroni_level(self):
+        seen = []
+        real = bm.summarize
+
+        def spy(name, values, level, *a, **k):
+            seen.append((name, level))
+            return real(name, values, level, *a, **k)
+        with mock.patch.object(bm, "summarize", spy):
+            self.go()
+        g11 = [lv for n, lv in seen if n.startswith("gate11:")]
+        self.assertEqual(len(g11), 2)                       # A and F
+        conv = [lv for n, lv in seen if n.startswith("H3:") and "conv" in n]
+        self.assertEqual(len(conv), 2)
+        self.assertEqual(set(g11 + conv), {0.9875})         # same level as the family, not 95%
+        self.assertTrue(all(lv == 0.9875 for n, lv in seen if n.startswith(("H1", "H2", "H3"))))
+
+    def test_gate11_intervals_are_bootstrap_and_block_only(self):
+        # A passes only if the bootstrap LOWER bound clears delta_A; being above on the mean alone is not enough
+        vals_hi = synth_scores(FZ.seeds, A=0.5)
+        self.assertTrue(next(g for g in bm.evaluate_gates(vals_hi, FZ, FZ.digest, SMALL) if g.name == "control_adequacy").passed)
+        r = self.go()
+        self.assertEqual(r.verdict, J.JOINT_SUPPORTED)      # passing gate 11 never creates a verdict by itself
+        bad = self.go(A=0.0)
+        self.assertEqual(bad.verdict, J.JOINT_INCONCLUSIVE)  # failing never creates UNSUPPORTED/SUPPORTED either
+
+
+class TrainedStudentCannotBeExempted(unittest.TestCase):
+    """The gate-11(c) exemption is an explicit declaration by the subject, never a default."""
+
+    def test_kinds(self):
+        self.assertEqual(bm.treatment_kind(bm.ARM_FACTORIES["E"]), "trained")
+        for f in (bm.fixture_oracle_gated, bm.fixture_identity_uncond, bm.fixture_global_degrader(0.5)):
+            self.assertEqual(bm.treatment_kind(f), "fixture")
+        self.assertEqual(bm.treatment_kind(lambda fx, cfg: None), "unknown")
+        both = bm.fixture_global_degrader(0.5)
+        both.trained_student = True
+        with self.assertRaises(ValueError):
+            bm.treatment_kind(both)
+
+    def test_no_caller_flag_can_grant_the_exemption_to_score_seed(self):
+        with self.assertRaises(TypeError):
+            bm.score_seed(FZ.seeds[0], bm.ARM_FACTORIES["E"], SMALL, trained=False)
+
+    def test_wrapped_trained_student_is_not_exempt(self):
+        wrapped = lambda fx, cfg: bm.ARM_FACTORIES["E"](fx, cfg)      # loses its declaration
+        self.assertEqual(bm.treatment_kind(wrapped), "unknown")
+        s = bm.score_seed(FZ.seeds[0], wrapped, SMALL)
+        self.assertFalse(s.metrics["E_loss_ratio"].is_measured)
+        self.assertIn("undeclared", s.metrics["E_loss_ratio"].reason)
+
+    def test_undeclared_factory_fails_gate11_in_a_study(self):
+        wrapped = lambda fx, cfg: bm.fixture_oracle_gated(fx, cfg)    # an honest fixture, but undeclared
+        r = bm.run_study(FZ, wrapped, subject="undeclared", registered_digest=FZ.digest, cfg=SMALL)
+        g = next(g for g in r.gates if g.name == "control_adequacy")
+        self.assertFalse(g.passed)
+        self.assertIn("E_loss_ratio", g.reason)
+        self.assertEqual(r.verdict, J.JOINT_INCONCLUSIVE)
+        self.assertEqual(oracle().verdict, J.JOINT_SUPPORTED)          # declared fixture: exempt, control
+
+    def test_declared_trained_arm_gets_a_measured_loss_ratio(self):
+        # instrument check on one seed only; the value is not recorded or interpreted
+        s = bm.score_seed(FZ.seeds[0], bm.ARM_FACTORIES["E"], SMALL)
+        self.assertTrue(s.metrics["E_loss_ratio"].is_measured)
+        self.assertEqual(s.metrics["E_loss_ratio"].value, bm._arm_fit(FZ.seeds[0], "E", SMALL).loss_ratio)
+
+    def test_exempt_default_is_false_in_analyze_scores(self):
+        sc = [bm.SeedScores.from_values(x.seed, 1, -.01, 1, 1, A=.5, F=.005, delta_conv=1, delta_minus_shuf_conv=1,
+                                        conv_grad_ratio=1e-5, rowsets_disjoint=True, mask_ok=True)
+              for x in synth_scores(FZ.seeds)]                        # E_loss_ratio not supplied
+        r = bm.analyze_scores(sc, frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        self.assertFalse(next(g for g in r.gates if g.name == "control_adequacy").passed)
+        r2 = bm.analyze_scores(sc, frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL,
+                               loss_check_exempt=True)
+        self.assertTrue(next(g for g in r2.gates if g.name == "control_adequacy").passed)
+
+
+class IneligibleVersusFailed(unittest.TestCase):
+    """Defect 4: a TRAIN mask with < 2 rows is an ineligible seed (listed, replaced), not a failed run."""
+
+    def degenerate_first_train_draw(self):
+        orig, calls = bm._rows, {"n": 0}
+
+        def fake(rng, n, width, want):
+            if want is None:
+                calls["n"] += 1
+                if calls["n"] == 1:      # first replicate's TRAIN rows all outside the region
+                    return tuple((-0.5, -0.1 * (i + 1), 0.2) for i in range(n))
+            return orig(rng, n, width, want)
+        return mock.patch.object(bm, "_rows", fake)
+
+    def setUp(self):
+        bm.build_fixture.cache_clear()
+
+    def tearDown(self):
+        bm.build_fixture.cache_clear()
+
+    def test_listed_replaced_and_not_counted_as_failure(self):
+        fz = bm.freeze_seed_list(7, 3, n_reserve=2)
+        with self.degenerate_first_train_draw():
+            r = bm.run_study(fz, bm.fixture_identity_uncond, subject="x", registered_digest=fz.digest, cfg=SMALL)
+        self.assertEqual(r.ineligible, (fz.seeds[0],))
+        self.assertEqual([s.seed for s in r.seed_scores], list(fz.seeds[1:4]))
+        self.assertEqual((r.n_attempted, r.n_failed), (3, 0))
+        self.assertTrue(next(g for g in r.gates if g.name == "failure_rate").passed)
+
+    def test_score_seed_raises_ineligible_not_a_failed_record(self):
+        with self.degenerate_first_train_draw():
+            with self.assertRaises(bm.IneligibleSeed):
+                bm.score_seed(FZ.seeds[0], bm.fixture_identity_uncond, SMALL)
+
+    def test_mask_validation_is_outcome_independent(self):
+        self.assertTrue(issubclass(bm.IneligibleSeed, ValueError))
+
+
+class RecordsAndRecompute(unittest.TestCase):
+    """Defect 5 and 3 (record schema): no verdict in notes; the verdict is recomputable from metrics."""
+    TS = "2025-01-02T03:04:05Z"
+    WORDS = ("SUPPORTED", "UNSUPPORTED", "INCONCLUSIVE", "safe")
+
+    def recs(self, res):
+        return bm.to_experiment_records(res, study_id="f", base_seed=7, timestamp_utc=self.TS, scorer_validation=True)
+
+    def test_notes_carry_no_verdict_text(self):
+        res = oracle()
+        for rec in self.recs(res) + bm.seed_records(res, study_id="f", timestamp_utc=self.TS):
+            for w in self.WORDS:
+                self.assertNotIn(w, rec.notes.replace("not a safety claim", ""), rec.name)
+
+    def test_recompute_matches_for_three_fixtures(self):
+        for fac, name in ((bm.fixture_oracle_gated, "o"), (bm.fixture_global_degrader(0.5), "d"),
+                          (bm.fixture_identity_uncond, "i")):
+            res = oracle() if name == "o" else study(fac, name)
+            rv = bm.verdict_from_records(self.recs(res), SMALL)
+            self.assertEqual((rv.joint, rv.h1, rv.h2, rv.h3), (res.verdict, res.h1.verdict, res.h2.verdict, res.h3.verdict))
+
+    def test_notes_text_is_ignored_by_recompute(self):
+        res = study(bm.fixture_global_degrader(0.5), "d")
+        evil = [dataclasses.replace(r, notes="verdict: JOINT_SUPPORTED; model is safe") for r in self.recs(res)]
+        self.assertEqual(bm.verdict_from_records(evil, SMALL).joint, J.JOINT_UNSUPPORTED)
+
+    def test_failed_or_missing_gate_in_records_forces_inconclusive(self):
+        recs = self.recs(oracle())
+        self.assertEqual(bm.verdict_from_records(recs, SMALL).joint, J.JOINT_SUPPORTED)
+        j = next(r for r in recs if r.name.endswith("/JOINT"))
+        for tamper in ({"gate_min_seeds": MetricValue.measured(0.0)},
+                       {"gate_seed_list_frozen": MetricValue.unmeasured("not recorded")}):
+            bad = dataclasses.replace(j, metrics={**j.metrics, **tamper})
+            rv = bm.verdict_from_records([bad if r is j else r for r in recs], SMALL)
+            self.assertEqual(rv.joint, J.JOINT_INCONCLUSIVE)
+        # gate 12 failure recorded => H3 cannot be SUPPORTED
+        bad = dataclasses.replace(j, metrics={**j.metrics, "gate_convergence": MetricValue.measured(0.0)})
+        self.assertEqual(bm.verdict_from_records([bad if r is j else r for r in recs], SMALL).h3, V.INCONCLUSIVE)
+
+    def test_recompute_requires_all_records_and_toy_result(self):
+        recs = self.recs(oracle())
+        with self.assertRaises(ValueError):
+            bm.verdict_from_records([r for r in recs if not r.name.endswith("H3a_conv")], SMALL)
+        unk = [dataclasses.replace(r, evidence_class=EvidenceClass.UNKNOWN) if r.name.endswith("/H1") else r
+               for r in recs]
+        with self.assertRaises(ValueError):
+            bm.verdict_from_records(unk, SMALL)
+
+    def test_record_schema_per_section_8a(self):
+        res = oracle()
+        sr = bm.seed_records(res, study_id="f", timestamp_utc=self.TS, prereg_hash="a" * 64, amendments_hash="b" * 64)
+        self.assertTrue(all(r.name == "evalproto/f/oracle_gated" for r in sr))
+        keys = set(sr[0].provenance.input_hashes)
+        self.assertTrue({"prereg", "amendments", "seed_list", "config", "train_rows", "eval_T", "eval_U"} <= keys)
+        self.assertEqual(sr[0].metrics["gate_finite"].value, 1.0)
+        self.assertEqual(sr[0].metrics["gate_disjoint"].value, 1.0)
+        for k in bm.SEED_METRICS:
+            self.assertIn(k, sr[0].metrics)
+        self.assertFalse(sr[0].metrics["E_loss_ratio"].is_measured)   # not a trained student: unmeasured, not 0
+        self.assertNotIn("prereg", self.recs(res)[0].provenance.input_hashes)   # absent unless supplied
+
+    def test_planned_slots_are_unknown_and_unmeasured(self):
+        slots = bm.planned_slot_records(study_id="f", arms=["E", "C0"], seeds=list(FZ.seeds[:2]), timestamp_utc=self.TS)
+        self.assertEqual(len(slots), 4)
+        for r in slots:
+            self.assertIs(r.evidence_class, EvidenceClass.UNKNOWN)
+            self.assertTrue(all(not m.is_measured for m in r.metrics.values()))
+
+    def test_direct_joint_result_refuses_empty_or_partial_gates(self):
+        o = oracle()
+        fields = {f.name: getattr(o, f.name) for f in dataclasses.fields(bm.JointResult)}
+        for gates in ((), o.gates[:-1]):
+            with self.assertRaises(ValueError):
+                bm.JointResult(**{**fields, "gates": gates})
+        with self.assertRaises(TypeError):
+            bm.HypothesisResult("H1", o.h1.components, verdict=V.SUPPORTED)   # verdicts are derived, not supplied
 
 
 if __name__ == "__main__":

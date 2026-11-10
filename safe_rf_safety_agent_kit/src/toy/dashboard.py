@@ -34,6 +34,7 @@ Structural guards against displaying an unsupported claim as confirmed
 from __future__ import annotations
 
 import html
+import inspect
 import json
 import math
 import tempfile
@@ -41,8 +42,8 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
-from toy.benchmark import JointResult, HypothesisResult, IntervalPair, Verdict, JointVerdict, combine_joint
-from toy.benchmark import interval_verdict as bm_interval_verdict
+from toy import benchmark as bm  # attributes are looked up at call time so API drift is detected
+from toy.benchmark import JointResult, HypothesisResult, IntervalPair, Verdict, JointVerdict
 from toy.schema import EvidenceClass, ExperimentRecord, MetricValue
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -371,20 +372,101 @@ def _interval(lo: Any, hi: Any) -> str:
     return _unknown("interval not computable")
 
 
-def _eff_component(c: Any, gates_ok: bool = True) -> Optional[Verdict]:
-    """Component verdict RECOMPUTED from the interval and margin; the stored verdict is never trusted.
-    If recomputation disagrees with the stored value, the weaker INCONCLUSIVE is shown."""
-    stored = _vcoerce(Verdict, getattr(c, "verdict", None))
-    if stored is None:
-        return None
-    pair = getattr(c, "pair", None)
+def _contract_problems() -> list:
+    """Check, at render time, the parts of the scorer API the recomputation relies on. Any problem makes the
+    scorecard withhold EVERY decisive verdict and say so on the page (fail loud, never fall back silently)."""
+    probs = []
     try:
-        re_v, _ = bm_interval_verdict(pair, float(c.margin), c.direction)
-    except Exception:
-        return Verdict.INCONCLUSIVE
-    if not gates_ok or re_v is not stored:
-        return Verdict.INCONCLUSIVE  # failed gate or stored/recomputed disagreement: never decisive
-    return stored
+        params = list(inspect.signature(bm.interval_verdict).parameters)
+        if params[:3] != ["pair", "margin", "direction"] or not {"width_tol", "min_n"} <= set(params):
+            probs.append(f"interval_verdict signature changed: {params}")
+    except Exception as ex:  # noqa: BLE001 - any failure is a contract problem
+        probs.append(f"interval_verdict not inspectable: {type(ex).__name__}")
+    if {v.value for v in Verdict} != {"SUPPORTED", "UNSUPPORTED", "INCONCLUSIVE"}:
+        probs.append("Verdict members changed")
+    if {v.value for v in JointVerdict} != {"JOINT_SUPPORTED", "JOINT_UNSUPPORTED", "JOINT_INCONCLUSIVE"}:
+        probs.append("JointVerdict members changed")
+    if not isinstance(getattr(bm, "GATE_SCOPES", None), dict):
+        probs.append("GATE_SCOPES missing")
+    return probs
+
+
+def _recompute(c: Any) -> Optional[Verdict]:
+    """Verdict recomputed from the interval alone. None means 'could not recompute' (treated as a mismatch)."""
+    try:
+        v, _ = bm.interval_verdict(c.pair, float(c.margin), c.direction,
+                                   getattr(c, "width_tol", 0.25), getattr(c, "min_n", 30))
+        return Verdict(v)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _gate_scope(g: Any) -> str:
+    try:
+        return str(g.scope)
+    except Exception:  # noqa: BLE001 - unknown gate/scope: treat as global (fail safe)
+        return "all"
+
+
+def _failed(g: Any) -> bool:
+    return getattr(g, "passed", None) is not True
+
+
+def _eff_component(c: Any, withheld: bool, contract_bad: bool) -> tuple:
+    """(displayed verdict or None, mismatch). Decisive only if stored AND recomputed agree and nothing withholds it."""
+    stored = _vcoerce(Verdict, getattr(c, "verdict", None))
+    rec = _recompute(c)
+    if stored is None or rec is None or rec is not stored:
+        return Verdict.INCONCLUSIVE, True
+    if withheld or contract_bad:
+        return Verdict.INCONCLUSIVE, False
+    return stored, False
+
+
+def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool) -> tuple:
+    """(displayed verdict, mismatch). Decisive only if the stored hypothesis verdict equals an independent
+    recomputation from recomputed component verdicts, scope-aware gates, and (H3) converged components."""
+    rc = [_recompute(c) for c in h.components]
+    mismatch = any(_eff_component(c, False, False)[1] for c in h.components)
+    if None in rc:
+        return Verdict.INCONCLUSIVE, True
+    blocked = bool(getattr(h, "blocking", ())) or any(
+        _failed(g) and (_gate_scope(g) == "all" or h.hid in _gate_scope(g) or _gate_scope(g) not in _KNOWN_SCOPES)
+        for g in gates)
+    sup_block = bool(getattr(h, "supported_blockers", ())) or any(
+        _failed(g) and _gate_scope(g) == "H3" for g in gates) and h.hid == "H3"
+    if blocked:
+        rv = Verdict.INCONCLUSIVE
+    elif Verdict.UNSUPPORTED in rc:
+        rv = Verdict.UNSUPPORTED
+    elif all(v is Verdict.SUPPORTED for v in rc):
+        rv = Verdict.SUPPORTED
+    else:
+        rv = Verdict.INCONCLUSIVE
+    if rv is Verdict.SUPPORTED and h.hid == "H3":
+        conv = tuple(getattr(h, "converged_components", ()) or ())
+        if sup_block or not conv or not all(_recompute(c) is Verdict.SUPPORTED for c in conv):
+            rv = Verdict.INCONCLUSIVE
+    stored = _vcoerce(Verdict, getattr(h, "verdict", None))
+    if stored is not rv:
+        return Verdict.INCONCLUSIVE, True
+    return (Verdict.INCONCLUSIVE if contract_bad else rv), mismatch
+
+
+_KNOWN_SCOPES = ("all", "H1H2", "H3")
+
+
+def _combine(h1: Verdict, h2: Verdict, h3: Verdict, gates_ok: bool) -> JointVerdict:
+    """Protocol section 5, deliberately re-implemented (not bm.combine_joint) so a bug or drift there is a
+    detectable disagreement rather than a shared blind spot."""
+    vs = (h1, h2, h3)
+    if not gates_ok:
+        return JointVerdict.JOINT_INCONCLUSIVE
+    if Verdict.UNSUPPORTED in vs:
+        return JointVerdict.JOINT_UNSUPPORTED
+    if all(v is Verdict.SUPPORTED for v in vs):
+        return JointVerdict.JOINT_SUPPORTED
+    return JointVerdict.JOINT_INCONCLUSIVE
 
 
 def _joint_wellformed(j: Any) -> bool:
@@ -395,7 +477,7 @@ def _joint_wellformed(j: Any) -> bool:
             return False
         if not all(isinstance(c.pair, IntervalPair) for c in h.components):
             return False
-    return isinstance(j.gates, tuple) and all(hasattr(g, "passed") for g in j.gates)
+    return isinstance(j.gates, tuple) and bool(j.gates) and all(hasattr(g, "passed") for g in j.gates)
 
 
 _HNAMES = {"H1": "Suppression (S)", "H2": "Retention (L)", "H3": "Selectivity (delta)"}
@@ -403,78 +485,88 @@ _HNAMES = {"H1": "Suppression (S)", "H2": "Retention (L)", "H3": "Selectivity (d
 
 def render_scorecard(joint: Any) -> str:
     """Render a whole JointResult as a panel. There is no API to render H1 alone: suppression and
-    retention/selectivity are always in the same table. A malformed object is refused with NO figures."""
+    retention/selectivity are always in the same table. A malformed object is refused with NO figures.
+    Decisive verdicts are shown only where the stored value and an independent recomputation agree; any
+    disagreement, recomputation failure or scorer-API change is shown loudly and displays INCONCLUSIVE."""
     if not _joint_wellformed(joint):
         return _panel("Benchmark scorecard", EvidenceClass.UNKNOWN,
                       '<p class="warn">REFUSED: not a complete JointResult (H1 suppression, H2 retention and H3 '
                       'selectivity must be reported together). No figures shown.</p>')
-    gates_ok = all(g.passed is True for g in joint.gates)
-    eff_h = {}
-    rows = ""
+    problems = _contract_problems()
+    bad = bool(problems)
+    gates = tuple(joint.gates)
+    any_failed = any(_failed(g) for g in gates)
     mismatch = []
+    eff = {}
+    rows = ""
     for h in (joint.h1, joint.h2, joint.h3):
-        comps = [_eff_component(c, gates_ok) for c in h.components]
-        if None in comps:
-            ev = None
-        elif not gates_ok:
-            ev = Verdict.INCONCLUSIVE
-        elif Verdict.UNSUPPORTED in comps:
-            ev = Verdict.UNSUPPORTED
-        elif all(c is Verdict.SUPPORTED for c in comps):
-            ev = Verdict.SUPPORTED
-        else:
-            ev = Verdict.INCONCLUSIVE
-        eff_h[h.hid] = ev
-        stored = _vcoerce(Verdict, h.verdict)
-        if stored is not ev or any(_eff_component(c, True) is not _vcoerce(Verdict, getattr(c, 'verdict', None)) for c in h.components):
+        ev, mm = _eff_hypothesis(h, gates, bad)
+        eff[h.hid] = ev
+        if mm:
             mismatch.append(h.hid)
-        for i, c in enumerate(h.components):
-            pair = c.pair
-            ecv = _eff_component(c, gates_ok)
-            margin = c.margin if isinstance(c.margin, (int, float)) and not isinstance(c.margin, bool) \
-                and math.isfinite(c.margin) else None
-            rows += (
-                f"<tr><td>{_e(h.hid)} {_e(_HNAMES[h.hid])}</td><td>{_e(_visible(str(c.metric)))}</td>"
-                f"<td>{_e(_visible(str(c.direction)))} {_e(_num(margin)) if margin is not None else _unknown('margin')}</td>"
-                f"<td>{_metric_cell(pair.mean)}</td><td>{_interval(pair.boot_lo, pair.boot_hi)}</td>"
-                f"<td>{_interval(pair.t_lo, pair.t_hi)}</td><td>{_e(pair.n) if isinstance(pair.n, int) else _unknown('n')}</td>"
-                f"<td>{_verdict_cell(ecv)}</td><td>{_e(_visible(str(c.reason))[:MAX_TEXT])}</td></tr>")
-        hv = _verdict_cell(ev, note=" [hypothesis-level]")
-        rows += f"<tr><th colspan=7>{_e(h.hid)} hypothesis verdict</th><td colspan=2>{hv}</td></tr>"
-    if None in eff_h.values():
+        groups = [(h.components, "")]
+        conv = tuple(getattr(h, "converged_components", ()) or ()) if h.hid == "H3" else ()
+        if conv:
+            groups.append((conv, " (converged-budget)"))
+        for comps, suffix in groups:
+            for c in comps:
+                pair = c.pair
+                ecv, cmm = _eff_component(c, any_failed, bad)
+                if cmm and h.hid not in mismatch:
+                    mismatch.append(h.hid)
+                margin = c.margin if isinstance(c.margin, (int, float)) and not isinstance(c.margin, bool) \
+                    and math.isfinite(c.margin) else None
+                rows += (
+                    f"<tr><td>{_e(h.hid)} {_e(_HNAMES[h.hid])}{_e(suffix)}</td><td>{_e(_visible(str(c.metric)))}</td>"
+                    f"<td>{_e(_visible(str(c.direction)))} {_e(_num(margin)) if margin is not None else _unknown('margin')}</td>"
+                    f"<td>{_metric_cell(pair.mean)}</td><td>{_interval(pair.boot_lo, pair.boot_hi)}</td>"
+                    f"<td>{_interval(pair.t_lo, pair.t_hi)}</td>"
+                    f"<td>{_e(pair.n) if isinstance(pair.n, int) else _unknown('n')}</td>"
+                    f"<td>{_e(_num(pair.level)) if isinstance(pair.level, float) else _unknown('level')}</td>"
+                    f"<td>{_verdict_cell(ecv)}</td></tr>")
+        rows += f"<tr><th colspan=8>{_e(h.hid)} hypothesis verdict</th><td>{_verdict_cell(ev, note=' [hypothesis-level]')}</td></tr>"
+    try:
+        stored_j = _vcoerce(JointVerdict, joint.verdict)
+    except Exception:  # noqa: BLE001
+        stored_j = None
+    gates_ok = not any(_failed(g) for g in gates if _gate_scope(g) == "all" or _gate_scope(g) not in _KNOWN_SCOPES)
+    try:
+        jv = _combine(eff["H1"], eff["H2"], eff["H3"], gates_ok)   # independent of bm.combine_joint on purpose
+    except Exception:  # noqa: BLE001
         jv = None
-    else:
-        jv = combine_joint(eff_h["H1"], eff_h["H2"], eff_h["H3"], gates_ok)
-    if _vcoerce(JointVerdict, joint.verdict if _joint_prop_ok(joint) else None) is not jv:
+    if jv is None or jv is not stored_j:
         mismatch.append("JOINT")
-    deferred = tuple(joint.deferred_gates) if isinstance(joint.deferred_gates, (tuple, list)) else ()
-    cond = (f" CONDITIONAL on {len(deferred)} unimplemented gate(s)" if deferred or not joint.complete_gate_coverage
-            else "")
+        jv = JointVerdict.JOINT_INCONCLUSIVE
+    if bad:
+        jv = JointVerdict.JOINT_INCONCLUSIVE
+    deferred = tuple(joint.deferred_gates) if isinstance(getattr(joint, "deferred_gates", None), (tuple, list)) else ()
+    cond = f" CONDITIONAL on {len(deferred)} unimplemented gate(s)" if deferred or joint.complete_gate_coverage is not True else ""
     gate_rows = "".join(
         f"<tr><td>{_untrusted(g.name, 'gate')}</td><td>{'PASS' if g.passed is True else 'FAIL'}</td>"
-        f"<td>{_e(_visible(str(g.reason))[:MAX_TEXT])}</td></tr>" for g in joint.gates)
-    body = (f"<p>Subject: {_untrusted(joint.subject, 'subject')}</p>"
-            f"<table><tr><th>hypothesis</th><th>metric</th><th>direction, margin</th><th>mean</th>"
-            f"<th>bootstrap interval</th><th>t interval</th><th>n</th><th>component verdict</th><th>reason</th></tr>"
-            f"{rows}</table>"
-            f"<p><b>Joint verdict:</b> {_verdict_cell(jv, note=cond)}</p>"
-            f"<p>Attempted {_int_or_unk(joint.n_attempted)}, failed {_int_or_unk(joint.n_failed)}. "
-            f"Complete gate coverage: {'yes' if joint.complete_gate_coverage is True else 'NO'}.</p>"
-            f"<table><tr><th>validity gate</th><th>result</th><th>detail</th></tr>{gate_rows}</table>")
-    if mismatch:
-        body += (f'<p class="warn">Stored verdict(s) for {_e(", ".join(mismatch))} disagree with the structured '
-                 f'fields and are NOT shown; the recomputed value above is used.</p>')
-    body += ('<p class="caveat">Verdicts are recomputed from intervals and gates. They describe a scorer run on '
-             'synthetic toy data and say nothing about any real model. Margins are arbitrary protocol parameters.</p>')
-    return _panel("Benchmark scorecard", EvidenceClass.TOY_RESULT, body, extra=(EvidenceClass.NOT_VALIDATED,))
-
-
-def _joint_prop_ok(j: JointResult) -> bool:
+        f"<td>{_e(_visible(str(g.reason))[:MAX_TEXT])}</td></tr>" for g in gates)
     try:
-        j.verdict
-        return True
-    except Exception:
-        return False
+        fam = f"{bm.N_PRIMARY} primary intervals, Bonferroni level {_num(bm.bonferroni_level())} (read from the scorer)"
+    except Exception:  # noqa: BLE001
+        fam = "family size/level UNKNOWN"
+    body = ""
+    if bad:
+        body += ('<p class="warn">SCORER/RENDERER CONTRACT PROBLEM: ' + _e("; ".join(problems)) +
+                 '. All decisive verdicts are withheld (INCONCLUSIVE shown).</p>')
+    body += (f"<p>Subject: {_untrusted(joint.subject, 'subject')}</p><p class=\"caveat\">{_e(fam)}</p>"
+             f"<table><tr><th>hypothesis</th><th>metric</th><th>direction, margin</th><th>mean</th>"
+             f"<th>bootstrap interval</th><th>t interval</th><th>n</th><th>level</th><th>verdict</th></tr>"
+             f"{rows}</table>"
+             f"<p><b>Joint verdict:</b> {_verdict_cell(jv, note=cond)}</p>"
+             f"<p>Attempted {_int_or_unk(joint.n_attempted)}, failed {_int_or_unk(joint.n_failed)}. "
+             f"Complete gate coverage: {'yes' if joint.complete_gate_coverage is True else 'NO'}.</p>"
+             f"<table><tr><th>validity gate</th><th>result</th><th>detail</th></tr>{gate_rows}</table>")
+    if mismatch:
+        body += (f'<p class="warn">Stored verdict(s) for {_e(", ".join(mismatch))} disagree with an independent '
+                 f'recomputation (or could not be recomputed) and are NOT shown; INCONCLUSIVE is displayed.</p>')
+    body += ('<p class="caveat">Verdicts are shown only when stored and recomputed values agree. They describe a '
+             'scorer run on synthetic toy data and say nothing about any real model. Margins are arbitrary '
+             'protocol parameters.</p>')
+    return _panel("Benchmark scorecard", EvidenceClass.TOY_RESULT, body, extra=(EvidenceClass.NOT_VALIDATED,))
 
 
 def _int_or_unk(v: Any) -> str:

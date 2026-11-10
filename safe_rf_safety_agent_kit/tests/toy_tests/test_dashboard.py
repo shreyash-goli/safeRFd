@@ -5,6 +5,7 @@ import re
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -19,13 +20,30 @@ FZ = bm.freeze_seed_list(7, 30)
 TS = "2026-01-01T00:00:00Z"
 
 
-def joint(S=1.0, L=-0.01, d=1.0, dms=1.0, seeds=None, registered="auto"):
+def joint(S=None, L=0.0, d=None, dms=None, seeds=None, registered="auto", conv=True, gates_inputs=True):
+    """Built through the REAL entry point (analyze_scores). Every level is derived from the scorer's own
+    margins/thresholds with a 10x cushion and noise 1/20 of the margin, so a Bonferroni-level change does not
+    flip the intended verdict. Pass S=0.0 etc. to make a genuinely non-supporting fixture."""
+    m, cfg = bm.Margins(), SMALL
+    S = 10 * m.delta_S if S is None else S
+    d = 10 * m.delta_sel if d is None else d
+    dms = 10 * m.delta_sel if dms is None else dms
     r = random.Random(1)
     seeds = FZ.seeds if seeds is None else seeds
-    sc = [bm.SeedScores.from_values(s, S + r.gauss(0, .05), L + r.gauss(0, .005), d + r.gauss(0, .05),
-                                    dms + r.gauss(0, .05), rowsets_disjoint=True, mask_ok=True) for s in seeds]
+    kw = {}
+    sc = []
+    for s_ in seeds:
+        extra = {}
+        if gates_inputs:
+            extra = dict(A=cfg.delta_A * 10 + r.gauss(0, cfg.delta_A / 10), F=cfg.eps_fit / 10,
+                         conv_grad_ratio=cfg.tau_conv / 10)
+        if conv:
+            extra.update(delta_conv=d + r.gauss(0, m.delta_sel / 20), delta_minus_shuf_conv=dms + r.gauss(0, m.delta_sel / 20))
+        sc.append(bm.SeedScores.from_values(
+            s_, S + r.gauss(0, m.delta_S / 20), L + r.gauss(0, m.delta_R / 20), d + r.gauss(0, m.delta_sel / 20),
+            dms + r.gauss(0, m.delta_sel / 20), rowsets_disjoint=True, mask_ok=True, **extra))
     return bm.analyze_scores(sc, frozen=FZ, registered_digest=FZ.digest if registered == "auto" else registered,
-                             subject="synthetic", cfg=SMALL)
+                             subject="synthetic", cfg=cfg)
 
 
 def rec(name="n", notes=None, ec=EC.TOY_RESULT, run_id="r1", code="c1", metrics=None):
@@ -180,9 +198,16 @@ class Injection(unittest.TestCase):
 
     def test_gate_and_reason_text(self):
         j = joint()
-        g = dataclasses.replace(j.gates[0], name=self.P, reason=self.P)
-        j = dataclasses.replace(j, gates=(g,) + j.gates[1:])
+        gs = tuple(dataclasses.replace(g, reason=self.P) for g in j.gates)
+        j = dataclasses.replace(j, gates=gs)          # complete, valid gate set: only the free text differs
         self.check(db.render_scorecard(j))
+        # gate NAME is validated upstream, so reach it by bypassing the frozen dataclass; the renderer must
+        # still escape it AND survive the resulting unknown scope (treated as a global failing-safe scope).
+        g0 = j.gates[0]
+        object.__setattr__(g0, "name", self.P)
+        out = db.render_scorecard(j)
+        self.check(out)
+        self.assertNotIn("<script", out)
 
     def test_bidi_and_control_made_visible(self):
         h = db.render_dashboard({"records": [rec(name="a‮b\x00c\x1b[31m")]})
@@ -296,6 +321,82 @@ class CannotDisplayUnsupportedAsConfirmed(unittest.TestCase):
         h = db.render_dashboard({"joint": joint()})
         self.assertRegex(h, r'<section class="ev-hyp" data-evidence="HYPOTHESIS">')
         self.assertIn("NOT EVIDENCE", h)
+
+
+class ScorerDriftFailsLoudly(unittest.TestCase):
+    """If benchmark changes under the renderer it must degrade to a visible warning + INCONCLUSIVE."""
+
+    def decisive(self, h):
+        return re.findall(r'class="vd (vd-supported|vd-unsupported)"', h)
+
+    def test_genuine_supported_has_no_false_alarm(self):
+        h = db.render_scorecard(joint())
+        self.assertNotIn("NOT shown", h)
+        self.assertNotIn("CONTRACT PROBLEM", h)
+        self.assertIn('class="vd vd-supported">JOINT_SUPPORTED', h)
+        self.assertIn("converged-budget", h)
+
+    def test_signature_change_withholds_everything(self):
+        def new_sig(pair, margin):          # a plausible future signature change
+            return bm.Verdict.SUPPORTED, "stale"
+        j = joint()
+        with mock.patch.object(bm, "interval_verdict", new_sig):
+            h = db.render_scorecard(j)
+        self.assertIn("CONTRACT PROBLEM", h)
+        self.assertEqual(self.decisive(h), [])
+        self.assertIn("JOINT_INCONCLUSIVE", h)
+
+    def test_removed_function_withholds_everything(self):
+        j = joint()
+        with mock.patch.object(bm, "interval_verdict", None):
+            h = db.render_scorecard(j)
+        self.assertEqual(self.decisive(h), [])
+        self.assertIn("CONTRACT PROBLEM", h)
+
+    def test_semantics_drift_same_signature_is_detected(self):
+        def always_supported(pair, margin, direction, width_tol=0.25, min_n=30):
+            return bm.Verdict.SUPPORTED, "stale"
+        j = joint(S=0.0)                    # genuinely UNSUPPORTED, built before the drift
+        self.assertEqual(j.verdict, bm.JointVerdict.JOINT_UNSUPPORTED)
+        with mock.patch.object(bm, "interval_verdict", always_supported):
+            h = db.render_scorecard(j)
+        self.assertIn("NOT shown", h)
+        jp = re.search(r"<b>Joint verdict:</b>.*?</p>", h).group(0)
+        self.assertNotIn("vd-supported", jp)
+        self.assertNotIn("vd-unsupported", jp)
+
+    def test_semantics_drift_hides_a_true_supported(self):
+        def always_unsupported(pair, margin, direction, width_tol=0.25, min_n=30):
+            return bm.Verdict.UNSUPPORTED, "stale"
+        j = joint()
+        with mock.patch.object(bm, "interval_verdict", always_unsupported):
+            h = db.render_scorecard(j)
+        self.assertEqual(self.decisive(h), [])
+        self.assertIn("NOT shown", h)
+
+    def test_combine_joint_drift_detected(self):
+        with mock.patch.object(bm, "combine_joint", lambda *a, **k: bm.JointVerdict.JOINT_SUPPORTED):
+            j = joint(S=0.0)                # upstream's own stored joint verdict is now wrong too
+            self.assertEqual(j.verdict, bm.JointVerdict.JOINT_SUPPORTED)
+            h = db.render_scorecard(j)
+        self.assertIn("NOT shown", h)
+        jp = re.search(r"<b>Joint verdict:</b>.*?</p>", h).group(0)
+        self.assertNotIn("vd-supported", jp)
+
+    def test_h3_without_converged_components_cannot_be_supported(self):
+        j = joint(conv=False)
+        self.assertNotEqual(j.h3.verdict, bm.Verdict.SUPPORTED)
+        object.__setattr__(j.h3, "verdict", bm.Verdict.SUPPORTED)       # forge past the upstream guard
+        h = db.render_scorecard(j)
+        self.assertIn("NOT shown", h)
+        self.assertNotIn("JOINT_SUPPORTED", h)
+
+    def test_missing_gate_inputs_fail_closed_without_false_alarm(self):
+        j = joint(gates_inputs=False)
+        h = db.render_scorecard(j)
+        self.assertEqual(self.decisive(re.search(r"<b>Joint verdict:</b>.*?</p>", h).group(0)), [])
+        self.assertNotIn("NOT shown", h)           # genuine upstream INCONCLUSIVE agrees with the recomputation
+        self.assertIn("FAIL", h)
 
 
 class OneSidedScorecard(unittest.TestCase):

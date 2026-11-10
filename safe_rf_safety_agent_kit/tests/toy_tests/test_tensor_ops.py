@@ -25,10 +25,11 @@ CUDA_OK = T.device_available("cuda")
 MPS_OK = T.device_available("mps")
 
 requires_torch = unittest.skipUnless(T.TORCH_AVAILABLE, "torch not installed; torch tensor tests skipped")
+_WHY = "torch not installed" if not T.TORCH_AVAILABLE else None
 requires_cuda = unittest.skipUnless(
-    CUDA_OK, "CUDA not available: CPU-vs-CUDA comparison (ER-09) is UNKNOWN, not passed")
+    CUDA_OK, (f"{_WHY}; " if _WHY else "") + "CUDA not available: CPU-vs-CUDA comparison (ER-09) is UNKNOWN, not passed")
 requires_mps = unittest.skipUnless(
-    MPS_OK, "MPS not available (or probe op failed): CPU-vs-MPS comparison is UNKNOWN, not passed")
+    MPS_OK, (f"{_WHY}; " if _WHY else "") + "MPS not available (or probe op failed): CPU-vs-MPS comparison is UNKNOWN, not passed")
 
 
 def _t(vals, **kw):
@@ -170,7 +171,8 @@ class TestPureOpsTorch(unittest.TestCase):
         y = T.normalize(z, eps=1e-6)
         self.assertEqual(y.tolist(), [[0.0, 0.0]])
         y.sum().backward()
-        self.assertTrue(bool(torch.isfinite(z.grad).all()))
+        # x/eps in the 0 <= norm < eps branch: gradient is exactly 1/eps per element (finite but large)
+        torch.testing.assert_close(z.grad, torch.full((1, 2), 1e6), rtol=1e-6, atol=0)
 
     def test_clamp_values_nan_and_gradient_kill(self):
         x = _t([-2.0, 0.5, 9.0, float("nan")], requires_grad=True)
@@ -179,7 +181,12 @@ class TestPureOpsTorch(unittest.TestCase):
         self.assertTrue(bool(torch.isnan(y[3])))
         self.assertTrue(bool(torch.isnan(x[3])))
         y[:3].sum().backward()
-        self.assertEqual(x.grad[:3].tolist(), [0.0, 1.0, 0.0])  # gradient is zero where the bound is active
+        self.assertEqual(x.grad[:3].tolist(), [0.0, 1.0, 0.0])  # zero strictly outside the bounds
+
+    def test_clamp_gradient_at_the_bound_is_one(self):
+        x = _t([0.0, 0.5, 1.0, 2.0, -1.0], requires_grad=True)
+        T.clamp(x, 0.0, 1.0).sum().backward()
+        self.assertEqual(x.grad.tolist(), [1.0, 1.0, 1.0, 0.0, 0.0])
 
 
 # ------------------------------------------------------------------ mutation detector
@@ -277,7 +284,11 @@ class TestDetectorTorch(unittest.TestCase):
     def test_signed_zero_and_nan_payload_distinguished(self):
         x = _t([0.0, float("nan")])
         rep = T.detect_mutation(lambda a: a.__setitem__(0, -0.0), x)
-        self.assertTrue(rep.mutated)
+        self.assertEqual([f.kind for f in rep.findings], ["values_changed+version_bumped"])
+        y = _t([0.0])
+        rep_d = T.detect_mutation(lambda a: a.data.__setitem__(0, -0.0), y)
+        self.assertEqual([f.kind for f in rep_d.findings], ["values_changed"])  # value signal alone, no version
+        self.assertEqual(y._version, 0)
         rep2 = T.detect_mutation(lambda a: a.__setitem__(1, float("nan")), x)
         # rewriting NaN with the same payload is value-identical: version bump at most
         self.assertTrue(all(f.kind != "values_changed" for f in rep2.findings))
@@ -539,6 +550,335 @@ class TestCpuVsCuda(unittest.TestCase):
             self.assertLess(r.max_rel_diff.value, 1e-4, name)
 
 
+
+# ------------------------------------------------------------------ QA round: hardening tests
+class TestNormalizeRange(unittest.TestCase):
+    def test_list_overflow_and_underflow_inputs_normalize_correctly(self):
+        r = math.sqrt(0.5)
+        for big in (1e200, 1e308, 1e-200, 1e-320):
+            out = T.normalize([big, big])
+            self.assertAlmostEqual(out[0], r, places=12, msg=str(big))
+            self.assertAlmostEqual(out[1], r, places=12, msg=str(big))
+
+    def test_list_all_zero_message_names_cause(self):
+        with self.assertRaises(T.TensorOpError) as cm:
+            T.normalize([0.0, 0.0])
+        self.assertIn("all-zero", str(cm.exception))
+
+    def test_list_eps_floor_applies_when_norm_below_eps(self):
+        # norm 5e-7 < eps 1e-6 -> divide by eps, NOT by the norm
+        out = T.normalize([3e-7, 4e-7], eps=1e-6)
+        self.assertAlmostEqual(out[0], 0.3, places=9)
+        self.assertAlmostEqual(out[1], 0.4, places=9)
+        out2 = T.normalize([3.0, 4.0], eps=1e-6)   # norm above eps: ordinary unit vector
+        self.assertEqual(out2, [0.6, 0.8])
+
+    def test_list_non_real_entries_raise_tensorop_error(self):
+        for bad in (["a"], [True, 1.0], [1.0, None], [1j]):
+            with self.assertRaises(T.TensorOpError, msg=repr(bad)):
+                T.normalize(bad)
+
+
+@requires_torch
+class TestNormalizeRangeTorch(unittest.TestCase):
+    def test_float32_overflow_and_underflow_inputs(self):
+        r = math.sqrt(0.5)
+        for big in (1e30, 3e38, 1e-25, 1e-40):
+            y = T.normalize(torch.tensor([big, big], dtype=torch.float32))
+            torch.testing.assert_close(y, torch.tensor([r, r]), rtol=1e-6, atol=0, msg=str(big))
+        y = T.normalize(torch.tensor([1e200, 1e200], dtype=torch.float64))
+        torch.testing.assert_close(y, torch.tensor([r, r], dtype=torch.float64))
+
+    def test_all_zero_row_raises_with_cause_but_eps_gives_zeros(self):
+        with self.assertRaises(T.TensorOpError) as cm:
+            T.normalize(_t([[1.0, 0.0], [0.0, 0.0]]))
+        self.assertIn("all-zero", str(cm.exception))
+        self.assertEqual(T.normalize(_t([[0.0, 0.0]]), eps=1e-6).tolist(), [[0.0, 0.0]])
+
+    def test_eps_floor_applies_when_norm_below_eps(self):
+        y = T.normalize(_t([[3e-7, 4e-7]]), eps=1e-6)
+        torch.testing.assert_close(y, _t([[0.3, 0.4]]), rtol=1e-5, atol=0)
+        y2 = T.normalize(_t([[3.0, 4.0]]), eps=1e-6)
+        torch.testing.assert_close(y2, _t([[0.6, 0.8]]))
+
+    def test_large_inputs_with_eps_have_no_nan_gradient(self):
+        x = _t([[3e38, 3e38], [0.0, 0.0]], requires_grad=True)
+        T.normalize(x, eps=1e-6).sum().backward()
+        self.assertTrue(bool(torch.isfinite(x.grad).all()))
+
+    def test_gradient_matches_float64_reference(self):
+        x32 = _t([[3.0, 4.0, 1.0]], requires_grad=True)
+        T.normalize(x32).pow(2).mul(_t([[1.0, 2.0, 3.0]])).sum().backward()
+        x64 = torch.tensor([[3.0, 4.0, 1.0]], dtype=torch.float64, requires_grad=True)
+        (x64 / torch.linalg.vector_norm(x64, dim=-1, keepdim=True)).pow(2).mul(
+            torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float64)).sum().backward()
+        torch.testing.assert_close(x32.grad.double(), x64.grad, rtol=1e-5, atol=1e-7)
+
+
+@requires_torch
+class TestSetIndicesCasts(unittest.TestCase):
+    def test_float_into_int_tensor_raises_and_does_not_truncate(self):
+        x = torch.tensor([1, 2, 3])
+        with self.assertRaises(T.TensorOpError):
+            T.set_indices(x, [0], 2.7)
+        self.assertEqual(x.tolist(), [1, 2, 3])
+
+    def test_overflow_into_float32_raises(self):
+        with self.assertRaises(T.TensorOpError):
+            T.set_indices(_t([1.0, 2.0]), [0], torch.tensor(1e300, dtype=torch.float64))
+        with self.assertRaises(T.TensorOpError):
+            T.set_indices(_t([1.0, 2.0]), [0], 1e300)
+
+    def test_out_of_range_int_and_bool_cases(self):
+        with self.assertRaises(T.TensorOpError):
+            T.set_indices(torch.tensor([1, 2], dtype=torch.int8), [0], 300)
+        with self.assertRaises(T.TensorOpError):
+            T.set_indices(torch.tensor([True, False]), [0], 1)
+        with self.assertRaises(T.TensorOpError):
+            T.set_indices(_t([1.0]), [0], 1 + 2j)
+
+    def test_legal_casts_still_work(self):
+        self.assertEqual(T.set_indices(torch.tensor([1, 2, 3]), [0], 7).tolist(), [7, 2, 3])
+        y = T.set_indices(_t([1.0, 2.0]), [1], 0.1)   # ordinary rounding is allowed
+        self.assertAlmostEqual(y[1].item(), 0.1, places=6)
+        self.assertEqual(T.set_indices(_t([1.0, 2.0]), [0], 3).tolist(), [3.0, 2.0])  # int -> float ok
+        self.assertTrue(math.isnan(T.set_indices(_t([1.0]), [0], float("nan"))[0].item()))
+
+    def test_value_shape_mismatch_is_tensorop_error(self):
+        x = torch.zeros(3, 2)
+        with self.assertRaises(T.TensorOpError):
+            T.set_indices(x, [0], torch.zeros(1, 5))
+        with self.assertRaises(T.TensorOpError):
+            T.set_indices(x, [0, 1], torch.zeros(3, 2))
+        self.assertEqual(T.set_indices(x, [0], torch.ones(1, 2))[0].tolist(), [1.0, 1.0])
+
+    def test_accumulate_wrong_delta_type_is_tensorop_error(self):
+        for bad in ([1.0, 2.0], "a", None, True):
+            with self.assertRaises(T.TensorOpError, msg=repr(bad)):
+                T.accumulate(_t([1.0, 2.0]), bad)
+        with self.assertRaises(T.TensorOpError):
+            T.accumulate([1.0, 2.0], ["a", "b"])
+
+
+@requires_torch
+class TestFlattenRejections(unittest.TestCase):
+    """D-T1/D-T2/D-T3: a comparison that compared nothing must never be a measured zero."""
+
+    def _dt(self, fn, x=None):
+        x = _t([1.0, 2.0], dtype=torch.float64) if x is None else x
+        return T.compare_across_dtypes(fn, [x], ["float64", "float32"])
+
+    def _assert_unmeasured(self, r):
+        self.assertFalse(r.measured)
+        self.assertIsNone(r.max_abs_diff.value)
+        self.assertIsNone(r.max_rel_diff.value)
+        self.assertIsNone(r.bitwise_identical)
+        self.assertTrue(r.skipped)
+
+    def test_empty_output_is_unmeasured(self):
+        r = self._dt(lambda a: a[:0])
+        self._assert_unmeasured(r)
+        self.assertIn("empty", r.skipped[0][1])
+
+    def test_sequence_of_empty_tensors_is_unmeasured(self):
+        self._assert_unmeasured(self._dt(lambda a: (a[:0], a[:0])))
+        self._assert_unmeasured(self._dt(lambda a: []))
+
+    def test_empty_with_nonempty_sibling_still_measured(self):
+        r = self._dt(lambda a: (a[:0], a * 1.0))
+        self.assertTrue(r.measured)
+
+    def test_int64_above_2_53_not_cast_away(self):
+        r = T.compare_across_devices(lambda a: a + (1 if a.dtype == torch.int64 else 0),
+                                     [torch.tensor([2 ** 60], dtype=torch.int64)], ["cpu", "cpu"])
+        self.assertFalse(r.measured)
+        r = self._dt(lambda a: torch.tensor([2 ** 60 + (1 if a.dtype == torch.float64 else 2)]))
+        self._assert_unmeasured(r)
+        self.assertIn("non-floating", r.skipped[0][1])
+
+    def test_bool_output_is_unmeasured(self):
+        self._assert_unmeasured(self._dt(lambda a: a > 0))
+
+    def test_complex_output_is_unmeasured_not_zero(self):
+        # imaginary parts differ (1 vs 2) while real parts agree; the old code reported measured 0.0
+        r = self._dt(lambda a: torch.complex(a, torch.ones_like(a) * (1.0 if a.dtype == torch.float64 else 2.0)))
+        self._assert_unmeasured(r)
+        self.assertIn("imaginary", r.skipped[0][1])
+
+    def test_check_repeatability_rejects_complex_int_empty(self):
+        counter = {"n": 0}
+
+        def nonrepeatable_complex(a):
+            counter["n"] += 1
+            return torch.complex(a, a * 0 + float(counter["n"]))   # real part constant, imag part drifts
+        with self.assertRaises(T.TensorOpError):
+            T.check_repeatability(nonrepeatable_complex, [_t([1.0])], runs=3)
+        with self.assertRaises(T.TensorOpError):
+            T.check_repeatability(lambda a: torch.tensor([2 ** 60]), [_t([1.0])], runs=2)
+        with self.assertRaises(T.TensorOpError):
+            T.check_repeatability(lambda a: a[:0], [_t([1.0])], runs=2)
+
+    def test_check_repeatability_catches_shape_change(self):
+        state = {"n": 0}
+
+        def f(a):
+            state["n"] += 1
+            return torch.ones(state["n"])
+        self.assertFalse(T.check_repeatability(f, [_t([1.0])], runs=3).bitwise_identical_all_runs)
+
+    def test_shape_mismatch_between_configs_is_unmeasured_not_broadcast(self):
+        r = self._dt(lambda a: torch.ones(1) if a.dtype == torch.float64 else torch.ones(2))
+        self.assertFalse(r.measured)
+        self.assertIn("shape mismatch", r.pairs[0].reason)
+        self.assertIsNone(r.pairs[0].bitwise_identical)
+
+    def test_zero_reference_with_nonzero_candidate_is_unmeasured(self):
+        r = self._dt(lambda a: torch.zeros(1, dtype=a.dtype) if a.dtype == torch.float64 else torch.ones(1))
+        self.assertFalse(r.measured)
+        self.assertIn("identically zero", r.pairs[0].reason)
+        self.assertIsNone(r.max_rel_diff.value)
+        # but zero vs zero is a genuine measured zero
+        r0 = self._dt(lambda a: torch.zeros(2, dtype=a.dtype))
+        self.assertTrue(r0.measured)
+        self.assertEqual((r0.max_abs_diff.value, r0.max_rel_diff.value, r0.bitwise_identical), (0.0, 0.0, True))
+
+    def test_multi_candidate_aggregation(self):
+        # 1 + 2^-12 is exact in float32, rounded in float16 (11-bit significand)
+        x = torch.tensor([1.0 + 2.0 ** -12], dtype=torch.float64)
+        r = T.compare_across_dtypes(lambda a: a + 0.0, [x], ["float64", "float32", "float16"])
+        self.assertEqual(r.n_measured, 2)
+        by = {p.candidate: p for p in r.pairs}
+        self.assertTrue(by["float32"].bitwise_identical)
+        self.assertEqual(by["float32"].max_abs_diff.value, 0.0)
+        self.assertFalse(by["float16"].bitwise_identical)
+        self.assertGreater(by["float16"].max_abs_diff.value, 1e-4)
+        self.assertEqual(r.max_abs_diff.value, by["float16"].max_abs_diff.value)  # max, not min
+        self.assertEqual(r.max_rel_diff.value, by["float16"].max_rel_diff.value)
+        self.assertFalse(r.bitwise_identical)  # all(), not any()
+
+    def test_kabsch_actually_aligns_not_just_rotation_shaped(self):
+        p, q = T.kabsch_inputs()
+        R = T.kabsch_rotation(p, q)
+        pc, qc = p - p.mean(0), q - q.mean(0)
+        self.assertLess(float((pc @ R.T - qc).norm()), 1e-9)
+        self.assertGreater(float((pc @ R - qc).norm()), 0.1)   # the transpose does NOT align
+
+
+class TestDetectorOpaque(unittest.TestCase):
+    def test_pure_callable_on_plain_object_is_clean_with_unchecked(self):
+        class Plain:
+            def __init__(self):
+                self.v = 1
+        obj = Plain()
+        rep = T.detect_mutation(lambda o: o.v + 1, obj)
+        self.assertFalse(rep.mutated)
+        self.assertTrue(any("opaque Plain" in u for u in rep.unchecked))
+
+    def test_consumed_iterator_listed_not_called_changed(self):
+        it = iter([1, 2, 3])
+        rep = T.detect_mutation(lambda i: next(i), it)
+        self.assertFalse(rep.mutated)       # honest: we cannot see it
+        self.assertTrue(any("opaque" in u for u in rep.unchecked))
+
+    def test_list_with_nan_is_clean_when_pure(self):
+        rep = T.detect_mutation(lambda a: len(a), [float("nan"), 1.0])
+        self.assertFalse(rep.mutated)
+        self.assertEqual(rep.unchecked, ())
+
+    def test_scalar_replacements_that_equality_would_miss(self):
+        for before, after in [(1, 1.0), (1, True), (0.0, -0.0), (1.0, 1), ("a", b"a")]:
+            data = [before]
+
+            def swap(d, after=after):
+                d[0] = after
+            rep = T.detect_mutation(swap, data)
+            self.assertTrue(rep.mutated, (before, after))
+            self.assertEqual(rep.findings[0].kind, "object_changed")
+        d = {"k": 0.0}
+        self.assertTrue(T.detect_mutation(lambda m: m.__setitem__("k", -0.0), d).mutated)
+
+    def test_cycle_and_depth_are_listed_unchecked(self):
+        a = [1]
+        a.append(a)
+        rep = T.detect_mutation(lambda z: None, a)
+        self.assertTrue(any("cycle" in u for u in rep.unchecked))
+        deep = cur = []
+        for _ in range(40):
+            nxt = []
+            cur.append(nxt)
+            cur = nxt
+        rep = T.detect_mutation(lambda z: None, deep)
+        self.assertTrue(any("depth limit" in u for u in rep.unchecked))
+
+    def test_custom_eq_object_flagged_as_weak_comparison(self):
+        class Box:
+            def __init__(self, v): self.v = v
+            def __eq__(self, o): return self.v == o.v
+            __hash__ = None
+        b = Box(1)
+        rep = T.detect_mutation(lambda o: setattr(o, "v", 2), b)
+        self.assertTrue(rep.mutated)
+        self.assertTrue(any("== only" in u for u in rep.unchecked))
+
+
+@requires_torch
+class TestDetectorTorchMetadata(unittest.TestCase):
+    def _kinds(self, fn, x):
+        rep = T.detect_mutation(fn, x)
+        return [(f.kind, f.detail) for f in rep.findings]
+
+    def test_tensor_inside_tuple_is_found(self):
+        tup = (_t([1.0]), _t([2.0]))
+        rep = T.detect_mutation(lambda t: t[0].add_(1.0), tup)
+        self.assertEqual(rep.locations, ("args[0][0]",))
+        self.assertFalse(T.detect_mutation(lambda t: t[0] + t[1], tup).mutated)
+
+    def test_requires_grad_flip(self):
+        x = _t([1.0])
+        k = self._kinds(lambda a: a.requires_grad_(), x)
+        self.assertEqual(k[0][0], "metadata_changed")
+        self.assertIn("requires_grad", k[0][1])
+
+    def test_grad_zeroed_replaced_or_cleared(self):
+        def fresh():
+            x = _t([1.0, 2.0], requires_grad=True)
+            (x * 3).sum().backward()
+            return x
+        x = fresh()
+        self.assertEqual(self._kinds(lambda a: a.grad.zero_(), x)[0][0], "metadata_changed")
+        x = fresh()
+        self.assertIn("grad", self._kinds(lambda a: setattr(a, "grad", None), x)[0][1])
+        x = fresh()
+        self.assertIn("grad", self._kinds(lambda a: setattr(a, "grad", torch.ones(2)), x)[0][1])
+        x = fresh()
+        self.assertFalse(T.detect_mutation(lambda a: (a * 2).sum(), x).mutated)  # reading .grad-bearing tensor is clean
+
+    def test_register_hook_and_rename(self):
+        x = _t([1.0], requires_grad=True)
+        k = self._kinds(lambda a: a.register_hook(lambda g: g), x)
+        self.assertIn("hooks", k[0][1])
+        y = torch.zeros(2, 3)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")   # named tensors are flagged experimental by torch
+            k = self._kinds(lambda a: a.rename_("r", "c"), y)
+        self.assertIn("names", k[0][1])
+
+    def test_detach_inplace_and_data_swap(self):
+        y = _t([1.0], requires_grad=True) * 2
+        k = self._kinds(lambda a: a.detach_(), y)
+        self.assertTrue(any("grad_fn" in d for _, d in k))
+        z = _t([1.0, 2.0])
+        rep = T.detect_mutation(lambda a: setattr(a, "data", torch.tensor([5.0, 6.0])), z)
+        self.assertTrue(rep.mutated)
+
+    def test_pure_ops_on_grad_tensors_stay_clean(self):
+        x = _t([1.0, 2.0], requires_grad=True)
+        (x * 2).sum().backward()
+        for fn in (lambda a: a * 2, lambda a: a.clone(), lambda a: T.normalize(a)):
+            self.assertFalse(T.detect_mutation(fn, x).mutated)
+
+
 class TestSkipWiring(unittest.TestCase):
     def test_cuda_class_skip_flag_matches_availability(self):
         self.assertEqual(getattr(TestCpuVsCuda, "__unittest_skip__", False), not CUDA_OK)
@@ -581,6 +921,8 @@ class TestSkipWiring(unittest.TestCase):
             "    T.probe_inplace_autograd(); raise SystemExit('no raise')\n"
             "except T.TorchUnavailable: pass\n"
             "from toy_tests import test_tensor_ops as t\n"
+            "assert 'torch not installed' in t.TestCpuVsMps.__unittest_skip_why__\n"
+            "assert 'torch not installed' in t.TestCpuVsCuda.__unittest_skip_why__\n"
             "res = unittest.TextTestRunner(stream=open('/dev/null','w')).run(\n"
             "    unittest.defaultTestLoader.loadTestsFromModule(t))\n"
             "print('RESULT', res.testsRun, len(res.skipped), len(res.failures), len(res.errors))\n"

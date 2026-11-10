@@ -872,6 +872,8 @@ def probe_precision(kind: str, param: float, seeds: Sequence[int], cfg: ProbeCon
     (validators raise, e.g. overflow) makes that seed unmeasured with the reason; a silent total loss
     (underflow to a measured 0.0 whose exact value is nonzero) is counted as `n_silent_zero`. `measure` (used by
     'magnitude' only) lets a test supply a measure without the underflow guard."""
+    if kind not in ("magnitude", "cancellation", "accumulation"):
+        raise ValueError(f"unknown precision kind {kind!r}")
     seeds = _check_seeds(seeds)
     per_seed, rows = [], []
     for s in seeds:

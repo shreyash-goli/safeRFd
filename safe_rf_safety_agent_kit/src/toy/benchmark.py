@@ -20,8 +20,10 @@ Design points (each traceable to the protocol):
   never against the untouched teacher (C0 still trains the student).
 * The seed is the unit of replication; rows are never pooled across seeds.
 * Metrics are `MetricValue`s; uncomputable => `.unmeasured(reason)`, never 0.0.
-* Only H1, H2, H3 can produce a verdict (Bonferroni family, m=3). Anything else
-  is an `ExploratoryResult`, which has no verdict field at all.
+* Only H1, H2, H3 can produce a verdict. The Bonferroni family is the FOUR
+  primary intervals I1 (S), I2 (L), I3a (delta), I3b (delta - delta_shuf), so
+  m = 4 and each is at 1 - 0.05/4 = 98.75%. Anything else is an
+  `ExploratoryResult`, which has no verdict field at all.
 * Verdicts are reported only inside one `JointResult`; there is no standalone
   suppression getter. The verdict is a structured enum object; the
   `ExperimentRecord.notes` string is a serialisation fallback and must never be
@@ -29,12 +31,29 @@ Design points (each traceable to the protocol):
 * The deterministic RNG is `make_rng(derive_seed(...))`; global `random` state
   is never touched.
 
-Known limits stated plainly: a "frozen" seed list is verified only as "the
-digest supplied by the caller equals the digest of the seeds analysed"; this
-code cannot prove the digest was recorded *before* any arm was run. Gates that
-the protocol assigns to SR-11 or to other registers (configuration-shift
-sensitivity arm, ERROR_REGISTER cross-check, V-set) are NOT implemented here;
-`JointResult.deferred_gates` lists them and `complete_gate_coverage` is False.
+* A verdict is never stored in `ExperimentRecord.notes`. It is rebuilt from
+  stored metrics only, by `verdict_from_records`.
+* n >= min_seeds is enforced where a component verdict is produced
+  (`interval_verdict`), not only at the gate.
+
+Known limits stated plainly:
+* A "frozen" seed list is verified only as "the digest supplied by the caller
+  equals the digest of the seeds analysed"; this code cannot prove the digest
+  was recorded *before* any arm was run.
+* IMPLEMENTED protocol checks: gates frozen-seed-list, min-n, failure rate,
+  row-set disjointness, mask correctness; gate 11 (control adequacy: A(s),
+  F(s), E loss fell; global: a failure makes H1, H2, H3 and JOINT INCONCLUSIVE); gate 12 + C_conv (converged-budget H3 requirement,
+  section 4.1); ineligible-seed listing/replacement (G_s and mask size).
+* NOT IMPLEMENTED (see `DEFERRED_GATES`; a favourable verdict is conditional on
+  them, `JointResult.complete_gate_coverage` is always False): configuration-
+  shift sensitivity arm (gate 1), ERROR_REGISTER cross-check (gate 2), V-set
+  probes, execution of the pilot and the n_cap width rule (only the pure
+  arithmetic `required_n` exists), the exchangeability check (assumption 1),
+  and the amendment log. The tail-ratio check (assumption 2) is flag-only.
+* `JointResult` derives every verdict from the intervals it holds and refuses
+  an incomplete gate list; a caller can still hand-build intervals, so the
+  guarantee is "no verdict without real intervals and a full gate list", not
+  tamper-proofing.
 """
 from __future__ import annotations
 
@@ -53,8 +72,12 @@ from toy.teacher_student import Teacher, erasure_target, make_teacher, predict, 
 
 CODE_VERSION = "toy-benchmark-v1"
 PINNED_TS = "2000-01-01T00:00:00Z"  # internal: train() records need a timestamp; not used as evidence
-N_PRIMARY = 3                       # H1, H2, H3
-DEFERRED_GATES = ("config_shift_sensitivity_arm", "error_register_crosscheck", "V_set_probes")
+N_PRIMARY = 4                       # Bonferroni family: I1 (S), I2 (L), I3a (delta), I3b (delta - delta_shuf)
+DEFERRED_GATES = ("gate1_config_shift_sensitivity_arm", "gate2_error_register_crosscheck", "V_set_probes",
+                  "pilot_execution_and_n_cap_width_rule", "assumption1_exchangeability_check",
+                  "amendment_log_hash")
+GATE_SCOPES = {"seed_list_frozen": "all", "min_seeds": "all", "failure_rate": "all", "rowsets_disjoint": "all",
+               "mask_correct": "all", "control_adequacy": "all", "convergence": "H3"}
 Matrix = tuple
 Predictor = Callable[[Sequence[Sequence[float]]], Matrix]
 
@@ -102,9 +125,15 @@ class BenchmarkConfig:
     min_seeds: int = 30
     max_failure_rate: float = 0.05
     width_tol: float = 0.25
+    steps_conv: int = 1000      # converged budget for C_conv (protocol 4.1); PROTOCOL PARAMETER
+    tau_conv: float = 1e-3      # gate 12: final/initial gradient norm must be <= this in every converged run
+    delta_A: float = 0.05       # gate 11(a): lower bound of mean A(s) must exceed this
+    eps_fit: float = 0.05       # gate 11(b): upper bound of mean F(s) must be below this
+    loss_factor: float = 2.0    # gate 11(c): E training loss must fall at least this factor in every run
+    tail_ratio_max: float = 10.0  # assumption-2 flag threshold on max|v|/median|v| (flag only, not a verdict input)
 
     def __post_init__(self) -> None:
-        for k in ("width", "n_train", "n_eval", "steps", "n_boot", "min_seeds"):
+        for k in ("width", "n_train", "n_eval", "steps", "n_boot", "min_seeds", "steps_conv"):
             v = getattr(self, k)
             if isinstance(v, bool) or not isinstance(v, int) or v < 0:
                 raise ValueError(f"{k} must be a nonnegative int")
@@ -112,7 +141,8 @@ class BenchmarkConfig:
             raise ValueError("width, n_eval and n_boot must be >= 1")
         if self.n_train < 16:
             raise ValueError("n_train must be >= 16 (protocol: masked subset needs >= 2 distinct values)")
-        for k in ("lr", "eta_star", "g_min", "alpha", "max_failure_rate", "width_tol"):
+        for k in ("lr", "eta_star", "g_min", "alpha", "max_failure_rate", "width_tol", "tau_conv", "delta_A",
+              "eps_fit", "loss_factor", "tail_ratio_max"):
             v = getattr(self, k)
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
                 raise ValueError(f"{k} must be a finite nonnegative number")
@@ -323,7 +353,7 @@ class IntervalPair:
 
 
 def summarize(name: str, values: Sequence[float], level: float, n_boot: int, base_seed: int,
-              min_n: int = 30) -> IntervalPair:
+              min_n: int = 30, tail_ratio_max: float = 10.0) -> IntervalPair:
     """Spread + percentile bootstrap + t-interval for one series. The bootstrap RNG is
     make_rng(derive_seed(base_seed, "bootstrap:" + name)) so the interval is reproducible from the record."""
     _check_level(level)
@@ -344,7 +374,10 @@ def summarize(name: str, values: Sequence[float], level: float, n_boot: int, bas
         return IntervalPair(name, 0, level, n_boot, u, u, u, u, u, u, u, u, u, u, tuple(flags))
     s = sorted(vals)
     med = quantile(sorted(abs(v) for v in vals), 0.5)
-    mom = _mv(max(abs(v) for v in vals) / med if med > 0 else None, "median |value| is 0")
+    ratio = max(abs(v) for v in vals) / med if med > 0 else None
+    mom = _mv(ratio, "median |value| is 0")
+    if ratio is not None and ratio > tail_ratio_max:
+        flags.append(f"heavy tail: max|v|/median|v| = {ratio:.3g} > {tail_ratio_max} (flag only)")
     if n >= 2:
         bl, bh = bootstrap_ci(vals, level, n_boot, make_rng(derive_seed(base_seed, "bootstrap:" + name)))
         tl, th = t_interval(vals, level)
@@ -358,20 +391,18 @@ def summarize(name: str, values: Sequence[float], level: float, n_boot: int, bas
 
 
 # =============================================================== verdicts
-def interval_verdict(pair: IntervalPair, margin: float, direction: str, width_tol: float = 0.25
-                     ) -> tuple[Verdict, str]:
-    """Protocol section 7 for one component. direction 'greater': SUPPORTED iff lower > margin,
-    UNSUPPORTED iff upper <= margin. direction 'less': SUPPORTED iff upper < margin, UNSUPPORTED iff
-    lower >= margin. The bootstrap interval decides; the t-interval can only veto via the disagreement rule."""
+def _verdict_from_bounds(n: int, boot: Optional[tuple], tint: Optional[tuple], margin: float, direction: str,
+                         min_n: int, width_tol: float) -> tuple:
     if direction not in ("greater", "less"):
         raise ValueError("direction must be 'greater' or 'less'")
-    b, t = pair.boot(), pair.tint()
-    if b is None or t is None:
+    if n < min_n:   # protocol 6.1: no verdict below the minimum number of seeds, wherever the verdict is made
+        return Verdict.INCONCLUSIVE, f"n={n} below protocol minimum {min_n}: no verdict"
+    if boot is None or tint is None:
         return Verdict.INCONCLUSIVE, "interval not computable (n < 2): unmeasured, not zero"
-    bad, why = intervals_disagree(b, t, margin, width_tol)
+    bad, why = intervals_disagree(boot, tint, margin, width_tol)
     if bad:
         return Verdict.INCONCLUSIVE, "bootstrap/t disagreement: " + why
-    lo, hi = b
+    lo, hi = boot
     if direction == "greater":
         if lo > margin:
             return Verdict.SUPPORTED, "whole interval above margin"
@@ -383,6 +414,15 @@ def interval_verdict(pair: IntervalPair, margin: float, direction: str, width_to
         if lo >= margin:
             return Verdict.UNSUPPORTED, "whole interval at or above margin"
     return Verdict.INCONCLUSIVE, "interval spans margin"
+
+
+def interval_verdict(pair: IntervalPair, margin: float, direction: str, width_tol: float = 0.25,
+                     min_n: int = 30) -> tuple:
+    """Protocol section 7 for one component. direction 'greater': SUPPORTED iff lower > margin,
+    UNSUPPORTED iff upper <= margin. direction 'less': SUPPORTED iff upper < margin, UNSUPPORTED iff
+    lower >= margin. The bootstrap interval decides; the t-interval can only veto via the disagreement rule.
+    n < min_n (default 30) is always INCONCLUSIVE."""
+    return _verdict_from_bounds(pair.n, pair.boot(), pair.tint(), margin, direction, min_n, width_tol)
 
 
 def combine_joint(h1: Verdict, h2: Verdict, h3: Verdict, gates_ok: bool) -> JointVerdict:
@@ -405,25 +445,75 @@ PRIMARY = {
     "H2": (("L", "less", "delta_R"),),
     "H3": (("delta", "greater", "delta_sel"), ("delta_minus_shuf", "greater", "delta_sel")),
 }
+# converged-budget requirement for H3 (protocol 4.1); can only BLOCK a SUPPORTED, never create UNSUPPORTED
+# (extra UNSUPPORTED-capable intervals would enlarge the m=4 family).
+CONVERGED = (("delta_conv", "greater", "delta_sel"), ("delta_minus_shuf_conv", "greater", "delta_sel"))
+assert N_PRIMARY == sum(len(v) for v in PRIMARY.values())
 
 
 @dataclasses.dataclass(frozen=True)
 class ComponentResult:
+    """One interval and its verdict. The verdict is DERIVED from the interval in __post_init__."""
     metric: str
     direction: str
     margin: float
     pair: IntervalPair
-    verdict: Verdict
-    reason: str
+    min_n: int = 30
+    width_tol: float = 0.25
+    verdict: Verdict = dataclasses.field(init=False)
+    reason: str = dataclasses.field(init=False)
+
+    def __post_init__(self) -> None:
+        v, why = interval_verdict(self.pair, self.margin, self.direction, self.width_tol, self.min_n)
+        object.__setattr__(self, "verdict", v)
+        object.__setattr__(self, "reason", why)
 
 
 @dataclasses.dataclass(frozen=True)
 class HypothesisResult:
+    """Verdict derived from components and gate state (never a free argument).
+    blocking: gate failures that force INCONCLUSIVE. supported_blockers: failures that only prevent SUPPORTED
+    (gate 12 for H3: protocol says 'H3 cannot be SUPPORTED')."""
     hid: str
     components: tuple
-    verdict: Verdict
-    reasons: tuple
+    converged_components: tuple = ()
+    blocking: tuple = ()
+    supported_blockers: tuple = ()
     label: str = "PRIMARY"
+    verdict: Verdict = dataclasses.field(init=False)
+    reasons: tuple = dataclasses.field(init=False)
+
+    def __post_init__(self) -> None:
+        if self.hid not in PRIMARY:
+            raise ValueError(f"{self.hid!r} is not a primary hypothesis")
+        if len(self.components) != len(PRIMARY[self.hid]):
+            raise ValueError("wrong number of components for " + self.hid)
+        if not all(isinstance(c, ComponentResult) for c in self.components + self.converged_components):
+            raise ValueError("components must be ComponentResult objects (verdicts are derived, not supplied)")
+        vs = [c.verdict for c in self.components]
+        reasons = [f"{c.metric}: {c.reason}" for c in self.components]
+        if self.blocking:
+            verdict = Verdict.INCONCLUSIVE
+            reasons = [f"gate failed: {g}" for g in self.blocking] + reasons
+        elif Verdict.UNSUPPORTED in vs:
+            verdict = Verdict.UNSUPPORTED
+        elif not all(v is Verdict.SUPPORTED for v in vs):
+            verdict = Verdict.INCONCLUSIVE
+        elif self.hid != "H3":
+            verdict = Verdict.SUPPORTED
+        elif self.supported_blockers:
+            verdict = Verdict.INCONCLUSIVE
+            reasons += [f"cannot be SUPPORTED, gate failed: {g}" for g in self.supported_blockers]
+        elif len(self.converged_components) != len(CONVERGED):
+            verdict = Verdict.INCONCLUSIVE
+            reasons.append("converged-budget requirement (4.1) not evaluated")
+        elif not all(c.verdict is Verdict.SUPPORTED for c in self.converged_components):
+            verdict = Verdict.INCONCLUSIVE
+            reasons.append("H3: finite-budget only; attributed to partial convergence (not established)")
+        else:
+            verdict = Verdict.SUPPORTED
+        object.__setattr__(self, "verdict", verdict)
+        object.__setattr__(self, "reasons", tuple(reasons))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -435,30 +525,25 @@ class ExploratoryResult:
 
 
 def evaluate_primary(hid: str, series: Mapping[str, Sequence[float]], margins: Margins, cfg: BenchmarkConfig,
-                     base_seed: int, gate_failures: Sequence[str] = ()) -> HypothesisResult:
-    """Evaluate one primary hypothesis at the Bonferroni level. Refuses anything outside {H1,H2,H3}."""
+                     base_seed: int, blocking: Sequence[str] = (), supported_blockers: Sequence[str] = ()
+                     ) -> HypothesisResult:
+    """Evaluate one primary hypothesis at the Bonferroni level (m=4). Refuses anything outside {H1,H2,H3}."""
     if hid not in PRIMARY:
         raise ValueError(f"{hid!r} is not a primary hypothesis; non-primary metrics are exploratory and "
                          f"cannot produce a verdict (use exploratory_interval)")
     level = bonferroni_level(cfg.alpha, N_PRIMARY)
-    comps = []
-    for metric, direction, mname in PRIMARY[hid]:
-        margin = float(getattr(margins, mname))
-        pair = summarize(f"{hid}:{metric}", series.get(metric, ()), level, cfg.n_boot, base_seed, cfg.min_seeds)
-        v, why = interval_verdict(pair, margin, direction, cfg.width_tol)
-        comps.append(ComponentResult(metric, direction, margin, pair, v, why))
-    vs = [c.verdict for c in comps]
-    if gate_failures:
-        verdict, reasons = Verdict.INCONCLUSIVE, tuple(f"gate failed: {g}" for g in gate_failures)
-    else:
-        if Verdict.UNSUPPORTED in vs:
-            verdict = Verdict.UNSUPPORTED
-        elif all(v is Verdict.SUPPORTED for v in vs):
-            verdict = Verdict.SUPPORTED
-        else:
-            verdict = Verdict.INCONCLUSIVE
-        reasons = tuple(f"{c.metric}: {c.reason}" for c in comps)
-    return HypothesisResult(hid, tuple(comps), verdict, reasons)
+
+    def build(table):
+        out = []
+        for metric, direction, mname in table:
+            pair = summarize(f"{hid}:{metric}", series.get(metric, ()), level, cfg.n_boot, base_seed,
+                             cfg.min_seeds, cfg.tail_ratio_max)
+            out.append(ComponentResult(metric, direction, float(getattr(margins, mname)), pair, cfg.min_seeds,
+                                       cfg.width_tol))
+        return tuple(out)
+
+    return HypothesisResult(hid, build(PRIMARY[hid]), build(CONVERGED) if hid == "H3" else (),
+                            tuple(blocking), tuple(supported_blockers))
 
 
 def exploratory_interval(name: str, values: Sequence[float], cfg: BenchmarkConfig, base_seed: int
@@ -467,7 +552,25 @@ def exploratory_interval(name: str, values: Sequence[float], cfg: BenchmarkConfi
     if name in PRIMARY:
         raise ValueError(f"{name!r} is a primary hypothesis id; use evaluate_primary")
     return ExploratoryResult(name, summarize("explore:" + name, values, 1.0 - cfg.alpha, cfg.n_boot, base_seed,
-                                             cfg.min_seeds))
+                                             cfg.min_seeds, cfg.tail_ratio_max))
+
+
+def required_n(pilot_sds: Sequence[float], margins: Margins, level: float, n_floor: int = 100,
+               n_cap: Optional[int] = None) -> tuple:
+    """Pure arithmetic of the protocol 6.1 precision rule (the pilot itself is NOT run here):
+    hw_max = 0.5*min(margins); n_req = ceil((z*SD_max/hw_max)^2), z = normal quantile of the adjusted level;
+    n_planned = max(n_floor, n_req). Returns (n_planned, n_req, capped) where capped means n_req > n_cap."""
+    from statistics import NormalDist
+    _check_level(level)
+    sds = [float(s) for s in pilot_sds]
+    if not sds or any(not math.isfinite(s) or s < 0 for s in sds):
+        raise ValueError("pilot_sds must be nonempty, finite, nonnegative")
+    hw = 0.5 * min(margins.delta_S, margins.delta_R, margins.delta_sel)
+    if hw <= 0:
+        raise ValueError("margins must be positive")
+    z = NormalDist().inv_cdf(1.0 - (1.0 - level) / 2.0)
+    n_req = math.ceil((z * max(sds) / hw) ** 2)
+    return max(n_floor, n_req), n_req, (n_cap is not None and n_req > n_cap)
 
 
 # ================================================================ seeds
@@ -499,6 +602,11 @@ def freeze_seed_list(base_seed: int, n_planned: int, n_reserve: int = 0) -> Froz
 def _mse(a: Matrix, b: Matrix) -> float:
     n = sum(len(r) for r in a)
     return math.fsum((x - y) ** 2 for ra, rb in zip(a, b) for x, y in zip(ra, rb)) / n
+
+
+class IneligibleSeed(ValueError):
+    """Outcome-independent ineligibility (protocol section 2): the seed is LISTED and REPLACED from the
+    frozen list; it is not a failed run and does not count toward the failure-rate gate."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -534,13 +642,18 @@ def _row_hashes(rows) -> set:
     return {hashlib.sha256(repr(r).encode()).hexdigest() for r in rows}
 
 
+def fixture_hashes(fx: SeedFixture) -> dict:
+    h = lambda rows: hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest()
+    return {"train_rows": h(fx.train_x), "eval_T": h(fx.T), "eval_U": h(fx.U)}
+
+
 @functools.lru_cache(maxsize=4096)
 def build_fixture(seed: int, cfg: BenchmarkConfig) -> SeedFixture:
     teacher = make_teacher(seed, cfg.width)
     train_x = _rows(make_rng(derive_seed(seed, "train_rows")), cfg.n_train, cfg.width, None)
     mask = tuple(in_region(r) for r in train_x)
     if sum(mask) < 2 or len({r[0] for r, m in zip(train_x, mask) if m}) < 2:
-        raise ValueError("degenerate fixture: fewer than 2 distinct masked rows")
+        raise IneligibleSeed("TRAIN mask selects fewer than 2 distinct rows (ineligible, not a failed run)")
     T = _rows(make_rng(derive_seed(seed, "eval_T")), cfg.n_eval, cfg.width, True)
     U = _rows(make_rng(derive_seed(seed, "eval_U")), cfg.n_eval, cfg.width, False)
     out = teacher.outputs(T + U)
@@ -554,13 +667,30 @@ def build_fixture(seed: int, cfg: BenchmarkConfig) -> SeedFixture:
 
 # ================================================================== arms
 PredictorFactory = Callable[[SeedFixture, BenchmarkConfig], Predictor]
-ARM_NAMES = ("E", "C0", "C_init", "C_rand", "C_shuf", "C_all")
+ARM_NAMES = ("E", "C0", "C_init", "C_rand", "C_shuf", "C_conv", "C_all")
+
+
+@dataclasses.dataclass(frozen=True)
+class ArmFit:
+    params: tuple
+    loss_init: float
+    loss_final: float
+    grad_init: float
+    grad_final: float
+
+    @property
+    def grad_ratio(self) -> Optional[float]:
+        return self.grad_final / self.grad_init if self.grad_init > 0 else None
+
+    @property
+    def loss_ratio(self) -> Optional[float]:
+        return self.loss_final / self.loss_init if self.loss_init > 0 else None
 
 
 @functools.lru_cache(maxsize=4096)
-def _arm_params(seed: int, arm: str, cfg: BenchmarkConfig) -> tuple:
-    """Trained student parameters for (seed, arm, cfg). Pure function of its arguments; arms differ from
-    E in exactly one declared factor and share TRAIN, steps, lr, student init (derive_seed(seed,'student_init'))."""
+def _arm_fit(seed: int, arm: str, cfg: BenchmarkConfig) -> ArmFit:
+    """Trained student for (seed, arm, cfg). Pure function of its arguments; arms differ from E in exactly
+    one declared factor and share TRAIN, lr, student init (derive_seed(seed,'student_init'))."""
     if arm not in ARM_NAMES:
         raise ValueError(f"unknown arm {arm!r}; allowed {ARM_NAMES}")
     fx = build_fixture(seed, cfg)
@@ -569,6 +699,8 @@ def _arm_params(seed: int, arm: str, cfg: BenchmarkConfig) -> tuple:
         eta = 0.0
     elif arm == "C_init":
         steps = 0
+    elif arm == "C_conv":
+        steps = cfg.steps_conv       # E re-run at the converged budget (protocol 4.1)
     elif arm == "C_all":
         mask = (True,) * len(mask)
     elif arm == "C_shuf":
@@ -580,22 +712,46 @@ def _arm_params(seed: int, arm: str, cfg: BenchmarkConfig) -> tuple:
         teacher = Teacher({"cond_scale": other.params["cond_scale"], "cond_bias": other.params["cond_bias"],
                            "uncond_scale": teacher.params["uncond_scale"],
                            "uncond_bias": teacher.params["uncond_bias"]})
-    return train(seed, steps=steps, lr=cfg.lr, eta=eta, x=fx.train_x, mask=mask, teacher=teacher,
-                 timestamp_utc=PINNED_TS).final_params
+    r = train(seed, steps=steps, lr=cfg.lr, eta=eta, x=fx.train_x, mask=mask, teacher=teacher,
+              timestamp_utc=PINNED_TS)
+    return ArmFit(r.final_params, r.history[0][1], r.history[-1][1], r.history[0][2], r.history[-1][2])
+
+
+def _arm_params(seed: int, arm: str, cfg: BenchmarkConfig) -> tuple:
+    return _arm_fit(seed, arm, cfg).params
 
 
 def _student_factory(arm: str) -> PredictorFactory:
     def factory(fx: SeedFixture, cfg: BenchmarkConfig) -> Predictor:
-        params = _arm_params(fx.seed, arm, cfg)
+        params = _arm_params(fx.seed, "E" if arm == "E" else arm, cfg)
         return lambda rows: predict(params, tuple(tuple(r) for r in rows))
     factory.__name__ = f"arm_{arm}"
+    factory.trained_student = True
+    factory.arm_name = arm
     return factory
 
 
 ARM_FACTORIES: Mapping[str, PredictorFactory] = {a: _student_factory(a) for a in ARM_NAMES}
 
 
+def _scorer_validation_fixture(f):
+    """Declare a factory to be a scorer-validation fixture (not a trained student). This declaration is the ONLY
+    way to be exempt from the gate-11(c) 'E training loss fell' check; an undeclared factory is NOT exempt."""
+    f.scorer_validation_fixture = True
+    return f
+
+
+def treatment_kind(treatment) -> str:
+    """'trained' (an ARM_FACTORIES student), 'fixture' (declared scorer-validation fixture) or 'unknown'.
+    Declaring both is an error. 'unknown' gets no exemption: gate 11(c) then fails closed."""
+    t, f = getattr(treatment, "trained_student", False) is True, getattr(treatment, "scorer_validation_fixture", False) is True
+    if t and f:
+        raise ValueError("treatment declares both trained_student and scorer_validation_fixture")
+    return "trained" if t else "fixture" if f else "unknown"
+
+
 # --------------------------------------------- scorer-validation fixtures
+@_scorer_validation_fixture
 def fixture_oracle_gated(fx: SeedFixture, cfg: BenchmarkConfig) -> Predictor:
     """ORACLE_GATED: erasure target on region rows, unconditioned output elsewhere. A test of the scorer."""
     def pred(rows):
@@ -622,16 +778,18 @@ def fixture_global_degrader(magnitude: float = 0.5) -> PredictorFactory:
             u = fx.teacher.outputs(tuple(tuple(r) for r in rows)).unconditioned
             return tuple(tuple(v + magnitude * s for v, s in zip(r, signs)) for r in u)
         return pred
-    return factory
+    return _scorer_validation_fixture(factory)
 
 
+@_scorer_validation_fixture
 def fixture_identity_uncond(fx: SeedFixture, cfg: BenchmarkConfig) -> Predictor:
     """IDENTITY_TEACHER_UNCOND: returns the unconditioned output exactly. A test of the scorer."""
     return lambda rows: fx.teacher.outputs(tuple(tuple(r) for r in rows)).unconditioned
 
 
 # ================================================================ scoring
-SEED_METRICS = ("S", "L", "S_U", "delta", "delta_minus_shuf", "G", "e_c_T", "e_u_U")
+SEED_METRICS = ("S", "L", "S_U", "delta", "delta_minus_shuf", "G", "e_c_T", "e_u_U",
+                "A", "F", "E_loss_ratio", "delta_conv", "delta_minus_shuf_conv", "conv_grad_ratio")
 _PRIMARY_SERIES = ("S", "L", "delta", "delta_minus_shuf")
 
 
@@ -679,6 +837,7 @@ class SeedScores:
     metrics: Mapping[str, MetricValue]
     rowsets_disjoint: Optional[bool] = None
     mask_ok: Optional[bool] = None
+    input_hashes: Mapping[str, str] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if set(self.metrics) != set(SEED_METRICS):
@@ -691,39 +850,95 @@ class SeedScores:
         return all(self.metrics[k].is_measured for k in _PRIMARY_SERIES)
 
     @classmethod
-    def failed(cls, seed: int, reason: str, rowsets_disjoint=None, mask_ok=None) -> "SeedScores":
-        return cls(seed, {k: MetricValue.unmeasured(reason) for k in SEED_METRICS}, rowsets_disjoint, mask_ok)
+    def failed(cls, seed: int, reason: str, rowsets_disjoint=None, mask_ok=None, input_hashes=None) -> "SeedScores":
+        return cls(seed, {k: MetricValue.unmeasured(reason) for k in SEED_METRICS}, rowsets_disjoint, mask_ok,
+                   dict(input_hashes or {}))
 
     @classmethod
     def from_values(cls, seed: int, S: float, L: float, delta: float, delta_minus_shuf: float,
-                    S_U: Optional[float] = None, G: Optional[float] = None, rowsets_disjoint=None, mask_ok=None
+                    S_U: Optional[float] = None, G: Optional[float] = None, A: Optional[float] = None,
+                    F: Optional[float] = None, E_loss_ratio: Optional[float] = None,
+                    delta_conv: Optional[float] = None, delta_minus_shuf_conv: Optional[float] = None,
+                    conv_grad_ratio: Optional[float] = None, rowsets_disjoint=None, mask_ok=None
                     ) -> "SeedScores":
-        na = MetricValue.unmeasured("not supplied")
+        """Anything not supplied is MetricValue.unmeasured (so the dependent gate fails), never 0.0."""
+        def opt(x, nm):
+            return _mv(x, f"{nm} not supplied") if x is not None else MetricValue.unmeasured(f"{nm} not supplied")
         m = {"S": _mv(S, "non-finite"), "L": _mv(L, "non-finite"), "delta": _mv(delta, "non-finite"),
-             "delta_minus_shuf": _mv(delta_minus_shuf, "non-finite"),
-             "S_U": _mv(S_U, "not supplied") if S_U is not None else na,
-             "G": _mv(G, "not supplied") if G is not None else na, "e_c_T": na, "e_u_U": na}
+             "delta_minus_shuf": _mv(delta_minus_shuf, "non-finite"), "S_U": opt(S_U, "S_U"), "G": opt(G, "G"),
+             "e_c_T": opt(None, "e_c_T"), "e_u_U": opt(None, "e_u_U"), "A": opt(A, "A"), "F": opt(F, "F"),
+             "E_loss_ratio": opt(E_loss_ratio, "E_loss_ratio"), "delta_conv": opt(delta_conv, "delta_conv"),
+             "delta_minus_shuf_conv": opt(delta_minus_shuf_conv, "delta_minus_shuf_conv"),
+             "conv_grad_ratio": opt(conv_grad_ratio, "conv_grad_ratio")}
         return cls(seed, m, rowsets_disjoint, mask_ok)
 
 
+def _ratio_mv(x: Optional[float], why: str) -> MetricValue:
+    return _mv(x, why)
+
+
+def _control_adequacy(fx: SeedFixture, cfg: BenchmarkConfig, c0: Predictor) -> tuple:
+    """A(s) = [e_u(C_init,U) - e_u(C0,U)]/G, F(s) = e_u(C0,U)/G (absolute, not vs C0)."""
+    oU = fx.teacher.outputs(fx.U)
+    e0 = _mse(c0(fx.U), oU.unconditioned)
+    ei = _mse(ARM_FACTORIES["C_init"](fx, cfg)(fx.U), oU.unconditioned)
+    return _mv((ei - e0) / fx.G, "non-finite"), _mv(e0 / fx.G, "non-finite")
+
+
+def _converged(fx: SeedFixture, treatment: PredictorFactory, cfg: BenchmarkConfig, trained_arm: Optional[str]) -> tuple:
+    """Converged-budget H3 contrasts (protocol 4.1): same treatment, C0 and C_shuf re-run with steps=steps_conv.
+    Also the worst end-of-training gradient ratio among the trained arms (gate 12 input)."""
+    cc = dataclasses.replace(cfg, steps=cfg.steps_conv)
+    try:
+        c0, sh = ARM_FACTORIES["C0"](fx, cc), ARM_FACTORIES["C_shuf"](fx, cc)
+        a = score_predictor(fx, treatment(fx, cc), c0, cfg.g_min)
+        b = score_predictor(fx, sh, c0, cfg.g_min)
+        arms = ["C0", "C_shuf"] + ([trained_arm] if trained_arm else [])
+        ratios = [_arm_fit(fx.seed, arm, cc).grad_ratio for arm in arms]
+    except ValueError as e:
+        u = MetricValue.unmeasured(f"converged-budget run failed: {e}")
+        return u, u, u
+    d = a.delta.value if a.delta.is_measured else None
+    ds = (a.delta.value - b.delta.value) if a.delta.is_measured and b.delta.is_measured else None
+    gr = max(ratios) if all(r is not None for r in ratios) else None
+    return _mv(d, "converged contrast unmeasured"), _mv(ds, "converged contrast unmeasured"), \
+        _mv(gr, "initial gradient is zero")
+
+
 def score_seed(seed: int, treatment: PredictorFactory, cfg: BenchmarkConfig) -> SeedScores:
-    """Score one replicate: treatment vs C0, plus delta_E - delta_Cshuf (C_shuf scored vs C0 the same way)."""
+    """Score one replicate: treatment vs C0, plus delta_E - delta_Cshuf, gate-11 inputs and the converged-budget
+    contrasts. Raises IneligibleSeed (not a failed run) for an ineligible fixture.
+    Whether the treatment is a trained student is read from the factory's own declaration (`treatment_kind`),
+    never from a caller flag: an undeclared factory gets E_loss_ratio unmeasured (and so fails gate 11(c))."""
+    kind = treatment_kind(treatment)
+    trained_arm = treatment.arm_name if kind == "trained" else None
     try:
         fx = build_fixture(seed, cfg)
+    except IneligibleSeed:
+        raise
     except ValueError as e:
         return SeedScores.failed(seed, f"fixture build failed: {e}")
+    hashes = fixture_hashes(fx)
     try:
         c0 = ARM_FACTORIES["C0"](fx, cfg)
         sh = ARM_FACTORIES["C_shuf"](fx, cfg)
         a = score_predictor(fx, treatment(fx, cfg), c0, cfg.g_min)
         b = score_predictor(fx, sh, c0, cfg.g_min)
+        A, F = _control_adequacy(fx, cfg, c0)
+        lr_ = _arm_fit(seed, trained_arm, cfg).loss_ratio if trained_arm else None
     except ValueError as e:   # train() divergence etc.: counted, never hidden
-        return SeedScores.failed(seed, f"numerical failure: {e}", fx.disjoint, fx.mask_ok)
+        return SeedScores.failed(seed, f"numerical failure: {e}", fx.disjoint, fx.mask_ok, hashes)
     dms = (MetricValue.measured(a.delta.value - b.delta.value) if a.delta.is_measured and b.delta.is_measured
            else MetricValue.unmeasured("treatment or C_shuf contrast unmeasured"))
+    dc, dmsc, gr = _converged(fx, treatment, cfg, trained_arm)
     return SeedScores(seed, {"S": a.S, "L": a.L, "S_U": a.S_U, "delta": a.delta, "delta_minus_shuf": dms,
-                             "G": MetricValue.measured(float(fx.G)), "e_c_T": a.e_c_T, "e_u_U": a.e_u_U},
-                      fx.disjoint, fx.mask_ok)
+                             "G": MetricValue.measured(float(fx.G)), "e_c_T": a.e_c_T, "e_u_U": a.e_u_U,
+                             "A": A, "F": F,
+                             "E_loss_ratio": _mv(lr_, {"fixture": "declared scorer-validation fixture: not a trained student",
+                                                  "unknown": "treatment undeclared: cannot tell whether it is trained"}
+                                                 .get(kind, "initial loss is zero")),
+                             "delta_conv": dc, "delta_minus_shuf_conv": dmsc, "conv_grad_ratio": gr},
+                      fx.disjoint, fx.mask_ok, hashes)
 
 
 # ================================================================== gates
@@ -733,9 +948,14 @@ class GateResult:
     passed: bool
     reason: str
 
+    @property
+    def scope(self) -> str:
+        return GATE_SCOPES[self.name]
+
 
 def evaluate_gates(scores: Sequence[SeedScores], frozen: FrozenSeedList, registered_digest: Optional[str],
-                   cfg: BenchmarkConfig) -> tuple:
+                   cfg: BenchmarkConfig, loss_check_exempt: bool = False, margins: Optional[Margins] = None
+                   ) -> tuple:
     gates = []
     ids = [s.seed for s in scores]
     if registered_digest is None:
@@ -759,6 +979,36 @@ def evaluate_gates(scores: Sequence[SeedScores], frozen: FrozenSeedList, registe
         ok = bool(vals) and all(v is True for v in vals)
         gates.append(GateResult(nm, ok, "all seeds verified" if ok else
                                 "not verified on every seed (False or not measured)"))
+    # gate 11: control adequacy (A, F, E loss fell)
+    level, ok_scores = bonferroni_level(cfg.alpha, N_PRIMARY), [s for s in scores if s.ok]
+    probs = []
+    for key in ("A", "F"):
+        vals = [s.metrics[key].value for s in ok_scores]
+        if len(vals) < 2 or len(vals) != len(ok_scores) or any(v is None for v in vals):
+            probs.append(f"{key} not measured on every seed")
+            continue
+        p = summarize(f"gate11:{key}", vals, level, cfg.n_boot, frozen.base_seed, cfg.min_seeds)
+        lo, hi = p.boot()
+        if key == "A" and not lo > cfg.delta_A:
+            probs.append(f"A lower bound {lo!r} not above delta_A={cfg.delta_A}")
+        if key == "F" and not hi < cfg.eps_fit:
+            probs.append(f"F upper bound {hi!r} not below eps_fit={cfg.eps_fit}")
+    if not loss_check_exempt:
+        rs = [s.metrics["E_loss_ratio"].value for s in ok_scores]
+        if not rs or any(r is None for r in rs):
+            probs.append("E_loss_ratio not measured on every seed")
+        elif max(rs) > 1.0 / cfg.loss_factor:
+            probs.append(f"E training loss did not fall by factor {cfg.loss_factor} in every run (worst ratio {max(rs)!r})")
+    gates.append(GateResult("control_adequacy", not probs, "; ".join(probs) or
+                            ("A, F, E-loss ok" if not loss_check_exempt else
+                                          "A, F ok; E-loss check exempt (declared scorer-validation fixture)")))
+    # gate 12: converged-budget gradient norm
+    grs = [s.metrics["conv_grad_ratio"].value for s in ok_scores]
+    if not grs or any(g is None for g in grs):
+        gates.append(GateResult("convergence", False, "converged-budget gradient ratio not measured on every seed"))
+    else:
+        gates.append(GateResult("convergence", max(grs) <= cfg.tau_conv,
+                                f"worst final/initial gradient ratio {max(grs)!r} vs tau_conv={cfg.tau_conv}"))
     return tuple(gates)
 
 
@@ -766,7 +1016,11 @@ def evaluate_gates(scores: Sequence[SeedScores], frozen: FrozenSeedList, registe
 @dataclasses.dataclass(frozen=True)
 class JointResult:
     """The only container of verdicts. H1, H2 and H3 live together; the joint verdict is derived from
-    them, so suppression cannot be reported without retention and selectivity."""
+    them, so suppression cannot be reported without retention and selectivity.
+
+    Boundary (stated, not implied): every hypothesis verdict is derived from the intervals it holds, and the
+    gate list must contain every required gate name, so an empty or partial gate list is refused. A caller
+    could still hand-build intervals; this class does not authenticate where intervals came from."""
     subject: str
     h1: HypothesisResult
     h2: HypothesisResult
@@ -780,17 +1034,26 @@ class JointResult:
     registered_digest: Optional[str]
     config_hash: str
     margins: Margins
-    deferred_gates: tuple = DEFERRED_GATES
-    complete_gate_coverage: bool = False   # always False in SR-10: see module docstring
+
+    deferred_gates = DEFERRED_GATES   # class-level constant: not an init argument, not settable per instance
 
     def __post_init__(self) -> None:
         for h, hid in ((self.h1, "H1"), (self.h2, "H2"), (self.h3, "H3")):
             if not isinstance(h, HypothesisResult) or h.hid != hid:
                 raise ValueError(f"JointResult needs HypothesisResult {hid} in its slot")
+        names = [g.name for g in self.gates if isinstance(g, GateResult)]
+        if sorted(names) != sorted(GATE_SCOPES):
+            raise ValueError(f"gates must contain exactly {sorted(GATE_SCOPES)} (empty gates do not pass vacuously)")
+
+    @property
+    def complete_gate_coverage(self) -> bool:
+        return not self.deferred_gates
 
     @property
     def gates_ok(self) -> bool:
-        return all(g.passed for g in self.gates)
+        """Global gates (scope 'all', including gate 11): any failure forces H1, H2 and H3, and so the joint verdict,
+        to INCONCLUSIVE. Only gate 12 (scope 'H3') is block-SUPPORTED-only, inside HypothesisResult."""
+        return all(g.passed for g in self.gates if g.scope == "all")
 
     @property
     def verdict(self) -> JointVerdict:
@@ -799,12 +1062,17 @@ class JointResult:
 
 def analyze_scores(scores: Sequence[SeedScores], *, frozen: FrozenSeedList, registered_digest: Optional[str],
                    subject: str, ineligible: Sequence[int] = (), cfg: BenchmarkConfig = BenchmarkConfig(),
-                   margins: Margins = Margins()) -> JointResult:
+                   margins: Margins = Margins(), loss_check_exempt: bool = False) -> JointResult:
     scores = tuple(scores)
-    gates = evaluate_gates(scores, frozen, registered_digest, cfg)
-    failing = [f"{g.name} ({g.reason})" for g in gates if not g.passed]
-    series = {k: [s.metrics[k].value for s in scores if s.ok] for k in _PRIMARY_SERIES}
-    hs = [evaluate_primary(h, series, margins, cfg, frozen.base_seed, failing) for h in ("H1", "H2", "H3")]
+    gates = evaluate_gates(scores, frozen, registered_digest, cfg, loss_check_exempt, margins)
+    by = {g.name: g for g in gates}
+    glob = [f"{g.name} ({g.reason})" for g in gates if g.scope == "all" and not g.passed]
+    g12 = [f"convergence ({by['convergence'].reason})"] if not by["convergence"].passed else []
+    names = _PRIMARY_SERIES + ("delta_conv", "delta_minus_shuf_conv")
+    series = {k: [s.metrics[k].value for s in scores if s.ok and s.metrics[k].is_measured] for k in names}
+    hs = [evaluate_primary("H1", series, margins, cfg, frozen.base_seed, glob),
+          evaluate_primary("H2", series, margins, cfg, frozen.base_seed, glob),
+          evaluate_primary("H3", series, margins, cfg, frozen.base_seed, glob, g12)]
     return JointResult(subject, hs[0], hs[1], hs[2], gates, scores, tuple(ineligible), len(scores),
                        sum(not s.ok for s in scores), frozen.digest, registered_digest, cfg.config_hash(), margins)
 
@@ -812,8 +1080,11 @@ def analyze_scores(scores: Sequence[SeedScores], *, frozen: FrozenSeedList, regi
 def run_study(frozen: FrozenSeedList, treatment: PredictorFactory, *, subject: str,
               registered_digest: Optional[str], cfg: BenchmarkConfig = BenchmarkConfig(),
               margins: Margins = Margins()) -> JointResult:
-    """Walk the frozen seed list in order, skip ineligible seeds (G_s < g_min, a teacher-only criterion;
-    they are listed, replaced from the reserve in order), score until n_planned seeds are attempted."""
+    """Walk the frozen seed list in order, skip ineligible seeds (G_s < g_min or TRAIN mask < 2 rows: both
+    teacher/input-only; they are listed and replaced from the reserve in order), score until n_planned seeds
+    are attempted. Only a factory DECLARED a scorer-validation fixture is exempt from the gate-11(c) loss check;
+    trained and undeclared treatments must pass it (undeclared ones cannot, so they come out INCONCLUSIVE)."""
+    exempt = treatment_kind(treatment) == "fixture"
     scores, skipped = [], []
     for s in frozen.seeds:
         if len(scores) >= frozen.n_planned:
@@ -822,11 +1093,14 @@ def run_study(frozen: FrozenSeedList, treatment: PredictorFactory, *, subject: s
             if build_fixture(s, cfg).G < cfg.g_min:
                 skipped.append(s)
                 continue
+        except IneligibleSeed:
+            skipped.append(s)
+            continue
         except ValueError:
-            pass   # fixture failure is scored as a failed run by score_seed, never dropped
+            pass   # other fixture failures are scored as failed runs by score_seed, never dropped
         scores.append(score_seed(s, treatment, cfg))
     return analyze_scores(scores, frozen=frozen, registered_digest=registered_digest, subject=subject,
-                          ineligible=skipped, cfg=cfg, margins=margins)
+                          ineligible=skipped, cfg=cfg, margins=margins, loss_check_exempt=exempt)
 
 
 # ============================================================== records
@@ -834,28 +1108,41 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _agg_metrics(pair: IntervalPair, margin: Optional[float], n_failed: int) -> dict:
+_AGG_KEYS = ("mean", "sd", "iqr", "min", "max", "max_over_median_abs", "ci_boot_lo", "ci_boot_hi", "ci_t_lo",
+             "ci_t_hi")
+
+
+def _agg_metrics(pair: IntervalPair, margin: float, n_failed: int) -> dict:
     m = {"mean": pair.mean, "sd": pair.sd, "iqr": pair.iqr, "min": pair.minimum, "max": pair.maximum,
          "max_over_median_abs": pair.max_over_median_abs,
          "ci_boot_lo": pair.boot_lo, "ci_boot_hi": pair.boot_hi, "ci_t_lo": pair.t_lo, "ci_t_hi": pair.t_hi,
          "n_seeds": MetricValue.measured(float(pair.n)), "n_failed": MetricValue.measured(float(n_failed)),
-         "ci_level": MetricValue.measured(float(pair.level))}
-    m["margin"] = (MetricValue.measured(float(margin)) if margin is not None
-                   else MetricValue.unmeasured("exploratory: no margin"))
+         "ci_level": MetricValue.measured(float(pair.level)), "n_boot": MetricValue.measured(float(pair.n_boot)),
+         "margin": MetricValue.measured(float(margin))}
     return m
 
 
+def _tag(hid: str, metric: str, conv: bool = False) -> str:
+    if len(PRIMARY[hid]) == 1:
+        return hid
+    return hid + ("a" if metric.startswith("delta") and "minus" not in metric else "b") + ("_conv" if conv else "")
+
+
 def to_experiment_records(res: JointResult, *, study_id: str, base_seed: int, timestamp_utc: Optional[str] = None,
-                          code_version: str = CODE_VERSION, scorer_validation: bool = False) -> list:
-    """Serialise onto ExperimentRecord (always EvidenceClass.TOY_RESULT for measured data; SOURCE_OBSERVED
-    is rejected by the schema). The structured verdict lives in `res`; the verdict text in `notes` is a
-    serialisation fallback only and must not be parsed or treated as evidence."""
+                          code_version: str = CODE_VERSION, scorer_validation: bool = False,
+                          prereg_hash: Optional[str] = None, amendments_hash: Optional[str] = None) -> list:
+    """Serialise onto ExperimentRecord (EvidenceClass.TOY_RESULT for measured data; SOURCE_OBSERVED is rejected
+    by the schema). NO verdict is written to `notes`. Interval bounds, margins, n and gate states are stored as
+    metrics, and `verdict_from_records` rebuilds the verdict from them alone. `prereg_hash` / `amendments_hash`
+    are included in input_hashes only when supplied (a hash field cannot hold 'unmeasured')."""
     ts = timestamp_utc or _now()
     kind = ("SCORER-VALIDATION FIXTURE (a test of the scorer, not a result about any method)"
             if scorer_validation else "toy fixture")
     hashes = {"seed_list": res.seed_list_digest, "config": res.config_hash}
-    if res.registered_digest is not None:
-        hashes["registered_seed_list"] = res.registered_digest
+    for k, v in (("registered_seed_list", res.registered_digest), ("prereg", prereg_hash),
+                 ("amendments", amendments_hash)):
+        if v is not None:
+            hashes[k] = v
 
     def prov(run_id: str, seed: int) -> RunProvenance:
         return RunProvenance(run_id=run_id, timestamp_utc=ts, seed=seed, code_version=code_version,
@@ -863,40 +1150,125 @@ def to_experiment_records(res: JointResult, *, study_id: str, base_seed: int, ti
 
     recs = []
     for h in (res.h1, res.h2, res.h3):
-        for c in h.components:
-            tag = h.hid if len(h.components) == 1 else h.hid + ("a" if c.metric == "delta" else "b")
-            ec = EvidenceClass.TOY_RESULT if c.pair.mean.is_measured else EvidenceClass.UNKNOWN
-            recs.append(ExperimentRecord(
-                name=f"evalproto/{study_id}/agg/{tag}", provenance=prov(f"{study_id}-agg-{tag}", base_seed),
-                metrics=_agg_metrics(c.pair, c.margin, res.n_failed), evidence_class=ec,
-                notes=f"{TOY_LABEL} PRIMARY {h.hid} [{kind}] subject={res.subject}; component verdict "
-                      f"{c.verdict.value}; hypothesis verdict {h.verdict.value} (serialisation fallback; "
-                      f"structured verdict is in JointResult; not evidence). Flags: {list(c.pair.flags)}"))
+        for conv, comps in ((False, h.components), (True, h.converged_components)):
+            for c in comps:
+                tag = _tag(h.hid, c.metric.replace("_conv", ""), conv)
+                ec = EvidenceClass.TOY_RESULT if c.pair.mean.is_measured else EvidenceClass.UNKNOWN
+                recs.append(ExperimentRecord(
+                    name=f"evalproto/{study_id}/agg/{tag}", provenance=prov(f"{study_id}-agg-{tag}", base_seed),
+                    metrics=_agg_metrics(c.pair, c.margin, res.n_failed), evidence_class=ec,
+                    notes=f"{TOY_LABEL} PRIMARY {h.hid} component {c.metric} [{kind}] subject={res.subject}. "
+                          f"Informational only; flags: {list(c.pair.flags)}"))
+    gate_m = {f"gate_{g.name}": MetricValue.measured(1.0 if g.passed else 0.0) for g in res.gates}
+    gate_m.update({"n_seeds": MetricValue.measured(float(res.n_attempted - res.n_failed)),
+                   "n_failed": MetricValue.measured(float(res.n_failed)),
+                   "n_deferred_checks": MetricValue.measured(float(len(res.deferred_gates)))})
     recs.append(ExperimentRecord(
         name=f"evalproto/{study_id}/agg/JOINT", provenance=prov(f"{study_id}-agg-JOINT", base_seed),
-        metrics={"n_seeds": MetricValue.measured(float(res.n_attempted - res.n_failed)),
-                 "n_failed": MetricValue.measured(float(res.n_failed))},
-        evidence_class=EvidenceClass.TOY_RESULT,
-        notes=f"{TOY_LABEL} [{kind}] subject={res.subject}; joint verdict {res.verdict.value} (serialisation "
-              f"fallback; not evidence). Gates failed: {[g.name for g in res.gates if not g.passed]}. "
-              f"Deferred (unimplemented) gates: {list(res.deferred_gates)}; a JOINT_SUPPORTED here is "
-              f"conditional on them."))
+        metrics=gate_m, evidence_class=EvidenceClass.TOY_RESULT,
+        notes=f"{TOY_LABEL} [{kind}] subject={res.subject}. Informational only; gate states are metrics. "
+              f"Unimplemented checks (any favourable outcome is conditional on them): {list(res.deferred_gates)}."))
     return recs
 
 
+def _pair_from_record(rec: ExperimentRecord) -> IntervalPair:
+    m = rec.metrics
+    return IntervalPair(rec.name, int(m["n_seeds"].value), m["ci_level"].value, int(m["n_boot"].value),
+                        m["mean"], m["sd"], m["iqr"], m["min"], m["max"], m["max_over_median_abs"],
+                        m["ci_boot_lo"], m["ci_boot_hi"], m["ci_t_lo"], m["ci_t_hi"])
+
+
+@dataclasses.dataclass(frozen=True)
+class RecomputedVerdict:
+    joint: JointVerdict
+    h1: Verdict
+    h2: Verdict
+    h3: Verdict
+
+
+def verdict_from_records(records: Sequence[ExperimentRecord], cfg: BenchmarkConfig = BenchmarkConfig()
+                         ) -> RecomputedVerdict:
+    """Rebuild the verdict ONLY from stored metrics (interval bounds, margins, n, gate states). `notes`,
+    `name` text and every other free-text field are ignored. A missing record raises ValueError; a missing or
+    unmeasured gate counts as failed."""
+    by = {}
+    for r in records:
+        if "/agg/" in r.name:
+            by[r.name.rsplit("/agg/", 1)[1]] = r
+    need = ["H1", "H2", "H3a", "H3b", "H3a_conv", "H3b_conv", "JOINT"]
+    missing = [k for k in need if k not in by]
+    if missing:
+        raise ValueError(f"records missing for {missing}")
+    for r in by.values():
+        if r.evidence_class is not EvidenceClass.TOY_RESULT:
+            raise ValueError(f"{r.name}: only TOY_RESULT records can carry a recomputed verdict")
+
+    def comp(tag, metric, direction):
+        r = by[tag]
+        mg = r.metrics["margin"]
+        if not mg.is_measured:
+            raise ValueError(f"{tag}: margin unmeasured")
+        return ComponentResult(metric, direction, mg.value, _pair_from_record(r), cfg.min_seeds, cfg.width_tol)
+
+    gm = by["JOINT"].metrics
+    state = {n: gm.get(f"gate_{n}") for n in GATE_SCOPES}
+    failed = [n for n, v in state.items() if v is None or v.value != 1.0]
+    glob = [n for n in failed if GATE_SCOPES[n] == "all"]
+    g12 = [n for n in failed if GATE_SCOPES[n] == "H3"]
+    h1 = HypothesisResult("H1", (comp("H1", "S", "greater"),), blocking=tuple(glob))
+    h2 = HypothesisResult("H2", (comp("H2", "L", "less"),), blocking=tuple(glob))
+    h3 = HypothesisResult("H3", (comp("H3a", "delta", "greater"), comp("H3b", "delta_minus_shuf", "greater")),
+                          (comp("H3a_conv", "delta_conv", "greater"),
+                           comp("H3b_conv", "delta_minus_shuf_conv", "greater")),
+                          blocking=tuple(glob), supported_blockers=tuple(g12))
+    return RecomputedVerdict(combine_joint(h1.verdict, h2.verdict, h3.verdict, not glob),
+                             h1.verdict, h2.verdict, h3.verdict)
+
+
+def _gate_metrics(s: SeedScores) -> dict:
+    return {"gate_finite": MetricValue.measured(1.0 if s.ok else 0.0),
+            "gate_disjoint": (MetricValue.measured(1.0 if s.rowsets_disjoint else 0.0)
+                              if s.rowsets_disjoint is not None else MetricValue.unmeasured("not checked"))}
+
+
 def seed_records(res: JointResult, *, study_id: str, timestamp_utc: Optional[str] = None,
-                 code_version: str = CODE_VERSION) -> list:
-    """One ExperimentRecord per scored seed. Unmeasured metrics stay MetricValue.unmeasured."""
+                 code_version: str = CODE_VERSION, prereg_hash: Optional[str] = None,
+                 amendments_hash: Optional[str] = None) -> list:
+    """One ExperimentRecord per (arm/subject, seed), named evalproto/<study>/<subject>. Unmeasured metrics stay
+    MetricValue.unmeasured. Notes carry no verdict."""
     ts = timestamp_utc or _now()
-    hashes = {"seed_list": res.seed_list_digest, "config": res.config_hash}
     out = []
     for s in res.seed_scores:
+        hashes = {"seed_list": res.seed_list_digest, "config": res.config_hash, **dict(s.input_hashes)}
+        for k, v in (("prereg", prereg_hash), ("amendments", amendments_hash)):
+            if v is not None:
+                hashes[k] = v
         out.append(ExperimentRecord(
-            name=f"evalproto/{study_id}/{res.subject}/seed",
+            name=f"evalproto/{study_id}/{res.subject}",
             provenance=RunProvenance(run_id=f"{study_id}-{res.subject}-{s.seed}", timestamp_utc=ts, seed=s.seed,
                                      code_version=code_version, python_version=current_python_version(),
                                      toy_only=True, input_hashes=hashes),
-            metrics=dict(s.metrics),
+            metrics={**s.metrics, **_gate_metrics(s)},
             evidence_class=EvidenceClass.TOY_RESULT if s.ok else EvidenceClass.UNKNOWN,
-            notes=f"{TOY_LABEL} per-seed values; PRIMARY inputs; no verdict at this level."))
+            notes=f"{TOY_LABEL} arm/subject={res.subject}; PRIMARY inputs; per-seed values only."))
+    return out
+
+
+def planned_slot_records(*, study_id: str, arms: Sequence[str], seeds: Sequence[int], timestamp_utc: Optional[str] = None,
+                         code_version: str = CODE_VERSION, seed_list_hash: Optional[str] = None) -> list:
+    """Planned-but-unrun (arm, seed) slots: EvidenceClass.UNKNOWN, every metric unmeasured."""
+    ts = timestamp_utc or _now()
+    hashes = {} if seed_list_hash is None else {"seed_list": seed_list_hash}
+    why = "UNKNOWN: registered, not yet run"
+    out = []
+    for arm in arms:
+        for s in seeds:
+            m = {k: MetricValue.unmeasured(why) for k in SEED_METRICS + ("gate_finite", "gate_disjoint")}
+            out.append(ExperimentRecord(
+                name=f"evalproto/{study_id}/{arm}",
+                provenance=RunProvenance(run_id=f"{study_id}-{arm}-{s}", timestamp_utc=ts, seed=s,
+                                         code_version=code_version, python_version=current_python_version(),
+                                         toy_only=True, input_hashes=hashes),
+                metrics=m, evidence_class=EvidenceClass.UNKNOWN,
+                notes=f"{TOY_LABEL} planned slot arm={arm}; nothing measured."))
     return out
