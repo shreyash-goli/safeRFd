@@ -984,6 +984,28 @@ class TestQAHardening(unittest.TestCase):
             with self.assertRaises(ValueError, msg=m.__name__):
                 m(big, ((0.0,),) * 3, (True,) * 3)
 
+    def test_from_values_wraps_unrepresentable_and_bad_types_in_valueerror(self):
+        for bad in ([10 ** 400] * 3, [-10 ** 400, 1.0, 2.0], [None, 1.0, 2.0], [object(), 1.0, 2.0]):
+            with self.assertRaises(ValueError, msg=repr(bad)[:30]):
+                rb.SeedSummary.from_values(bad)
+            try:
+                rb.SeedSummary.from_values(bad)
+            except ValueError as e:
+                self.assertNotIsInstance(e, OverflowError)
+        with self.assertRaises(ValueError):          # same via summarize_seeds' inputs is MetricValue-only
+            rb.summarize_seeds([10 ** 400] * 3, 3)
+
+    def test_zero_variance_warning_is_exact_set_test_not_sd_and_scale_independent(self):
+        tiny = 5e-324     # smallest subnormal
+        c = rb.seed_sensitivity_probe(lambda s: tiny, SEEDS[:10], CFG)
+        self.assertTrue(c.details["zero_variance_warning"])
+        steps = {s: tiny * (1 + i % 3) for i, s in enumerate(SEEDS[:10])}
+        d = rb.seed_sensitivity_probe(lambda s: steps[s], SEEDS[:10], CFG)
+        self.assertFalse(d.details["zero_variance_warning"])        # non-constant sample is never flagged
+        self.assertEqual(d.details["n_distinct_values"], 3)
+        self.assertIn("2.47e-324", rb.SeedSummary.__doc__)
+        self.assertIn("zero_variance_warning", rb.SeedSummary.__doc__)
+
     def test_documented_corner_extreme_summary_is_accepted(self):
         s = rb.SeedSummary.from_values([1.7e308] * 3)      # documented, unguarded: see SeedSummary docstring
         self.assertEqual(s.n, 3)

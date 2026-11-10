@@ -3058,3 +3058,40 @@ teammate's tests landed, with failure counts varying between runs (0, 3, 5). **E
 builder could read was in `tests/toy_tests/test_scripts.py`** — the SR-15 owner's file, mid-rework on
 the per-module baseline. The builder honestly noted it did **not** capture which test failed on the
 first run, so it cannot confirm that one was also SR-15's.
+
+---
+
+## SR-11 contract leak fixed — and the citation hazard materialised within the same round
+
+**Date:** 2026-11-10. `test_robustness.py` at 87 tests (was 85); module suite **OK**.
+
+- **The leak is closed:** `SeedSummary.from_values` now raises `ValueError` for an unrepresentable
+  value such as `10**400` or `-10**400`, and a `TypeError` (from `None` or a bare object) is also
+  wrapped as `ValueError`. That retires the last instance of the contract class SR-06 was failed for —
+  "every error derives from the documented base" — which this same module had already been corrected
+  for once, on `abs_bias_fsum`.
+- **The citation hazard the orchestrator warned about happened immediately.** The brief said: "if you
+  ever move or change that cast, the citation breaks silently." Wrapping it in `try/except` **moved
+  the cast from line 178 to line 189**, so `src/toy/benchmark.py:254` now cites a **stale** line.
+  The builder reported this unprompted and added a comment above the cast — *"Keep the cast; if it
+  moves, update that citation."* — making the coupling visible from the depended-on side, which is
+  where it was previously invisible. **Orchestrator verified:** the cast is at `robustness.py:189`;
+  `benchmark.py:254` still reads 178. Routed to the `benchmark.py` owner as a one-line fix.
+  *Lesson worth keeping:* a cross-file line-number citation is a latent defect. The comment helps, but
+  the durable fix is to cite a **symbol** (`from_values`'s cast) rather than a line.
+- **The zero-SD floor turns out not to reach SR-11 at all, and for a better reason than expected.**
+  The orchestrator asked whether the newly documented floor (~2.47e-324) could make
+  `zero_variance_warning` fire or fail to fire misleadingly. The builder established it **cannot**:
+  the warning tests **`len(set(values)) == 1`**, not the SD, so it never consults `sample_sd` — and
+  this holds even for user-supplied subnormal-scale outcomes, not merely for the built-in probes.
+  Documented at `robustness.py:155`. Separately, the built-in probes only ever feed O(1)-scale
+  quantities (scorer outcomes, relative deviations from 0.0 up to ~1e-17, relative errors, integer
+  counts), so none can reach the floor — now stated in the `SeedSummary` docstring rather than left
+  as an unexamined assumption, with the floor cited.
+- **New tests:** the overflow and type-wrapping cases; and that the warning fires for a constant
+  sample of the smallest subnormal, stays off for a **non-constant** subnormal sample, and that the
+  docstring names the floor.
+- The builder reported it did **not** obtain a pytest count (its first background run printed nothing
+  and it did not re-run), and attributed the 3 remaining unittest failures to
+  `tests/toy_tests/test_scripts.py::TestDemoRepoInodeGuard` — the SR-15 owner's in-flight work —
+  rather than investigating them.

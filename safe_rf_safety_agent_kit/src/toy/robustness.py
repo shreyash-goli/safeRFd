@@ -147,6 +147,13 @@ class InsufficientEvidence:
 @dataclasses.dataclass(frozen=True)
 class SeedSummary:
     """Distribution of an outcome over >= SEED_FLOOR measured seeds. Cannot be built from fewer.
+    Scale assumption (cites the floor documented in `toy.benchmark.sample_sd`): SD is exactly 0.0 for a
+    constant sample, but a NON-constant sample whose true SD is below ~2.47e-324 (half the smallest
+    subnormal) also reports 0.0, because the true value is unrepresentable. Every built-in probe feeds
+    O(1)-scale quantities (seed outcomes of the benchmark scorer, relative deviations >= 0 down to ~1e-17 or
+    exactly 0.0, relative errors, integer counts), so no built-in probe can reach that floor.
+    `details.zero_variance_warning` does not use SD at all: it tests `len(set(values)) == 1`, which is exact
+    for any scale, so it is unaffected by the floor even for user-supplied subnormal-scale outcomes.
     Known unguarded corner: finite values near the float maximum are accepted (e.g. three copies of 1.7e308)
     and such a summary serializes; no overflow check is made on the statistics beyond finiteness."""
     n: int
@@ -175,7 +182,15 @@ class SeedSummary:
 
     @classmethod
     def from_values(cls, values: Sequence[float]) -> "SeedSummary":
-        vals = tuple(float(v) for v in values)
+        # NOTE: toy.benchmark.sample_sd's docstring cites this cast as the reason the "Python ints beyond 2**53"
+        # limit is unreachable from SR-11 (every value is cast to float here, and SeedSummary.__post_init__
+        # rejects non-float values). Keep the cast; if it moves, update that citation.
+        try:
+            vals = tuple(float(v) for v in values)
+        except OverflowError:   # e.g. 10**400: keep the documented ValueError family
+            raise ValueError("a value is too large to represent as a finite float") from None
+        except TypeError as e:
+            raise ValueError(f"values must be real numbers: {e}") from None
         if len(vals) < SEED_FLOOR:
             raise ValueError(f"a summary needs >= {SEED_FLOOR} measured seeds, got {len(vals)}")
         return cls(*_stats(vals), values=vals)
