@@ -2196,3 +2196,39 @@ and **never validated against a real erasure-arm run**.
 reviewer saw, and the orchestrator has since requested the `subject_kind` field (for SR-12's F4) plus
 gate-11/12 test coverage, so the current file differs from the attested one. It will be re-reviewed
 before marking — the discipline SR-12 had to teach the orchestrator.
+
+---
+
+## SR-09 close-out fixes (D-a, D-b, D-c) — complete
+
+**Date:** 2026-11-10. All three applied to `docs/EVALUATION_PROTOCOL.md`; the PASS already recorded
+above stands.
+
+- **D-c resolved with the fact left on the record.** The premature "verified against git by the
+  orchestrator and reviewer" line is replaced by a precise account: the **orchestrator** ran
+  `git show --stat ff451e1` and `git log -S` on `control_adequacy` before requesting the correction,
+  and the entry's facts come from those checks; the earlier wording **named a reviewer who had not yet
+  reviewed**, so it asserted a verification that had not happened; and the independent reviewer later
+  re-ran those checks in its final pass and confirmed them. The entry now states in one sentence that
+  an unverified attribution slipped into the entry written to fix an unverified attribution.
+  **The owner was also honest about its own limits here:** it recorded that it did **not** re-derive
+  the git facts itself — it is relaying the orchestrator's checks and the reviewer's confirmation,
+  which is exactly the distinction this kit insists on.
+- **D-a resolved:** the §7 template now carries `divergence_period` (required when
+  `logged_late: yes`) and `known_residual` (optional). The owner noted, unprompted, that the
+  template's field order differs slightly from A-1's and that it did not check whether that matters —
+  a small honest loose end rather than a silent assumption.
+- **D-b resolved by decision rather than by move:** §7.1 stays at the end of the file, with one
+  italic line stating that this is **deliberate** — the log is append-only, so new entries are
+  appended rather than renumbered into the body. Making an odd-looking layout explicitly intentional
+  is the right resolution for a cosmetic finding.
+- **The implementation lag is recorded separately from A-1**, as instructed: r2 (`905bbfe`) specified
+  gate 11 while `benchmark.py` had no `control_adequacy` until `12bc490`. Logged as an implementation
+  lag — the document specifying something the code did not yet have — and explicitly **not** an
+  amendment or scope change, with A-1 unchanged on that point.
+- The four UNKNOWN items are untouched, and the Level B boundary and zero-measured-results property
+  are unchanged.
+
+**Suite: 768 tests, OK (2 skipped)** under `unittest discover -s tests` with bytecode caching
+disabled. `tests/toy_tests/test_benchmark.py` remains modified in the working tree by the in-flight
+SR-10 work and is not part of this change.
