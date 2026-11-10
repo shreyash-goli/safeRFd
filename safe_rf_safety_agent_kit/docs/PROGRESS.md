@@ -4543,3 +4543,92 @@ three shuffles, components reversed, converged reversed, and all at once → no 
 `_weaker_than_protocol` verified in **both** directions, producing a byte-identical paragraph for
 honest and forged, accusing and exculpating neither. `_contract_problems` fires on a defaultless
 signature and does not false-fire at HEAD. The documented same-name-forged-pair residual is unchanged.
+
+---
+
+# SR-15 third attestation: FAIL — and I caused it
+
+**Date:** 2026-11-10. All five round-2 fixes verified sound, 13 of 14 mutants killed, baseline at
+**zero slack on both columns** with a fresh `--update-baseline` byte-identical to the committed file.
+**The FAIL is a change I made three commits earlier.**
+
+## The defect: my fatal-ruff test breaks the documented run on any machine without ruff
+I added `test_ruff_correctness_findings_are_fatal_not_advisory` with
+`@unittest.skipUnless(shutil.which("ruff"), "ruff is not installed (optional linter)")`. That reason
+names no package the none-mode policy recognises (`NONE_OK` matches only
+`(torch|numpy|pyyaml|pytest)`), so on a clean machine:
+
+```
+skip policy (none): 90 skipped across 4 modules; 1040 tests started
+FAIL: POLICY:NONE_REASON skip reason does not say a package is missing:
+  ...test_ruff_correctness_findings_are_fatal_not_advisory :: 'ruff is not installed (optional linter)'
+RESULT: FAIL
+```
+
+`ruff` appears **nowhere** in `CLEAN_CLONE.md`, `README.md`, `requirements-dev.txt`, `constraints.txt`
+or `ci.yml`. Nothing installs it, and the document's own bareness probe
+(`for m in torch numpy pytest yaml`) cannot see it. Documented steps **(a)**, **(c)** and **(d)** all
+fail — (d) as `POLICY:TORCH_MODE_MISSING`, because the reason contains "not installed" — while (b) is
+unaffected since `NONE_REASON` sits inside `if mode == "none":`. It falsifies `CLEAN_CLONE.md:3`
+("the standard library is enough") and `README.md:35` ("a clean clone, CI"), which are precisely the
+two environments where it breaks. **CI would be red on all three legs.**
+
+**Three things about this are worth keeping.**
+1. **The kit caught me with its own rule.** `test_none_mode_requires_a_package_name_and_a_phrase`
+   already lists `"optional dependency absent"` as a reason that **must** fail. I wrote a reason of
+   exactly that shape into the suite the rule governs. The policy is right; my skip reason is wrong.
+2. **It was invisible to two measurements, mine and the builder's, both reading `OK (skipped=89)`** —
+   because `ruff` is on this host's `PATH`. The reviewer found it by running under `env -i` with a
+   cleaned `PATH`. **A green run on a developer host is not evidence about a clean clone**, and the
+   whole point of `--expect none` is to measure the clean-clone case. I had the tool for this and did
+   not use it.
+3. **I introduced a dependency while hardening a check against undeclared dependencies.** The change
+   was motivated by an undefined name of mine that ruff reported and `lint.sh` discarded; making it
+   fatal was right, and I shipped it with a skip that assumes the tool is present.
+
+## Two new defects, neither mine
+- **The staging write re-opens D1.** `mv "$TMP/base.staged" "$BASELINE"` never checks that
+  `$BASELINE` is an existing **directory**, and `$(grep -cv '^#' "$BASELINE" || true)` hides the
+  result: `--baseline scripts --update-baseline` reports `baseline written: .../scripts ( modules)`
+  with `RESULT: OK` and leaves an untracked, non-gitignored **`scripts/base.staged` inside the
+  repository**. Same shape as D1, in a kit whose `demo.py` has an inode guard precisely to stop that.
+  The honest `mv`-failure path works when the parent is unwritable, but **`POLICY:BASELINE_WRITE` is
+  asserted by no test** — nor are `POLICY:RECORDER` or `POLICY:SKIP_RECORD`.
+- **A Linux-only hole in the family enumeration**, reported high-confidence and **explicitly
+  unexecuted** rather than claimed: `SOCKET_FAMILY`'s `send\w*` matches `sendmsg_afalg`, which
+  typeshed defines under `if sys.platform == "linux":` and which is in neither `_BLOCK_SOCKET` nor
+  `_NOT_BLOCKED` — so `test_every_family_member_is_either_patched_or_disclosed` fails on Linux.
+  `fam_sock` is 10 on macOS and 11 on Linux, and **the anti-vacuity floor is met exactly at 10**, so
+  it would not have caught a shrinking family either. The family-as-data fix was the right shape and
+  still has a platform hole; "enumerate from the live module" is only as portable as the module.
+
+## Verified sound, recorded so it is not re-litigated
+D5 end to end: every executed IPv4 literal in `scripts/` and `tests/` is `127.0.0.1`, all eight
+`192.0.2.1` occurrences are comments or docstrings, `listen` is driven on AF_UNIX, UDP on loopback,
+and both TEST-NET mutants die. `GUARD_CALLS` = 14 = `PATCHED_MODULE`(8) ∪ `PATCHED_SOCKET`(6), with
+the unguarded arm asserting `failures=14`. A live probe under the real guard confirmed **all 14
+patched names blocked** and **all 8 `_NOT_BLOCKED` names behaving exactly as disclosed**. D1's `none`
+case, D2's shell-side refusal (whose mutant reproduces the pre-fix output verbatim), D4's
+no-restated-count, and the `policy()` arity check (whose mutant reproduces `$3: unbound variable`)
+all hold. The fatal-ruff behaviour itself is correct and its test is **not** masked — the
+`ruff_advisory` mutant dies, which proves ruff really runs inside it. Every `CLEAN_CLONE.md` number
+checked matched except one hedged `110` against a live `111`.
+
+## Lint evasion 28, reported and correctly not scored
+`typing.get_type_hints(f)` where `f`'s return annotation is the **string**
+`"__import__('os').system('echo pwned')"` — it executes a string literal with no `eval`, `exec`,
+`compile`, `getattr`, `__dict__`, `vars` or `getmembers` token anywhere, defeating the `EXEC_ALLOW`
+mechanism in a shape nothing on the "not covered" list describes. Also `inspect.getattr_static`,
+`sys.breakpointhook` with `PYTHONBREAKPOINT=os.system`, and bare `breakpoint()` reaching `pdb` — a
+module explicitly named in `PROC` — through a builtin with no import.
+**Not findings, by the kit's own standard**, which the reviewer applied correctly: the document admits
+"any stdlib code-execution or server entry point nobody has thought of yet" and asserts nothing the
+probes contradict. Recorded because three cheap names would close them, and because `breakpoint()`
+reaching a *named-and-banned* module through a builtin is the most interesting shape found so far.
+
+## The method note worth promoting
+The reviewer ran the documented sequence under `env -i` with an explicit minimal `PATH`. That is the
+only reason this was found, and it is now the standing way to measure a clean-clone claim: **the
+ambient `PATH` is part of the development environment, so a measurement taken on it cannot attest a
+clean clone.** It also correctly declined to re-measure two full runs once the criterion had already
+failed on a reproduced documented command, and said so rather than padding.
