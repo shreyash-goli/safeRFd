@@ -1,5 +1,7 @@
 """SR-13 tests for toy.dashboard. TOY ONLY: fixtures are synthetic; nothing here is a safety result."""
 import dataclasses
+import itertools
+import os
 import random
 import re
 import sys
@@ -325,8 +327,7 @@ class CannotDisplayUnsupportedAsConfirmed(unittest.TestCase):
 
     def test_failed_gate_forces_inconclusive_even_if_stored_supported(self):
         j = joint()
-        g = dataclasses.replace(j.gates[1], passed=False)
-        j = dataclasses.replace(j, gates=(j.gates[0], g) + j.gates[2:])
+        fail_gate(j, j.gates[1].name)
         for h_ in (j.h1, j.h2, j.h3):
             object.__setattr__(h_, "verdict", bm.Verdict.SUPPORTED)
         h = db.render_scorecard(j)
@@ -428,6 +429,295 @@ class ScorerDriftFailsLoudly(unittest.TestCase):
         self.assertEqual(self.decisive(re.search(r"<b>Joint verdict:</b>.*?</p>", h).group(0)), [])
         self.assertNotIn("NOT shown", h)           # genuine upstream INCONCLUSIVE agrees with the recomputation
         self.assertIn("FAIL", h)
+
+
+def fail_gate(j, name):
+    """Forge a failed gate on an otherwise SUPPORTED result. dataclasses.replace() is now refused upstream
+    (JointResult validates gate/verdict consistency), so bypass the frozen dataclass, as a tamperer would."""
+    gs = tuple(dataclasses.replace(g, passed=False) if g.name == name else g for g in j.gates)
+    object.__setattr__(j, "gates", gs)
+    return j
+
+
+def joint_cell(h):
+    return re.search(r"<b>Joint verdict:</b>.*?</p>", h).group(0)
+
+
+def hyp_cells(h):
+    return dict((m.group(1), m.group(3)) for m in re.finditer(
+        r'<th colspan=8>(H\d) hypothesis verdict</th><td><span class="vd (vd-\w+)">(\w+)</span>', h))
+
+
+class WriteGuards(unittest.TestCase):
+    def setUp(self):
+        self._t = tempfile.TemporaryDirectory()
+        self.addCleanup(self._t.cleanup)
+        self.root = Path(self._t.name).resolve()
+        (self.root / "repo").mkdir()
+        (self.root / "out").mkdir()
+        self.repo_file = self.root / "repo" / "SOURCE_SNAPSHOT.json"
+        self.repo_file.write_text("PRECIOUS", encoding="utf-8")
+        p = mock.patch.object(db, "REPO_ROOT", self.root / "repo")   # a scratch 'repo'; the real one is never touched
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_hardlink_to_repo_file_refused_and_file_untouched(self):
+        link = self.root / "out" / "link.html"
+        os.link(self.repo_file, link)
+        self.assertFalse(db._inside_repo(link))                     # the PATH looks fine: only the inode is bad
+        with self.assertRaisesRegex(ValueError, "hard link"):
+            db.write_dashboard(link, {})
+        self.assertEqual(self.repo_file.read_text(encoding="utf-8"), "PRECIOUS")
+        self.assertEqual(link.read_text(encoding="utf-8"), "PRECIOUS")
+
+    def test_hardlink_even_if_check_missed_replace_does_not_modify_inode(self):
+        # second layer: write goes to a temp file + os.replace, so an existing inode is never rewritten
+        link = self.root / "out" / "link.html"
+        os.link(self.repo_file, link)
+        with mock.patch.object(os, "lstat", side_effect=FileNotFoundError):    # simulate the nlink check missing
+            db.write_dashboard(link, {})
+        self.assertEqual(self.repo_file.read_text(encoding="utf-8"), "PRECIOUS")
+        self.assertIn("<html", link.read_text(encoding="utf-8"))
+
+    def test_path_inside_repo_refused_incl_dotdot_and_symlinked_dir(self):
+        with self.assertRaises(ValueError):
+            db.write_dashboard(self.root / "repo" / "x.html", {})
+        with self.assertRaises(ValueError):
+            db.write_dashboard(self.root / "out" / ".." / "repo" / "x.html", {})
+        os.symlink(self.root / "repo", self.root / "out" / "dirlink")
+        with self.assertRaises(ValueError):                           # only resolve() catches this
+            db.write_dashboard(self.root / "out" / "dirlink" / "x.html", {})
+        self.assertTrue(db._inside_repo(self.root / "out" / "dirlink" / "x.html"))
+        self.assertFalse((self.root / "repo" / "x.html").exists())
+
+    def test_symlink_file_refused(self):
+        target = self.root / "out" / "real.html"
+        target.write_text("old", encoding="utf-8")
+        os.symlink(target, self.root / "out" / "sym.html")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            db.write_dashboard(self.root / "out" / "sym.html", {})
+        self.assertEqual(target.read_text(encoding="utf-8"), "old")
+        os.symlink(self.root / "out" / "nowhere", self.root / "out" / "dangling.html")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            db.write_dashboard(self.root / "out" / "dangling.html", {})
+
+    def test_directory_target_refused(self):
+        with self.assertRaises(ValueError):
+            db.write_dashboard(self.root / "out", {})
+
+    def test_normal_write_overwrites_regular_file_and_leaves_no_temp(self):
+        out = self.root / "out" / "d.html"
+        out.write_text("old", encoding="utf-8")
+        db.write_dashboard(out, {})
+        self.assertEqual(out.read_text(encoding="utf-8"), db.render_dashboard({}))
+        self.assertEqual(sorted(x.name for x in (self.root / "out").iterdir()), ["d.html"])
+
+
+class CspAndBadges(unittest.TestCase):
+    def test_csp_meta_present_and_strict(self):
+        h = db.render_dashboard({})
+        metas = re.findall(r'<meta http-equiv="Content-Security-Policy" content="([^"]*)">', h)
+        self.assertEqual(len(metas), 1)
+        csp = metas[0]
+        self.assertEqual(csp, "default-src 'none'; style-src 'unsafe-inline'")
+        for loose in ("*", "unsafe-eval", "script-src", "http", "data:", "connect-src", "img-src"):
+            self.assertNotIn(loose, csp)
+        self.assertLess(h.index("Content-Security-Policy"), h.index("<style>"))
+
+    def test_badge_caveats(self):
+        for ec in (EC.HYPOTHESIS, EC.NOT_VALIDATED, EC.UNKNOWN):
+            self.assertIn("NOT EVIDENCE", db._badge(ec))
+        self.assertIn("not a safety claim", db._badge(EC.TOY_RESULT))
+        self.assertIn("not a model result", db._badge(EC.SOURCE_OBSERVED))
+        self.assertIn("warn", db._badge(EC.UNKNOWN, "problem text"))
+        self.assertEqual(set(db._BADGE), set(EC))                    # every class has a fixed badge
+
+
+class MalformedInputs(unittest.TestCase):
+    def test_history_rejects_nan_inf_bool_strings_arity(self):
+        good, bad = db._valid_history([(0, 1.0, 2.0), (1, float("nan"), 1.0), (2, 1.0, float("inf")),
+                                       (True, 1.0, 1.0), (3, False, 1.0), ("4", 1.0, 1.0), (5, 1.0),
+                                       (6, 1.0, 1.0, 1.0), None, 7])
+        self.assertEqual(good, [(0.0, 1.0, 2.0)])
+        self.assertEqual(bad, 9)
+        self.assertEqual(db._valid_history("not a list"), ([], 0))
+
+    def test_render_reports_omitted_history_rows(self):
+        t = dataclasses.replace(train(3, steps=3, timestamp_utc=TS),
+                                history=((0, 1.0, 1.0), (1, float("nan"), 1.0), (2, True, 1.0)))
+        h = db.render_dashboard({"train": t})
+        self.assertIn("2 malformed history row(s) omitted", h)
+        self.assertNotIn("nan", h.lower().replace("unknown", ""))
+
+    def test_forged_metric_values_render_unknown(self):
+        for forged in (float("nan"), True, False, 0, "0", float("inf"), 1):
+            mv = MetricValue.measured(0.5)
+            object.__setattr__(mv, "value", forged)
+            cell = db._metric_cell(mv)
+            self.assertIn("UNKNOWN", cell, forged)
+            self.assertNotIn('class="measured"', cell)
+        for notmv in (None, 0, 0.0, "0", {"value": 0.0}):
+            self.assertIn("UNKNOWN", db._metric_cell(notmv))
+
+    def test_train_fallback_labels(self):
+        t = train(3, steps=3, timestamp_utc=TS)
+        h = db.render_dashboard({"train": t})
+        self.assertIn('data-evidence="TOY_RESULT"><h2>Toy training curves', h)
+        no_rec = dataclasses.replace(t, record=None)
+        h = db.render_dashboard({"train": no_rec})
+        self.assertIn('data-evidence="UNKNOWN"><h2>Toy training curves', h)
+        self.assertIn("no valid ExperimentRecord attached", h)
+        self.assertIn("<svg", h)                                      # curve drawn, but never labelled above UNKNOWN
+        hyp = dataclasses.replace(t, record=rec(ec=EC.HYPOTHESIS))
+        self.assertIn('data-evidence="HYPOTHESIS"><h2>Toy training curves', db.render_dashboard({"train": hyp}))
+        h = db.render_dashboard({"train": rec()})                       # bare record: no history, no curve
+        self.assertIn("no usable history", h)
+        self.assertNotIn("<svg", h)
+        h = db.render_dashboard({"train": object()})
+        self.assertIn('data-evidence="UNKNOWN"><h2>Toy training curves', h)
+
+    def test_row_cap_is_loud(self):
+        h = db.render_dashboard({"records": [rec(name=f"n{i}") for i in range(db.MAX_TABLE_ROWS + 1)]})
+        self.assertIn(f"TRUNCATED: showing {db.MAX_TABLE_ROWS} of {db.MAX_TABLE_ROWS + 1}", h)
+        self.assertEqual(h.count("UNTRUSTED FREE TEXT (name)"), db.MAX_TABLE_ROWS)
+        self.assertNotIn('data-evidence="TOY_RESULT"><h2>Experiment records', h)   # incomplete => not plain TOY
+        ok = db.render_dashboard({"records": [rec(name=f"n{i}") for i in range(db.MAX_TABLE_ROWS)]})
+        self.assertNotIn("TRUNCATED", ok)
+        self.assertIn('data-evidence="TOY_RESULT"><h2>Experiment records', ok)
+
+    def test_non_record_entries_are_loud_not_silent(self):
+        evil = {"name": "<script>x</script>", "verdict": "JOINT_SUPPORTED"}
+        h = db.render_dashboard({"records": [rec(), evil, "str", 5, None]})
+        self.assertIn("4 entries not rendered: not an ExperimentRecord", h)
+        self.assertEqual(h.count("ENTRY IS NOT AN ExperimentRecord"), 4)
+        self.assertNotIn("<script", h)
+        self.assertNotIn("JOINT_SUPPORTED", h)                          # contents of bad entries are never rendered
+        self.assertIn('data-evidence="NOT_VALIDATED"><h2>Experiment records', h)
+        only = db.render_dashboard({"records": ["x"]})
+        self.assertIn('data-evidence="UNKNOWN"><h2>Experiment records', only)
+        self.assertIn("not iterable", db.render_dashboard({"records": 5}))
+        self.assertIn("record list is empty", db.render_dashboard({"records": []}))
+
+
+class ScorecardVerdictCore(unittest.TestCase):
+    """Each layer of the verdict derivation demonstrated on its own, starting from a GENUINE SUPPORTED result.
+    The renderer may only ever downgrade: every scenario must end with no supported joint cell."""
+
+    def base(self):
+        j = joint()
+        h = db.render_scorecard(j)
+        self.assertIn("vd-supported", joint_cell(h))
+        self.assertEqual(set(hyp_cells(h).values()), {"SUPPORTED"})
+        self.assertNotIn("NOT shown", h)
+        return j
+
+    def assertDowngraded(self, h, mismatch=True):
+        self.assertNotIn("vd-supported", joint_cell(h))
+        self.assertNotIn("vd-unsupported", joint_cell(h))
+        self.assertIn("vd-inconclusive", joint_cell(h))
+        if mismatch:
+            self.assertIn("NOT shown", h)
+
+    def test_layer_hypothesis_blocking(self):
+        j = self.base()
+        object.__setattr__(j.h1, "blocking", ("control_adequacy (forged)",))     # stored verdict still SUPPORTED
+        h = db.render_scorecard(j)
+        self.assertEqual(hyp_cells(h)["H1"], "INCONCLUSIVE")
+        self.assertEqual(hyp_cells(h)["H2"], "SUPPORTED")                        # only the blocked hypothesis changes
+        self.assertDowngraded(h)
+
+    def test_layer_global_gate_blocks_everything(self):
+        j = self.base()
+        for name in ("control_adequacy", "min_seeds", "seed_list_frozen"):
+            j = fail_gate(joint(), name)
+            h = db.render_scorecard(j)
+            self.assertEqual(set(hyp_cells(h).values()), {"INCONCLUSIVE"}, name)
+            self.assertDowngraded(h)
+
+    def test_layer_h3_scoped_gate_blocks_only_h3(self):
+        j = self.base()
+        h = db.render_scorecard(fail_gate(j, "convergence"))
+        cells = hyp_cells(h)
+        self.assertEqual(cells["H3"], "INCONCLUSIVE")
+        self.assertEqual((cells["H1"], cells["H2"]), ("SUPPORTED", "SUPPORTED"))  # scope-aware, not blanket
+        self.assertDowngraded(h)
+
+    def test_layer_any_failed_gate_withholds_component_cells(self):
+        j = self.base()
+        h = db.render_scorecard(fail_gate(j, "convergence"))
+        comp_rows = [r for r in h.split("<tr>") if "greater" in r or "less" in r]
+        self.assertTrue(comp_rows)
+        for r in comp_rows:
+            self.assertNotIn("vd-supported", r)
+
+    def test_layer_h3_converged_components_required(self):
+        j = self.base()
+        object.__setattr__(j.h3, "converged_components", ())
+        h = db.render_scorecard(j)
+        self.assertEqual(hyp_cells(h)["H3"], "INCONCLUSIVE")
+        self.assertDowngraded(h)
+
+    def test_layer_h3_weak_converged_components(self):
+        j = self.base()
+        weak = joint(expect=None, d=0.0, dms=0.0)
+        self.assertNotEqual(weak.h3.converged_components[0].verdict, bm.Verdict.SUPPORTED)
+        object.__setattr__(j.h3, "converged_components", weak.h3.converged_components)
+        h = db.render_scorecard(j)
+        self.assertEqual(hyp_cells(h)["H3"], "INCONCLUSIVE")
+        self.assertDowngraded(h)
+
+    def test_layer_supported_blockers(self):
+        j = self.base()
+        object.__setattr__(j.h3, "supported_blockers", ("convergence (forged)",))
+        h = db.render_scorecard(j)
+        self.assertEqual(hyp_cells(h)["H3"], "INCONCLUSIVE")
+        self.assertDowngraded(h)
+
+    def test_layer_component_recomputation(self):
+        j = joint(expect=bm.JointVerdict.JOINT_UNSUPPORTED, S=0.0)
+        object.__setattr__(j.h1.components[0], "verdict", bm.Verdict.SUPPORTED)
+        object.__setattr__(j.h1, "verdict", bm.Verdict.SUPPORTED)
+        h = db.render_scorecard(j)
+        self.assertEqual(hyp_cells(h)["H1"], "INCONCLUSIVE")
+        self.assertNotIn("vd-supported", joint_cell(h))
+
+    def test_layer_combine_truth_table(self):
+        V, JV = bm.Verdict, bm.JointVerdict
+        for h1, h2, h3, ok in itertools.product(V, V, V, (True, False)):
+            vs = (h1, h2, h3)
+            if not ok:
+                want = JV.JOINT_INCONCLUSIVE
+            elif V.UNSUPPORTED in vs:
+                want = JV.JOINT_UNSUPPORTED
+            elif all(v is V.SUPPORTED for v in vs):
+                want = JV.JOINT_SUPPORTED
+            else:
+                want = JV.JOINT_INCONCLUSIVE
+            self.assertIs(db._combine(h1, h2, h3, ok), want, (vs, ok))
+        # explicit anchors, independent of the loop above
+        self.assertIs(db._combine(V.SUPPORTED, V.SUPPORTED, V.INCONCLUSIVE, True), JV.JOINT_INCONCLUSIVE)
+        self.assertIs(db._combine(V.SUPPORTED, V.SUPPORTED, V.SUPPORTED, False), JV.JOINT_INCONCLUSIVE)
+        self.assertIs(db._combine(V.SUPPORTED, V.UNSUPPORTED, V.SUPPORTED, True), JV.JOINT_UNSUPPORTED)
+
+    def test_layer_joint_mismatch_both_directions(self):
+        sup, uns = self.base(), joint(expect=bm.JointVerdict.JOINT_UNSUPPORTED, S=0.0)
+        with mock.patch.object(bm.JointResult, "verdict", property(lambda self: bm.JointVerdict.JOINT_SUPPORTED)):
+            h = db.render_scorecard(uns)            # stored claims SUPPORTED, structure says UNSUPPORTED
+        self.assertDowngraded(h)
+        self.assertIn("JOINT", h.split("Stored verdict(s) for ")[1].split(" disagree")[0])
+        with mock.patch.object(bm.JointResult, "verdict", property(lambda self: bm.JointVerdict.JOINT_INCONCLUSIVE)):
+            h = db.render_scorecard(sup)            # stored is weaker than the structure: still not promoted
+        self.assertDowngraded(h)
+        with mock.patch.object(bm.JointResult, "verdict", property(lambda self: "JOINT_SUPPORTED")):
+            self.assertDowngraded(db.render_scorecard(uns))        # a bare string is not a JointVerdict
+
+    def test_renderer_never_more_permissive_than_scorer(self):
+        for kw in (dict(S=0.0), dict(conv=False), dict(gate_inputs=False), dict(L=1.0)):
+            j = joint(expect=None, **kw)
+            h = db.render_scorecard(j)
+            if j.verdict is not bm.JointVerdict.JOINT_SUPPORTED:
+                self.assertNotIn("vd-supported", joint_cell(h), kw)
+                self.assertNotIn("NOT shown", h, kw)             # and the honest scorer result raises no alarm
 
 
 class OneSidedScorecard(unittest.TestCase):

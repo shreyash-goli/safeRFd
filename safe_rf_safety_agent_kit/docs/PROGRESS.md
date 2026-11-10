@@ -1386,3 +1386,90 @@ correctly returned INCONCLUSIVE for fixtures meant to be SUPPORTED or UNSUPPORTE
   are intact.
 
 **Suite: 606 tests under unittest (2 skipped), 604 passed under pytest. Green.**
+
+---
+
+## SR-02 — QA verdict: PASS (third pass; marked `[x]`)
+
+- **Date:** 2026-11-09. Two prior FAILs, two reworks. QA confirmed `git diff 12bc490 HEAD` over all
+  target files is empty, so its verdict applies to the committed bytes.
+- **QA re-derived the clamp algebra by hand** from k = 6−5s, target k·u, raw scale 1/|k| clamped to
+  [0.1, 2], and confirmed the document's four boundary cases (s = −0.8, 1.1, 1.3, 3.2 all give `u` or
+  `−u` exactly at the clamp edges) and all four intermediate values (s=1.15 → (1.5,0,0) via scale 4
+  clamped to 2; s=1.19 → (0.3,0,0) via scale 20 clamped to 2; s=1.25 → (−1.5,0,0); s=−1 → (3.3,0,0)
+  via scale 0.0909 clamped to 0.1), plus t̂ undefined at s=1.2. The radial component ‖u‖(cos θ−1) and
+  displacement magnitude 2‖u‖sin(θ/2) are correct.
+  *Clarity point, not an error:* all four intermediate values sit in clamp-binding regions, and the
+  document says the clamp binds outside the two ranges without stating explicitly that these four are
+  clamp-bound.
+- Claims-register #7 now reads "replaces the displacement −η·d with ‖u‖(t̂ − û)". **A grep across
+  `docs`, `src/toy` and `tests` confirms no surviving copy of the old "removes radial component"
+  claim** — the only hits are the correct item-2 text and this journal's own history lines.
+- §9 `th_ang_v`/`th_dih_v` verified **by reading D:485-586, with no code run** (correcting the
+  previous reviewer's boundary deviation): after `nan_to_num`, `valid` is always True because every
+  norm is ≥ sqrt(1e-8) = 1e-4 > `tiny` = 1e-7 and everything is finite, so the (1,0) branch at
+  D:525-527 is unreachable at the defaults; NaN or all-zero input gives cos=0, sin=sqrt(1+1e-8) ≈ 1,
+  a 90° angle; `th_dih_v` gives (0,0). All D-line cites accurate.
+- Nits verified fixed: D:88 is the `torch.cat(... .to(xyz_t.device))` line; D:213-339 is used
+  consistently (D:213 hunk header, function at D:215, `return px0_aligned` at D:339); the
+  `align_motif` conditional is at `A:rfdiffusion/inference/utils.py:447`.
+- No new citation drift, no label-discipline slip, no safety-claim slip.
+- **Status: PASS — blueprint checkbox marked `[x]`.**
+
+---
+
+## SR-03 — QA verdict: PASS (third pass; marked `[x]`)
+
+- **Date:** 2026-11-09. Two prior FAILs, two reworks.
+- **ER-04 verified:** Medium in both the summary table and the entry; the entry admits the earlier
+  claim was wrong; and QA opened each cite — S:373 is
+  `grad_norm = clip_grad_norm_(student.parameters())`, S:384 is `grad_norm.item()`, S:425 is
+  `grad_norms.append`, S:430-435 is the log line. The gap is correctly scoped to the absent
+  per-parameter coverage gate.
+- **ER-09 verified, including the figure the builder had not re-measured.** QA confirmed this host
+  reports torch 2.7.1 with MPS True / CUDA False, then **re-ran the CPU-vs-MPS float32 battery
+  itself**: sum_squares 6.1e-8, matmul 7.5e-8, normalize 1.44e-7 — so "around 1e-7" and the
+  attribution to SR-07 are accurate. **Important caveat QA added:** no test pins that figure
+  (`test_tensor_ops.py` only asserts rel < 1e-5), so it is a point-in-time measurement that could
+  drift silently.
+- ER-03 matches corrected METHOD_AUDIT §6, with `Track_module` cites A:415-416/435-436/456-457
+  verified. ER-10's heading and body now read "Necessary given the fork's chosen edit; not shown
+  necessary for any gradient flow", cites verified. **ER-08 verified by grep: `load_checkpoint` is
+  defined at S:477 with `torch.load` at S:479, and has no call site anywhere in the script**; upstream
+  `torch.load` at A:model_runners.py:183 checks out; the register contains no payload and its single
+  fenced block holds only the `python3 -m` reproduce commands.
+- **Severity scale judged internally consistent** across all 11 entries on a "consequence if reached"
+  basis, with loud failures ranked below silent ones: ER-01 Low-Medium, ER-02 Medium, ER-03 Low,
+  ER-04 Medium, ER-05 Low-Medium, ER-06 Medium, ER-07 Informational, ER-08 Medium-High, ER-09
+  Unknown, ER-10 Medium, ER-11 Low-Medium. Soft spots recorded, none blocking: there is **no written
+  rubric** for what each level means; ER-08 is the only entry above Medium yet its own reach note says
+  the fork's load path is unexercised; ER-10's Medium is on a different axis (validity), which the
+  entry states; and ER-01 carries editorial history ("lowered from High, then from Medium…") inside
+  the register itself.
+- **The structural hardening works. 50 mutants run; the two the builder had NOT re-run are now
+  confirmed killed** — swapping `PATTERN_FUNCTIONS` between ER-01 and ER-02 dies in
+  `test_pattern_function_mapping_pinned`, and removing a function name from an entry or summary row
+  dies. Also killed: classification-label changes for ER-01/02/04/05/06/10; severity changes in either
+  the entry or the summary table; deleting a summary row or editing its labels; removing either
+  banner; nine verdict phrasings including bullet-initial and `**broken**`; a fenced
+  pickle/`__reduce__` payload, a fenced non-`python3 -m` command, an indented fence, and inline
+  `os.system`/`eval(`; `import pickle` added to `failure_modes.py`; and deleting the ER-08 section.
+  **Correctly allowed:** "We make no claim that the method is broken."
+- **Tripwire gaps QA established, now written into the register's own "Known limits"** so no reader
+  mistakes a tripwire for coverage: subject-less phrasings slip through ("It is unsafe", "the method
+  fails", "the method is ineffective", "the checkpoint is not safe to use"); a verdict following an
+  earlier "no claim" phrase within the 40-character look-back slips through; `~~~` tilde fences are
+  not recognised; and inline `os.popen`, `exec(`, `__import__` and `<script>` are missed.
+- **Two nits fixed by the orchestrator** (QA judged no rework round needed): ER-09's "Where" still
+  cited `D:213-342` while METHOD_AUDIT had been corrected to `D:213-339` — **and this journal had
+  claimed that fix was applied everywhere, which was inaccurate**; and the "Known limits" paragraph
+  did not disclose which scans are unpinned. Both corrected; the enumerated gaps above are now in the
+  register.
+- **Status: PASS — blueprint checkbox marked `[x]`.**
+
+---
+
+## Verified so far: 9 of 17 — SR-00, SR-01, SR-02, SR-03, SR-04, SR-05, SR-06, SR-08, SR-09.
+Suite: **656 tests, OK (2 skipped).** Outstanding: SR-07 and SR-10 reworked and awaiting QA; SR-11
+and SR-13 in rework after FAIL/BLOCKED; SR-14 built and awaiting QA; SR-12, SR-15, SR-16 not started;
+SR-17 remains out of autonomous scope by design.

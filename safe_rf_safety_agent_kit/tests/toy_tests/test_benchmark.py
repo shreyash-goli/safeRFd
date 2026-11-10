@@ -863,6 +863,88 @@ class TrainedStudentCannotBeExempted(unittest.TestCase):
         self.assertTrue(next(g for g in r2.gates if g.name == "control_adequacy").passed)
 
 
+class InScopeGateInvariant(unittest.TestCase):
+    """JointResult refuses a decisive hypothesis alongside a failed in-scope gate, however it was built."""
+
+    def clean(self):
+        r = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        self.assertEqual(r.verdict, J.JOINT_SUPPORTED)
+        return r
+
+    def fields(self, r, **over):
+        return {**{f.name: getattr(r, f.name) for f in dataclasses.fields(bm.JointResult)}, **over}
+
+    def with_failed(self, r, name):
+        return tuple(bm.GateResult(g.name, False, "forced") if g.name == name else g for g in r.gates)
+
+    def test_hand_built_hypotheses_without_blocking_cannot_go_decisive(self):
+        r = self.clean()
+        for name, scope in bm.GATE_SCOPES.items():
+            bare = dict(h1=bm.HypothesisResult("H1", r.h1.components),            # built WITHOUT blocking info
+                        h2=bm.HypothesisResult("H2", r.h2.components),
+                        h3=bm.HypothesisResult("H3", r.h3.components, r.h3.converged_components))
+            self.assertTrue(all(bare[k].verdict is V.SUPPORTED for k in bare))      # decisive on their own
+            with self.assertRaises(ValueError, msg=name):
+                bm.JointResult(**self.fields(r, gates=self.with_failed(r, name), **bare))
+
+    def test_correctly_built_inconclusive_hypotheses_are_accepted_and_inconclusive(self):
+        r = self.clean()
+        for name, scope in bm.GATE_SCOPES.items():
+            if scope != "all":
+                continue
+            blk = (f"{name} (forced)",)
+            hs = {k: bm.HypothesisResult(h.hid, h.components, h.converged_components, blocking=blk)
+                  for k, h in (("h1", r.h1), ("h2", r.h2), ("h3", r.h3))}
+            j = bm.JointResult(**self.fields(r, gates=self.with_failed(r, name), **hs))
+            self.assertEqual(j.verdict, J.JOINT_INCONCLUSIVE, name)
+
+    def test_gate12_failure_with_supported_h3_is_refused_but_inconclusive_is_fine(self):
+        r = self.clean()
+        gates = self.with_failed(r, "convergence")
+        with self.assertRaises(ValueError):
+            bm.JointResult(**self.fields(r, gates=gates))                       # h3 still SUPPORTED
+        h3 = bm.HypothesisResult("H3", r.h3.components, r.h3.converged_components, supported_blockers=("convergence",))
+        self.assertEqual(bm.JointResult(**self.fields(r, gates=gates, h3=h3)).verdict, J.JOINT_INCONCLUSIVE)
+
+    def test_dataclasses_replace_cannot_bypass(self):
+        r = self.clean()
+        with self.assertRaises(ValueError):
+            dataclasses.replace(r, gates=self.with_failed(r, "min_seeds"))
+
+    def test_deferred_gates_are_exactly_the_six_unimplemented_checks(self):
+        want = {"gate1_config_shift_sensitivity_arm", "gate2_error_register_crosscheck", "V_set_probes",
+                "pilot_execution_and_n_cap_width_rule", "assumption1_exchangeability_check", "amendment_log_hash"}
+        self.assertEqual(set(bm.DEFERRED_GATES), want)
+        self.assertEqual(len(bm.DEFERRED_GATES), 6)
+        self.assertEqual(set(oracle().deferred_gates), want)
+        for key in ("shift sensitivity", "ERROR_REGISTER", "V-set", "n_cap", "exchangeability", "amendment log"):
+            self.assertIn(key, bm.__doc__)           # the module docstring names each unimplemented check
+        self.assertIn("interval_verdict", bm.__doc__)
+
+
+class ConstantSampleExactness(unittest.TestCase):
+    CONSTS = (0.7, -0.7, 0.1, -3.3, 1e15 + 0.5, 1e300, 1e-300, 123456789.123456789, 0.0, -0.0, 5.0)
+
+    def test_sd_and_mean_exactly_exact_on_constants(self):
+        for c in self.CONSTS:
+            for n in (2, 3, 7, 30, 101):
+                v = [c] * n
+                self.assertEqual(bm.sample_sd(v), 0.0, (c, n))
+                self.assertEqual(bm.mean(v), c, (c, n))
+
+    def test_constant_intervals_have_exactly_zero_width(self):
+        for c in (0.7, -3.3, 1e15 + 0.5):
+            lo, hi = bm.t_interval([c] * 30, 0.95)
+            self.assertEqual((lo, hi), (c, c))
+            p = bm.summarize("k", [c] * 30, 0.9875, 200, 1)
+            self.assertEqual((p.boot_lo.value, p.boot_hi.value), (c, c))
+            self.assertEqual(p.sd.value, 0.0)
+
+    def test_near_constant_is_not_collapsed(self):
+        self.assertGreater(bm.sample_sd([0.7, 0.7, 0.7 + 1e-9]), 0.0)
+        self.assertAlmostEqual(bm.sample_sd([1.0, 2.0, 3.0, 4.0]), math.sqrt(5 / 3), places=12)   # hand: var 5/3
+
+
 class IneligibleVersusFailed(unittest.TestCase):
     """Defect 4: a TRAIN mask with < 2 rows is an ineligible seed (listed, replaced), not a failed run."""
 

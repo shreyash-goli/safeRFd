@@ -433,6 +433,8 @@ class TestInvariancesAndSensitivities(unittest.TestCase):
     def test_exact_invariances_hold_for_both_real_measures(self):
         for m in (rb.mse_fsum, rb.mse_naive):
             for sp in (rb.shift_reorder_rows(), rb.shift_masked_out_rows(), rb.shift_scale(2.0 ** 10)):
+                if m is rb.mse_naive and sp.name == "reorder_rows" and not PY312:
+                    continue   # environmental: needs CPython >= 3.12 compensated sum(); QA confirmed a plain loop flips it
                 sc = rb.probe_shift(m, sp, SEEDS, CFG)
                 self.assertIs(sc.status, PS.INVARIANCE_HOLDS, (m.__name__, sp.name))
                 self.assertEqual(sc.details["n_violations"], 0)
@@ -759,6 +761,211 @@ class TestNumericalStability(unittest.TestCase):
         self.assertEqual(rb.exact_masked_mse(((1.0,), (3.0,)), ((0.0,), (0.0,)), (True, True)), Fraction(5))
         with self.assertRaises(ValueError):
             rb._rel_err(1.0, Fraction(0))
+
+
+class TestQAHardening(unittest.TestCase):
+    """Pins the structural guards (mutants that survived the first QA) and the documented limits."""
+
+    def insufficient_card(self):
+        return rb.seed_sensitivity_probe(lambda s: 4.0, SEEDS[:1], CFG)
+
+    # --- InsufficientEvidence and seed validation
+    def test_insufficient_evidence_requires_n_below_required(self):
+        for n, req in ((5, 5), (6, 5), (10, 3)):
+            with self.assertRaises(ValueError):
+                rb.InsufficientEvidence(n, req, "r")
+        with self.assertRaises(ValueError):
+            rb.InsufficientEvidence(1, 5, "  ")
+        rb.InsufficientEvidence(4, 5, "ok")
+
+    def test_seed_type_validation(self):
+        for bad in (True, 5.0, -1, "3", None, 2 ** 64):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                rb.seed_sensitivity_probe(lambda s: 1.0, (bad, 2, 3), CFG)
+        with self.assertRaises(ValueError):
+            rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), (1, 2, True), CFG)
+        with self.assertRaises(ValueError):
+            rb.build_scorecard(probe_id="x", probe_kind="k", seeds=(1.5,), per_seed=[MetricValue.measured(1.0)],
+                               cfg=CFG, status_if_summarized=PS.MEASURED, details_always={})
+
+    # --- Scorecard consistency checks for insufficient / unmeasured cards
+    def test_insufficient_card_counts_status_and_labels_are_checked(self):
+        c = self.insufficient_card()
+        self.assertEqual(c.insufficient.n_measured, 1)
+        for kw in (dict(insufficient=rb.InsufficientEvidence(0, 10, "wrong count")),
+                   dict(insufficient=rb.InsufficientEvidence(1, 9, "wrong required")),
+                   dict(status=PS.MEASURED), dict(status=PS.INVARIANCE_HOLDS),
+                   dict(evidence_labels=(EvidenceClass.NOT_VALIDATED,)),                  # drops UNKNOWN
+                   dict(evidence_labels=(EvidenceClass.NOT_VALIDATED, EvidenceClass.TOY_RESULT))):
+            with self.assertRaises(ValueError, msg=str(kw)):
+                dataclasses.replace(c, **kw)
+
+    def test_unknown_label_required_when_any_seed_unmeasured(self):
+        def flaky(seed):
+            if seed == SEEDS[0]:
+                raise ValueError("gone")
+            return float(seed % 9)
+        c = rb.seed_sensitivity_probe(flaky, SEEDS, rb.ProbeConfig(3))
+        self.assertIsNotNone(c.summary)
+        self.assertIn(EvidenceClass.UNKNOWN, c.evidence_labels)
+        with self.assertRaises(ValueError):
+            dataclasses.replace(c, evidence_labels=(EvidenceClass.NOT_VALIDATED, EvidenceClass.TOY_RESULT))
+
+    # --- nested validation: replace() laundering, subclass skipping
+    def test_replace_cannot_launder_a_tampered_summary(self):
+        card = sc_simple()
+        object.__setattr__(card.summary, "mean", 42.0)      # honest bypass; now the nested object is forged
+        with self.assertRaises(ValueError):
+            dataclasses.replace(card)
+        with self.assertRaises(ValueError):
+            dataclasses.replace(card, probe_id="other")
+        fresh = sc_simple()
+        object.__setattr__(fresh.summary, "values", fresh.summary.values[:2])
+        with self.assertRaises(ValueError):
+            dataclasses.replace(fresh)
+
+    def test_tampered_insufficient_object_is_revalidated(self):
+        c = self.insufficient_card()
+        object.__setattr__(c.insufficient, "n_measured", 99)
+        with self.assertRaises(ValueError):
+            dataclasses.replace(c)
+
+    def test_subclass_can_skip_its_own_check_but_scorecard_refuses_it(self):
+        @dataclasses.dataclass(frozen=True)
+        class Sub(rb.SeedSummary):
+            def __post_init__(self):          # documented bypass: subclass skips validation
+                pass
+        lone = Sub(1, 3.0, 0.0, 3.0, 3.0, 0.0, 3.0, 3.0, (3.0,))     # a 1-value "summary" DOES exist
+        self.assertEqual(lone.n, 1)
+        card = sc_simple()
+        with self.assertRaises(ValueError):
+            dataclasses.replace(card, summary=lone)
+        good_vals = card.summary.values
+        sub_ok = Sub(*[getattr(card.summary, f) for f in ("n", "mean", "sd", "q1", "q3", "iqr", "minimum", "maximum")],
+                     values=good_vals)                                # statistically correct but wrong type
+        with self.assertRaises(ValueError):
+            dataclasses.replace(card, summary=sub_ok)
+
+        @dataclasses.dataclass(frozen=True)
+        class SubI(rb.InsufficientEvidence):
+            def __post_init__(self):
+                pass
+        with self.assertRaises(ValueError):
+            dataclasses.replace(self.insufficient_card(), insufficient=SubI(1, 10, "sub"))
+
+    # --- documented narrower truths
+    def test_repeated_values_are_counted_not_deduplicated_by_summary_functions(self):
+        """Documented limit: summarize_seeds/from_values see values, not seeds. Only the probe path rejects
+        duplicate SEEDS. This pins the narrower claim so the module cannot silently drift to the wider one."""
+        s = rb.summarize_seeds([MetricValue.measured(0.5)] * 10, 10)
+        self.assertIsInstance(s, rb.SeedSummary)
+        self.assertEqual(s.sd, 0.0)
+        self.assertIsInstance(rb.SeedSummary.from_values([1.0] * 3), rb.SeedSummary)
+        with self.assertRaises(ValueError):                       # ...whereas the probe path refuses repeats
+            rb.seed_sensitivity_probe(lambda s: 0.5, (7,) * 10, CFG)
+
+    def test_constant_outcome_is_not_downgraded_but_flagged(self):
+        c = rb.seed_sensitivity_probe(lambda s: 0.5, SEEDS[:10], CFG)
+        self.assertIs(c.status, PS.MEASURED)
+        self.assertEqual(c.summary.sd, 0.0)
+        self.assertTrue(c.details["zero_variance_warning"])
+        self.assertIn(EvidenceClass.TOY_RESULT, c.evidence_labels)     # deliberate: see module doc
+
+    def test_insufficient_card_keeps_raw_per_seed_but_no_statistic_or_verdict(self):
+        c = rb.probe_missing_inputs(zero_on_failure, SEEDS[:1], CFG)
+        self.assertIs(c.status, PS.INSUFFICIENT_EVIDENCE)
+        self.assertEqual(len(c.per_seed), 1)
+        self.assertTrue(c.per_seed[0].is_measured)                    # the lone raw datum is retained (documented)
+        d = c.to_dict()
+        self.assertIsNone(d["summary"])
+        self.assertNotIn("n_silent_value_total", d["details"])        # nothing derived from it
+        self.assertNotIn("case_table", d["details"])
+        self.assertIn(rb.STANDARD_NON_CLAIMS[-1], c.does_not_establish)
+
+    def test_python_version_recorded_on_every_card(self):
+        cards = [sc_simple(), self.insufficient_card(),
+                 rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), SEEDS, CFG),
+                 rb.probe_missing_inputs(rb.mse_fsum, SEEDS, CFG), rb.probe_precision("accumulation", 20, SEEDS, CFG)]
+        for c in cards:
+            self.assertEqual(c.details["python_version"], ".".join(map(str, sys.version_info[:3])))
+
+    def test_structural_checks_are_labelled_as_library_checks(self):
+        d = rb.probe_missing_inputs(zero_on_failure, SEEDS, CFG).details
+        self.assertIn("NOT the measure", d["structural_checks_scope"])
+        self.assertTrue(all(d["structural_checks"].values()))         # true even for a defective measure
+
+    # --- +-inf in the missing-input cases
+    def test_infinities_are_enumerated_and_substitution_is_caught(self):
+        cases = rb.missing_input_cases(rb.make_measure_fixture(0))
+        for k in ("inf_in_selected_row", "neg_inf_in_selected_row", "inf_in_masked_out_row"):
+            self.assertIn(k, cases)
+            self.assertTrue(any(math.isinf(x) for r in cases[k][0] for x in r))
+
+        def zero_on_inf(p, t, m):
+            if any(isinstance(x, float) and math.isinf(x) for r in p for x in r):
+                return 0.0
+            return rb.mse_fsum(p, t, m)
+        sc = rb.probe_missing_inputs(zero_on_inf, SEEDS, CFG)
+        self.assertIs(sc.status, PS.SILENT_DEFAULT_DEFECT)
+        tab = sc.details["case_table"]
+        for k in ("inf_in_selected_row", "neg_inf_in_selected_row", "inf_in_masked_out_row"):
+            self.assertEqual(tab[k]["silent_value"], 12, k)
+        self.assertEqual(tab["nan_in_selected_row"]["silent_value"], 0)
+        with self.assertRaises(rb.SilentDefaultError):
+            rb.assert_no_silent_default(zero_on_inf)
+        for m in (rb.mse_naive, rb.mse_fsum):                         # real measures reject infinities
+            self.assertEqual(rb.probe_missing_inputs(m, SEEDS, CFG).details["case_table"]["inf_in_masked_out_row"]["raised"], 12)
+
+    # --- mse_fsum guards (mutants: underflow guard and finite check removed)
+    def test_mse_fsum_refuses_underflow_overflow_and_sum_overflow(self):
+        with self.assertRaises(stability.StabilityError) as cm:
+            rb.mse_fsum(((1e-170,), (1.0,)), ((2e-170,), (1.0,)), (True, False))   # d^2 ~ 1e-340 -> 0.0
+        self.assertIn("underflow", str(cm.exception).lower())
+        if hasattr(stability, "UnderflowError"):
+            with self.assertRaises(stability.UnderflowError):
+                rb.mse_fsum(((1e-170,),), ((2e-170,),), (True,))
+        with self.assertRaises(stability.NonFiniteError):                # d = 1e200 -> d*d = inf
+            rb.mse_fsum(((1e200,), (0.0,)), ((0.0,), (0.0,)), (True, True))
+        with self.assertRaises(stability.NonFiniteError):                # each square 1e308 finite; sum of 4 overflows
+            rb.mse_fsum(((1e154,),) * 4, ((0.0,),) * 4, (True,) * 4)
+        # equal nonzero inputs are a genuine 0.0, not underflow
+        self.assertEqual(rb.mse_fsum(((1e-170,), (2.0,)), ((1e-170,), (2.0,)), (True, True)), 0.0)
+
+    # --- fixture invariants (mutant: all-True mask possible)
+    def test_fixture_always_has_a_masked_out_row_even_for_few_rows(self):
+        for rows in (4, 5):
+            for s in range(1500):
+                fx = rb.make_measure_fixture(s, rows=rows)
+                self.assertTrue(any(not b for b in fx.mask), (rows, s))
+                self.assertGreaterEqual(sum(fx.mask), 2, (rows, s))
+
+    # --- bound tightness (mutant: cast bound loosened by 1e6)
+    def test_cast_bounds_are_tight_enough_to_be_informative(self):
+        # observed deviation is 1-30% of the hand-derived cap; a cap 1e6 looser would give ratios ~1e-8
+        for sp in (rb.shift_scale(1.7), rb.shift_translate(1000.0), rb.shift_column_offsets((3.0, -7.0, 0.5)),
+                   rb.shift_jitter(1e-6)):
+            r = rb.probe_shift(rb.mse_fsum, sp, SEEDS, CFG).details["max_dev_over_bound"]
+            self.assertTrue(1e-3 < r < 1.0, (sp.name, r))
+
+    # --- independent oracle check for exact_masked_mse
+    def test_exact_masked_mse_against_independent_decimal_arithmetic(self):
+        import decimal
+        ctx = decimal.Context(prec=6000)
+        for s in range(30):
+            fx = rb.make_measure_fixture(s, magnitude_spread=6)
+            tot, cnt = decimal.Decimal(0), 0
+            for pr, tr, use in zip(fx.pred, fx.target, fx.mask):
+                if use:
+                    for a, b in zip(pr, tr):
+                        d = ctx.subtract(decimal.Decimal(a), decimal.Decimal(b))   # Decimal(float) is exact
+                        tot = ctx.add(tot, ctx.multiply(d, d))
+                        cnt += 1
+            n, den = tot.as_integer_ratio()
+            from fractions import Fraction
+            self.assertEqual(rb.exact_masked_mse(fx.pred, fx.target, fx.mask), Fraction(n, den * cnt), s)
+        # hand value: (0.1 - 0)^2 with the exact binary value of 0.1
+        from fractions import Fraction
+        self.assertEqual(rb.exact_masked_mse(((0.1,),), ((0.0,),), (True,)), Fraction(0.1) ** 2)
 
 
 if __name__ == "__main__":

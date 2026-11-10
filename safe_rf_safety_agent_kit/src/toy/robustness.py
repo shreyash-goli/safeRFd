@@ -15,18 +15,42 @@ behaved as declared, never whether anything is safe. Nothing here says anything 
 audited fork, or any real model, and a clean probe is not evidence of safety or of robustness of any real
 system.
 
-Structural rule against single-example claims (not merely a docstring):
+Structural rule against single-example claims (checked at construction, not merely documented):
 * `SeedSummary` (the only carrier of mean/SD/IQR/min/max) validates in `__post_init__` that it holds at
-  least `SEED_FLOOR` distinct measured values and that every statistic equals the recomputed one.
+  least `SEED_FLOOR` measured values (a COUNT: the values themselves may repeat, e.g. a constant outcome
+  is legitimate) and that every statistic equals the recomputed one.
 * `summarize_seeds` returns `InsufficientEvidence` (a type with NO numeric statistic fields) whenever the
-  number of distinct measured seeds is below the configurable minimum, which itself cannot be set below
-  `SEED_FLOOR`. Duplicate seeds are rejected, so one example cannot be repeated to inflate n.
-* `Scorecard.__post_init__` requires exactly one of {summary, insufficient} and checks the status agrees,
-  so an object that carries a scalar summary of fewer than `SEED_FLOOR` seeds cannot be constructed
-  through the public constructors, `dataclasses.replace`, or the builders.
-Honest limit: Python cannot make this impossible against `object.__setattr__` / `object.__new__`
-bypasses or edits to module constants; the guarantee is "no supported API path", checked at
-construction, not a security boundary. The same caveat applies to every "frozen" claim below.
+  number of measured values is below the configurable minimum, which itself cannot be set below
+  `SEED_FLOOR`. `summarize_seeds` and `SeedSummary.from_values` see values, not seeds, so they CANNOT
+  detect one example repeated: `summarize_seeds([mv] * 10)` returns a summary. Duplicate SEEDS are
+  rejected only on the probe path (`_check_seeds`, used by every probe and by `build_scorecard`).
+* `Scorecard.__post_init__` requires exactly one of {summary, insufficient}, checks the status, labels,
+  counts and seed digest agree, and RE-VALIDATES the nested summary / insufficient object (exact type,
+  recomputed statistics), so `dataclasses.replace` cannot launder a summary that was tampered with
+  after construction. A card carrying a summary of fewer than `SEED_FLOOR` values, or a subclass of
+  `SeedSummary`, cannot be built through the public constructors, `dataclasses.replace`, or the builders.
+Honest limits: Python cannot make this impossible. `object.__setattr__`, `object.__new__`, and
+SUBCLASSING `SeedSummary` / `InsufficientEvidence` with a `__post_init__` that skips the checks all build
+unvalidated nested objects (a `Scorecard` still refuses such an object, via the exact-type check, but a
+bare unvalidated subclass instance exists). Edits to module constants also defeat the floor. The guarantee
+is "no supported API path", not a security boundary. The same caveat applies to every "frozen" claim below.
+
+Scope notes, stated plainly:
+* An INSUFFICIENT_EVIDENCE card still holds `per_seed`: the raw observations (including a lone
+  measured datum). They are data, not a finding: no statistic, status other than INSUFFICIENT_EVIDENCE,
+  or verdict is derived from them, and `details` is restricted to identification fields. Read them as
+  "what was observed", never as a result.
+* A constant outcome across >= min distinct seeds gives status MEASURED with SD 0.0 and the advisory
+  `details.zero_variance_warning`. It is deliberately NOT downgraded: zero variance is the expected,
+  correct reading for an exact invariance probe (all deviations are 0.0). The flag is a prompt to check
+  that the outcome is not ignoring the seed, nothing more.
+* Reorder-invariance assertions about `toy.stability` hold on CPython >= 3.12 because `sum()` of floats is
+  compensated there. On an older interpreter (QA patched `sum` to a plain loop to confirm) even the default
+  random-fixture reorder probe of `mse_naive` flips to INVARIANCE_DEFECT. The reorder result is therefore an
+  environmental fact; every scorecard records `details.python_version` for that reason.
+* Headline figures quoted in docs or reports (for example the plain-loop violation counts and deviations)
+  are specific to the seed list that produced them and vary across seed lists; quote them with the list.
+* Probes enumerate cases (missing-input cases, shifts, magnitudes). Anything not enumerated is untried.
 
 Asymmetry stated plainly: one failing seed refutes an invariance, but no number of passing seeds proves
 it; passes are "not refuted on these n synthetic fixtures". Scorecards never say more.
@@ -64,6 +88,7 @@ STANDARD_NON_CLAIMS = (
     "Not an experiment of EVALUATION_PROTOCOL: a probe of a measurement procedure on synthetic fixtures.",
     "Seeds are replicates of a synthetic fixture generator, not independent samples of any real population.",
     "No claim from fewer seeds than the stated minimum; passes mean 'not refuted on these n fixtures'.",
+    "On an INSUFFICIENT_EVIDENCE card per_seed holds raw observations only; they support no claim.",
 )
 
 
@@ -185,6 +210,31 @@ def require_summary(result) -> SeedSummary:
     raise InsufficientEvidenceError(f"no scalar summary exists: {result!r}")
 
 
+def _recheck_summary(s) -> None:
+    """Re-run SeedSummary validation on an existing object (replace() does not re-run nested validators,
+    and a subclass could have skipped them)."""
+    if type(s) is not SeedSummary:
+        raise ValueError("summary must be exactly a SeedSummary (subclasses are refused)")
+    vals = tuple(s.values)
+    if len(vals) < SEED_FLOOR:
+        raise ValueError(f"summary holds fewer than {SEED_FLOOR} values")
+    for v in vals:
+        if isinstance(v, bool) or not isinstance(v, float) or not math.isfinite(v):
+            raise ValueError("summary values must be finite floats")
+    if (s.n, s.mean, s.sd, s.q1, s.q3, s.iqr, s.minimum, s.maximum) != _stats(vals):
+        raise ValueError("summary statistics do not match the per-seed values (tampered?)")
+
+
+def _recheck_insufficient(x) -> None:
+    if type(x) is not InsufficientEvidence:
+        raise ValueError("insufficient must be exactly an InsufficientEvidence (subclasses are refused)")
+    if (isinstance(x.n_measured, bool) or isinstance(x.n_required, bool) or not isinstance(x.n_measured, int)
+            or not isinstance(x.n_required, int) or x.n_measured >= x.n_required):
+        raise ValueError("InsufficientEvidence requires int n_measured < n_required")
+    if not isinstance(x.reason, str) or not x.reason.strip():
+        raise ValueError("reason must be a nonblank string")
+
+
 def _check_seeds(seeds: Sequence[int]) -> tuple:
     seeds = tuple(seeds)
     for s in seeds:
@@ -241,7 +291,10 @@ def thaw(x: Any) -> Any:
 class Scorecard:
     """Immutable record of one probe. Frozen dataclass; containers are read-only (MappingProxyType / tuple),
     copied defensively at construction. `object.__setattr__` still bypasses the freeze (Python cannot prevent
-    that); `content_hash` makes any such tampering detectable by recomputation, not impossible."""
+    that). The card stores no hash of itself (only `seed_digest`, a hash of the seed list), so tampering is
+    detectable only by comparing a freshly recomputed `content_hash()` with a hash recorded EARLIER, for
+    example the one `scorecard_to_record` places in the record's `input_hashes["scorecard"]`; not impossible,
+    and not detectable without such a recorded value."""
     probe_id: str
     probe_kind: str
     status: ProbeStatus
@@ -273,8 +326,7 @@ class Scorecard:
             raise ValueError("exactly one of summary / insufficient must be set")
         measured = tuple(m.value for m in per_seed if m.is_measured)
         if self.summary is not None:
-            if not isinstance(self.summary, SeedSummary):
-                raise ValueError("summary must be a SeedSummary")
+            _recheck_summary(self.summary)
             if self.status is ProbeStatus.INSUFFICIENT_EVIDENCE:
                 raise ValueError("a summarized scorecard cannot have INSUFFICIENT_EVIDENCE status")
             if self.summary.values != measured:
@@ -282,8 +334,7 @@ class Scorecard:
             if len(measured) < self.min_seeds:
                 raise ValueError("summary present with fewer measured seeds than min_seeds")
         else:
-            if not isinstance(self.insufficient, InsufficientEvidence):
-                raise ValueError("insufficient must be an InsufficientEvidence")
+            _recheck_insufficient(self.insufficient)
             if self.status is not ProbeStatus.INSUFFICIENT_EVIDENCE:
                 raise ValueError("an insufficient scorecard must have INSUFFICIENT_EVIDENCE status")
             if self.insufficient.n_measured != len(measured) or self.insufficient.n_required != self.min_seeds:
@@ -352,6 +403,7 @@ def build_scorecard(*, probe_id: str, probe_kind: str, seeds: Sequence[int], per
         labels.add(EvidenceClass.UNKNOWN)
         status, summ, insuf = ProbeStatus.INSUFFICIENT_EVIDENCE, None, result
         details = dict(details_always)  # no deviation counts etc. from fewer than the minimum seeds
+    details = {"python_version": current_python_version(), **details}   # environmental facts live on every card
     return Scorecard(probe_id, probe_kind, status, cfg.min_seeds, seeds, seed_list_digest(seeds), per_seed,
                      summ, insuf, tuple(labels), details, STANDARD_NON_CLAIMS + tuple(non_claims))
 
@@ -749,6 +801,9 @@ def missing_input_cases(fx: MeasureFixture) -> dict:
         "missing_value_none": (with_value(p, first_in, None), t, m),
         "nan_in_selected_row": (with_value(p, first_in, math.nan), t, m),
         "nan_in_masked_out_row": (with_value(p, first_out, math.nan), t, m),
+        "inf_in_selected_row": (with_value(p, first_in, math.inf), t, m),
+        "neg_inf_in_selected_row": (with_value(p, first_in, -math.inf), t, m),
+        "inf_in_masked_out_row": (with_value(p, first_out, math.inf), t, m),
     }
 
 
@@ -805,6 +860,8 @@ def probe_missing_inputs(measure: Measure, seeds: Sequence[int], cfg: ProbeConfi
             make_measure_fixture(seeds[0] if seeds else 0))),
             "error_register": ["ER-01 (empty/all-False mask must be loud)", "ER-02 (NaN under a mask)"]},
         details_if_summarized={"case_table": table, "structural_checks": structural,
+                               "structural_checks_scope": "these test library behaviour (seed-probe and "
+                               "arm_difference), NOT the measure under probe; they cannot fail because of the measure",
                                "n_silent_value_total": silent_total},
         non_claims=("Only the enumerated missing-input cases were tried; handling of other malformed inputs "
                     "is unknown.",))

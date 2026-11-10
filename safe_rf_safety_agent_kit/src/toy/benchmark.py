@@ -34,7 +34,10 @@ Design points (each traceable to the protocol):
 * A verdict is never stored in `ExperimentRecord.notes`. It is rebuilt from
   stored metrics only, by `verdict_from_records`.
 * n >= min_seeds is enforced where a component verdict is produced
-  (`interval_verdict`), not only at the gate.
+  (`interval_verdict`, implemented in `_verdict_from_bounds`), and again by the
+  `min_seeds` gate; no component verdict exists below the minimum.
+* `JointResult` refuses to be constructed if any in-scope gate failed while a
+  hypothesis it holds is decisive, however the hypotheses were built.
 
 Known limits stated plainly:
 * A "frozen" seed list is verified only as "the digest supplied by the caller
@@ -155,17 +158,25 @@ class BenchmarkConfig:
 
 
 # ============================================================ statistics
+def _constant(v: Sequence[float]) -> bool:
+    return all(x == v[0] for x in v)
+
+
 def mean(v: Sequence[float]) -> float:
+    """Exactly-rounded mean (fsum); a constant sample returns that constant exactly (n*x/n can be off by an ulp)."""
     if len(v) == 0:
         raise ValueError("mean of empty sample")
-    return math.fsum(v) / len(v)
+    return float(v[0]) if _constant(v) else math.fsum(v) / len(v)
 
 
 def sample_sd(v: Sequence[float]) -> float:
-    """Sample SD, divisor n-1."""
+    """Sample SD, divisor n-1. Exactly 0.0 for a constant sample (no cancellation residue: a zero-variance
+    series must be recognisable as such). Otherwise two-pass with an exactly-rounded mean."""
     n = len(v)
     if n < 2:
         raise ValueError("sample SD needs n >= 2")
+    if _constant(v):
+        return 0.0
     m = mean(v)
     return math.sqrt(math.fsum((x - m) ** 2 for x in v) / (n - 1))
 
@@ -211,7 +222,7 @@ def bootstrap_means(values: Sequence[float], n_boot: int, rng) -> list[float]:
         raise ValueError("need a nonempty sample and n_boot >= 1")
     n = len(values)
     vals = list(values)
-    return [math.fsum(rng.choices(vals, k=n)) / n for _ in range(n_boot)]
+    return [mean(rng.choices(vals, k=n)) for _ in range(n_boot)]
 
 
 def bootstrap_ci(values: Sequence[float], level: float, n_boot: int, rng) -> tuple[float, float]:
@@ -1044,6 +1055,15 @@ class JointResult:
         names = [g.name for g in self.gates if isinstance(g, GateResult)]
         if sorted(names) != sorted(GATE_SCOPES):
             raise ValueError(f"gates must contain exactly {sorted(GATE_SCOPES)} (empty gates do not pass vacuously)")
+        # Single-place invariant, independent of how the HypothesisResults were built (e.g. without `blocking`):
+        failed = {g.name: g for g in self.gates if not g.passed}
+        if any(GATE_SCOPES[n] == "all" for n in failed):
+            bad = [h.hid for h in (self.h1, self.h2, self.h3) if h.verdict is not Verdict.INCONCLUSIVE]
+            if bad:
+                raise ValueError(f"a failed global gate {sorted(n for n in failed if GATE_SCOPES[n] == 'all')} "
+                                 f"requires INCONCLUSIVE, but {bad} are decisive")
+        if "convergence" in failed and self.h3.verdict is Verdict.SUPPORTED:
+            raise ValueError("gate 12 (convergence) failed: H3 cannot be SUPPORTED")
 
     @property
     def complete_gate_coverage(self) -> bool:

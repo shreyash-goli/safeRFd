@@ -37,6 +37,8 @@ import html
 import inspect
 import json
 import math
+import os
+import stat
 import tempfile
 import unicodedata
 from pathlib import Path
@@ -596,12 +598,19 @@ def _render_uncertainty(joint: Any) -> str:
 def _render_records(records: Any) -> str:
     if records is None:
         return _panel("Experiment records", EvidenceClass.UNKNOWN, "<p>" + _unknown("no records supplied") + "</p>")
-    recs = list(records)
-    rows, classes = "", set()
+    try:
+        recs = list(records)
+    except TypeError:
+        return _panel("Experiment records", EvidenceClass.UNKNOWN,
+                      '<p class="warn">records is not iterable; nothing shown.</p>')
+    rows, classes, skipped = "", set(), 0
     for r in recs[:MAX_TABLE_ROWS]:
         if not isinstance(r, ExperimentRecord):
             classes.add(EvidenceClass.UNKNOWN)
-            rows += f"<tr><td colspan=4>{_unknown('not an ExperimentRecord')}</td></tr>"
+            skipped += 1
+            rows += (f'<tr><td colspan=4><span class="warn">ENTRY IS NOT AN ExperimentRecord (type '
+                     f'{_e(_visible(type(r).__name__))}); contents not rendered</span> '
+                     f'{_unknown("cannot be labelled")}</td></tr>')
             continue
         ec, prob = _coerce_class(r.evidence_class, run_record=True)
         classes.add(ec)
@@ -609,10 +618,17 @@ def _render_records(records: Any) -> str:
                  f"<td>{_metric_table(r.metrics)}</td>"
                  f"<td>{_untrusted(r.notes, 'notes') if r.notes is not None else _unknown('no notes')}"
                  f"{_untrusted(r.provenance.run_id, 'run_id')}{_untrusted(r.provenance.code_version, 'code_version')}</td></tr>")
+    note = ""
+    if skipped:
+        note += f'<p class="warn">{_e(skipped)} entr{"y" if skipped == 1 else "ies"} not rendered: not an ExperimentRecord.</p>'
+    if len(recs) > MAX_TABLE_ROWS:
+        note += (f'<p class="warn">TRUNCATED: showing {_e(MAX_TABLE_ROWS)} of {_e(len(recs))} records; '
+                 f'{_e(len(recs) - MAX_TABLE_ROWS)} not shown.</p>')
+        classes.add(EvidenceClass.UNKNOWN)
     panel_ec = next(iter(classes)) if len(classes) == 1 else (EvidenceClass.NOT_VALIDATED if classes else EvidenceClass.UNKNOWN)
     body = (f"<table><tr><th>label</th><th>name</th><th>metrics</th><th>free text</th></tr>{rows}</table>"
             if rows else "<p>" + _unknown("record list is empty") + "</p>")
-    return _panel("Experiment records", panel_ec, body)
+    return _panel("Experiment records", panel_ec, note + body)
 
 
 # ---------------------------------------------------------------------- page
@@ -652,12 +668,36 @@ def _inside_repo(p: Path) -> bool:
 
 
 def write_dashboard(path: Optional[Any] = None, data: Optional[Mapping] = None) -> Path:
-    """Write only to `path` (default: a fresh temp dir). Refuses paths inside the repo tree and symlinks."""
+    """Write only to `path` (default: a fresh temp dir).
+
+    Guards (path AND inode level): refuse a path that resolves inside the repo tree; refuse symlinks; refuse an
+    existing target that is not a regular file; refuse an existing target with more than one hard link (a
+    hardlink's path can lie outside the repo while its inode is a repo file); and write via a temp file +
+    os.replace so that even a missed case replaces the directory entry and never modifies an existing inode."""
     out = Path(path) if path is not None else Path(tempfile.mkdtemp(prefix="saferf_dashboard_")) / "dashboard.html"
     if _inside_repo(out):
         raise ValueError("refusing to write the dashboard inside the repository tree")
     if out.is_symlink():
         raise ValueError("refusing to write through a symlink")
+    try:
+        st = os.lstat(out)
+    except FileNotFoundError:
+        st = None
+    if st is not None:
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("refusing to overwrite a non-regular file")
+        if st.st_nlink > 1:
+            raise ValueError("refusing to overwrite a file with multiple hard links (it may alias another file)")
     text = render_dashboard(data)
-    out.write_text(text, encoding="utf-8", newline="\n")
+    fd, tmp = tempfile.mkstemp(prefix=".dashboard-", suffix=".tmp", dir=str(out.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp, out)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     return out
