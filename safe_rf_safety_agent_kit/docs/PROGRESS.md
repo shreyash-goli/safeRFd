@@ -2766,3 +2766,76 @@ review rather than being taken on trust.
 **Attestation status:** this delta-2 is **unattested**, like delta-1 before it. SR-10's checkbox stays
 unchecked until a reviewer confirms it — the same discipline applied to SR-05, and the reason six
 downstream tasks remain blocked.
+
+---
+
+## SR-09 → v1-DRAFT-r7: five defects fixed, three of them the orchestrator's
+
+**Date:** 2026-11-10. **The full read the owner had skipped for four consecutive revisions found five
+defects its grep passes missed — and three were caused by the orchestrator's own instructions.**
+
+### The orchestrator's three errors, now fixed
+1. **The commit pin the orchestrator supplied verified the wrong thing.** It told the owner to pin
+   `2b06fff`, but at that commit the journal entry says the figures were "relayed only" and contains
+   **no configuration statement** — the `n_boot=2000` / 30-seeds sentence arrived later, in `3620de2`.
+   So the pin chosen *specifically to make the reference verifiable* did not cover the claim attached
+   to it. Now pinned to **`3620de2`** (2026-11-10T03:45:29Z), with the superseded pin named, both
+   sample-size settings mentioned (30 seeds, and 60 plus 10 reserve), and the statement that
+   **neither is the registered configuration** (`B`=10,000, `n_planned` ≥ 100) so neither is a
+   registered run of anything.
+2. **The orchestrator called the document "r6" in this journal and in a commit message without
+   checking what the document said** — it still said r5. Worse, **the committed texts of both
+   `2b06fff` and `577099d` carried the header label "r5"**, so two different texts bore the same
+   version. The header now states the version history exactly, records the **labelling error on
+   record**, and says — as reported by the coordinator and explicitly *not witnessed by the author* —
+   that r3 and r4 passed, **r5 was reviewed and FAILED, r6 was reviewed and FAILED**, and r7 is
+   unreviewed. Changelog rows now exist for r5, r6 and r7.
+3. **The orchestrator caused the A-2 in-place rewrite** by saying "reword the `reason` field" without
+   saying to annotate it, breaking the append-only discipline the owner had correctly applied to A-1.
+   A revision note is now appended, stating that A-2 was edited in place without a dated note, that
+   its `timestamp_utc` still names the first writing, that the edits were substantive, and that
+   **`git log -p` is the record of the original wording**.
+
+### The owner's two defects
+4. **`steps_bad` had no rule — the text asserted one existed.** This mattered: the reviewer showed
+   that with `steps_conv` set to `steps_bad`, gate 12 fires at `steps_bad` = 10 or 100 **even at
+   `tau_conv` = 1e-2**, making the "must fire there" constraint vacuous and admitting a threshold ten
+   times laxer than the placeholder (at 299 it fires at 1e-3 but passes at 1e-2). **Now specified
+   with no free parameter:** `steps_bad` **is** the registered finite-budget `steps` — the largest
+   budget the protocol itself deems unconverged — so the constraint binds `tau_conv` as tightly as
+   the protocol's own logic allows, and the rule "uses no outcome and no choice". It is a **two-sided
+   bracket**: gate 12 must fire at `steps` *and* `C0`/`C_shuf` must pass at `steps_conv` on the same
+   seeds, with `steps_conv > steps`. And a clause the orchestrator did not ask for: if gate 12 does
+   **not** fire at `steps`, the finite budget is already converged, contradicting §4.1's premise, so
+   registration must revisit `tau_conv` and the budgets — **"failing either side is never resolved by
+   dropping seeds."** The text now also states the constraints are **necessary, not sufficient**
+   (they show a gate is not disabled, not that a threshold is calibrated) and that the code does not
+   enforce `delta_A > 0` or `loss_factor > 1`.
+5. **The gate-12 "firing" definition could not apply to gate 12** — it required a reason string naming
+   a failed sub-check, but gate 12 has no sub-checks and `benchmark.py:1129-1131` emits the same
+   format either way. Firing now means only that the recorded `passed` is false; gate 11 keeps the
+   sub-check-naming definition.
+
+### Smaller items, all fixed
+§8.3.1's heading is now neutral ("Scorer validation across base seeds: referenced journal entry,
+placeholders, known-bad rejection") instead of reading as a finding. `delta_A` and `loss_factor` are
+reconciled as registration-time placeholders alongside `steps_conv`, `tau_conv` and `eps_fit`, leaving
+only `tail_ratio_max` as a v1 default — the owner correctly treated this as fixing an inconsistency,
+since §5 and §8 row 11 already said so, and recorded that reasoning in the revision note. Pilot seeds
+are disambiguated: the pilot must be **disjoint from replicate seeds derived from every
+scorer-validation base seed**, checked by set intersection.
+
+### Two additions the owner made unprompted, the first of which closes a real hole
+- **The 11(c) known-bad case must run as a *declared trained student*, because a fixture would be
+  exempt from the very gate the case exists to test.** The owner found this itself. Without it, the
+  known-bad case for 11(c) could have been trivially satisfied by a subject that the gate never
+  applies to.
+- `eps_fit` must be below the **smallest** `F` of the bad control across the validation seeds.
+
+**Orchestrator verified:** version `v1-DRAFT-r7` with the labelling error on record; pin `3620de2`
+with `2b06fff` named as superseded; the `steps_bad` rule present and outcome-independent;
+"zero measured results" still appearing twice and unconditional; Level B byte-identical to `c9f52d8`
+(matching md5, per the owner); suite **OK (2 skipped)**.
+
+**Residual the owner reported honestly:** it read the whole file **before** editing, but did **not**
+re-read the edited result end to end — so r7 needs an independent read, like its predecessors.
