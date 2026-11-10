@@ -2061,3 +2061,65 @@ describes **its own diff**, verified with `git show --stat` before committing.
 
 **Stale citation fixed in passing:** this journal cited `src/toy/benchmark.py:83` for
 `control_adequacy`; the line is now `:94`.
+
+---
+
+## SR-07 — QA verdict: PASS (marked `[x]`; dependency SR-05 now verified)
+
+**Date:** 2026-11-10. Acceptance: "non-in-place numerical operations and optional device/precision
+comparison tests for generic tensors; do not modify or run RFdiffusion inference; tests demonstrate
+behavior, document optional GPU skips." Dependency SR-05 is now properly attested, so this checkbox
+is earned rather than assumed.
+
+- **The three FAIL defects are closed, and the reviewer went beyond the reported cases.** Empty
+  outputs, int64 `2**60+1` vs `2**60+2`, and complex outputs with differing imaginary parts all land
+  in `skipped` with `bitwise_identical=None` and an unmeasured report. Also now unmeasured:
+  zero-size shapes `(0,3)` and `(3,0)`, a sequence of empties, NaN-only and inf outputs, a bool
+  output, a non-tensor return, a nested list, a dict, and an int-vs-float output across configs.
+  0-d, float16 and bfloat16 outputs are measured correctly, and `-0.0` vs `+0.0` gives
+  `bitwise_identical=False`.
+- **`check_repeatability` can no longer certify a non-repeatable function as repeatable** — the worst
+  consequence of the original D-T3. It raises `TensorOpError` for complex, int64, bool, empty,
+  `(3,0)` and non-tensor outputs, and for `runs<2`; a changing element count gives `False` with an
+  infinite spread.
+- **`normalize` verified across every requested input:** `[1e200,1e200]`, `[1e308,1e308]`, f32 `1e30`,
+  `3e38`, `1e-25`, `1e-45`, and f16/bf16 extremes all give correct unit vectors; only an all-zero
+  vector raises, with a message naming the cause; the `eps>0` zero-vector gradient is exactly `1e6`
+  for `eps=1e-6`. The reviewer found **no input that silently zeroes or yields NaN**.
+- **The mutation detector's false positives and false negatives are both fixed.** It now detects
+  int→float, int→bool, `0.0`→`-0.0`, `requires_grad` on and off, `.grad` set / `zero_` / `=None` /
+  `.data` write / swap-with-equal-values, `rename_`, `detach_`, hook addition, `.data` and numpy
+  writes, `set_`, `as_strided_`, `t_()`, `transpose_` and storage resize. **No pure call is reported
+  as changed**, and cycles and depth > 32 populate `unchecked`.
+- **New routes the reviewer found, recorded as residuals (low severity):** the aggregate can hide an
+  unmeasured pair — with dtypes `[float64, float32, float16]`, an equal float32 pair and a NaN
+  float16 pair report `measured=True`, `max_abs_diff=0.0`, `bitwise_identical=True`, with the float16
+  pair marked `measured=False` in `.pairs` but **not** in `.skipped`; same-element-count different
+  shapes `(2,3)` vs `(3,2)` compare as measured and identical because both are flattened, and
+  `check_repeatability` does the same; undeclared detector false negatives not in `unchecked`
+  (`retain_grad()`, `register_post_accumulate_grad_hook`, attributes on list/dict/tuple subclasses,
+  attributes set on a tensor); and `normalize([10**400,...])` raises `OverflowError` rather than
+  `TensorOpError`.
+- **89 mutants: 61 killed, 28 survived.** Real gaps recorded: `_compare_pair`'s bitwise check using
+  float `equal` instead of an int view (so `-0.0`/`+0.0` is untested); `check_repeatability`'s
+  shape-diff removal, `allclose`-instead-of-bitwise, `runs<2` removal (**without which one run
+  certifies "repeatable"**), and comparing only the first two runs; `_compare_generic`'s reference
+  check (a failed reference is silently replaced by the next config); `normalize`'s last-dim check
+  (0-d would silently normalise); `set_indices`' length-mismatch check (a length-1 `values` would
+  silently broadcast) and its float→int refusal for exact floats like `1.0`; detector `stride`,
+  `storage_ptr` and `.grad` identity/version/value metadata; dtype-change and dict-key-reorder
+  labelling; and the detector's `bits` float64 cast for int64 above 2^53 and NaN payloads.
+- **Scope confirmed:** no RFdiffusion import or execution, no network, no file I/O, no weights;
+  `tensor_ops.py` imports only `copy`, `math`, `dataclasses`, `typing`, guarded `torch`, and
+  `.schema`; the test file itself guards against network imports and scans for `pickle`/`torch.load`.
+  Determinism claims are made only where tested, with a consistency test requiring every
+  `REPEATABLE_TESTED_ON_CPU` claim to have an executable case and no untested claim to be labelled
+  repeatable — and the reviewer notes `check_repeatability` remains unsound for complex and int64
+  outputs, which undercuts the tested claim **for those types only**.
+- **Status: PASS — blueprint checkbox marked `[x]`.** 110 tests in file.
+
+## Verified: 9 of 17 — SR-00, SR-01, SR-02, SR-03, SR-04, SR-05, SR-06, SR-07, SR-08.
+Remaining chain: SR-09 (FAIL, rework in flight) → SR-10 (QA PASS, blocked on SR-09) → SR-11 (QA PASS,
+blocked on SR-10) → SR-12 (FAIL, re-run needed after fixes); and SR-10 → SR-13 (QA in flight) → SR-14
+(QA PASS, blocked on SR-13) → SR-15 (QA in flight) → SR-16 (not started). SR-17 is out of autonomous
+scope by design.
