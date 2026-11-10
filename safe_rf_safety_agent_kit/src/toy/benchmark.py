@@ -47,6 +47,9 @@ Known limits stated plainly:
   row-set disjointness, mask correctness; gate 11 (control adequacy: A(s),
   F(s), E loss fell; global: a failure makes H1, H2, H3 and JOINT INCONCLUSIVE); gate 12 + C_conv (converged-budget H3 requirement,
   section 4.1); ineligible-seed listing/replacement (G_s and mask size).
+* PYTHON VERSION: sums use `math.fsum`, never the built-in `sum` (which is only compensated from Python 3.12:
+  `sum([1e16,1,-1e16,1])/4` is 0.25 on 3.9). Developed and tested on 3.12.4 only; no claim for other versions
+  beyond what CI runs.
 * NOT IMPLEMENTED (see `DEFERRED_GATES`; a favourable verdict is conditional on
   them, `JointResult.complete_gate_coverage` is always False): configuration-
   shift sensitivity arm (gate 1), ERROR_REGISTER cross-check (gate 2), V-set
@@ -173,8 +176,21 @@ def _constant(v: Sequence[float]) -> bool:
     return all(x == v[0] for x in v)
 
 
+def _check_finite(v: Sequence[float], what: str) -> None:
+    if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in v):
+        raise ValueError(f"{what} needs finite numbers (no inf/nan/non-numeric)")
+
+
 def mean(v: Sequence[float]) -> float:
-    """Exactly-rounded mean (fsum); a constant sample returns that constant exactly (n*x/n can be off by an ulp)."""
+    """Public mean: finite input only (ValueError otherwise)."""
+    _check_finite(v, "mean")
+    return _mean(v)
+
+
+def _mean(v: Sequence[float]) -> float:
+    """Exactly-rounded mean via math.fsum, deliberately NOT built-in sum (sum only became compensated in
+    Python 3.12; e.g. sum([1e16,1,-1e16,1])/4 is 0.25 on 3.9 but the true mean is 0.5). A constant sample returns
+    that constant exactly (n*x/n can be off by an ulp). Caller guarantees finite input."""
     if len(v) == 0:
         raise ValueError("mean of empty sample")
     if _constant(v):
@@ -194,9 +210,10 @@ def sample_sd(v: Sequence[float]) -> float:
     n = len(v)
     if n < 2:
         raise ValueError("sample SD needs n >= 2")
+    _check_finite(v, "sample SD")          # without this, [inf,inf,inf] would give 0.0 (constant) or nan
     if _constant(v):
         return 0.0
-    m = mean(v)
+    m = _mean(v)
     try:
         return math.sqrt(math.fsum((x - m) ** 2 for x in v) / (n - 1))
     except OverflowError:     # squares overflow: factor out the largest deviation
@@ -249,7 +266,8 @@ def bootstrap_means(values: Sequence[float], n_boot: int, rng) -> list[float]:
         raise ValueError("need a nonempty sample and n_boot >= 1")
     n = len(values)
     vals = list(values)
-    return [mean(rng.choices(vals, k=n)) for _ in range(n_boot)]
+    _check_finite(vals, "bootstrap")
+    return [_mean(rng.choices(vals, k=n)) for _ in range(n_boot)]
 
 
 def bootstrap_ci(values: Sequence[float], level: float, n_boot: int, rng) -> tuple[float, float]:
@@ -332,7 +350,7 @@ def t_interval(values: Sequence[float], level: float) -> tuple[float, float]:
     n = len(values)
     if n < 2:
         raise ValueError("t-interval needs n >= 2")
-    m, se = mean(values), sample_sd(values) / math.sqrt(n)
+    m, se = _mean(values), sample_sd(values) / math.sqrt(n)
     h = t_ppf(1.0 - (1.0 - level) / 2.0, n - 1) * se
     return m - h, m + h
 
@@ -526,6 +544,10 @@ class HypothesisResult:
             raise ValueError(f"{self.hid!r} is not a primary hypothesis")
         if len(self.components) != len(PRIMARY[self.hid]):
             raise ValueError("wrong number of components for " + self.hid)
+        if self.hid != "H3" and self.converged_components:
+            raise ValueError("only H3 has converged-budget components")
+        if len(self.converged_components) > len(CONVERGED):
+            raise ValueError("too many converged-budget components")
         if not all(isinstance(c, ComponentResult) for c in self.components + self.converged_components):
             raise ValueError("components must be ComponentResult objects (verdicts are derived, not supplied)")
         vs = [c.verdict for c in self.components]

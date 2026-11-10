@@ -1289,6 +1289,152 @@ class FixtureGuards(unittest.TestCase):
         self.assertTrue(all(g.passed for g in bm.evaluate_gates(gate_scores(), FZ, FZ.digest, SMALL, "fixture")))
 
 
+# ===================================================== QA round 3: the "equivalent" labels that were wrong
+class HypothesisResultPublicConstructor(unittest.TestCase):
+    """The public constructor is what enforces 'no verdict without an interval'; drive it directly."""
+
+    def comp(self, lo, hi, metric="S", direction="greater", margin=0.1, n=40):
+        z = bm._mv
+        pair = bm.IntervalPair("p", n, 0.9875, 100, z((lo + hi) / 2, ""), z(.1, ""), z(.1, ""), z(lo, ""), z(hi, ""),
+                               z(1., ""), z(lo, ""), z(hi, ""), z(lo, ""), z(hi, ""))
+        return bm.ComponentResult(metric, direction, margin, pair, 30, 0.25)
+
+    def good(self, metric="S", direction="greater"):
+        c = self.comp(0.5, 0.9, metric, direction)
+        self.assertIs(c.verdict, V.SUPPORTED)
+        return c
+
+    def test_duck_typed_component_with_a_verdict_but_no_interval_is_refused(self):
+        class Duck:
+            metric, verdict, reason = "S", V.SUPPORTED, "trust me"
+        for comps, conv in (((Duck(),), ()), ((self.good(),), (Duck(), Duck()))):
+            with self.assertRaises(ValueError):
+                bm.HypothesisResult("H1" if not conv else "H3", comps if not conv else (self.good(), self.good()), conv)
+        with self.assertRaises(ValueError):
+            bm.HypothesisResult("H1", (Duck(),))
+        with self.assertRaises(ValueError):
+            bm.HypothesisResult("H3", (self.good(), self.good()), (Duck(), Duck()))
+        with self.assertRaises(ValueError):
+            bm.HypothesisResult("H1", ("SUPPORTED",))
+
+    def test_component_counts_are_enforced(self):
+        g = self.good
+        with self.assertRaises(ValueError):
+            bm.HypothesisResult("H1", (g(), g()))                         # H1 has one component
+        with self.assertRaises(ValueError):
+            bm.HypothesisResult("H1", ())
+        with self.assertRaises(ValueError):
+            bm.HypothesisResult("H3", (g(),), (g(), g()))                 # H3 needs two finite components
+        with self.assertRaises(ValueError):
+            bm.HypothesisResult("H3", (g(), g(), g()))
+        with self.assertRaises(ValueError):
+            bm.HypothesisResult("H1", (g(),), (g(),))                     # converged components belong to H3 only
+        with self.assertRaises(ValueError):
+            bm.HypothesisResult("H3", (g(), g()), (g(), g(), g()))
+        with self.assertRaises(ValueError):
+            bm.HypothesisResult("H9", (g(),))
+
+    def test_h3_without_the_full_converged_set_is_never_supported(self):
+        g = self.good
+        for conv in ((), (g(),)):
+            h = bm.HypothesisResult("H3", (g(), g()), conv)
+            self.assertIs(h.verdict, V.INCONCLUSIVE, len(conv))
+            self.assertTrue(any("not evaluated" in x for x in h.reasons))
+        self.assertIs(bm.HypothesisResult("H3", (g(), g()), (g(), g())).verdict, V.SUPPORTED)   # control
+
+    def test_unsupported_converged_component_blocks_h3_support(self):
+        bad = self.comp(-0.5, 0.0)
+        self.assertIs(bad.verdict, V.UNSUPPORTED)
+        h = bm.HypothesisResult("H3", (self.good(), self.good()), (self.good(), bad))
+        self.assertIs(h.verdict, V.INCONCLUSIVE)                          # block-only: never UNSUPPORTED from conv
+
+
+class ConfigHashProvenance(unittest.TestCase):
+    def test_hash_is_stable_and_changes_with_every_field(self):
+        base = bm.BenchmarkConfig()
+        self.assertEqual(base.config_hash(), bm.BenchmarkConfig().config_hash())
+        self.assertRegex(base.config_hash(), r"^[0-9a-f]{64}$")
+        seen = {base.config_hash()}
+        for f in dataclasses.fields(base):
+            v = getattr(base, f.name)
+            other = dataclasses.replace(base, **{f.name: (v + 1 if isinstance(v, int) else v * 1.5 if v else 0.5)})
+            h = other.config_hash()
+            self.assertNotEqual(h, base.config_hash(), f.name)
+            self.assertNotIn(h, seen, f.name)
+            seen.add(h)
+        self.assertNotEqual(bm.BenchmarkConfig().config_hash(), bm.BenchmarkConfig(steps=301).config_hash())
+
+    def test_study_records_the_config_hash_of_its_config(self):
+        o = oracle()
+        self.assertEqual(o.config_hash, SMALL.config_hash())
+        self.assertNotEqual(o.config_hash, bm.BenchmarkConfig().config_hash())     # n_boot differs
+
+
+class BoundaryAndGuardGaps(unittest.TestCase):
+    def test_width_tolerance_boundary_is_not_a_disagreement(self):
+        # widths 1 and 0.75 differ by exactly 0.25 of the larger: 'more than 25%' is false
+        self.assertEqual(bm.intervals_disagree((0.0, 1.0), (0.0, 0.75), 5.0, 0.25), (False, "agree"))
+        self.assertTrue(bm.intervals_disagree((0.0, 1.0), (0.0, 0.7499), 5.0, 0.25)[0])
+        self.assertTrue(bm.intervals_disagree((0.0, 1.0), (0.0, 0.75), 5.0, 0.2499)[0])
+
+    def test_unmeasured_or_missing_interval_is_inconclusive_never_a_verdict(self):
+        # n = 1 allowed through by min_n = 1: bounds do not exist
+        one = bm.summarize("one", [5.0], 0.9875, 10, 1, min_n=1)
+        self.assertEqual(bm.interval_verdict(one, 0.1, "greater", min_n=1)[0], V.INCONCLUSIVE)
+        self.assertIn("not computable", bm.interval_verdict(one, 0.1, "greater", min_n=1)[1])
+        # n = 40 but unmeasured bounds: what verdict_from_records rebuilds from records with unmeasured bounds
+        u = bm.MetricValue.unmeasured("x")
+        m = bm._mv(1.0, "")
+        for boot_ok, t_ok in ((False, False), (True, False), (False, True)):
+            lo, hi = (m, m) if boot_ok else (u, u)
+            tlo, thi = (m, m) if t_ok else (u, u)
+            pair = bm.IntervalPair("p", 40, 0.9875, 100, m, m, m, m, m, m, lo, hi, tlo, thi)
+            v, why = bm.interval_verdict(pair, 0.1, "greater")
+            self.assertEqual(v, V.INCONCLUSIVE, (boot_ok, t_ok))
+            self.assertIn("not computable", why)
+
+    def test_recompute_with_unmeasured_bounds_is_inconclusive(self):
+        recs = bm.to_experiment_records(oracle(), study_id="f", base_seed=7, timestamp_utc="2025-01-02T03:04:05Z")
+        h1 = next(r for r in recs if r.name.endswith("/H1"))
+        for k in ("ci_t_lo", "ci_boot_hi"):
+            bad = dataclasses.replace(h1, metrics={**h1.metrics, k: bm.MetricValue.unmeasured("x")})
+            rv = bm.verdict_from_records([bad if r is h1 else r for r in recs], SMALL)
+            self.assertEqual(rv.h1, V.INCONCLUSIVE, k)
+            self.assertEqual(rv.joint, J.JOINT_INCONCLUSIVE, k)
+
+    def test_a_seed_counted_as_failed_never_feeds_another_hypothesis(self):
+        fz = bm.freeze_seed_list(7, 40)
+        sc = []
+        for i, s in enumerate(fz.seeds):
+            if i < 2:   # S unmeasured => run failed; L = 50 would wreck H2 if it leaked in
+                sc.append(bm.SeedScores.from_values(s, None, 50.0, 1.0, 1.0, A=.5, F=.005, E_loss_ratio=.01,
+                                                    delta_conv=1.0, delta_minus_shuf_conv=1.0, conv_grad_ratio=1e-5,
+                                                    rowsets_disjoint=True, mask_ok=True))
+            else:
+                sc.append(synth_scores([s], rng_seed=i)[0])
+        r = bm.analyze_scores(sc, frozen=fz, registered_digest=fz.digest, subject="s", cfg=SMALL)
+        self.assertEqual(r.n_failed, 2)
+        for h in (r.h1, r.h2, r.h3):
+            for c in h.components + h.converged_components:
+                self.assertEqual(c.pair.n, 38, (h.hid, c.metric))
+        self.assertLess(r.h2.components[0].pair.mean.value, 0.0)           # the L=50 values are not in it
+        self.assertIs(r.h2.verdict, V.SUPPORTED)
+
+    def test_mean_and_sd_refuse_non_finite_and_use_exact_sums(self):
+        inf, nan = float("inf"), float("nan")
+        for bad in ([inf, inf, inf], [nan, 1.0], [1.0, -inf], [True, False]):
+            with self.assertRaises(ValueError, msg=bad):
+                bm.sample_sd(bad)
+        for bad in ([inf], [nan, 1.0]):
+            with self.assertRaises(ValueError, msg=bad):
+                bm.mean(bad)
+        with self.assertRaises(ValueError):
+            bm.bootstrap_means([1.0, nan], 5, make_rng(1))
+        # math.fsum, not built-in sum (sum is compensated only from Python 3.12): the true mean is 0.5
+        self.assertEqual(bm.mean([1e16, 1.0, -1e16, 1.0]), 0.5)
+        self.assertEqual(bm.mean([0.1] * 10), 0.1)
+
+
 class IneligibleVersusFailed(unittest.TestCase):
     """Defect 4: a TRAIN mask with < 2 rows is an ineligible seed (listed, replaced), not a failed run."""
 

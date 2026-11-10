@@ -2306,3 +2306,90 @@ caught and corrected itself. Two left as **argued** equivalents: `combine_joint(
 
 **SR-10 remains unmarked.** Its QA PASS covered the pre-rework state; this substantially changed
 file needs its own review before the checkbox is earned.
+
+---
+
+## The seven "equivalent" mutants were not equivalent — and two were security-relevant
+
+**Date:** 2026-11-10. The highest-return decision of the session: a reviewer had labelled seven SR-10
+mutation survivors "equivalent or near-equivalent" **without argument**, and was asked to argue each
+one — specifically to state *the input space over which the argument holds*. The result:
+**none of the seven is equivalent over the public API.** Six labels were wrong.
+
+The rationale for asking was that this exact failure had already occurred in this project: on SR-05 a
+builder argued QA's `after = before` mutant was equivalent because the teacher is structurally
+immutable, the orchestrator accepted it, and a later pass **partly refuted** it — the argument held
+for the stock class but not for the public API, because `train` never type-checked its `teacher`
+argument. **This is now the third occurrence of the same pattern**, which makes it a reliable rule
+rather than bad luck: an "equivalent mutant" claim is a proof obligation over the whole reachable
+input space, and an unargued one should be treated as an unexamined test gap.
+
+### The two security-relevant gaps
+**`HypothesisResult`'s guards are the only thing enforcing "no verdict without an interval"** — the
+property `JointResult` depends on — **and the suite never exercised the public constructor**, because
+`evaluate_primary` always builds the correct shape. Concretely, with the guards removed:
+
+| Mutant | Input | Original | Mutant |
+|---|---|---|---|
+| `isinstance` guard removed | duck-typed object, `verdict=SUPPORTED`, no interval | `ValueError` | **H1 = SUPPORTED** |
+| converged-count guard removed | H3, two SUPPORTED components, **no** converged components | INCONCLUSIVE | **SUPPORTED** |
+| converged-count guard removed | H3 with one of two converged components | INCONCLUSIVE | SUPPORTED |
+| component-count guard removed | H1 with two components; H3 with one + two converged | `ValueError` | SUPPORTED |
+
+**`config_hash` was a provenance collision, not an equivalence.** With the hash input replaced by
+`{}`, `BenchmarkConfig()` and `BenchmarkConfig(steps=301)` produced **identical** hashes
+(`44136fa355b3…`) — two different configurations sharing provenance, which is precisely what the hash
+exists to prevent. The reviewer also **corrected the orchestrator's own recollection**:
+`test_config_hash_covers_every_field` lives in `test_teacher_student.py` and covers a different class;
+`test_benchmark.py` contained **no `config_hash` reference at all**.
+
+### The other three, and the two genuinely close cases
+- **Width tolerance `>` vs `>=`:** `boot=(0,1)`, `t=(0,0.75)`, `width_tol=0.25` sits exactly on the
+  boundary — original `(False,'agree')`, mutant `(True,'widths differ…')`. The existing tests used
+  1.0-vs-1.5 and 1.0-vs-1.1, neither at the boundary.
+- **`boot is None or tint is None`:** reachable via an n=1 pair with `min_n=1` (and
+  `BenchmarkConfig` *permits* `min_seeds=1`), and via an `IntervalPair` with n=40 but unmeasured
+  bounds — **exactly what `verdict_from_records` rebuilds from records with unmeasured bounds.**
+- **`ok-only series`:** 2 of 40 seeds with `S` unmeasured but `L=50.0` — both report `n_failed=2`, but
+  the mutant feeds those seeds into the `L` series (n=40, mean 2.52, H2 INCONCLUSIVE) where the
+  original excludes them (n=38, mean 0.0205, H2 SUPPORTED). **A seed counted as failed would still
+  feed the other hypotheses.**
+- **`mean` with `sum` instead of `fsum`:** equivalent only on Python 3.12+ and only for
+  non-adversarial inputs — a differing case appeared in ~9,000 trials, and on Python 3.9.6 (installed
+  here) `mean([1e16,1,-1e16,1])` gives **0.25** instead of 0.5.
+- **Removing the `sd` constant shortcut:** exact on finite input, but `sample_sd([inf,inf,inf])`
+  returned `0.0` originally and `nan` mutated; `summarize` filters non-finite first, but `sample_sd`
+  is public.
+- **The zero-variance guarantee survived scrutiny:** the `sum` mutants **cannot** produce a non-zero
+  sd for a constant sample, because the `_constant` shortcut returns before the changed line —
+  verified across the full grid plus `5e-324` and `1.7e308`, n=2…101, zero violations, with `mean`
+  preserving `-0.0`.
+
+### The fixes, which exceeded the brief
+All six gaps are closed with tests that **drive the public constructor directly**, and the builder
+**added two guards the code did not have**: converged components are permitted only on H3, and at most
+two. H3 with an UNSUPPORTED converged component is now INCONCLUSIVE, never UNSUPPORTED. The first
+`config_hash` tests in this file assert the hash changes with every `BenchmarkConfig` field, never
+collides across single-field variants, is stable, and is recorded by a study. Rather than *documenting*
+the inf/nan divergence, `mean`, `sample_sd` and the bootstrap now **raise `ValueError` on any
+non-finite or non-numeric input**, removing it. The module docstring records that `mean` uses
+`math.fsum`, carries the Python 3.9 counter-example, and states the code was tested on 3.12.4 only
+with no claim beyond what CI runs. 14 module-scoped mutants: 13 killed; the one survivor is the
+constant shortcut, now **argued** equivalent for all finite input (`_mean` returns the exact constant
+so every deviation is exactly 0.0, including `-0.0`) and deliberately retained as a second layer.
+
+### Both reviewers audited their own method, in opposite directions
+- One found **1 of its 111 mutants was invalid**: the search string also matched a docstring, so
+  `replace(..., 1)` patched the docstring and left the code untouched — a **false survivor**. It then
+  re-checked all 111 SR-10 and all 89 SR-07 mutants by comparing parsed code with docstrings
+  stripped, and corrected its totals to **110 valid, 73 killed, 37 survived**.
+- A builder earlier had the opposite failure: a mutant that "died" only as a **syntax error**, i.e. a
+  **false kill**. It caught and redid it.
+- The SR-10 builder also volunteered that **2 of its own 37 earlier "equivalent" labels were wrong**
+  in the same way (the T-to-U overlap and `mask_ok` T-row checks), both already killed by the previous
+  round's tests.
+**Standing rule added:** every mutant must be confirmed to have changed *executable code* — not a
+comment or docstring — and must fail for the intended reason rather than as a syntax error.
+
+**Orchestrator independent verification:** the duck-typed component with a verdict and no interval is
+refused with `ValueError` through the public constructor. Suite **780 tests, OK (2 skipped)**.
