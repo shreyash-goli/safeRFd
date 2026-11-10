@@ -2327,7 +2327,7 @@ class RecordsAndRecompute(unittest.TestCase):
         res = oracle()
         for rec in self.recs(res) + bm.seed_records(res, study_id="f", timestamp_utc=self.TS):
             for w in self.WORDS:
-                self.assertNotIn(w, rec.notes.replace("not a safety claim", ""), rec.name)
+                self.assertNotIn(w, rec.notes.replace("not a safety finding", ""), rec.name)
 
     def test_recompute_matches_for_three_fixtures(self):
         for fac, name in ((bm.fixture_oracle_gated, "o"), (bm.fixture_global_degrader(0.5), "d"),

@@ -19,7 +19,8 @@ from toy import stability
 from toy.benchmark import fixture_oracle_gated
 from toy.robustness import ProbeStatus as PS
 from toy.robustness import ShiftKind as SK
-from toy.schema import (TOY_LABEL, EvidenceClass, ExperimentRecord, MetricValue, canonical_json, derive_seed)
+from toy.schema import (SCHEMA_VERSION, TOY_LABEL, EvidenceClass, ExperimentRecord, MetricValue,
+                        canonical_json, derive_seed)
 
 SEEDS = tuple(derive_seed(11, f"s{k}") for k in range(12))
 SEEDS_B = tuple(derive_seed(12, f"s{k}") for k in range(12))
@@ -371,7 +372,11 @@ class TestImmutability(unittest.TestCase):
         self.assertEqual(sc.to_json(), canonical_json(d))
         self.assertEqual(json.loads(sc.to_json()), d)
         self.assertEqual(d["label"], TOY_LABEL)
-        self.assertEqual(d["schema_version"], "1")
+        # Reference the symbol, not a literal. This assertion was hard-coded to "1" and went red
+        # when SCHEMA_VERSION became "2" (the TOY_LABEL wording change). The point of the check is
+        # that the card serializes the SAME version the schema module declares, which a literal
+        # cannot express.
+        self.assertEqual(d["schema_version"], SCHEMA_VERSION)
         self.assertRegex(sc.content_hash(), r"^[0-9a-f]{64}$")
         self.assertEqual(d["seed_digest"], sc.seed_digest)
         self.assertEqual(d["evidence_labels"], sorted(d["evidence_labels"]))

@@ -710,7 +710,9 @@ class CspAndBadges(unittest.TestCase):
     def test_badge_caveats(self):
         for ec in (EC.HYPOTHESIS, EC.NOT_VALIDATED, EC.UNKNOWN):
             self.assertIn("NOT EVIDENCE", db._badge(ec))
-        self.assertIn("not a safety claim", db._badge(EC.TOY_RESULT))
+        self.assertIn("not a safety finding", db._badge(EC.TOY_RESULT))
+        # and NOT the content-asserting form: this badge sits beside untrusted free text
+        self.assertNotIn("not a safety claim", db._badge(EC.TOY_RESULT))
         self.assertIn("not a model result", db._badge(EC.SOURCE_OBSERVED))
         self.assertIn("warn", db._badge(EC.UNKNOWN, "problem text"))
         self.assertEqual(set(db._BADGE), set(EC))                    # every class has a fixed badge

@@ -188,9 +188,10 @@ class InvalidInputs(unittest.TestCase):
                 ExperimentRecord.from_json(json.dumps(d))
 
     def test_label_near_misses_rejected(self):
-        good = "TOY RESULT (synthetic, non-biological; not a safety claim)"
+        good = "TOY RESULT (synthetic, non-biological; not a safety finding)"
         near = [good + " ", " " + good, good + "\n", good.lower(), "TOY RESULT",
-                good[:10] + "\u200b" + good[10:], good.replace("not a safety claim", "a safety claim"),
+                good[:10] + "\u200b" + good[10:], good.replace("not a safety finding", "a safety finding"),
+                good.replace("finding", "claim"),   # the pre-F15 wording is now a near miss
                 good + " validated safe"]
         d = json.loads(record().to_json())
         for bad in near:

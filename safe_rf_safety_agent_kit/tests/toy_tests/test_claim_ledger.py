@@ -1318,13 +1318,15 @@ class SafetyClaimClassificationField(unittest.TestCase):
         self.assertIn("NO classification", s["safety_claim_classification_note"])
         self.assertIn("is NOT a finding that the claim is harmless",
                       s["safety_claim_classification_note"])
-        # No field this module WORDS asserts that the claim is not a safety claim. `toy_label` is
-        # excluded deliberately: its text is `toy.schema.TOY_LABEL`, which this owner does not own --
-        # it still reads "...; not a safety claim" and is reported upwards rather than edited here.
-        owned = {k: v for k, v in s.items()
-                 if k not in ("toy_label", "safety_claim_classification_note")}
+        # No field asserts that the claim is not a safety claim -- that would be a statement about
+        # the claim's CONTENT, which nothing in this kit classifies. The former `toy_label` carve-out
+        # is GONE: `toy.schema.TOY_LABEL` was reported upwards and now reads "not a safety FINDING",
+        # which describes the record rather than its content. So the exclusion list no longer needs
+        # `toy_label`, and the whole summary can be checked.
+        owned = {k: v for k, v in s.items() if k != "safety_claim_classification_note"}
         self.assertNotIn("not a safety claim", json.dumps(owned).lower())
-        self.assertIn("not a safety claim", s["toy_label"].lower())   # the carve-out, pinned so it is visible
+        # the replacement wording is present, and in the label specifically
+        self.assertIn("not a safety finding", s["toy_label"].lower())
         json.dumps(s)
 
     def test_classification_value_is_the_same_for_every_claim_and_says_so(self):

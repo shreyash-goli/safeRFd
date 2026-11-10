@@ -27,10 +27,16 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Mapping, Optional
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 _TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", re.ASCII)
 _SHA256_RE = re.compile(r"[0-9a-f]{64}", re.ASCII)
-TOY_LABEL = "TOY RESULT (synthetic, non-biological; not a safety claim)"
+TOY_LABEL = "TOY RESULT (synthetic, non-biological; not a safety finding)"
+# SR-12 F15 wording, applied here after the claim_ledger owner drew the distinction: "not a safety
+# CLAIM" is an assertion about the labelled content, which nothing in this kit ever classifies, and
+# this label is prepended to free text a user supplies (SR-12 Q6: a crop then reads as the kit
+# vouching for the user's "model is safe"). "not a safety FINDING" describes THIS RECORD and is
+# true by construction, whatever the notes say. Changing it changes the serialized contract, so
+# SCHEMA_VERSION is bumped with it.
 MAX_SEED = 2**64 - 1
 
 
@@ -246,10 +252,15 @@ class ExperimentRecord:
     def from_dict(cls, data: Any) -> "ExperimentRecord":
         _check_keys("ExperimentRecord", data, {
             "schema_version", "label", "name", "provenance", "metrics", "evidence_class", "notes"})
-        if data["label"] != TOY_LABEL:
-            raise ValueError(f"label must equal {TOY_LABEL!r}, got {data['label']!r}")
+        # Version BEFORE label, deliberately. TOY_LABEL's text changed when SCHEMA_VERSION went
+        # 1 -> 2, so a version-1 record fails both checks; whichever runs first decides the
+        # diagnostic. "unsupported schema_version '1'" tells the reader what is actually wrong;
+        # "label must equal ..." sends them hunting for a typo in a record that was correct when
+        # it was written.
         if data["schema_version"] != SCHEMA_VERSION:
             raise ValueError(f"unsupported schema_version {data['schema_version']!r}")
+        if data["label"] != TOY_LABEL:
+            raise ValueError(f"label must equal {TOY_LABEL!r}, got {data['label']!r}")
         if not isinstance(data["metrics"], dict):
             raise ValueError("metrics must be a JSON object")
         return cls(
