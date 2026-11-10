@@ -251,7 +251,8 @@ def sample_sd(v: Sequence[float]) -> float:
         Consumers (SR-11 robustness probes) must NOT read zero-SD as 'constant' for samples within a few
         subnormal steps of each other.
     (2) PYTHON INTS beyond 2**53 are converted to float, so sample_sd([10**20, 10**20+1]) is 0.0. SR-11 casts to
-        float first (src/toy/robustness.py:178, `vals = tuple(float(v) for v in values)`), so this is only
+        float first (robustness.py, the `float(v)` cast in `SeedSummary.from_values`; cited by symbol, not line
+        number, and guarded by a test), so this is only
         reachable by a direct caller. An int too large for float (10**400) raises ValueError.
     (3) FALSE ValueError: a representable SD can still be refused when x - m overflows, e.g.
         [1.7e308, -1.7e308, -1.7e308, -1.7e308]. It fails closed (raises, never mis-reports)."""

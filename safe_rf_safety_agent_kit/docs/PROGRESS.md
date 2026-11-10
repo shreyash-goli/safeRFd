@@ -3095,3 +3095,38 @@ first run, so it cannot confirm that one was also SR-15's.
   and it did not re-run), and attributed the 3 remaining unittest failures to
   `tests/toy_tests/test_scripts.py::TestDemoRepoInodeGuard` — the SR-15 owner's in-flight work —
   rather than investigating them.
+
+---
+
+## The cross-file citation is now by symbol, with a guard test that has the right semantics
+
+**Date:** 2026-11-10. `test_benchmark.py` at 182 tests; module suite OK.
+
+The `sample_sd` docstring no longer cites a line number. **Before:**
+`float first (src/toy/robustness.py:178, ...)`. **After:** `float first (robustness.py, the
+`float(v)` cast in `SeedSummary.from_values`; cited by symbol, not line number, and guarded by a
+test)`. *Orchestrator verified:* zero occurrences of `robustness.py:178` remain, and the symbol
+reference is present.
+
+**The guard test's semantics are exactly right, which is the interesting part.**
+`test_the_cited_float_cast_still_exists_in_robustness` reads the **source of
+`SeedSummary.from_values`** and asserts it still contains `float(v)`. So:
+- **Removing** the cast fails the test — because that is what would make the cited claim false.
+- **Moving** the cast leaves it green — because the citation no longer depends on position.
+That is the correct discrimination: the test fires on the change that invalidates the claim and stays
+quiet on the change that does not. A line-number assertion would have had it backwards, failing on
+harmless moves while passing if the cast were deleted from a different line.
+
+It also pins the *absence* of the old form: the docstring text-pin now asserts there is **no
+`robustness.py:` line-number citation**, so the file cannot quietly regress to citing a line.
+
+**The dependency is now documented from both sides:** `benchmark.py` names the symbol it relies on,
+and `robustness.py:189` carries the SR-11 owner's comment — *"Keep the cast; if it moves, update that
+citation."* — above it. The round-trip took one orchestrator warning, one immediate breakage, and two
+owners' fixes, which is a fair illustration of why cross-file line citations should not be written in
+the first place.
+
+**Suite state at this commit:** 3 failures, **all** in `tests/toy_tests/test_scripts.py::
+TestDemoRepoInodeGuard` — the SR-15 owner's in-flight implementation of the demo inode guard
+(orchestrator's Priority 4, the case-varied `TMPDIR` in-repo write leak), with its tests written
+ahead of the fix. Not attributable to SR-10 or SR-11.

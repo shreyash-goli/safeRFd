@@ -1688,7 +1688,7 @@ class SdScaleBands(unittest.TestCase):
         for needle in ("FLOAT FLOOR", "PYTHON INTS", "FALSE ValueError",
                        "Consumers (SR-11 robustness probes) must NOT read zero-SD as 'constant' for samples within a "
                        "few subnormal steps of each other",
-                       "src/toy/robustness.py:178", "HALF the smallest subnormal (4.94e-324)", "2.017e-324"):
+                       "the `float(v)` cast in `SeedSummary.from_values`", "HALF the smallest subnormal (4.94e-324)", "2.017e-324"):
             self.assertIn(needle, doc)
         # the floor arithmetic quoted in the docstring
         # (in units of the smallest subnormal 4.94e-324; subnormal arithmetic itself is avoided here)
@@ -1700,6 +1700,15 @@ class SdScaleBands(unittest.TestCase):
             bm.sample_sd([10 ** 400, 1])
         with self.assertRaises(ValueError):
             bm.mean([10 ** 400])
+
+    def test_the_cited_float_cast_still_exists_in_robustness(self):
+        """sample_sd's docstring says SR-11 casts to float first. Fail loudly if that cast is removed (a mere move
+        is harmless because the citation is by symbol)."""
+        import inspect
+        from toy import robustness
+        src = inspect.getsource(robustness.SeedSummary.from_values)
+        self.assertIn("float(v)", src)
+        self.assertNotIn("robustness.py:", " ".join(bm.sample_sd.__doc__.split()))   # no line-number citation
 
     def test_empty_seed_list_fails_failure_rate_even_if_the_limit_is_one(self):
         lax = dataclasses.replace(SMALL, max_failure_rate=1.0)
