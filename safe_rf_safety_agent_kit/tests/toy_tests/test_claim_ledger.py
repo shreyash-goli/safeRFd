@@ -1,6 +1,7 @@
 """SR-14 tests. TOY only: synthetic, non-biological; nothing here asserts safety."""
 import ast
 import copy
+import hashlib
 import itertools
 import json
 import os
@@ -665,8 +666,8 @@ class ErrorContract(unittest.TestCase):
     """F1: every failure is a ClaimLedgerError, never a bare ValueError/TypeError/AttributeError."""
 
     def test_every_exception_class_derives_from_base(self):
-        classes = [c for c in vars(cl).values() if isinstance(c, type) and issubclass(c, Exception)
-                   and c.__module__ == cl.__name__]
+        classes = list({c for c in vars(cl).values() if isinstance(c, type) and issubclass(c, Exception)
+                        and c.__module__ == cl.__name__})  # distinct: aliases must not count twice
         self.assertIn(cl.ClaimLedgerError, classes)
         for c in classes:
             self.assertTrue(issubclass(c, ClaimLedgerError), c)
@@ -1077,6 +1078,160 @@ class AtomicWrite(unittest.TestCase):
                 with self.assertRaises(OSError):
                     save_ledger(target, full_ledger())
             self.assertEqual(os.listdir(td), [])
+
+
+class MaskedAndLimitTests(unittest.TestCase):
+    def test_load_populates_caches_before_any_checked_operation(self):
+        # Must inspect state BEFORE append/claim_state/summary, which rebuild caches themselves.
+        d = full_ledger().to_dict()
+        loaded = ClaimLedger.from_dict(d)
+        self.assertEqual(loaded.claim_ids(), ("c1", "c2"))
+        self.assertEqual(loaded._ids, {e.event_id: e.seq for e in loaded.events})
+        self.assertEqual(loaded._states, {"c1": S.UNSUPPORTED, "c2": S.REVIEWED})
+        self.assertEqual(loaded._last_ts, {"c1": T3, "c2": T3})
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "l.json"
+            save_ledger(p, full_ledger())
+            via_file = load_ledger(p)
+            self.assertEqual(via_file.claim_ids(), ("c1", "c2"))
+            self.assertEqual(via_file._last_ts, {"c1": T3, "c2": T3})
+
+    def test_file_level_per_claim_timestamps_going_backwards_are_rejected(self):
+        d = [e.to_dict() for e in ledger_in(S.REVIEWED).events]
+        d[1]["timestamp_utc"] = "2024-01-01T00:00:00Z"  # before the OPEN at T0
+        forged = rewrite(d)
+        res = verify_dicts(forged)
+        self.assertEqual((res.ok, res.first_broken_index, res.reason), (False, 1, "TimestampOrderError"))
+        with self.assertRaises(ChainIntegrityError):
+            ClaimLedger.from_dict(doc(forged))
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "l.json"
+            p.write_text(canonical_json(doc(forged)))
+            with self.assertRaises(ChainIntegrityError):
+                load_ledger(p)
+
+    def test_replay_path_bad_class_and_malformed_retry_raise_duplicate_not_noop(self):
+        lg = ledger_in(S.DRAFT)
+        head = lg.head_digest
+        for kw in (dict(evidence_class="BOGUS"), dict(evidence_class=5), dict(evidence_class="toy_result"),
+                   dict(evidence_class=None), dict(statement=None), dict(reviewer=""), dict(timestamp_utc="bad")):
+            base = dict(event_id="e-open", claim_id="c1", reviewer="a", justification="draft",
+                        statement="toy claim", evidence_class=EvidenceClass.TOY_RESULT, timestamp_utc=T0)
+            base.update(kw)
+            with self.subTest(kw=kw):
+                with self.assertRaises(DuplicateEventIdError):
+                    lg.open_claim(**base)
+        for kw in (dict(action="NOPE"), dict(to_state=[]), dict(from_state=5)):
+            base = dict(event_id="e-open", claim_id="c1", action=Action.OPEN, from_state=None,
+                        to_state=S.DRAFT, reviewer="a", justification="draft", evidence_class="TOY_RESULT",
+                        statement="toy claim", timestamp_utc=T0)
+            base.update(kw)
+            with self.assertRaises(DuplicateEventIdError):
+                lg.append(EventRequest(**base))
+        self.assertEqual(lg.head_digest, head)
+
+    def test_custom_skew_is_honoured(self):
+        for skew in (0, 10, 3600):
+            lg = ledger_in(S.DRAFT, max_future_skew_seconds=skew, clock=lambda: "2025-01-02T03:04:10Z")
+            base = datetime_add("2025-01-02T03:04:10Z", skew)
+            lg.review(event_id="e-ok", claim_id="c1", reviewer="a", justification="j", timestamp_utc=base)
+            lg2 = ledger_in(S.DRAFT, max_future_skew_seconds=skew, clock=lambda: "2025-01-02T03:04:10Z")
+            with self.assertRaises(cl.TimestampFutureError):
+                lg2.review(event_id="e-no", claim_id="c1", reviewer="a", justification="j",
+                           timestamp_utc=datetime_add("2025-01-02T03:04:10Z", skew + 1))
+
+    def test_future_bound_not_applied_on_load(self):
+        d = [e.to_dict() for e in ledger_in(S.DRAFT).events]
+        d[0]["timestamp_utc"] = "2999-01-01T00:00:00Z"
+        loaded = ClaimLedger.from_dict(doc(rewrite(d)))
+        self.assertEqual(loaded.events[0].timestamp_utc, "2999-01-01T00:00:00Z")
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "l.json"
+            p.write_text(canonical_json(doc(rewrite(d))))
+            self.assertEqual(len(load_ledger(p)), 1)
+
+    def test_constructor_arguments_are_validated(self):
+        for bad in (None, "5", float("nan"), float("inf"), 1.5, -1, True, [], 10**30 if False else -10**9):
+            with self.subTest(skew=bad):
+                with self.assertRaises(EventFormatError):
+                    ClaimLedger(max_future_skew_seconds=bad)
+        for bad in ("not callable", 5, []):
+            with self.assertRaises(EventFormatError):
+                ClaimLedger(clock=bad)
+
+    def test_malformed_clock_fails_closed_with_ledger_error(self):
+        def boom():
+            raise RuntimeError("x")
+        for clock in (boom, lambda: None, lambda: 5, lambda: "yesterday", lambda: "2025-02-30T00:00:00Z"):
+            lg = ClaimLedger(clock=clock)
+            with self.assertRaises(EventFormatError):
+                lg.open_claim(event_id="e", claim_id="c", reviewer="a", justification="j", statement="s",
+                              evidence_class="HYPOTHESIS")
+            with self.assertRaises(EventFormatError):  # even with a pinned timestamp: bound needs the clock
+                lg.open_claim(event_id="e", claim_id="c", reviewer="a", justification="j", statement="s",
+                              evidence_class="HYPOTHESIS", timestamp_utc=T0)
+            self.assertEqual(len(lg), 0)
+
+    def test_save_cleans_up_on_keyboard_interrupt(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch.object(cl.os, "fsync", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    save_ledger(Path(td) / "l.json", full_ledger())
+            self.assertEqual(os.listdir(td), [])
+
+
+class DocumentedLimitsDemonstrated(unittest.TestCase):
+    """These tests pin the two most consequential KNOWN limits. They are demonstrations, not
+    endorsements: if one starts failing the limit has changed and the docstring must change too."""
+
+    def test_hollow_supported_single_self_reviewer_with_reference_to_nothing(self):
+        nothing = hashlib.sha256(b"nothing at all").hexdigest()
+        lg = ClaimLedger()
+        lg.open_claim(event_id="e1", claim_id="hollow", reviewer="solo", justification="j",
+                      statement="a claim", evidence_class="TOY_RESULT", timestamp_utc=T0)
+        lg.review(event_id="e2", claim_id="hollow", reviewer="solo", justification="j", timestamp_utc=T1)
+        lg.support(event_id="e3", claim_id="hollow", reviewer="solo", justification="trust me",
+                   evidence_refs=(EvidenceRef("content_hash", nothing),), timestamp_utc=T2)
+        s = lg.summary()[0]
+        self.assertEqual(s["state"], "SUPPORTED")  # known limit: shape-only evidence, self-attested review
+        self.assertEqual(s["reviewers"], ["solo"])
+        self.assertFalse(s["is_safety_claim"])
+        self.assertTrue(s["is_toy"])
+        # the opt-in mitigation: a registry of known evidence closes this route
+        strict = ClaimLedger(known_evidence={H1})
+        strict.open_claim(event_id="e1", claim_id="hollow", reviewer="solo", justification="j", statement="s",
+                          evidence_class="TOY_RESULT", timestamp_utc=T0)
+        strict.review(event_id="e2", claim_id="hollow", reviewer="solo", justification="j", timestamp_utc=T1)
+        with self.assertRaises(UnknownEvidenceError):
+            strict.support(event_id="e3", claim_id="hollow", reviewer="solo", justification="trust me",
+                           evidence_refs=(EvidenceRef("content_hash", nothing),), timestamp_utc=T2)
+
+    def test_tail_truncation_with_corrected_head_digest_is_accepted(self):
+        lg = ledger_in(S.SUPPORTED)
+        lg.retract(event_id="e-ret", claim_id="c1", reviewer="a", justification="new evidence", timestamp_utc=T3)
+        self.assertEqual(lg.summary()[0]["state"], "UNSUPPORTED")
+        pinned = lg.head_digest  # what an out-of-band pin would hold
+        full = lg.to_dict()
+        cut = copy.deepcopy(full)
+        cut["events"].pop()  # erase the RETRACT
+        with self.assertRaises(ChainIntegrityError):  # stale head_digest: caught by the file's own head
+            ClaimLedger.from_dict(cut)
+        cut["head_digest"] = cut["events"][-1]["digest"]  # attacker fixes the head too
+        reverted = ClaimLedger.from_dict(cut)  # ACCEPTED: known limit
+        self.assertEqual(reverted.summary()[0]["state"], "SUPPORTED")
+        self.assertTrue(reverted.verify_chain().ok)
+        # ...detectable only by comparing against the pinned head
+        self.assertNotEqual(reverted.head_digest, pinned)
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "l.json"
+            p.write_text(canonical_json(cut))
+            self.assertNotEqual(load_ledger(p).head_digest, pinned)
+
+
+def datetime_add(ts, seconds):
+    from datetime import datetime, timedelta, timezone
+    return (datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ") + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 if __name__ == "__main__":

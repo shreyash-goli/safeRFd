@@ -992,6 +992,59 @@ class VerdictCoreSurvivors(unittest.TestCase):
         object.__setattr__(j.h3, "components", j.h3.components[::-1])
         self.assertNotIn("NOT shown", db.render_scorecard(j))
 
+    def test_margins_missing_or_wrong_type_refused_not_skipped(self):
+        # C2: a None Margins used to skip the margin cross-check (fail OPEN). Now the whole card is refused.
+        for bad in (None, object(), {"delta_S": 0.1}, "margins"):
+            j = joint(expect=None, dms=bm.Margins().delta_sel)      # weak H3
+            for c in (*j.h3.components, *j.h3.converged_components):
+                object.__setattr__(c, "margin", -1e9)                # forged margins that would flip the verdict
+            object.__setattr__(j.h3, "verdict", bm.Verdict.SUPPORTED)
+            object.__setattr__(j, "margins", bad)
+            h = db.render_scorecard(j)
+            self.assertIn("REFUSED", h, repr(bad))
+            self.assertNotIn("vd-", h)
+            self.assertNotIn("Suppression", h)
+            self.assertIn("REFUSED", db.render_dashboard({"joint": j}))
+
+    def test_extra_duplicate_components_alarm(self):
+        # F-i / F-j: compare sorted SEQUENCES, not sets: a size-increasing duplicate must alarm too
+        for field, hid in (("components", "h3"), ("converged_components", "h3")):
+            j = joint()
+            x = getattr(j, hid)
+            cur = getattr(x, field)
+            object.__setattr__(x, field, (*cur, cur[0]))
+            h = db.render_scorecard(j)
+            self.assertEqual(hyp_cells(h)[hid.upper()], "INCONCLUSIVE", field)
+            self.alarmed(h)
+        j = joint()
+        object.__setattr__(j.h3, "components", (j.h3.components[0], j.h3.components[1], j.h3.components[0]))
+        self.alarmed(db.render_scorecard(j))
+        self.assertTrue(db._component_sets_ok(joint().h3))
+
+    def test_component_set_check_itself_fails_closed_unmasked(self):
+        # direct unit test: other layers (e.g. _declared) would otherwise force INCONCLUSIVE and mask a fail-open
+        h3 = joint().h3
+        for tbl in ("PRIMARY", "CONVERGED"):
+            with mock.patch.object(bm, tbl, None):
+                self.assertFalse(db._component_sets_ok(h3), tbl)
+        with mock.patch.object(bm, "PRIMARY", {}):
+            self.assertFalse(db._component_sets_ok(h3))
+        self.assertFalse(db._component_sets_ok(object()))
+
+    def test_documented_limit_same_name_forged_pair_is_a_residual(self):
+        # Honest boundary (C1): names are checked, intervals are producer-asserted. A same-name component carrying
+        # a self-consistent strong pair is NOT detectable. Pinned so the docstring stays truthful.
+        weak = joint(expect=None, dms=bm.Margins().delta_sel)
+        strong = joint()
+        j = weak
+        object.__setattr__(j.h3, "components", (j.h3.components[0], strong.h3.components[1]))
+        object.__setattr__(j.h3, "converged_components", strong.h3.converged_components)
+        object.__setattr__(j.h3, "verdict", bm.Verdict.SUPPORTED)
+        self.assertEqual(hyp_cells(db.render_scorecard(j))["H3"], "SUPPORTED")
+        self.assertIn("producer-asserted", db._component_sets_ok.__doc__)
+        self.assertIn("producer-asserted", db._recompute.__doc__)
+        self.assertNotIn("is not a residual", db._recompute.__doc__)
+
     def test_component_set_check_fails_closed_if_tables_vanish(self):
         j = joint()
         with mock.patch.object(bm, "PRIMARY", None):

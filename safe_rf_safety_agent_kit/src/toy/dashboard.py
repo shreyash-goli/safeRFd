@@ -414,8 +414,9 @@ def _recompute(c: Any, margins: Any = None) -> Optional[Verdict]:
     margin was edited on its own is therefore an alarm. RESIDUAL LIMIT: the renderer has no second source of
     truth for the registered margins themselves. A result whose Margins object AND component margins were
     forged consistently recomputes consistently and raises no alarm. Margins are shown on the page (see
-    'Uncertainty and protocol limits') but are producer-asserted, not authenticated. (A deleted or substituted
-    COMPONENT is not a residual: `_component_sets_ok` alarms on it.)"""
+    'Uncertainty and protocol limits') but are producer-asserted, not authenticated. Likewise the intervals
+    themselves are producer-asserted: a same-name component with a self-consistent forged pair is a residual
+    (only missing, extra or wrongly named components are alarmed, by `_component_sets_ok`)."""
     try:
         if margins is not None:
             direction, margin = _declared(c.metric, margins)
@@ -451,9 +452,13 @@ def _eff_component(c: Any, withheld: bool, contract_bad: bool, margins: Any = No
 
 
 def _component_sets_ok(h: Any) -> bool:
-    """The component and converged-component metric sets must be EXACTLY what the protocol tables declare
-    (benchmark.PRIMARY / CONVERGED). A deleted, duplicated or substituted component is how a weak hypothesis
-    would be laundered into a strong one, so it is as loud as a forged one."""
+    """The component and converged-component METRIC NAMES must be exactly what the protocol tables declare
+    (benchmark.PRIMARY / CONVERGED), as sorted sequences (so extra duplicates alarm too). A deleted,
+    duplicated, extra or wrongly-named component is alarmed.
+
+    RESIDUAL LIMIT, stated plainly: this checks names only. The INTERVALS inside a component are
+    producer-asserted; a component with the correct metric name carrying a forged but self-consistent
+    interval pair (and a matching stored verdict) recomputes consistently and raises no alarm."""
     try:
         want = sorted(m for m, _d, _a in bm.PRIMARY[h.hid])
         if sorted(str(c.metric) for c in h.components) != want:
@@ -525,6 +530,8 @@ def _joint_wellformed(j: Any) -> bool:
             return False
         if not all(isinstance(c.pair, IntervalPair) for c in h.components):
             return False
+    if not isinstance(getattr(j, "margins", None), bm.Margins):   # fail closed: no margins, no cross-check, no figures
+        return False
     return isinstance(j.gates, tuple) and bool(j.gates) and all(hasattr(g, "passed") for g in j.gates)
 
 

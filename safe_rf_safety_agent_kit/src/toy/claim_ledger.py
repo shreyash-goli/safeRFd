@@ -32,7 +32,8 @@ module does not authenticate it and does not enforce a four-eyes rule. Nothing
 in the kit auto-advances a claim; the only way to change state is `append` (or
 a wrapper) with explicit reviewer-supplied fields.
 
-SUPPORTED without evidence is structurally impossible: the transition table
+SUPPORTED without an evidence REFERENCE is structurally impossible (a reference to
+nothing is NOT prevented: see "Honest limits" below): the transition table
 entry for SUPPORT has `needs_evidence=True`, and the check lives in the single
 function (`_validate_and_build`) that every append AND every load/verify replay
 goes through. A forged file containing a SUPPORT event with no evidence refs is
@@ -569,6 +570,12 @@ class ClaimLedger:
     def __init__(self, *, known_evidence: Optional[Iterable[str]] = None,
                  max_future_skew_seconds: int = DEFAULT_MAX_FUTURE_SKEW_SECONDS,
                  clock: Optional[Callable[[], str]] = None):
+        if isinstance(max_future_skew_seconds, bool) or not isinstance(max_future_skew_seconds, int) \
+                or max_future_skew_seconds < 0:
+            raise EventFormatError("max_future_skew_seconds must be a non-negative int "
+                                   "(floats such as nan/inf are refused: a bound must not silently disable)")
+        if clock is not None and not callable(clock):
+            raise EventFormatError("clock must be a callable returning YYYY-MM-DDTHH:MM:SSZ")
         self._max_skew = max_future_skew_seconds
         self._clock = clock or _now_utc
         self._events: list = []
@@ -601,6 +608,14 @@ class ClaimLedger:
             self._states[e.claim_id] = e.to_state
             self._last_ts[e.claim_id] = e.timestamp_utc
 
+    def _now(self) -> str:
+        try:
+            return _ts(self._clock())
+        except EventFormatError:
+            raise
+        except Exception as e:  # a malformed injected clock must not leak a raw error
+            raise EventFormatError(f"clock failed: {type(e).__name__}") from None
+
     def _checked(self) -> None:
         """Fail closed: verify the whole chain and rebuild the derived caches from the events."""
         res = self.verify_chain()
@@ -632,7 +647,8 @@ class ClaimLedger:
         if not isinstance(req, EventRequest):
             raise EventFormatError("append requires an EventRequest")
         self._checked()
-        ts = req.timestamp_utc if req.timestamp_utc is not None else self._clock()
+        now = self._now()
+        ts = req.timestamp_utc if req.timestamp_utc is not None else now
         req = EventRequest(req.event_id, req.claim_id, req.action, req.from_state, req.to_state,
                            req.reviewer, req.justification, req.evidence_refs, ts,
                            req.evidence_class, req.statement)
@@ -655,7 +671,7 @@ class ClaimLedger:
                 f"event id {eid!r} already used with different content; a retry must reuse the original "
                 f"timestamp {existing.timestamp_utc} and evidence-ref order", existing.timestamp_utc)
         content = _validate_and_build(req, self._events, self._states, self._last_ts, self._known)
-        limit = datetime.strptime(self._clock(), "%Y-%m-%dT%H:%M:%SZ").timestamp() + self._max_skew
+        limit = datetime.strptime(now, "%Y-%m-%dT%H:%M:%SZ").timestamp() + self._max_skew
         if datetime.strptime(content["timestamp_utc"], "%Y-%m-%dT%H:%M:%SZ").timestamp() > limit:
             raise TimestampFutureError(
                 f"timestamp {content['timestamp_utc']} is more than {self._max_skew}s ahead of the ledger clock")

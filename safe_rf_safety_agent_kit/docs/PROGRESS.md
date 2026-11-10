@@ -3503,3 +3503,84 @@ boundaries are pinned; the demo's inode guard refuses case-varied, symlinked and
 `TMPDIR` **before anything is created**; all eight lint ban-mutants are killed. The measured counts
 (88 bare / 87 PyYAML-only / 2 full) are confirmed, and the 86→88 explanation checks out: 85
 torch/numpy skips + PyYAML + two pytest-only script tests.
+
+---
+
+## SR-13 conditions and SR-14 gaps closed
+
+**Date:** 2026-11-10. `test_dashboard.py` **107** tests (was 103); `test_claim_ledger.py` **97**
+(was 87). Both module suites **OK**.
+
+### SR-13 — C1, C2 and the three survivors closed
+- **C1 fixed by correcting the claim, with the honest boundary pinned by test.** Both docstrings now
+  say the **intervals are producer-asserted**, so a same-name component carrying a self-consistent
+  forged pair **is a residual**; only missing, extra or wrongly-named components are alarmed, and the
+  false "is not a residual" wording is **gone** (orchestrator verified: 3 occurrences of
+  "producer-asserted", 0 of the old phrase).
+  `test_documented_limit_same_name_forged_pair_is_a_residual` **shows H3 SUPPORTED for that attack**
+  and asserts the docstrings contain "producer-asserted" — documentation-by-test applied to a
+  *residual limit*, so the boundary cannot silently move in either direction.
+- **C2 fixed, and better than specified.** The orchestrator asked for
+  `isinstance(j.margins, bm.Margins)`; the builder wrote
+  `isinstance(getattr(j, "margins", None), bm.Margins)` at **`dashboard.py:533`**, which handles a
+  **missing attribute** as well as a wrong type, commented *"fail closed: no margins, no cross-check,
+  no figures"*. A missing or wrong-type `margins` now makes the whole card **REFUSED with no
+  figures**, instead of silently skipping the cross-check.
+  `test_margins_missing_or_wrong_type_refused_not_skipped` covers `None`, a plain object, a dict and
+  a string, with H3 margins forged to −1e9 and the verdict forged.
+- **F-i/F-j closed:** an extra duplicate on H3's components **and** on its converged components, plus
+  the `(c0, c1, c0)` case, now alarm — the set-comparison mutants are killed.
+- **F-h closed and unmasked:** `test_component_set_check_itself_fails_closed_unmasked` calls
+  `_component_sets_ok` **directly** with `PRIMARY` patched to `None`/`{}` and `CONVERGED` to `None`,
+  expecting False — so **no other layer can mask a fail-open**. That is the right way to fix a masked
+  test: test the unit, not the end-to-end path that shadowed it.
+- All four mutations verified, source restored byte-identical. S5b and F-f accepted as equivalent on
+  the stated arguments, with no tests written for them.
+- **Reported honestly and not investigated:** one earlier unittest run showed **10** failures where a
+  rerun showed only the 3 known `test_scripts.py` ones, so **7 were transient** and the cause is
+  unknown. Given the scratchpad collision below, this may be related.
+
+### SR-14 — the masked test, the unpinned limits, and the overclaim all closed
+- **G8c fixed at the root.** The new test inspects the caches **immediately after load, before any
+  call that rebuilds them**, checking `claim_ids()`, `_ids`, `_states` and `_last_ts` for **both**
+  `from_dict` and `load_ledger`. Removing `_reindex()` from `from_dict` now kills it. Previously
+  `_checked()` rebuilt the caches before every operation, so the load-time reindex was never
+  exercised and `claim_ids()` right after load returned `()`.
+- **G8d fixed:** a file whose per-claim timestamps run **backwards**, with recomputed digests, is now
+  rejected — `verify_events` returns `TimestampOrderError` at the right index and both load paths
+  raise `ChainIntegrityError`.
+- **Both honest limits are now pinned by demonstration**, which was the unmet requirement:
+  the **hollow SUPPORTED** route is shown end to end (a single reviewer `solo` opens, reviews and
+  supports citing `sha256(b"nothing at all")`) **and the mitigation is shown too** — the same attempt
+  raises `UnknownEvidenceError` when `known_evidence` is set; and **tail truncation** is pinned both
+  ways: with a stale `head_digest` it is rejected, with a corrected one it **loads and the claim reads
+  SUPPORTED again**, with the loaded head differing from the pinned one. If either limit closes or
+  widens, these tests fail and the docstring must change.
+- **The headline overclaim is corrected:** "SUPPORTED without an evidence **REFERENCE** is
+  structurally impossible", with an explicit note that a reference **to nothing** is not prevented.
+- **Constructor validation added, closing a bound that could silently disable itself:**
+  `max_future_skew_seconds` must be a non-negative `int` — `None`, strings, **`nan`**, `inf`, floats,
+  negatives and bools all raise `EventFormatError` — and `clock` must be callable, read once per
+  append via `_now()`, failing closed with `EventFormatError` and leaving the ledger unchanged.
+- F1e, G3k, F4f, F4h, G9d and the alias-count weakness are all now tested; the count uses a **set**,
+  so an alias no longer inflates it. 17 mutants, 16 killed — the one survivor was the builder's **own
+  badly-built alias mutant**, which added a replacement subclass and so left the count at 15; the
+  alias-only form **is** killed. It also reported that the previous round's 35 mutants were **not**
+  re-run.
+
+### A cross-agent interference event, investigated rather than assumed
+The SR-14 owner reported **unprompted** that its mutation harness sat at a **shared** scratchpad path
+`mut.py`, that the SR-15 owner **overwrote it**, and that it consequently **ran the SR-15 owner's
+script against the SR-15 owner's files once** — and that it does not know whether that interfered.
+**The orchestrator investigated before attributing anything:** `git diff --stat HEAD` over `scripts/`
+and `test_scripts.py` shows +179/−23 consistent with the SR-15 rework rather than a leftover
+single-line mutation, and the failures are a **stale text needle** — the test searches for
+`'expected >= 50 skips'` while the script now emits `'FAIL: expected >= 50 package skips with nothing
+installed, got 0: torch tests may be passing silently or were removed'`. That is a **forward** change
+(a better message), not a reverted behaviour, so the failures are the SR-15 owner's in-flight work and
+**not** contamination. The SR-15 owner has been asked to confirm its own files regardless, since only
+it can be certain.
+**Standing rule added:** mutation harnesses must use **unique, owner-scoped paths** (the SR-14 owner
+has moved to `ledger_mut_sr14.py`). A shared mutable harness path in a directory several agents write
+to is the same hazard class as the stale `.pyc`, the docstring-only false survivor, the syntax-error
+false kill, and the four masked tests — and it nearly caused a misattribution.
