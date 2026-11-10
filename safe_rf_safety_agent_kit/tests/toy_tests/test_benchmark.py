@@ -1589,15 +1589,22 @@ class OracleAcrossBaseSeeds(unittest.TestCase):
             self.assertTrue(failed <= {"control_adequacy", "convergence"}, (base, failed))
             self.assertEqual(r.verdict == J.JOINT_SUPPORTED, not failed, base)   # SUPPORTED iff every gate passes
 
+    def test_default_parameters_are_the_ones_the_pins_were_taken_under(self):
+        d = bm.BenchmarkConfig()
+        self.assertEqual((d.tau_conv, d.eps_fit, d.steps, d.steps_conv, d.lr, d.delta_A, d.loss_factor),
+                         (1e-3, 0.05, 300, 1000, 0.3, 0.05, 2.0),
+                         "a gate/budget DEFAULT changed. The EXPECT pins below were measured under the old defaults: "
+                         "re-measure them deliberately and record the change in docs/PROGRESS.md.")
+
     def test_default_parameter_pins(self):
         for base, want in self.EXPECT.items():
-            got = self.run_for(base).verdict
-            self.assertEqual(
-                got, want,
-                f"base seed {base}: oracle verdict {got.value} != pinned {want.value}. These pins record that the "
-                f"DEFAULT eps_fit/tau_conv/steps are marginal for the oracle's own gates (see module docstring and "
-                f"docs/PROGRESS.md). If you changed a default or the training budget: register the parameters in the "
-                f"pre-registration record and update docs/PROGRESS.md FIRST; do not just edit EXPECT.")
+            with self.subTest(base_seed=base):
+                got = self.run_for(base).verdict
+                self.assertEqual(
+                    got, want,
+                    f"base seed {base}: oracle verdict {got.value} != pinned {want.value}. If the defaults test "
+                    f"passes, this is a CODE change that moved a verdict: find out why before touching EXPECT. "
+                    f"If a default or budget changed, record it in docs/PROGRESS.md first.")
 
 
 # ===================================================== QA round 5
@@ -1663,13 +1670,74 @@ class SdScaleBands(unittest.TestCase):
         # (3) fails closed with a false ValueError (x - m overflows)
         with self.assertRaises(ValueError):
             bm.sample_sd([1.7e308, -1.7e308, -1.7e308, -1.7e308])
-        for needle in ("FLOAT FLOOR", "PYTHON INTS", "FALSE ValueError", "SR-11"):
-            self.assertIn(needle, bm.sample_sd.__doc__)
+        doc = " ".join(bm.sample_sd.__doc__.split())
+        for needle in ("FLOAT FLOOR", "PYTHON INTS", "FALSE ValueError",
+                       "Consumers (SR-11 robustness probes) must NOT read zero-SD as 'constant' for samples within a "
+                       "few subnormal steps of each other",
+                       "src/toy/robustness.py:178", "HALF the smallest subnormal (4.94e-324)", "2.017e-324"):
+            self.assertIn(needle, doc)
+        # the floor arithmetic quoted in the docstring
+        # (in units of the smallest subnormal 4.94e-324; subnormal arithmetic itself is avoided here)
+        self.assertAlmostEqual(4.94 / math.sqrt(6), 2.017, places=3)         # true SD of [0]*5+[1 step]
+        self.assertLess(1 / math.sqrt(6), 0.5)               # below half a step: 0.0 is the correctly rounded SD
+        self.assertGreater(bm.sample_sd([0.0] * 2 + [5e-324] * 2 + [1e-323]), 0.0)   # a few steps apart: nonzero
+        # (4) an int too large for float is refused with ValueError, not a raw OverflowError
+        with self.assertRaises(ValueError):
+            bm.sample_sd([10 ** 400, 1])
+        with self.assertRaises(ValueError):
+            bm.mean([10 ** 400])
 
     def test_empty_seed_list_fails_failure_rate_even_if_the_limit_is_one(self):
         lax = dataclasses.replace(SMALL, max_failure_rate=1.0)
         g = next(x for x in bm.evaluate_gates([], FZ, FZ.digest, lax) if x.name == "failure_rate")
         self.assertFalse(g.passed)
+
+
+# ===================================================== QA round 6
+class RelabelRouteBoundaryIsExactlyAsDocumented(unittest.TestCase):
+    """Pins the open route as it really is: the FLAG ALONE defeats the cross-check. Not a defence; a disclosure."""
+    TS = "2025-01-02T03:04:05Z"
+
+    def records(self, kind):
+        r = dataclasses.replace(oracle())
+        object.__setattr__(r, "subject_kind", kind)
+        object.__setattr__(r, "fixture_name", None)
+        return bm.to_experiment_records(r, study_id="f", base_seed=7, timestamp_utc=self.TS)
+
+    def test_relabelled_records_with_the_flag_neutralised_are_accepted(self):
+        for kind in ("trained", "unknown"):
+            recs = self.records(kind)
+            j = recs[-1]
+            with self.assertRaises(ValueError):                              # control: flag left at 1.0 is caught
+                bm.verdict_from_records(recs, SMALL)
+            keep = {k: v for k, v in j.metrics.items() if k != "loss_check_exempt"}
+            variants = {"flag deleted": keep,
+                        "flag zeroed": {**keep, "loss_check_exempt": MetricValue.measured(0.0)},
+                        "flag unmeasured": {**keep, "loss_check_exempt": MetricValue.unmeasured("x")},
+                        "both fields deleted": {k: v for k, v in keep.items() if k != "subject_kind_code"}}
+            for name, metrics in variants.items():
+                rv = bm.verdict_from_records(recs[:-1] + [dataclasses.replace(j, metrics=metrics)], SMALL)
+                self.assertEqual(rv.subject_kind, kind if name != "both fields deleted" else "unknown", (kind, name))
+                self.assertEqual(rv.joint, J.JOINT_SUPPORTED, (kind, name))      # the documented hole
+
+    def test_the_docstring_states_that_the_flag_alone_suffices(self):
+        doc = " ".join(bm.__doc__.split())
+        self.assertIn("THAT CROSS-CHECK IS DEFEATED BY THE FLAG ALONE", doc)
+        self.assertNotIn("forged consistently", doc)
+
+    def test_unmeasured_flag_is_handled_not_crashed(self):
+        recs = bm.to_experiment_records(oracle(), study_id="f", base_seed=7, timestamp_utc=self.TS)
+        j = recs[-1]
+        bad = dataclasses.replace(j, metrics={**j.metrics, "loss_check_exempt": MetricValue.unmeasured("x")})
+        self.assertEqual(bm.verdict_from_records(recs[:-1] + [bad], SMALL).subject_kind, "fixture")
+
+
+class SdOverflowFallback(unittest.TestCase):
+    def test_overflowing_sum_of_squares_becomes_a_value_error(self):
+        # reachable in practice only for n above ~1.8e8; simulated by patching the squares helper
+        with mock.patch.object(bm, "_sum_sq", side_effect=OverflowError("simulated")):
+            with self.assertRaisesRegex(ValueError, "not representable"):
+                bm.sample_sd([1.0, 2.0, 4.0])
 
 
 class IneligibleVersusFailed(unittest.TestCase):

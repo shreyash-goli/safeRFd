@@ -74,8 +74,10 @@ Known limits stated plainly:
   labelled 'trained'/'unknown' is refused only if its gates carry `exempt=True` (the flag is producer-set), so
   gates built by hand with `exempt=False` and a favourable control_adequacy pass are not detectable; (f)
   patching the `SUBJECT_KIND_CODE` table. `verdict_from_records` cross-checks stored `loss_check_exempt` against
-  the stored `subject_kind_code` (exempt=1 with a non-fixture code is refused) but cannot detect a code AND
-  exempt flag forged consistently. All of (a)-(f) are post-hoc tampering or declaration abuse, not routes through
+  the stored `subject_kind_code` (exempt=1 with a non-fixture code is refused). THAT CROSS-CHECK IS DEFEATED BY
+  THE FLAG ALONE: after relabelling a record to trained/unknown, deleting `loss_check_exempt`, setting it to 0.0,
+  or making it unmeasured is accepted (as is deleting both fields). Only a relabel that leaves the flag at 1.0
+  is caught. The stored code and flag are producer-asserted, not authenticated. All of (a)-(f) are post-hoc tampering or declaration abuse, not routes through
   the public pipeline, which always self-labels. None is reachable by accident.
 * DEFAULT PARAMETERS ARE MARGINAL FOR THE ORACLE'S OWN GATES: on base seeds 23 and 5 (30 seeds, n_boot 2000) the
   oracle fixture is JOINT_INCONCLUSIVE because gate 11(b) (F above eps_fit=0.05) and/or gate 12 (worst-seed
@@ -191,8 +193,12 @@ def _constant(v: Sequence[float]) -> bool:
 
 
 def _check_finite(v: Sequence[float], what: str) -> None:
-    if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in v):
-        raise ValueError(f"{what} needs finite numbers (no inf/nan/non-numeric)")
+    try:
+        ok = all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in v)
+    except OverflowError:      # a Python int too large for float, e.g. 10**400
+        ok = False
+    if not ok:
+        raise ValueError(f"{what} needs finite numbers (no inf/nan/non-numeric/too-large int)")
 
 
 def mean(v: Sequence[float]) -> float:
@@ -218,17 +224,23 @@ def _mean(v: Sequence[float]) -> float:
         return r
 
 
+def _sum_sq(v: Sequence[float], m: float) -> float:
+    return math.fsum((x - m) ** 2 for x in v)
+
+
 def sample_sd(v: Sequence[float]) -> float:
     """Sample SD, divisor n-1. Exactly 0.0 for a constant sample (no cancellation residue: a zero-variance
     series must be recognisable as such). Otherwise two-pass with an exactly-rounded mean.
 
     LIMITS OF THE 'SD == 0 iff constant' INVARIANT (stated so nobody relies on more than is true):
-    (1) FLOAT FLOOR: a non-constant sample returns 0.0 when its true SD is below ~2.5e-324 (the smallest
-        subnormal), because 0.0 is then the correctly rounded value, e.g. [0.0]*5 + [5e-324] (true SD 2.2e-324).
+    (1) FLOAT FLOOR: a non-constant sample returns 0.0 when its true SD is below ~2.47e-324, which is HALF the
+        smallest subnormal (4.94e-324), because 0.0 is then the correctly rounded value. Example:
+        [0.0]*5 + [5e-324] has true SD 5e-324/sqrt(6) = 2.017e-324 and returns 0.0.
         Consumers (SR-11 robustness probes) must NOT read zero-SD as 'constant' for samples within a few
         subnormal steps of each other.
     (2) PYTHON INTS beyond 2**53 are converted to float, so sample_sd([10**20, 10**20+1]) is 0.0. SR-11 casts to
-        float first, so this is only reachable by a direct caller.
+        float first (src/toy/robustness.py:178, `vals = tuple(float(v) for v in values)`), so this is only
+        reachable by a direct caller. An int too large for float (10**400) raises ValueError.
     (3) FALSE ValueError: a representable SD can still be refused when x - m overflows, e.g.
         [1.7e308, -1.7e308, -1.7e308, -1.7e308]. It fails closed (raises, never mis-reports)."""
     n = len(v)
@@ -247,7 +259,7 @@ def sample_sd(v: Sequence[float]) -> float:
             raise ValueError("sample SD is not representable as a finite float")
         return r
     try:
-        return math.sqrt(math.fsum((x - m) ** 2 for x in v) / (n - 1))
+        return math.sqrt(_sum_sq(v, m) / (n - 1))
     except OverflowError:     # reachable only when n*big^2 overflows (e.g. n above ~1.8e8 near big=1e150)
         raise ValueError("sample SD is not representable as a finite float") from None
 

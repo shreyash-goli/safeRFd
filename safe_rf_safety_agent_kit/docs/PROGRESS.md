@@ -2839,3 +2839,53 @@ with `2b06fff` named as superseded; the `steps_bad` rule present and outcome-ind
 
 **Residual the owner reported honestly:** it read the whole file **before** editing, but did **not**
 re-read the edited result end to end — so r7 needs an independent read, like its predecessors.
+
+---
+
+## SR-10 delta-3: the four residuals closed, with the open route documented as it actually is
+
+**Date:** 2026-11-10. Suite **805, OK (2 skipped)**; `test_benchmark.py` at 175 tests; 12 module-scoped
+mutants, all killed.
+
+- **R-1 fixed by correcting the claim, not by overstating the fix.** The docstring previously said a
+  code **and** flag forged *consistently together* were undetectable; in fact **the flag alone
+  defeats the cross-check**. The phrase "forged consistently" is **gone** (orchestrator verified: zero
+  occurrences), replaced by the accurate statement that only a relabel leaving the flag at 1.0 is
+  caught. Better still, a test now **enumerates the open route as it is** — after relabelling to
+  `trained` or `unknown`, deleting, zeroing or un-measuring the flag, or deleting both fields, is
+  **accepted** and still yields JOINT_SUPPORTED — with the control case (flag left at 1.0) refused,
+  and a second test pinning the docstring wording. **Documenting a hole by asserting the hole's
+  behaviour** is the right pattern: the test fails if the hole silently closes *or* widens.
+- **R-3 fixed where it mattered:** the rot guard now pins the **whole cross-task sentence**,
+  whitespace-normalised, instead of the bare token `SR-11` which also appeared elsewhere — so the
+  caveat the orchestrator most wanted protected can no longer be deleted with the suite still green.
+- **Both wrong docstring figures corrected**, and the orchestrator verified the replacement
+  independently: the true SD of `[0.0]*5+[5e-324]` is **2.017e-324** (= 4.94e-324/√6; computed to 40
+  digits as 2.0170145529…e-324), not the 2.2e-324 previously stated; and the floor is **HALF** the
+  smallest subnormal, the smallest subnormal being 4.94e-324. A test checks the arithmetic **in units
+  of the subnormal step**, avoiding subnormal floats entirely.
+- **The fourth, previously undocumented limit is now a contract rather than a leak:**
+  `sample_sd([10**400, 1])` and `mean([10**400])` raise **`ValueError`** instead of a raw
+  `OverflowError`, restoring the "fails closed with ValueError" promise.
+- **The reviewer's factual error corrected, with the citation the orchestrator asked for.** The
+  review had claimed SR-11 "does not exist in the tree", making the int-beyond-2^53 unreachability
+  claim unverifiable. It does exist; the builder re-checked and item (2) now cites
+  **`src/toy/robustness.py:178`** (`vals = tuple(float(v) for v in values)`). Orchestrator confirmed
+  both the file (54 KB) and the line.
+- **Both low-severity test gaps closed.** `F4` (unmeasured-flag handling) is pinned. And the overflow
+  fallback — previously untestable because its real trigger needs ~1.9e8 samples — is now reachable
+  under test by **splitting the squares sum into `_sum_sq` and mocking it to raise**, so changing the
+  `except` clause is killed. That is the right way to test an unreachable branch rather than leaving
+  it unpinned.
+- **The pins-test hardening landed as the reviewer recommended**, after it judged the previous
+  failure-message approach "a speed bump, not a control… partly theatre": a **separate** test now pins
+  `(tau_conv, eps_fit, steps, steps_conv, lr, delta_A, loss_factor)` against constants, so a default
+  change fails **distinctly** from a verdict change; the verdict pins use `subTest` per base seed so
+  all mismatching seeds are reported rather than just the first; and the failure message now says
+  that a *passing* defaults test means a **code change** moved the verdict.
+- One mutant that tried to make a zeroed flag refuse was killed — **because it breaks the tests that
+  document the open route.** That is the documentation-by-test pattern working in the widening
+  direction too.
+
+**Attestation status:** delta-3 is **unattested**, like delta-1 and delta-2. SR-10's checkbox stays
+unchecked pending a final review together with SR-09 r7.
