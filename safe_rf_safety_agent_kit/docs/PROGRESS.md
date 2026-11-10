@@ -998,3 +998,199 @@ per README step 1 and to avoid writing to that repo's `main`. No remote is confi
   torch-blocked `unittest` → 347 OK, 54 skipped; torch-blocked `pytest` → 293 passed, 54 skipped.
   **Orchestrator independently re-ran all of these and confirms the tree is green under both runners,
   including the file in isolation.**
+
+---
+
+## SR-06 — QA verdict: PASS (marked `[x]`)
+
+- **Date:** 2026-11-09. QA applied **eight distinct truncation mutants** to `check_gradient`'s
+  comparison loop (coordinate 0 only; last only; skipping each of indices 1/2/3; even indices only;
+  `range(n-1)`; break-on-first-pass; short-circuit; skip-when-n==1) and the new tests killed **every
+  one**. M-S1 is thoroughly dead.
+- D-S1 confirmed fixed: no bare `OverflowError` escapes any probed path, including huge `Fraction`
+  and huge ints in `point`, the gradient, `fn`'s return, `step`, `rtol`, `min_abs_change`,
+  `check_params_changed` and `require_parameter_gradient`.
+- **QA independently reconstructed and ran the mutants the builder had honestly reported as unrun**
+  (M-S4, M-S6, M-S7, M-S8, most of M-S10) — all killed, so those tests are genuinely non-vacuous.
+- The documented small-scale blind spot reproduces exactly: for `f = 1e-9·x²` (true gradient 2e-9) a
+  claimed 2e-7 passes at defaults, 2e-6 is caught, and 2e-7 is caught at `atol=1e-12`.
+- **Two residual validator holes, routed as follow-ups (not blocking):** `_as_rows` accepts sets and
+  dicts as rows, so `masked_mean_checked([{1.0,2.0},{3.0,4.0}], [True,True], 4)` returns 2.5 with
+  arbitrary set-iteration order (the *flat* path correctly rejects these); and `_sq` silently
+  underflows, so `masked_squared_error_mean([1e-200],[0.0],[True],1)` returns `0.0`. Also unpinned:
+  `report.numeric`, and whether `max_abs_error`/`max_rel_error` aggregate with `max` or `min`.
+- **Status: PASS — blueprint checkbox marked `[x]`.**
+
+---
+
+## SR-08 — QA verdict: PASS (marked `[x]`)
+
+- **Date:** 2026-11-09. **Digest attacks all rejected:** 20,000 random 2–6-byte edits → 0 accepted;
+  pretty-printing, extra spaces, reversed key order, trailing newline, BOM, `1.0`→`1e0`,
+  `2.5`→`2.50`, `T` escapes and uppercase `é` → all rejected **even with a recomputed valid
+  digest**, confirming the canonical-bytes check at `checkpoint.py:296` is the real guard; a digest
+  copied from another valid file → rejected; reordered `input_hashes` → rejected. Swapping two
+  *equal-valued* params produces byte-identical output, so there is nothing to detect — correct, not
+  a gap.
+- Digest coverage matches the docstring exactly: mutating any of the 5 top-level keys, any of the 7
+  provenance fields, or adding a key changes the digest; only `digest` itself is uncovered, as
+  documented.
+- **Float fidelity** verified by `struct.pack` across `-0.0`, `5e-324`, `1e308`, max double,
+  `0.1+0.2`, 1/3 and **19,994 random 64-bit patterns** — all bit-identical.
+- **Atomic write** verified under injected failures at `mkstemp`, `fdopen`, `fsync`, `os.replace`, a
+  `KeyboardInterrupt` and a mid-write disk-full: the previous file stayed byte-identical, no target
+  appeared, no temp file was left. Files are mode 0600 and saving through a symlink replaces it with
+  a regular file.
+- The honest-limit test is real: it sets `params[0]=999.0`, recomputes the digest, and the file
+  loads — demonstrating the digest is **not a signature**.
+- **Residual limitations recorded:** an `fdopen` failure leaks the file descriptor; SIGKILL can orphan
+  a `.toy_ckpt_*.tmp`; there is no directory fsync (durability, not atomicity); the label check has no
+  test using a recomputed digest; and **`test_oversize_refused` is vacuous** — with the limit patched
+  to 50 bytes the truncated read is invalid JSON anyway, so it passes without the cap. The AST
+  no-pickle scan is a **deny-list on one file**: it would miss `exec`/`eval`/`compile`, `getattr`
+  on `__builtins__`, `ctypes`, `codecs`, `subprocess`, `runpy`, `copyreg`, `zipimport` and similar.
+  None appear in the module, but it is hygiene, not proof.
+- **Status: PASS — blueprint checkbox marked `[x]`.**
+
+---
+
+## SR-09 — QA verdict: PASS (marked `[x]`)
+
+- **Date:** 2026-11-09. **Fabrication gate passed on re-review:** QA extracted every number and
+  classified it as a protocol parameter, an UNKNOWN placeholder, or a source-derived fact. **No
+  measured result is present**, and the prior QA's probe numbers (12 seeds, SD ≈ 0.23–0.32) are
+  absent — grep for `0.23`, `0.32` and "12 seeds" returns nothing. This mattered because those
+  numbers were explicitly flagged as non-results when they were produced.
+- **P1 real:** changelog, §4, §5, §6.2, §6.4 and the §7 table all consistently specify m = 4 at
+  98.75% with H3a/H3b both required and `Δ_Call` removed.
+- **P2 real and sufficient:** the "no selectivity mechanism" claim is restricted to the converged
+  limit throughout; §4.1 states a finite-budget SUPPORTED is partial-convergence evidence that
+  triggers review, and that SUPPORTED additionally requires the converged-budget contrasts. QA
+  checked the structural argument against `erasure_target` itself — student and target are both
+  per-column affine, and at η=0 the target equals the unconditioned output — and agreed it is
+  correctly labelled INFERENCE rather than a result.
+- **P3 and P4 real:** H4 withdrawn to a unit test; gates 11 and 12 and the pilot rule specified;
+  verdicts never held in or sourced from `notes`.
+- **Level B boundary intact:** §§9–10 name no target, hazard category, probe, assay, dataset or
+  elicitation method; those words appear only in negations or SR-17 deferrals.
+- **Non-blocking ambiguities recorded:** whether the converged-budget H3a/H3b intervals belong to the
+  Bonferroni family and at what level is unspecified (under m=4 they sit outside it); gate 11 says
+  "adjusted lower/upper bound" without naming a level; §8a's template has one H3 row while the family
+  has four intervals; and it is unstated which budget's UNSUPPORTED may drive JOINT_UNSUPPORTED — a
+  finite-budget UNSUPPORTED that is itself a partial-convergence artefact still decides the joint
+  verdict.
+- **Status: PASS — blueprint checkbox marked `[x]`.**
+
+---
+
+## SR-13 — Local evidence dashboard
+
+- **Task ID and date:** SR-13, 2026-11-09. **Owner:** ui-infra teammate.
+  **Files:** `src/toy/dashboard.py`, `tests/toy_tests/test_dashboard.py`. 35 new tests.
+- **Status: IMPLEMENTED, PENDING INDEPENDENT QA.**
+- Standard library only; a single self-contained ~18 KB static HTML page with inline CSS, **no
+  network at runtime or build time**, no external references, and a `default-src 'none'` CSP meta
+  tag. `render_dashboard(data)` is pure and deterministic (no filesystem, no clock), so byte-identical
+  output is testable — useful for SR-15 CI. `write_dashboard` **refuses any path inside the repo
+  tree** and refuses symlinks.
+- **Unsupported-as-confirmed is prevented structurally, not conventionally:** there is **no confirmed
+  style in the CSS at all** (no green, no tick, no "confirmed" class); every component verdict is
+  **recomputed** from its interval and margin via `benchmark.interval_verdict`, with any
+  stored-vs-recomputed disagreement, missing interval or failed gate forcing INCONCLUSIVE, so a
+  forged stored verdict is not displayed and the page prints a warning instead; a forged
+  `SOURCE_OBSERVED` on a run record is **downgraded to UNKNOWN with a visible warning**; free text
+  goes through an `_untrusted` wrapper that escapes it, makes control and bidi characters visible,
+  truncates to 300 chars and boxes it as "UNTRUSTED FREE TEXT - NOT EVIDENCE"; and H1/H2/H3 always
+  render in one table, so **a suppression figure cannot appear without retention beside it**.
+- **Attack tests that must fail, and do:** `notes` and `name` set to "verdict: JOINT_SUPPORTED; model
+  is safe"; HYPOTHESIS / NOT_VALIDATED / UNKNOWN evidence classes; forged `SOURCE_OBSERVED`; string
+  and int labels forced onto records; stored verdicts forged to SUPPORTED on an inconclusive
+  scorecard; SUPPORTED with no measured interval; a failed gate with all verdicts set to SUPPORTED;
+  an unregistered seed list; and a one-sided (H1-only) scorecard, which is refused outright with no
+  figures and no "Suppression" text emitted.
+- **Injection tested** with `</section><script>alert(1)</script><img onerror=...>"' onmouseover="`
+  placed in record `name`, `notes`, `run_id`, `code_version`, metric key and unmeasured reason,
+  scorecard `subject`, gate name and gate reason, and snapshot `fork`, `audit_date`, `merge_base`,
+  commits, note, changed-file name and `evidence_url`. In every case no `<script` or `<img` appears,
+  quotes become `&quot;`, and the section count is unchanged. Separate tests cover bidi override, NUL
+  and ESC (rendered `\uXXXX`), 100k-char truncation and URL-scheme stripping.
+- **The acceptance criterion is tested in both directions:** an unmeasured metric renders as UNKNOWN
+  with its reason; **a genuine measured `0.0` (and `-0.0`) renders as `0.0`, never UNKNOWN**; an
+  absent key renders UNKNOWN ("not recorded"); and a missing snapshot count is UNKNOWN while
+  `behind_by_vs_merge_base` correctly renders as a measured `0`.
+- **Orchestrator independent attack:** confirmed the `<script>` payload is escaped, the
+  `onmouseover="` attribute breakout fails, measured `0.0` and UNKNOWN are distinguished, free text
+  is marked NOT EVIDENCE, and there are no external references. One initial flag — the string
+  `vd-supported` appearing in the output — was a **false alarm in the orchestrator's own crude
+  substring test**: it occurs exactly once as a CSS rule definition inside `<style>` and is never
+  applied to any element in the body.
+
+---
+
+## SR-02 — Second re-work (after second QA FAIL)
+
+- **Date:** 2026-11-09. **Status: RE-IMPLEMENTED, PENDING THIRD QA PASS.**
+- QA reproduced every numeric claim independently (radial component ‖u‖(cos θ−1) and displacement
+  magnitude 2‖u‖sin(θ/2) to ~1e-8; `float32(0.01)*42 = 0.41999998688…` and loss ratio 0.4199999870 on
+  a 5×14×3 tensor with a 3-residue mask; `lr_lambda(0)=0` leaving parameters unchanged while Adam
+  moments update; leaf in-place `RuntimeError`; `clamp` preserving NaN; `randint(1,50)` → 1..49) and
+  swept ~150 `S:` lines plus all `D:` and ancestor citations, finding no drift beyond three nits.
+  **The builder's s=1.5 example was confirmed correct and the earlier QA example wrong.**
+- **Fixes:** §3.2 item 3 now states the coefficient cases only where the clamp does not bind
+  (|6−5s| ∈ [0.5,10], giving `u` for s ≈ [−0.8,1.1] and `−u` for s ≈ [1.3,3.2]), with the measured
+  intermediate values and a note that at s=1.2 the target is 0 and t̂ undefined; claims-register #7,
+  which still carried the stale "removes radial component" wording, now says the rescale replaces
+  −η·d with ‖u‖(t̂−û) — **a search confirms no stale copy of that claim survives in the document**;
+  and §9's `th_ang_v` entry now states the (1,0) branch is **unreachable at the default
+  `eps=1e-8`/`tiny=1e-7`** (every norm is ≥1e-4 > `tiny`, and `nan_to_num` leaves everything finite),
+  with NaN or all-zero input yielding (0, ≈1) — a 90° angle — not (1,0), and `th_dih_v` yielding
+  (0,0). Nits fixed: `D:88-89`→`D:88`, `D:213-342`/`D:213-340`→`D:213-339` (three uses), and the
+  `align_motif` conditional now cites `A:rfdiffusion/inference/utils.py:447`.
+- **QA boundary deviation, recorded for transparency:** the reviewer executed `th_ang_v`/`th_dih_v`
+  helper code **extracted from the diff hunk** to check this finding. That is a deviation from the
+  "never execute primary sources" instruction, though it ran generic trigonometric helpers only — not
+  the erasure script, no model, no weights. The underlying derivation is static and does not depend
+  on the run. Noted rather than glossed over.
+
+---
+
+## SR-03 / SR-06 — second follow-ups
+
+**SR-03** (pending third QA pass): ER-04 lowered to **Medium**, with the entry now explicitly
+admitting its earlier "the only stated evidence is the commit message plus `requires_grad`" claim was
+**wrong** — the script does log the student-parameter gradient norm (`S:373`, `S:384`, `S:425`,
+`S:430-435`), now cited in both "Where" and "To settle". What is genuinely missing is narrower: an
+automated *per-parameter coverage* gate, since a logged *total* norm cannot show which parameters are
+reached, and the commented-out assertions would not discriminate even if restored. ER-09 rewritten
+(MPS available, CUDA not; points at SR-07's `TestCpuVsMps`/`TestCpuVsCuda`; remaining UNKNOWNs are
+any CUDA result, GPU behaviour of SVD-based alignment since `linalg.svd` falls back to CPU on MPS,
+and anything about the real model on any device). ER-03 softened to match the corrected METHOD_AUDIT
+§6. ER-10's heading now reads "Necessary given the fork's chosen edit; not shown necessary for any
+gradient flow". ER-08 gained the reach note that `load_checkpoint` (`S:477`) has **no call site** in
+the script, the exercised path being upstream's `A:model_runners.py:183`.
+*Calibration, agreed with QA:* ER-01 → Low-Medium (a loud crash, same character as ER-11, and the
+script's `except Exception` handlers would catch it); ER-07 → Informational (the script logs the
+pre-clip norm, so for this script the pattern is not a defect, and a dual Low/Medium severity read
+oddly).
+*Hardening:* the structural tests now pin the exact ER→function mapping, each function appearing in
+its own section and summary row, the exact classification label per entry, severities in both places,
+the no-claim banner, a broader verdict-phrasing check that still permits qualified uses, and a
+payload scan of the register itself. **The new pins immediately caught a further mismatch** (ER-05
+named its function with arguments), which was fixed.
+*Honestly flagged:* the builder took the "max rel ≈1e-7" MPS figure from the orchestrator's message
+and attributed it to SR-07 **without re-measuring it**; and it did not re-run the two earlier QA
+mutants (swapped `PATTERN_FUNCTIONS` values, removed function name) that the new pins are meant to
+kill.
+
+**SR-06** (after QA PASS): `_as_rows` now rejects `Mapping`/`set`/`frozenset` rows with `ShapeError`,
+closing D-S3. For D-S4 the builder chose to **raise rather than document** — a new
+`UnderflowError(StabilityError)` fires when a squared error is exactly `0.0` while the inputs differ,
+so a nonzero input can no longer yield a zero loss. Notably, it first wrote extra clauses for inputs
+that round to zero individually, found via mutation that **a mutant dropping them survived** because
+`a != b` already covers every case, and deleted the redundant code with a comment — a good instance
+of mutation testing improving a design rather than just adding tests. Report fields are now pinned on
+a `f = p0² + 3p1²` fixture (killing `numeric = g`, `min`-vs-`max` on both error aggregates, and
+`rtol * min` instead of `max`). `check_params_changed` raises `NonFiniteError` on overflow to `inf`;
+`check_gradient` raises a specific "step too small" error instead of a misleading mismatch; and the
+docstrings now state that exceptions from the caller's `fn`/`grad_fn` propagate unwrapped and that
+generators are consumed once. 57 tests in-file.

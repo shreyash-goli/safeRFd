@@ -30,11 +30,11 @@ Autograd-safety summary of the pure ops (all verified in tests/toy_tests/test_te
   to the input is zero at masked positions.
 * `accumulate`   : `x + delta` (not `x += delta`). Autograd-safe; the input is
   not a modified saved tensor, so no version-counter error at backward().
-* `normalize`    : `x / clamp_min(norm, eps)`. Autograd-safe. With eps == 0 a
-  zero (or non-finite) input raises instead of silently yielding NaN.
+* `normalize`    : overflow/underflow-safe `x / max(norm, eps)`. Autograd-safe. With
+  eps == 0 an all-zero (or non-finite) input raises instead of yielding NaN.
 * `clamp`        : `torch.clamp` (out-of-place). Autograd-safe, BUT the gradient
-  is exactly zero wherever the bound is active: a clamp can silently kill
-  gradient. NaN passes through unchanged (it is not clamped).
+  is exactly zero for entries strictly outside the bounds (and 1 at x == bound):
+  a clamp can silently kill gradient. NaN passes through unchanged (it is not clamped).
 Each is non-mutating because it allocates its result; "does not mutate the
 input" is checked by `detect_mutation` in the tests, not just asserted here.
 """
@@ -102,13 +102,41 @@ def _norm_indices(indices: Sequence[int], n: int) -> list[int]:
     return out
 
 
+def _checked_cast(v: "torch.Tensor", dtype: "torch.dtype") -> "torch.Tensor":
+    """Cast `v` to `dtype` or raise TensorOpError if the cast is lossy in kind or
+    range: float -> int/bool (truncation), complex -> real, int out of the target
+    range, or a finite value becoming inf. Ordinary rounding (0.1 -> float32) is
+    allowed. Keeps autograd history of `v`."""
+    if v.dtype == dtype:
+        return v
+    d = v.detach()
+    if d.is_complex() and not dtype.is_complex:
+        raise TensorOpError(f"refusing complex -> {dtype}")
+    if dtype.is_floating_point or dtype.is_complex:
+        c = d.to(dtype)
+        if bool((torch.isfinite(d) & ~torch.isfinite(c)).any()):
+            raise TensorOpError(f"value overflows {dtype} (finite became inf)")
+        return v.to(dtype)
+    if dtype == torch.bool:
+        if d.dtype != torch.bool:
+            raise TensorOpError(f"refusing {d.dtype} -> bool")
+        return v
+    if d.is_floating_point():
+        raise TensorOpError(f"refusing silent truncation {d.dtype} -> {dtype}")
+    c = d.to(dtype)
+    if not bool((c.to(d.dtype) == d).all()):
+        raise TensorOpError(f"value out of range for {dtype}")
+    return v.to(dtype)
+
+
 def set_indices(x: Any, indices: Sequence[int], values: Any) -> Any:
     """Out-of-place equivalent of `x[indices] = values` (first dimension).
 
     Works on list/tuple (returns a new list/tuple) and torch tensors (returns a
     new tensor). `values` is a scalar or has leading length len(indices).
-    Raises TensorOpError on out-of-range, non-int or duplicate indices and on a
-    length mismatch (so an indexing error cannot become a silent no-op).
+    Raises TensorOpError on out-of-range, non-int or duplicate indices, on a
+    length/shape mismatch, and on a lossy cast of `values` into the tensor's
+    dtype (float -> int truncation, finite -> inf overflow, out-of-range int) (so an indexing error cannot become a silent no-op).
     An empty `indices` is legal and returns an equal copy.
     Autograd-safe for tensors: uses `index_put` (new graph node, no version bump).
     """
@@ -117,11 +145,20 @@ def set_indices(x: Any, indices: Sequence[int], values: Any) -> Any:
             raise TensorOpError("cannot index a 0-dim tensor")
         idx = _norm_indices(indices, x.shape[0])
         if _is_tensor(values):
-            v = values.to(dtype=x.dtype, device=x.device)
+            v = values
         else:
-            v = torch.as_tensor(values, dtype=x.dtype, device=x.device)
+            try:
+                v = torch.as_tensor(values)   # natural dtype, so a lossy cast is visible below
+            except (RuntimeError, TypeError, ValueError, OverflowError) as e:
+                raise TensorOpError(f"values not convertible to a tensor: {e}") from None
         if v.dim() > 0 and v.shape[0] != len(idx):
             raise TensorOpError(f"values length {v.shape[0]} != number of indices {len(idx)}")
+        v = _checked_cast(v, x.dtype).to(x.device)
+        target = (len(idx),) + tuple(x.shape[1:])
+        try:
+            v = v.expand(target)
+        except RuntimeError:
+            raise TensorOpError(f"values shape {tuple(v.shape)} not broadcastable to {target}") from None
         it = torch.as_tensor(idx, dtype=torch.long, device=x.device)
         return x.index_put((it,), v)
     if _is_seq(x):
@@ -175,26 +212,42 @@ def accumulate(x: Any, delta: Any) -> Any:
     modified, so no version-counter error at backward().
     """
     if _is_tensor(x):
-        if _is_tensor(delta) and delta.shape != x.shape:
-            raise TensorOpError(f"shape mismatch {tuple(x.shape)} vs {tuple(delta.shape)}")
+        if _is_tensor(delta):
+            if delta.shape != x.shape:
+                raise TensorOpError(f"shape mismatch {tuple(x.shape)} vs {tuple(delta.shape)}")
+        elif isinstance(delta, bool) or not isinstance(delta, (int, float)):
+            raise TensorOpError(f"delta must be a tensor or a real scalar, got {type(delta).__name__}")
         return x + delta
     if _is_seq(x):
         if _is_seq(delta):
             if len(delta) != len(x):
                 raise TensorOpError(f"length mismatch {len(x)} vs {len(delta)}")
-            return _rebuild(x, [a + b for a, b in zip(x, delta)])
-        return _rebuild(x, [a + delta for a in x])
+            try:
+                return _rebuild(x, [a + b for a, b in zip(x, delta)])
+            except TypeError as e:
+                raise TensorOpError(str(e)) from None
+        try:
+            return _rebuild(x, [a + delta for a in x])
+        except TypeError as e:
+            raise TensorOpError(str(e)) from None
     raise TensorOpError(f"unsupported container {type(x).__name__}")
 
 
 def normalize(x: Any, eps: float = 0.0) -> Any:
     """Out-of-place equivalent of `x /= norm(x)` (L2 over the last dim / the list).
 
-    eps == 0: a zero-norm or non-finite input RAISES TensorOpError (the in-place
-    pattern would produce NaN/inf silently). eps > 0: divide by max(norm, eps),
-    so a zero vector maps to zeros. Floating dtypes only for tensors.
-    Autograd-safe. The zero/finite check inspects `x.detach()` and so forces a
-    device sync on GPU; that is the price of failing loudly.
+    The norm is computed after rescaling by the largest |element|, so a finite
+    input never fails because of overflow (`[1e200, 1e200]`, f32 `1e30`) or
+    underflow (`[1e-200, 1e-200]`, f32 `1e-25`) of the squared sum: those give
+    the correct unit vector. eps == 0: the only thing that raises is a genuinely
+    all-zero vector ("all-zero input") or a non-finite input; the in-place
+    pattern would give NaN silently. eps > 0: the divisor is max(norm, eps), so
+    a vector with 0 <= norm < eps is divided by eps (a zero vector maps to zeros,
+    with gradient exactly 1/eps per element -- finite but large, 1e6 for
+    eps=1e-6). Floating dtypes only for tensors; non-real list entries raise.
+    Autograd-safe: the scale factor is a detached constant, which is exact
+    because x/||x|| is scale invariant. The zero/finite check inspects
+    `x.detach()` and forces a device sync on GPU.
     """
     if not isinstance(eps, (int, float)) or isinstance(eps, bool) or not eps >= 0 or math.isinf(eps):
         raise TensorOpError("eps must be a finite float >= 0")
@@ -203,23 +256,38 @@ def normalize(x: Any, eps: float = 0.0) -> Any:
             raise TensorOpError(f"normalize needs a floating dtype, got {x.dtype}")
         if x.dim() == 0 or x.shape[-1] == 0:
             raise TensorOpError("normalize needs a non-empty last dimension")
-        d = x.detach()
-        if not bool(torch.isfinite(d).all()):
+        if not bool(torch.isfinite(x.detach()).all()):
             raise TensorOpError("non-finite input")
-        norm = torch.linalg.vector_norm(x, dim=-1, keepdim=True)
-        if eps == 0.0 and bool((norm.detach() == 0).any()):
-            raise TensorOpError("zero-norm input with eps=0")
-        return x / norm.clamp_min(eps)
+        m = x.detach().abs().amax(dim=-1, keepdim=True)
+        if eps == 0.0 and bool((m == 0).any()):
+            raise TensorOpError("all-zero input with eps=0 (norm is exactly zero)")
+        m_safe = torch.where(m == 0, torch.ones_like(m), m)
+        xs = x / m_safe
+        n = torch.linalg.vector_norm(xs, dim=-1, keepdim=True).clamp_min(1.0)  # >= 1 whenever m > 0
+        unit = xs / n
+        if eps == 0.0:
+            return unit
+        small = (n.detach() * m) < eps          # true norm < eps (inf-safe: overflow compares False)
+        x_small = torch.where(small, x, torch.zeros_like(x)) / eps   # no inf in the untaken branch
+        return torch.where(small, x_small, unit)
     if _is_seq(x):
         if len(x) == 0:
             raise TensorOpError("empty vector")
+        for v in x:
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise TensorOpError(f"entries must be real numbers, got {type(v).__name__}")
         if any(not math.isfinite(v) for v in x):
             raise TensorOpError("non-finite input")
-        n = math.sqrt(math.fsum(v * v for v in x))
-        if eps == 0.0 and n == 0.0:
-            raise TensorOpError("zero-norm input with eps=0")
-        den = max(n, eps)
-        return _rebuild(x, [v / den for v in x])
+        m = max(abs(v) for v in x)
+        if m == 0:
+            if eps == 0.0:
+                raise TensorOpError("all-zero input with eps=0 (norm is exactly zero)")
+            return _rebuild(x, [v / eps for v in x])
+        xs = [v / m for v in x]
+        n = math.hypot(*xs)
+        if eps > 0.0 and n * m < eps:
+            return _rebuild(x, [v / eps for v in x])
+        return _rebuild(x, [v / n for v in xs])
     raise TensorOpError(f"unsupported container {type(x).__name__}")
 
 
@@ -228,7 +296,11 @@ def clamp(x: Any, lo: Optional[float] = None, hi: Optional[float] = None) -> Any
 
     At least one bound is required; lo > hi or a NaN bound raises. NaN entries
     pass through unchanged (so clamping does not hide NaN). Autograd-safe, with
-    the caveat that the gradient is zero where a bound is active.
+    the caveat that the gradient is exactly 0 for entries STRICTLY outside
+    [lo, hi] (clamped away) and exactly 1 for entries inside or ON a bound
+    (x == lo or x == hi): with lo=0, hi=1 the gradients for [0, .5, 1, 2, -1]
+    are [1, 1, 1, 0, 0] (measured on torch 2.7.1; boundary convention is a torch
+    detail, not a guarantee).
     """
     if lo is None and hi is None:
         raise TensorOpError("clamp needs at least one bound")
@@ -278,6 +350,7 @@ class MutationReport:
 
 
 _MAX_DEPTH = 32
+_SCALARS = (int, float, bool, complex, str, bytes, type(None))
 
 
 def _bits(t: Any) -> "torch.Tensor":
@@ -287,10 +360,31 @@ def _bits(t: Any) -> "torch.Tensor":
     return flat.view(torch.uint8) if flat.numel() else torch.zeros(0, dtype=torch.uint8)
 
 
+def _tensor_meta(t: Any) -> tuple:
+    """Autograd/metadata state that value+version snapshots cannot see."""
+    hooks = getattr(t, "_backward_hooks", None)
+    g = t.grad if t.is_leaf or t.retains_grad else None
+    try:
+        gsnap = None if g is None else (id(g), g._version, tuple(g.shape), _bits(g))
+    except Exception:  # noqa: BLE001
+        gsnap = (id(g), None, None, None)
+    try:
+        names = t.names
+    except Exception:  # noqa: BLE001
+        names = None
+    try:
+        ptr = t.untyped_storage().data_ptr()
+    except Exception:  # noqa: BLE001
+        ptr = None
+    return {"requires_grad": t.requires_grad, "grad": gsnap, "hooks": len(hooks) if hooks else 0,
+            "grad_fn": t.grad_fn, "names": names, "stride": tuple(t.stride()) if t.layout == torch.strided else None,
+            "storage_ptr": ptr, "device": str(t.device)}
+
+
 def _snap(obj: Any, path: str, out: dict, unchecked: list, depth: int = 0, seen: Optional[set] = None) -> None:
     seen = set() if seen is None else seen
     if depth > _MAX_DEPTH or id(obj) in seen:
-        unchecked.append(path + " (depth limit or cycle)")
+        unchecked.append(path + " (depth limit or cycle: not walked)")
         return
     if _is_tensor(obj):
         try:
@@ -302,7 +396,11 @@ def _snap(obj: Any, path: str, out: dict, unchecked: list, depth: int = 0, seen:
         except Exception:  # noqa: BLE001 - exotic dtypes/devices: record the gap
             data = None
             unchecked.append(path + " (values not snapshotable)")
-        out[path] = ("tensor", version, tuple(obj.shape), obj.dtype, data)
+        out[path] = ("tensor", version, tuple(obj.shape), obj.dtype, data, _tensor_meta(obj))
+        return
+    if isinstance(obj, _SCALARS):
+        # type + repr, NOT ==: distinguishes 1 / 1.0 / True and 0.0 / -0.0, and NaN == NaN
+        out[path] = ("scalar", type(obj), repr(obj))
         return
     if isinstance(obj, (list, tuple)):
         seen = seen | {id(obj)}
@@ -316,8 +414,14 @@ def _snap(obj: Any, path: str, out: dict, unchecked: list, depth: int = 0, seen:
         for k, v in obj.items():
             _snap(v, f"{path}[{k!r}]", out, unchecked, depth + 1, seen)
         return
+    if type(obj).__eq__ is object.__eq__:
+        # No value equality to compare with (plain classes, nn.Module, iterators...):
+        # say so instead of guessing "changed" or "clean".
+        unchecked.append(path + f" (opaque {type(obj).__name__}: no value equality, not compared)")
+        return
     try:
         out[path] = ("object", copy.deepcopy(obj))
+        unchecked.append(path + f" ({type(obj).__name__} compared with == only: may miss type/sign-of-zero changes)")
     except Exception:  # noqa: BLE001
         unchecked.append(path + " (not copyable)")
 
@@ -332,8 +436,8 @@ def _diff(before: dict, after: dict, live: dict, unchecked: list) -> list:
         if b[0] != a[0]:
             findings.append(MutationFinding(path, "structure_changed", f"{b[0]} became {a[0]}"))
         elif b[0] == "tensor":
-            _, v0, s0, d0, x0 = b
-            _, v1, s1, d1, x1 = a
+            _, v0, s0, d0, x0, m0 = b
+            _, v1, s1, d1, x1, m1 = a
             if s0 != s1:
                 findings.append(MutationFinding(path, "shape_changed", f"{s0} -> {s1}"))
             elif d0 != d1:
@@ -348,13 +452,31 @@ def _diff(before: dict, after: dict, live: dict, unchecked: list) -> list:
                 elif ver:
                     findings.append(MutationFinding(path, "version_bumped",
                                                     f"_version {v0} -> {v1}; values identical (value-neutral or restored write)"))
+            changed = []
+            for k in m0:
+                if k == "grad":
+                    g0, g1 = m0[k], m1[k]
+                    same = (g0 is None and g1 is None) or (
+                        g0 is not None and g1 is not None and g0[0] == g1[0] and g0[1] == g1[1] and g0[2] == g1[2]
+                        and (g0[3] is None or g1[3] is None or torch.equal(g0[3], g1[3])))
+                elif k == "grad_fn":
+                    same = m0[k] is m1[k]
+                else:
+                    same = m0[k] == m1[k]
+                if not same:
+                    changed.append(k)
+            if changed:
+                findings.append(MutationFinding(path, "metadata_changed", "changed: " + ", ".join(changed)))
+        elif b[0] == "scalar":
+            if b[1:] != a[1:]:
+                findings.append(MutationFinding(path, "object_changed", f"{b[1].__name__} {b[2]} -> {a[1].__name__} {a[2]}"))
         elif b[0] == "seq":
             if b[1:] != a[1:]:
                 findings.append(MutationFinding(path, "structure_changed", f"{b[1:]} -> {a[1:]}"))
         elif b[0] == "dict":
             if b[1] != a[1]:
                 findings.append(MutationFinding(path, "structure_changed", "dict keys changed"))
-        else:  # object: compare deep copy taken before against the live object after
+        else:  # object with custom __eq__: pre-call deep copy vs the live object after
             try:
                 same = b[1] == live[path]
                 if not isinstance(same, bool):
@@ -372,9 +494,7 @@ def _diff(before: dict, after: dict, live: dict, unchecked: list) -> list:
 
 
 def _collect_live(obj: Any, path: str, live: dict, depth: int = 0) -> None:
-    if depth > _MAX_DEPTH:
-        return
-    if _is_tensor(obj):
+    if depth > _MAX_DEPTH or _is_tensor(obj) or isinstance(obj, _SCALARS):
         return
     if isinstance(obj, (list, tuple)):
         for i, v in enumerate(obj):
@@ -398,16 +518,27 @@ def detect_mutation(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Mutati
       change however it was made (`.data`, numpy view), distinguishing -0.0 and
       NaN payloads. It does NOT see a write that stores identical bytes, nor a
       mutate-then-restore. It costs a copy of every tensor input.
-    Using both, `version_bumped` alone means "an in-place op ran, values equal";
+    * metadata snapshot (`metadata_changed`): `requires_grad`, `.grad` (identity,
+      version and values: catches `x.grad = None`, `x.grad = fresh`,
+      `x.grad.zero_()`), number of tensor backward hooks (`register_hook`),
+      `grad_fn` identity (`detach_`), dim names (`rename_`), strides, storage
+      pointer and device.
+    Using these, `version_bumped` alone means "an in-place op ran, values equal";
     `values_changed` alone means "changed behind autograd's back".
     Shape/dtype changes (`resize_`, `set_`) are reported separately.
-    Lists/tuples/dicts are walked recursively; other objects are deep-copied and
-    compared with `==` (locations where that is impossible are listed in
-    `unchecked`, never silently called clean). Tuples can't be mutated but the
-    tensors inside them can, so they are walked too.
-    Limits: it observes inputs only (not globals, not tensors reachable only via
-    object attributes), and cannot see mutation of an object that has no useful
-    `==`. If fn raises, the exception is recorded in `raised` and mutation that
+    Lists/tuples/dicts are walked recursively (tuples can't be mutated but the
+    tensors inside them can). Builtin scalars (int, float, bool, complex, str,
+    bytes, None) are compared by type AND repr, so 1 -> 1.0, 1 -> True and
+    0.0 -> -0.0 are changes and NaN is equal to itself.
+    NOT DETECTED / listed in `unchecked` instead of called clean:
+    * objects with no value equality (plain classes, nn.Module, iterators): not
+      compared at all;
+    * other objects that define `==`: compared with `==` only (can miss
+      type or sign-of-zero changes) and flagged as such;
+    * cycles and nesting deeper than 32;
+    * tensors reachable only through attributes of objects, global state, hooks
+      registered on `grad_fn`, and anything fn does after returning.
+    If fn raises, the exception is recorded in `raised` and mutation that
     happened before the raise is still reported (it is not re-raised).
     """
     unchecked: list = []
@@ -650,12 +781,30 @@ def _unmeasured_report(kind: str, reference: Optional[str], reason: str, skipped
                             unmeasured_reason=reason)
 
 
+def _flat_one(o: Any) -> "torch.Tensor":
+    if not _is_tensor(o):
+        raise TensorOpError(f"output element must be a tensor, got {type(o).__name__}")
+    if o.is_complex():
+        # .to(float64) would silently drop the imaginary part
+        raise TensorOpError("complex output not supported: the imaginary part would be lost")
+    if not o.is_floating_point():
+        # int64 > 2**53 would lose low bits in float64, bool/int are not 'numeric' comparisons here
+        raise TensorOpError(f"non-floating output dtype {o.dtype} not supported (cast would hide differences)")
+    return o.detach().cpu().to(torch.float64).reshape(-1)
+
+
 def _flatten64(out: Any) -> "torch.Tensor":
+    """Real floating, non-empty outputs only; anything else raises TensorOpError
+    (callers record that as an unmeasured configuration, never as a zero difference)."""
     if _is_tensor(out):
-        return out.detach().cpu().to(torch.float64).reshape(-1)
-    if _is_seq(out) and out and all(_is_tensor(o) for o in out):
-        return torch.cat([o.detach().cpu().to(torch.float64).reshape(-1) for o in out])
-    raise TypeError(f"fn must return a tensor or a non-empty sequence of tensors, got {type(out).__name__}")
+        flat = _flat_one(out)
+    elif _is_seq(out) and out:
+        flat = torch.cat([_flat_one(o) for o in out])
+    else:
+        raise TensorOpError(f"fn must return a tensor or a non-empty sequence of tensors, got {type(out).__name__}")
+    if flat.numel() == 0:
+        raise TensorOpError("empty output: nothing to compare")
+    return flat
 
 
 def _prepare(inputs: Sequence[Any], device: Any = None, dtype: Any = None) -> list:
@@ -677,6 +826,8 @@ def _compare_pair(ref_label: str, cand_label: str, ref: "torch.Tensor", cand: "t
     def unm(reason):
         return PairComparison(ref_label, cand_label, False, MetricValue.unmeasured(reason),
                               MetricValue.unmeasured(reason), None, reason)
+    if ref.numel() == 0 or cand.numel() == 0:
+        return unm("empty output: nothing to compare")
     if ref.shape != cand.shape:
         return unm(f"output shape mismatch {tuple(ref.shape)} vs {tuple(cand.shape)}")
     if not (bool(torch.isfinite(ref).all()) and bool(torch.isfinite(cand).all())):
@@ -868,11 +1019,18 @@ def check_repeatability(fn: Callable[..., Any], inputs: Sequence[Any], runs: int
     """Run `fn` `runs` times on identical inputs in this process and compare
     results bitwise. This is an EMPIRICAL observation of run-to-run repeatability
     for one process, thread count and machine. It is not a proof of determinism
-    and says nothing about other machines, thread counts, torch builds or devices."""
+    and says nothing about other machines, thread counts, torch builds or devices.
+    Only REAL FLOATING outputs are accepted: complex, integer/bool and empty
+    outputs raise TensorOpError. (An earlier version cast complex outputs to
+    float64, dropping the imaginary part, and could certify a non-repeatable
+    function as repeatable; the repeatability claims in DETERMINISM_CLAIMS were
+    all established on float32 outputs and never relied on that path.)"""
     _require_torch()
     if runs < 2:
         raise TensorOpError("runs must be >= 2")
     outs = [_flatten64(fn(*_prepare(inputs, device=device))) for _ in range(runs)]
+    if any(o.shape != outs[0].shape for o in outs[1:]):
+        return RepeatabilityResult(runs, False, float("inf"))
     same = all(torch.equal(outs[0].view(torch.int64), o.view(torch.int64)) for o in outs[1:])
     spread = max(float((o - outs[0]).abs().max()) for o in outs[1:]) if outs[0].numel() else 0.0
     return RepeatabilityResult(runs, same, spread)

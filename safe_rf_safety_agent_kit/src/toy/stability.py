@@ -86,6 +86,10 @@ class MissingGradientError(StabilityError):
     """A required gradient is absent (None)."""
 
 
+class UnderflowError(StabilityError):
+    """A nonzero quantity collapsed to exactly 0.0 (floating-point underflow)."""
+
+
 class NoOpUpdateError(StabilityError):
     """A parameter update changed nothing."""
 
@@ -151,8 +155,8 @@ def _as_rows(m, name: str) -> tuple[tuple, ...]:
         raise ShapeError(f"{name} is empty")
     rows = []
     for i, r in enumerate(outer):
-        if isinstance(r, (str, bytes)) or not hasattr(r, "__iter__"):
-            raise ShapeError(f"{name}[{i}] is not a row (got {type(r).__name__})")
+        if isinstance(r, (str, bytes, Mapping, set, frozenset)) or not hasattr(r, "__iter__"):
+            raise ShapeError(f"{name}[{i}] is not a row (sets/mappings have no defined order) (got {type(r).__name__})")
         row = tuple(r)
         if not row:
             raise ShapeError(f"{name}[{i}] is an empty row")
@@ -252,6 +256,9 @@ def masked_mean_checked(values, mask: Sequence[bool], denominator: int, *,
     reproduces that old lenient policy as an explicit, discouraged opt-in.)
 
     The result must be finite (an overflowing sum raises NonFiniteError).
+    Rows must be real sequences: sets and mappings are rejected (no defined
+    order / they would sum keys). `values` and `mask` may be one-shot iterables;
+    each is materialised exactly once.
     """
     if isinstance(denominator, bool) or not isinstance(denominator, int):
         raise NormalizationMismatchError(f"denominator must be an int element count, got {denominator!r}")
@@ -303,10 +310,19 @@ def _sq(a, b):
         if isinstance(v, bool) or not isinstance(v, Real):
             raise NonNumericError(f"{label} element is not a real number: {v!r} ({type(v).__name__})")
     try:
-        d = float(a) - float(b)
-        return d * d
+        fa, fb = float(a), float(b)
+        d = fa - fb
+        sq = d * d
     except OverflowError:
         return math.inf
+    # Deliberate policy: a nonzero input that becomes exactly 0.0 is an error, not a
+    # zero loss. This applies to every element, masked-out ones included, because
+    # `_sq` runs before the mask is applied. Genuinely equal inputs (a == b) are fine. (Inputs that
+    # themselves round to 0.0, e.g. a tiny Fraction, are caught because a != b.)
+    if sq == 0.0 and a != b:
+        raise UnderflowError(f"squared error underflowed to 0.0 from nonzero input "
+                             f"(prediction={a!r}, target={b!r}); refusing a silent zero")
+    return sq
 
 
 # ------------------------------------------------------ gradient validity
@@ -360,6 +376,11 @@ def check_gradient(fn: Callable[[list], float], grad_fn: Callable[[list], Sequen
       * non-finite fn values during differencing (NonFiniteError).
     Mismatch raises GradientMismatchError naming the coordinate.
 
+    Other behaviour: an exception raised inside the caller's `fn`/`grad_fn`
+    (e.g. ZeroDivisionError) propagates unwrapped; it is not a StabilityError.
+    `point`, like every sequence argument in this module, is materialised once
+    (generators are consumed a single time at validation).
+
     HONEST LIMITS: central differences have truncation error ~ h^2 f'''/6 and
     round-off error ~ eps*|f|/h (eps ~ 2.2e-16). Too large an h biases the
     estimate; too small an h lets round-off dominate; the best h is roughly
@@ -376,6 +397,10 @@ def check_gradient(fn: Callable[[list], float], grad_fn: Callable[[list], Sequen
             raise StabilityError(f"{label} must be {'> 0' if label == 'step' else '>= 0'}, got {v!r}")
     p0 = check_finite_sequence(point, "point")
     n = len(p0)
+    for i, x in enumerate(p0):
+        if x + step == x or x - step == x:
+            raise StabilityError(f"step {step!r} is too small to change point[{i}]={x!r} "
+                                 "(below float resolution); finite differences would be meaningless")
 
     def call(func, label, p):
         arg = list(p)
@@ -466,6 +491,8 @@ def check_params_changed(before: Sequence[float], after: Sequence[float], *,
     if mc < 0:
         raise StabilityError("min_abs_change must be >= 0")
     delta = max(abs(x - y) for x, y in zip(a, b))
+    if not math.isfinite(delta):
+        raise NonFiniteError(f"{name} change overflowed to {delta!r}")
     if delta <= mc:
         raise NoOpUpdateError(f"{name} unchanged by update: max |change| {delta!r} <= {mc!r}")
     return delta

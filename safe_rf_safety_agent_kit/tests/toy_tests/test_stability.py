@@ -458,6 +458,65 @@ class QAHardening(unittest.TestCase):
         self.assertEqual(math.copysign(1.0, st.masked_mean_checked([-0.0], [True], 1)), 1.0)
         self.assertIn("NOT covered", st.check_finite_scalar.__doc__)
 
+    # D-S3: sets / dicts are not rows
+    def test_set_and_dict_rows_rejected(self):
+        for bad_row in ({1.0, 2.0}, {1.0: 0, 2.0: 0}, frozenset({1.0, 2.0})):
+            with self.assertRaisesRegex(st.ShapeError, "not a row"):
+                st.check_finite_matrix([bad_row])
+            with self.assertRaisesRegex(st.ShapeError, "not a row"):
+                st.masked_mean_checked([bad_row, (3.0, 4.0)], [True, True], 4)
+            with self.assertRaises(st.ShapeError):
+                st.masked_squared_error_mean([bad_row], [(0.0, 0.0)], [True], 2)
+            with self.assertRaises(st.ShapeError):
+                st.masked_squared_error_mean([(0.0, 0.0)], [bad_row], [True], 2)
+
+    # D-S4: silent underflow to zero is an error (deliberate policy)
+    def test_underflow_to_zero_raises(self):
+        from fractions import Fraction
+        for pred, targ in ((1e-200, 0.0), (0.0, 1e-200), (Fraction(1, 10 ** 400), 0.0),
+                           (0.0, Fraction(1, 10 ** 400)), (1e-170, -1e-170)):
+            with self.subTest(pred=pred):
+                with self.assertRaises(st.UnderflowError):
+                    st.masked_squared_error_mean([pred], [targ], [True], 1)
+        # equal inputs and genuine zeros are NOT underflow
+        self.assertEqual(st.masked_squared_error_mean([1e-200, 0.0], [1e-200, 0.0], [True, True], 2), 0.0)
+        self.assertEqual(st.masked_squared_error_mean([0.0], [0.0], [True], 1), 0.0)
+        # still a ValueError
+        with self.assertRaises(ValueError):
+            st.masked_squared_error_mean([1e-200], [0.0], [True], 1)
+
+    # report fields pinned exactly on a known fixture (true gradient [2, 6])
+    def test_report_fields_exact(self):
+        f = lambda p: p[0] ** 2 + 3 * p[1] ** 2
+        claimed = [2.0, 6.0 * (1 + 5e-5)]
+        r = st.check_gradient(f, lambda p: list(claimed), [1.0, 1.0])
+        self.assertEqual(r.analytic, tuple(claimed))
+        self.assertNotEqual(r.numeric, r.analytic)  # numeric is its own estimate
+        self.assertAlmostEqual(r.numeric[0], 2.0, delta=1e-6)
+        self.assertAlmostEqual(r.numeric[1], 6.0, delta=1e-6)
+        self.assertAlmostEqual(r.max_abs_error, 3e-4, delta=1e-6)  # index 1, not index 0 (~0), max not min
+        self.assertAlmostEqual(r.max_rel_error, 5e-5, delta=1e-6)
+
+    # tolerance uses max(|a|,|d|), not min
+    def test_tolerance_uses_max_of_magnitudes(self):
+        f = lambda p: 10.0 * p[0]
+        st.check_gradient(f, lambda p: [16.0], [1.0], rtol=0.5, atol=0.0)  # |diff|=6 <= 0.5*16, > 0.5*10
+        with self.assertRaises(st.GradientMismatchError):
+            st.check_gradient(f, lambda p: [21.0], [1.0], rtol=0.5, atol=0.0)
+
+    # low-severity handling
+    def test_overflowing_change_raises(self):
+        with self.assertRaises(st.NonFiniteError):
+            st.check_params_changed([-1e308], [1e308])
+
+    def test_step_below_float_resolution(self):
+        with self.assertRaisesRegex(st.StabilityError, "too small"):
+            st.check_gradient(lambda p: p[0] ** 2, lambda p: [2e8], [1e8], step=1e-12)
+
+    def test_fn_exceptions_propagate_unwrapped_and_generators_materialised_once(self):
+        with self.assertRaises(ZeroDivisionError):
+            st.check_gradient(lambda p: 1 / 0, lambda p: [1.0], [1.0])
+        self.assertEqual(st.masked_mean_checked(iter([1.0, 3.0]), iter([True, True]), 2), 2.0)
 
 
 if __name__ == "__main__":
