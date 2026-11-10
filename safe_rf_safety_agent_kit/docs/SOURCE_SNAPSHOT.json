@@ -9,7 +9,9 @@
     "5cbd18a39c4607d65bdbf6457be3f79b27a6c3c1"
   ],
   "ahead_by": 2,
-  "behind_by": 36,
+  "behind_by_vs_merge_base": 0,
+  "behind_by_vs_upstream_main": 36,
+  "behind_by_field_note": "SR-01 relabel. The merge-base compare (base=merge_base, head=fork main) returns ahead_by=2, behind_by=0. The 36 figure comes from a different comparison (audited-fork:main...RosettaCommons:main, status=diverged, upstream ahead_by=36, behind_by=2) and is time-varying as upstream advances. The former 'behind_by: 36' field mixed the two comparisons. Verified live 2026-11-09.",
   "changed_files": [
     {
       "filename": "config/inference/base.yaml",

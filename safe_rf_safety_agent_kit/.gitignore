@@ -10,3 +10,8 @@ checkpoints/
 *.pt
 *.pth
 *.ckpt
+*.safetensors
+*.bin
+*.npz
+*.pdb
+*.cif
