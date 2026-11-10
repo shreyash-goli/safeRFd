@@ -1799,7 +1799,7 @@ nothing installed → **86**; PyYAML only → 85; torch blocked with numpy prese
 ## Orchestrator failure 1 — the protocol and the scorer now disagree on a verdict rule (F2)
 `docs/EVALUATION_PROTOCOL.md:122` states a failed control-adequacy gate scopes to **H1/H2 only**, and
 `:139` still carries the "Open issue for QA (not resolved by this document)" paragraph saying the
-implementation scopes it that way. But `src/toy/benchmark.py:83` has
+implementation scopes it that way. But `src/toy/benchmark.py:94` has
 `"control_adequacy": "all"` — global, so H3 and JOINT also become INCONCLUSIVE.
 **This is the orchestrator's doing.** It made the decision to extend gate 11 to H3, routed the
 *implementation* to SR-10, and never routed the corresponding *protocol amendment* to SR-09 — so
@@ -1874,7 +1874,7 @@ The previously claimed 11 was wrong, and the four reverted checkboxes are the re
 routing the implementation but never the protocol amendment — is now recorded as **amendment A-1**,
 and the protocol matches `benchmark.py`. Verified by the orchestrator: `EVALUATION_PROTOCOL.md:122`
 and `:242` now list `control_adequacy` as **global**, the stale "Open issue for QA (not resolved by
-this document)" paragraph is **gone** (zero matches), and `src/toy/benchmark.py:83` still has
+this document)" paragraph is **gone** (zero matches), and `src/toy/benchmark.py:94` still has
 `"control_adequacy": "all"`. Only gate 12 remains scoped and block-only.
 
 **The amendment is exemplary in its honesty, and is the standard the rest of this kit should be held
@@ -1968,3 +1968,96 @@ figure was **measured by SR-12**, confirming the owner's earlier *reasoned* valu
 between its two snapshots. It now skips size/mtime comparison for any file git-dirty at either
 snapshot, while still failing on any created or deleted path and any change to a clean file — so it
 tolerates concurrent work without weakening what it actually checks.
+
+---
+
+## SR-05 — QA verdict: PASS (the attestation section that was missing)
+
+**Date:** 2026-11-10. This section exists because SR-12 found SR-05 had been marked `[x]` with **no
+recorded QA verdict anywhere in this journal** — the PASS existed only as a phrase in a rework
+heading and a commit message, and the six defects fixed *after* that PASS were never re-attested.
+This is the proper attestation of the current state.
+
+- **All three acceptance properties verified by the reviewer's own probes.** *Determinism:* seed 5 run
+  twice with a pinned timestamp gave identical history and identical `content_hash`; a different seed
+  differed. *Frozen teacher:* after 200 steps params were unchanged and
+  `teacher_before == teacher_after`; item assignment, attribute assignment and writing into a params
+  tuple were all blocked. *Mutable student:* params changed, loss went 0.916 → 0.0129 over 200 steps,
+  and `step` mutates in place.
+- **All six post-PASS fixes verified, each mutated in a scratch copy:** D1 — a duck-typed object with
+  `params={}` now raises "teacher must be a Teacher instance, got Duck", a plain subclass is accepted,
+  and a stateful subclass is refused with "Refusing to record this run"; removing either the
+  `isinstance` check or the tripwire is caught. D2 — `eta=1` and `eta=1.0` give identical
+  `content_hash` and `input_hashes`. D3 — `run_id` differs across configs
+  (`…seed2-681b9de23bdc` vs `…seed2-367ac1a35aa0` for `lr` 0.05 vs 0.04). D4 — at `lr=3.0` the loss
+  rises 0.916 → **5130.9** over 50 steps with `loss_increased` True, the metric 1.0 and WARNING in
+  notes; a good run has none of these; all three mutants killed. D5 — bool, string, None and `10**400`
+  as `strength` all raise `ValueError`. D6 — "pin CURRENT behaviour" is gone, and the reviewer checked
+  `git show e436d93` to confirm the current claim about which tests originally existed is accurate.
+- **Erasure-demo hardening re-probed and holding:** strictly bool masks (0/1, None, strings rejected);
+  non-finite values rejected **under a False mask too**, for both NaN and inf; overflow raising in both
+  `toy_target` and `masked_mse`; `bool` rejected as `strength`; and
+  `masked_mse_loss_and_grad` raising "numeric overflow" for 1e200 inputs.
+- `tests/test_toy.py` confirmed **unmodified** — `git log` shows only the scaffold commit `f7eb976`,
+  no diff against HEAD, all 4 original tests passing. The Frobenius-vs-per-atom honest-scope statement
+  is still at `teacher_student.py:14-17`.
+- **Four untested sub-claims recorded as residuals, not waved through:** the D1 params-only comparison
+  branch survives mutation because no test drifts params while outputs stay equal (the reviewer's own
+  probe confirms the branch *works*); the `math.hypot` overflow path is untested since no test needs a
+  gradient norm above 1e154; `lr=True` rejection is untested though the code does reject it; and
+  in-place `Student.step` is only value-tested, so rebinding `self.params` would pass.
+- **One figure in the orchestrator's brief did not reproduce:** it cited D4's runaway loss as
+  "0.92 → 47.5"; at 50 steps the reviewer measured 0.916 → **5130.9**. The starting value matches and
+  the flag fires either way, so it is immaterial — but the orchestrator's number was wrong and is
+  corrected here. A minor message nit: for 1e160 the error reads "non-finite loss or gradient
+  (numeric overflow)" without the "input magnitude too large" clause, which appears only when overflow
+  occurs at step ≥ 1.
+- **Status: PASS.** Dependency SR-04 is verified, so the checkbox is now properly earned.
+
+---
+
+## Orchestrator failure 5 — the commit trail is unreliable, in a kit built on provenance
+
+**Date:** 2026-11-10. Found while verifying the SR-09 reviewer's challenge to amendment A-1. This is
+the orchestrator's most systemic failure in this session and it is recorded in full.
+
+**What the reviewer found, and the orchestrator independently confirmed with git:**
+- `ff451e1`, titled **"Gate 11 extended to H3 (global); SR-13 fixture coupling fixed at root"**,
+  touched exactly three files — `docs/PROGRESS.md`, `src/toy/dashboard.py`,
+  `tests/toy_tests/test_dashboard.py`. **It never touched `benchmark.py`, so it contains none of the
+  gate-11 change its title announces.**
+- `git log -S'"control_adequacy": "all"' -- src/toy/benchmark.py` returns exactly one commit:
+  **`12bc490`**. The scope was already `"all"` there, which means **committed history never contained
+  an H1/H2-scoped gate 11.**
+- **The protocol and the scorer therefore disagreed *inside a single commit*:**
+  `12bc490:docs/EVALUATION_PROTOCOL.md:122` says "gate 11 for H1/H2" and `:139` still carries the
+  unresolved "Open issue" paragraph, while `12bc490:src/toy/benchmark.py` already has `"all"`.
+- `d96ec22`, titled **"SR-09 r4: amendment A-1 …"**, bundles **ten files** including +137 lines of
+  `benchmark.py`, plus `checkpoint.py`, `ci.yml`, `constraints.txt`, `run_tests.sh` and
+  `test_scripts.py` — none of which is SR-09 work.
+- `9b2d928`, titled **"SR-10/11/13 reworks: gate invariant, hardlink guard, verdict layers pinned"**,
+  contains **one file**. The code it describes is not in it.
+- Survey of commit breadth: `e436d93` 8 files, `d87b48f` 15, `710151f` 19, `905bbfe` 11, `12bc490` 12,
+  `9b2d928` 1, `79be9d4` 18.
+
+**Root cause.** The orchestrator ran `git add -A` and committed whatever happened to be on disk at the
+moment it finished writing a journal entry, while three to six teammates had work in flight — and
+wrote each commit title to describe **the reports it had just received**, not the diff it was actually
+committing. The consequences: titles that misdescribe their contents; unrelated tasks bundled
+together; one commit announcing work it does not contain; and a code/document divergence that looks
+like it began at `ff451e1` when it actually began at `12bc490`.
+
+**Why this matters more here than in an ordinary project.** This kit's entire thesis is that provenance
+must be checkable and that a claim must not outrun its evidence. The commit trail is part of that
+provenance, and the orchestrator made it unreliable while enforcing exactly that standard on every
+teammate. Two earlier commit messages (`d87b48f`, `e436d93`) were already flagged by SR-12 for using
+"direct evidence", "confirms" and "load-bearing" about inference results; this is the same failure of
+discipline in the same place.
+
+**Not remediated by rewriting history.** CLAUDE.md forbids altering published history and the
+repository has no remote, so the commits stand. The remedy is forward-only: this entry, the corrected
+provenance fields in amendment A-1, and from here on one commit per coherent change with a title that
+describes **its own diff**, verified with `git show --stat` before committing.
+
+**Stale citation fixed in passing:** this journal cited `src/toy/benchmark.py:83` for
+`control_adequacy`; the line is now `:94`.
