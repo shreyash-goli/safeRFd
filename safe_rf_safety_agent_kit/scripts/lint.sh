@@ -5,7 +5,8 @@
 #
 # KNOWN GAPS (this is hygiene, not a sandbox): network use via getattr/string tricks, ctypes loaded under another
 # name, `exec` of a string built at runtime, and a literal `os.system("curl ...")` OUTSIDE src/ are not caught.
-# In src/ the rules below ban network/process modules, __import__, importlib, os.system/popen and any eval/exec
+# In src/ the rules below (including aliasing like `import os as o`, `f = os.system`, `e = eval`, `builtins.exec`,
+# `from os import system`, and the exec*/spawn*/posix_spawn* family) ban network/process modules, __import__, importlib, os.system/popen and any eval/exec
 # except the two literal strings allow-listed by (file, exact text). The runtime socket guard in run_tests.sh is
 # the second layer, and it is Python-level only (see docs/CLEAN_CLONE.md).
 #
@@ -31,7 +32,13 @@ ROOT = pathlib.Path(".")
 BANNED = {"socket", "urllib", "urllib2", "urllib3", "http", "httplib", "requests", "httpx", "aiohttp",
           "ftplib", "smtplib", "poplib", "imaplib", "telnetlib", "xmlrpc", "ssl", "websocket", "websockets",
           "_socket", "socketserver", "asyncio", "selectors", "webbrowser", "nntplib", "smtpd", "wsgiref", "cgi"}
-PROC = {"subprocess", "ctypes", "importlib", "multiprocessing", "pty"}   # banned in src/ only
+PROC = {"subprocess", "ctypes", "importlib", "multiprocessing", "pty", "posix", "nt", "builtins"}
+# Attribute names that start processes or execute/load code. Banned in src/ on ANY base object (this catches
+# `import os as o; o.system(..)`, `f = os.system`, `builtins.exec(..)`) and as `from os import <name>`.
+DANGEROUS_ATTR = {"system", "popen", "fork", "forkpty", "startfile", "import_module", "exec", "eval", "__import__",
+                  "posix_spawn", "posix_spawnp", "Popen"} | \
+                 {f"{p}{s}" for p in ("exec", "spawn") for s in ("l", "le", "lp", "lpe", "v", "ve", "vp", "vpe")}
+DANGEROUS_NAMES = {"eval", "exec", "__import__", "compile", "__builtins__"}   # banned in src/ only
 # eval/exec allowed in src/ ONLY for these exact (file, literal text) pairs: the demonstration of a bare-exception
 # statement. Anything else, including other string literals, is an error.
 EXEC_ALLOW = {("src/toy/failure_modes.py", "evaluated += 1; RuntimeError"),
@@ -48,6 +55,7 @@ for path in files:
     in_src = path.parts[0] == "src"
     in_tests = path.parts[0] == "tests"
     imported = {}
+    allowed_names = set()
     for node in ast.walk(tree):
         loc = f"{path}:{getattr(node, 'lineno', 0)}"
         if isinstance(node, ast.ExceptHandler) and node.type is None:
@@ -65,15 +73,15 @@ for path in files:
                     errors.append(f"{loc}: 'is' comparison with a literal")
         if in_src and isinstance(node, ast.Call):
             fn = node.func
-            if isinstance(fn, ast.Name) and fn.id in ("eval", "exec", "__import__", "compile"):
+            if isinstance(fn, ast.Name) and fn.id in ("eval", "exec"):
                 lit = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str) else None
-                if fn.id in ("eval", "exec") and (path.as_posix(), lit) in EXEC_ALLOW:
-                    pass
-                else:
-                    errors.append(f"{loc}: {fn.id}() in src/ (only the allow-listed literals in EXEC_ALLOW pass)")
-            if isinstance(fn, ast.Attribute) and fn.attr in ("system", "popen", "import_module", "spawn", "execv", "execl", "run", "Popen", "call", "check_output") \
-                    and isinstance(fn.value, ast.Name) and fn.value.id in ("os", "importlib", "subprocess"):
-                errors.append(f"{loc}: {fn.value.id}.{fn.attr}() in src/")
+                if (path.as_posix(), lit) in EXEC_ALLOW:
+                    allowed_names.add(id(fn))
+        if in_src and isinstance(node, ast.Attribute) and node.attr in DANGEROUS_ATTR:
+            errors.append(f"{loc}: attribute '.{node.attr}' (process start / dynamic code) in src/")
+        if in_src and isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in ("os", "posix", "nt", "builtins", "importlib") \
+                and any(a.name in DANGEROUS_ATTR or a.name in DANGEROUS_NAMES or a.name == "*" for a in node.names):
+            errors.append(f"{loc}: 'from {node.module} import ...' of a process/dynamic-code function in src/")
         mods = []
         if isinstance(node, ast.Import):
             mods = [a.name for a in node.names]
@@ -87,6 +95,10 @@ for path in files:
         if isinstance(node, (ast.Import, ast.ImportFrom)) and node.col_offset == 0:
             for a in node.names:
                 imported.setdefault((a.asname or a.name).split(".")[0], node.lineno)
+    if in_src:   # bare references: `e = eval`, `f = exec`, `__builtins__`, and non-allow-listed calls
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id in DANGEROUS_NAMES and id(node) not in allowed_names:
+                errors.append(f"{path}:{node.lineno}: {node.id} used in src/ (only the allow-listed exec literals in EXEC_ALLOW pass)")
     # Shadowed definitions: a duplicate test method is silently never run.
     for scope in ast.walk(tree):
         if isinstance(scope, (ast.ClassDef, ast.Module)):

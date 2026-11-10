@@ -25,19 +25,21 @@ verifies a second run gives identical counts and an identical skip list. You can
 Why no bytecode: a stale `.pyc` contaminated mutation results three times and once caused a misattributed
 10-failure spike. After any surprising failure count, clear `__pycache__` and re-run before drawing conclusions.
 
-## Expected counts (measured 2026-11-09 on a working tree of 874 tests; the total keeps growing)
+## Expected counts (measured 2026-11-09 on a working tree of 914 tests; the total keeps growing)
 
 | Environment | unittest | pytest | `--expect` |
 |---|---|---|---|
-| Nothing installed (the clean-clone case; `venv --without-pip`, Python 3.12.13) | 874 run, **88 skipped**, 0 failed | not run (not installed) | `none` |
-| Nothing but PyYAML (measured) | 874 run, 87 skipped | not run | `none` |
-| torch + numpy + pytest + PyYAML (macOS, MPS available) | 874 run, **2 skipped** | 872 passed, 2 skipped | `torch` |
-| torch + numpy on Linux CPU | roughly 2-8 skipped (CUDA/MPS classes) - **estimate, never observed** | same skip count | `torch` |
+| Nothing installed (the clean-clone case; `venv --without-pip`, Python 3.12.13) | 914 run, **89 skipped**, 0 failed | not run (not installed) | `none` |
+| Nothing but PyYAML | one fewer skip than bare; **87 measured at 874 tests, not re-measured at 914** | not run | `none` |
+| torch + numpy + pytest + PyYAML (macOS, MPS available) | 914 run, **2 skipped** (identical in two full runs) | 912 passed, 2 skipped | `torch` |
+| Case-sensitive APFS stand-in, bare | 914 run, 90 skipped (1 filesystem-case) | not run | `none` |
+| Case-sensitive APFS stand-in, torch | 914 run, 3 skipped (1 filesystem-case) | 911 passed, 3 skipped | `torch` |
+| Real Linux | **never observed** | | |
 
-Both bare and torch runs were repeated with `--twice` and were identical. The 88 bare skips are 85 torch/numpy skips
-plus the optional-PyYAML workflow-parse test plus two script tests that need pytest. (An independent review measured
-739 run / 86 skipped bare before the script tests grew; at the base commit alone it was 656 run, 85 skipped bare,
-2 with torch+numpy.) Python 3.13 bare gave the same counts in that review.
+All of these were repeated with `--twice` and were identical. The 89 bare skips are 85 torch/numpy skips plus the
+optional-PyYAML workflow-parse test plus script tests that need pytest. The stand-in showed 4 filesystem-case skips when
+first measured (874 tests, 92 bare / 6 torch); only 1 remains at 914 because the dashboard tests were since changed.
+An independent review measured 739 run / 86 skipped bare earlier, and 656 run / 85 skipped bare at the base commit.
 
 Totals grow as tests are added, so the runner does not pin one global number. It enforces, per test module, a
 recorded baseline (`scripts/test_baseline.txt`: tests and bare-environment skips for each module). A module with
@@ -53,7 +55,11 @@ process rather than scraped from output):
   "unavailable" or "not available"; at least 50 skips (`MIN_NONE_SKIPS`); at least one torch and one numpy reason;
   none may say "torch present"; no empty reasons.
 - `--expect torch`: each reason must name CUDA, MPS or "torch present" and must not say "not installed", "missing"
-  or mention numpy; at most 12 skips. (PyYAML must therefore be installed in this mode.)
+  or mention numpy; at most 12 skips. (PyYAML **and pytest** must therefore be installed in this mode: without them the script tests skip as "PyYAML/pytest not installed", which torch mode denies. `requirements-dev.txt` installs both.)
+
+- **Filesystem-case skips** (reason contains "case-sensitive"): allowed in both modes, at most 8, and not counted
+  toward the package-skip floor, the torch cap or the baseline. Four tests skip this way on a case-sensitive
+  filesystem (three `need_ci` tests in `test_dashboard`, one in `test_scripts`), whose reasons name no package.
 
 These rules are themselves tested with synthetic suites in `tests/toy_tests/test_scripts.py`, including the exact
 boundaries (50 passes / 49 fails, 12 / 13, `MIN_TESTS` inclusive).
@@ -94,7 +100,7 @@ Use `--keep` to retain the temp output for inspection.
 or CI). They document intent for a human reader. **Setting or changing them changes no behaviour**, and setting
 `BIOLOGICAL_TRAINING_ENABLED=false` does not constrain anything. No `.env` file is needed or read.
 
-The kit's actual guarantees are structural, and each is checked:
+The kit's guarantees are structural. Each of these is checked (with the scope limits described under "Lint scope" and "What the network guard does and does not do" below):
 - `src/toy/` is standard-library only and imports no network library (AST check in `scripts/lint.sh` and in
   `tests/toy_tests/test_scripts.py`).
 - `scripts/run_tests.sh` runs the suite under a socket guard that makes any connection attempt fail.
@@ -122,23 +128,54 @@ The structural checks (`scripts/lint.sh` and `tests/toy_tests/test_scripts.py` r
 `eval`/`exec` in `src/`) are the first layer; the runtime guard is a second, partial one. Known gaps in the static
 checks: `getattr`/string tricks, code built at runtime, and `os.system("curl ...")` outside `src/`.
 
+## First observation on a case-sensitive filesystem: the script FAILED, and was fixed
+
+The first stand-in for Linux (a case-sensitive APFS volume; **a stand-in, not Linux**) showed that
+`run_tests.sh` as originally written would have gone red on `ubuntu-latest` for both CI jobs: four tests skip because
+the filesystem is case-sensitive, their reasons name no package, and the skip policy rejected them
+(`--expect none`: 874 run, 92 skipped, 4 policy failures; `--expect torch`: 6 skipped, 4 policy failures). The policy
+now accepts these skips (see "Filesystem-case skips" above). Expect roughly 4 more skips on Linux than the macOS
+figures in the table: **counts above are from the stand-in only**. This is the class of surprise
+this document exists to warn about: the macOS-measured counts above are not Linux counts.
+
+## Lint scope: what "structural" does and does not cover
+
+`scripts/lint.sh` (and the same checks in `tests/toy_tests/test_scripts.py`) reject in `src/`: network-capable
+imports; `subprocess`, `ctypes`, `importlib`, `posix`, `nt`, `builtins`, `multiprocessing`, `pty`; `__import__`;
+`compile`; any bare reference to `eval`/`exec` other than the two allow-listed literal calls in `failure_modes.py`;
+and any attribute named like `system`, `popen`, `fork`, `exec*`, `spawn*`, `posix_spawn*`, `import_module`, on any
+object (so `import os as o; o.system(...)`, `f = os.system` and `builtins.exec(...)` are caught), plus
+`from os import system`-style imports. Network-capable imports are also rejected in `tests/` and `scripts/`.
+**Not covered:** `getattr(os, "sys" + "tem")`-style tricks, code or names built at runtime, `os.system("curl ...")`
+and similar outside `src/`, and anything in a third-party package. This is hygiene, not a sandbox; the runtime
+socket guard is a second, partial layer (see above).
+
 ## Known limits of this documentation (read before trusting CI)
 
 - **The CI workflow has never been executed.** Its two jobs were never run on a hosted runner (none was available);
   the commands they invoke were run locally and the YAML parses. A reviewer expects `core-no-deps` to pass given
   bare Python 3.12 and 3.13 local runs, and considers `optional-deps` unverifiable here.
-- **The Linux behaviour of `run_tests.sh` and the tests has never been observed.** Everything was run on macOS.
+- **Real Linux behaviour of `run_tests.sh` and the tests has never been observed.** Everything ran on macOS; a case-sensitive-APFS stand-in found one failure (above) and may hide others.
 - **The torch/numpy pin is untested as a combination.** `constraints.txt` pins torch 2.7.1 + numpy 1.26.4 on Python
   3.12. Locally the suite passes on torch 2.7.1 + numpy 2.4.6 (framework Python 3.12) and torch 2.11.0 + numpy 2.4.4
   (miniconda Python 3.13), so local runs do not test the pinned combination. The pin is kept for reproducibility.
   The `numpy<2` rationale (NumPy/torch ABI mismatch seen in the RFdiffusion repo) holds regardless.
 - **Whether `torch==2.7.1` resolves to the CPU wheel via `--extra-index-url` on Linux is untested.**
 - **Actions are pinned by tag, not commit SHA** (`actions/checkout@v4`, `actions/setup-python@v5`).
-- **The Linux-CPU skip count (~2-8) is an estimate** from the CUDA/MPS skip classes; it has not been observed.
-- The script tests take about a minute because they run the scripts on synthetic suites and trees.
+- **The case-sensitive-filesystem counts come from the stand-in**, not from Linux.
+- The script tests (see test collection for the count; `scripts/test_baseline.txt` records 13 modules) take about a minute because they run the scripts on synthetic suites and trees.
 
 ## What CI does
 
 `.github/workflows/ci.yml`: job `core-no-deps` (Python 3.12 and 3.13, installs nothing, lint, suite twice with
 `--expect none`, demo) and job `optional-deps` (Python 3.12, pinned torch 2.7.1 + numpy 1.26.4 (never executed; see limits above), suite twice with
 `--expect torch`, unittest and pytest, demo). Read-only permissions, no secrets, no publishing.
+
+## A bug in the runner that corrupted nested runs (fixed)
+
+`run_tests.sh` used to clear bytecode across the whole repo on every invocation. The script's own tests invoke it on
+synthetic suites, so they wiped the real repo's `__pycache__` while the surrounding test run was in progress, which
+produced failure counts that varied between runs. A run with `--tests-dir` now clears bytecode only under that
+directory; the default run still clears the whole tree (the standing rule). A regression test pins this with a
+sentinel `__pycache__` outside the synthetic tests dir. After the fix, two consecutive full torch runs gave identical
+results (914 run, 2 skipped, 0 failed, pytest 912 passed).

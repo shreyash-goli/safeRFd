@@ -12,7 +12,8 @@
 #   --twice         run the unittest suite a second time and require identical per-module counts and an
 #                   identical skip list (determinism check).
 #   --no-pytest     do not run pytest even if installed (used by the script's own tests for speed).
-#   --tests-dir D   test directory (default: tests). Exists so the policy can be driven by synthetic suites.
+#   --tests-dir D   test directory (default: tests). Exists so the policy can be driven by synthetic suites. A run
+#                   with --tests-dir clears bytecode ONLY under D; the default run clears the whole repo tree.
 #   --baseline F    per-module baseline (default scripts/test_baseline.txt; "none" disables). One line per
 #                   module: "<module> <tests> <bare-environment skips>". A module with FEWER tests than recorded
 #                   fails, and with --expect none so does a module with FEWER skips than recorded: deleting tests,
@@ -20,12 +21,16 @@
 #                   rather than hidden under a loose global floor.
 #   --update-baseline  rewrite the baseline from this run (requires --expect none; the diff is reviewable).
 #
+# Every policy failure line carries a stable token `POLICY:<NAME>`; tests match the token, not the prose.
 # SKIP POLICY (case-insensitive; reasons are the only defence against a torch test passing silently):
 #   none:  EVERY skip reason must name torch/numpy/pyyaml/pytest and say "not installed", "missing",
 #          "unavailable" or "not available"; at least MIN_NONE_SKIPS (default 50) skips; at least one torch and
 #          one numpy reason; no reason may say "torch present".
 #   torch: EVERY skip reason must name cuda, mps or "torch present", and must not say "not installed",
 #          "missing" or mention numpy; at most 12 skips.
+#   Filesystem-case skips ("case-sensitive filesystem ...": Linux, case-sensitive APFS) are allowed in every mode, at
+#   most 8, and are not counted toward the package-skip floor, the torch cap or the baseline (they were the first
+#   observed failure of this script on a case-sensitive filesystem; see docs/CLEAN_CLONE.md).
 #   Skips are recorded exactly (test id + reason) by a hook in the sitecustomize shim that runs inside the
 #   unittest process only (the env var is popped, so child processes do not log), not by scraping output.
 #
@@ -52,6 +57,7 @@ EXPECT=any
 TWICE=0
 GUARD=1
 TESTS_DIR=tests
+SCOPED=0     # --tests-dir given: a nested/driven run must NOT touch the rest of the repo
 BASELINE=""
 UPDATE=0
 NOPYTEST=0
@@ -61,10 +67,10 @@ while [ $# -gt 0 ]; do
     --twice) TWICE=1; shift ;;
     --no-network-guard) GUARD=0; shift ;;
     --no-pytest) NOPYTEST=1; shift ;;
-    --tests-dir) TESTS_DIR="${2:-}"; shift 2 ;;
+    --tests-dir) TESTS_DIR="${2:-}"; SCOPED=1; shift 2 ;;
     --baseline) BASELINE="${2:-}"; shift 2 ;;
     --update-baseline) UPDATE=1; shift ;;
-    -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,42p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -83,9 +89,14 @@ export MIN_TESTS="${MIN_TESTS:-650}"             # global floor (-ge); the per-m
 export MIN_NONE_SKIPS="${MIN_NONE_SKIPS:-50}"
 
 clear_bytecode() {
-  find . \( -name .git -o -name .venv -o -name venv -o -name node_modules \) -prune -o \
-    \( -name __pycache__ -type d -print0 \) | xargs -0 rm -rf
-  find . \( -name .git -o -name .venv -o -name venv \) -prune -o -name '*.pyc' -type f -print0 | xargs -0 rm -f
+  # Default (top-level) run: clear the whole repo tree, as the standing rule requires. With --tests-dir (a run driven
+  # by a test against a synthetic suite while an outer run may be using the real tree) clear ONLY that directory:
+  # wiping the repo's bytecode mid-run corrupted the surrounding run (varying failure counts).
+  if [ "$SCOPED" = 0 ]; then
+    find . \( -name .git -o -name .venv -o -name venv -o -name node_modules \) -prune -o \
+      \( -name __pycache__ -type d -print0 \) | xargs -0 rm -rf
+    find . \( -name .git -o -name .venv -o -name venv \) -prune -o -name '*.pyc' -type f -print0 | xargs -0 rm -f
+  fi
   find "$TESTS_DIR" \( -name __pycache__ -type d -print0 \) | xargs -0 rm -rf
   find "$TESTS_DIR" -name '*.pyc' -type f -print0 | xargs -0 rm -f
 }
@@ -127,7 +138,7 @@ export PYTHONPATH="$TMP/guard${PYTHONPATH:+:$PYTHONPATH}"
 if [ "$GUARD" = 1 ]; then
   CANARY="$(python3 -c "import socket; socket.create_connection(('192.0.2.1', 9), timeout=1)" 2>&1 || true)"
   case "$CANARY" in *"NETWORK BLOCKED"*) ;; *)
-    echo "FAIL: network guard canary did not trigger; refusing to run" >&2; exit 1 ;;
+    echo "FAIL: POLICY:CANARY network guard canary did not trigger; refusing to run" >&2; exit 1 ;;
   esac
   echo "network guard: active, python-level only (canary connect attempt was blocked)"
 fi
@@ -164,28 +175,38 @@ for e in starts: ran_mod[mod(e["id"])] = ran_mod.get(mod(e["id"]), 0) + 1
 for e in skips: skip_mod[mod(e["id"])] = skip_mod.get(mod(e["id"]), 0) + 1
 bad = []
 print(f"skip policy ({mode}): {len(skips)} skipped across {len(skip_mod)} modules; {len(starts)} tests started")
-if len(starts) < ran_log: bad.append(f"recorder saw {len(starts)} tests but unittest ran {ran_log}")
+if len(starts) < ran_log: bad.append(f"POLICY:RECORDER recorder saw {len(starts)} tests but unittest ran {ran_log}")
 reasons = [e["reason"] for e in skips]
 for e in skips:
-    if not e["reason"].strip(): bad.append("empty skip reason: " + e["id"])
+    if not e["reason"].strip(): bad.append("POLICY:EMPTY_REASON empty skip reason: " + e["id"])
+# Environment skips unrelated to optional packages: the filesystem is case-sensitive (Linux, case-sensitive APFS), so
+# tests of case-variant paths cannot run. Allowed in every mode, but capped and never counted toward the floors, so
+# they cannot pad the bare-mode skip count or hide a torch test.
+FS = re.compile(r"case[- ]sensitive", re.I)
+fs = [e for e in skips if FS.search(e["reason"])]
+pkg = [e for e in skips if not FS.search(e["reason"])]
+if len(fs) > 8: bad.append(f"POLICY:FS_CAP {len(fs)} filesystem-case skips; at most 8 are expected (found on a case-sensitive filesystem)")
+if fs: print(f"note: {len(fs)} skip(s) for a case-sensitive filesystem (expected on Linux); not counted toward package skips")
 if mode == "none":
     NONE_OK = re.compile(r"(torch|numpy|pyyaml|pytest).*(not installed|missing|unavailable|not available)", re.I | re.S)
+    for e in pkg:
+        if not NONE_OK.search(e["reason"]): bad.append(f"POLICY:NONE_REASON skip reason does not say a package is missing: {e['id']} :: {e['reason']!r}")
     for e in skips:
-        if not NONE_OK.search(e["reason"]): bad.append(f"skip reason does not say a package is missing: {e['id']} :: {e['reason']!r}")
-        if re.search(r"torch present", e["reason"], re.I): bad.append("a skip says torch is present although none is expected: " + e["id"])
-    if len(skips) < min_none: bad.append(f"expected >= {min_none} skips with nothing installed, got {len(skips)}: torch tests may be passing silently or were removed")
-    if not any(re.search(r"torch", r, re.I) for r in reasons): bad.append("no skip mentions torch")
-    if not any(re.search(r"numpy", r, re.I) for r in reasons): bad.append("no skip mentions numpy")
+        if re.search(r"torch present", e["reason"], re.I): bad.append("POLICY:TORCH_PRESENT a skip says torch is present although none is expected: " + e["id"])
+    if len(pkg) < min_none: bad.append(f"POLICY:MIN_NONE_SKIPS expected >= {min_none} package skips with nothing installed, got {len(pkg)}: torch tests may be passing silently or were removed")
+    if not any(re.search(r"torch", e["reason"], re.I) for e in pkg): bad.append("POLICY:NO_TORCH_REASON no skip mentions torch")
+    if not any(re.search(r"numpy", e["reason"], re.I) for e in pkg): bad.append("POLICY:NO_NUMPY_REASON no skip mentions numpy")
 elif mode == "torch":
     ALLOW = re.compile(r"\bcuda\b|\bmps\b|torch present", re.I)
     DENY = re.compile(r"not installed|missing|numpy", re.I)
     for e in skips:
-        if DENY.search(e["reason"]): bad.append(f"torch expected but skipped as missing: {e['id']} :: {e['reason']!r}")
-        elif not ALLOW.search(e["reason"]): bad.append(f"unexplained skip with torch present: {e['id']} :: {e['reason']!r}")
-    if len(skips) > 12: bad.append(f"{len(skips)} skips with torch present; at most 12 (CUDA/MPS/wiring) are allowed")
+        if DENY.search(e["reason"]): bad.append(f"POLICY:TORCH_MODE_MISSING torch expected but skipped as missing: {e['id']} :: {e['reason']!r}")
+    for e in pkg:
+        if not DENY.search(e["reason"]) and not ALLOW.search(e["reason"]): bad.append(f"POLICY:TORCH_MODE_UNEXPLAINED unexplained skip with torch present: {e['id']} :: {e['reason']!r}")
+    if len(pkg) > 12: bad.append(f"POLICY:TORCH_CAP {len(pkg)} skips with torch present; at most 12 (CUDA/MPS/wiring) are allowed")
 # per-module baseline
 if update and mode == "none":
-    rows = sorted((k, ran_mod[k], sum(1 for e in skips if mod(e["id"]) == k and not re.search("yaml", e["reason"], re.I))) for k in ran_mod)
+    rows = sorted((k, ran_mod[k], sum(1 for e in skips if mod(e["id"]) == k and not re.search("yaml|case[- ]sensitive", e["reason"], re.I))) for k in ran_mod)
     with open(base, "w", encoding="utf-8") as f:
         f.write("# module  tests  bare-environment-skips   (generated: scripts/run_tests.sh --expect none --update-baseline)\n")
         f.write("# Fewer tests, or (bare mode) fewer skips, than recorded here fails the run. Raise only by regenerating.\n")
@@ -195,10 +216,10 @@ elif base != "none" and os.path.exists(base):
     for line in open(base, encoding="utf-8"):
         if not line.strip() or line.startswith("#"): continue
         k, r, s_ = line.split(); r, s_ = int(r), int(s_)
-        if ran_mod.get(k, 0) < r: bad.append(f"baseline: module {k} ran {ran_mod.get(k, 0)} tests, baseline {r} (tests deleted?)")
+        if ran_mod.get(k, 0) < r: bad.append(f"POLICY:BASELINE_TESTS baseline: module {k} ran {ran_mod.get(k, 0)} tests, baseline {r} (tests deleted?)")
         elif mode == "none":
-            got = sum(1 for e in skips if mod(e["id"]) == k and not re.search("yaml", e["reason"], re.I))
-            if got < s_: bad.append(f"baseline: module {k} has {got} bare-environment skips, baseline {s_} (guarded tests now pass silently?)")
+            got = sum(1 for e in skips if mod(e["id"]) == k and not re.search("yaml|case[- ]sensitive", e["reason"], re.I))
+            if got < s_: bad.append(f"POLICY:BASELINE_SKIPS baseline: module {k} has {got} bare-environment skips, baseline {s_} (guarded tests now pass silently?)")
     known = {l.split()[0] for l in open(base, encoding="utf-8") if l.strip() and not l.startswith("#")}
     new = sorted(set(ran_mod) - known)
     if new: print("note: modules not in baseline (regenerate to track):", ", ".join(new))
@@ -230,12 +251,12 @@ if run_unittest "$TMP/ut1.log"; then UT_RC=0; else UT_RC=$?; fi
 tail -n 4 "$TMP/ut1.log"
 read -r RAN SKIPPED BAD < <(summarize "$TMP/ut1.log")
 echo "unittest: ran=$RAN skipped=$SKIPPED failed=$BAD rc=$UT_RC"
-[ "$UT_RC" -eq 0 ] || { echo "FAIL: unittest suite failed"; grep -E "^(FAIL|ERROR):" "$TMP/ut1.log" | head -30; FAIL=1; }
-[ "$RAN" -ge "$MIN_TESTS" ] || { echo "FAIL: only $RAN tests ran (floor MIN_TESTS=$MIN_TESTS)"; FAIL=1; }
+[ "$UT_RC" -eq 0 ] || { echo "FAIL: POLICY:UNITTEST_FAILED unittest suite failed"; grep -E "^(FAIL|ERROR):" "$TMP/ut1.log" | head -30; FAIL=1; }
+[ "$RAN" -ge "$MIN_TESTS" ] || { echo "FAIL: POLICY:MIN_TESTS only $RAN tests ran (floor MIN_TESTS=$MIN_TESTS)"; FAIL=1; }
 policy "$TMP/ut1.log" "$TMP/canon1.txt" || FAIL=1
 if [ -f "$TMP/canon1.txt.counts" ]; then
   read -r _ NSK < "$TMP/canon1.txt.counts"
-  [ "$NSK" = "$SKIPPED" ] || { echo "FAIL: recorded skips ($NSK) != reported skips ($SKIPPED)"; FAIL=1; }
+  [ "$NSK" = "$SKIPPED" ] || { echo "FAIL: POLICY:SKIP_RECORD recorded skips ($NSK) != reported skips ($SKIPPED)"; FAIL=1; }
 fi
 
 if [ "$NOPYTEST" = 1 ]; then
@@ -249,9 +270,9 @@ elif python3 -c "import pytest" 2>/dev/null; then
   PT_SKIPPED=$(grep -Eo '[0-9]+ skipped' "$TMP/pt.log" | tail -1 | cut -d' ' -f1); PT_SKIPPED=${PT_SKIPPED:-0}
   PT_FAILED=$(grep -Eo '[0-9]+ failed' "$TMP/pt.log" | tail -1 | cut -d' ' -f1); PT_FAILED=${PT_FAILED:-0}
   echo "pytest: passed=$PT_PASSED skipped=$PT_SKIPPED failed=$PT_FAILED rc=$PT_RC"
-  [ "$PT_RC" -eq 0 ] || { echo "FAIL: pytest failed"; FAIL=1; }
-  [ "$((PT_PASSED + PT_SKIPPED + PT_FAILED))" -eq "$RAN" ] || { echo "FAIL: pytest collected $((PT_PASSED + PT_SKIPPED + PT_FAILED)) tests, unittest ran $RAN"; FAIL=1; }
-  [ "$PT_SKIPPED" -eq "$SKIPPED" ] || { echo "FAIL: pytest skipped $PT_SKIPPED, unittest skipped $SKIPPED"; FAIL=1; }
+  [ "$PT_RC" -eq 0 ] || { echo "FAIL: POLICY:PYTEST_FAILED pytest failed"; FAIL=1; }
+  [ "$((PT_PASSED + PT_SKIPPED + PT_FAILED))" -eq "$RAN" ] || { echo "FAIL: POLICY:PYTEST_COLLECTED pytest collected $((PT_PASSED + PT_SKIPPED + PT_FAILED)) tests, unittest ran $RAN"; FAIL=1; }
+  [ "$PT_SKIPPED" -eq "$SKIPPED" ] || { echo "FAIL: POLICY:PYTEST_SKIPPED pytest skipped $PT_SKIPPED, unittest skipped $SKIPPED"; FAIL=1; }
 else
   echo "== pytest == SKIPPED: pytest is not installed (optional; unittest results above are authoritative)"
 fi
@@ -259,12 +280,13 @@ fi
 if [ "$TWICE" = 1 ]; then
   echo "== unittest, second run (determinism) =="
   clear_bytecode
-  run_unittest "$TMP/ut2.log"; read -r RAN2 SKIPPED2 BAD2 < <(summarize "$TMP/ut2.log")
+  if run_unittest "$TMP/ut2.log"; then UT_RC2=0; else UT_RC2=$?; fi
+  read -r RAN2 SKIPPED2 BAD2 < <(summarize "$TMP/ut2.log")
   policy "$TMP/ut2.log" "$TMP/canon2.txt" >/dev/null || true
-  if [ "$RAN$SKIPPED$BAD" = "$RAN2$SKIPPED2$BAD2" ] && cmp -s "$TMP/canon1.txt" "$TMP/canon2.txt"; then
+  if [ "$RAN $SKIPPED $BAD $UT_RC" = "$RAN2 $SKIPPED2 $BAD2 $UT_RC2" ] && cmp -s "$TMP/canon1.txt" "$TMP/canon2.txt"; then
     echo "deterministic: run1 == run2 (ran=$RAN skipped=$SKIPPED failed=$BAD, identical per-module counts and skip list)"
   else
-    echo "FAIL: non-deterministic: run1 ran=$RAN skipped=$SKIPPED failed=$BAD ; run2 ran=$RAN2 skipped=$SKIPPED2 failed=$BAD2"
+    echo "FAIL: POLICY:NONDETERMINISTIC non-deterministic: run1 ran=$RAN skipped=$SKIPPED failed=$BAD rc=$UT_RC ; run2 ran=$RAN2 skipped=$SKIPPED2 failed=$BAD2 rc=$UT_RC2"
     diff "$TMP/canon1.txt" "$TMP/canon2.txt" | head -20; FAIL=1
   fi
 fi

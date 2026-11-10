@@ -3584,3 +3584,95 @@ it can be certain.
 has moved to `ledger_mut_sr14.py`). A shared mutable harness path in a directory several agents write
 to is the same hazard class as the stale `.pyc`, the docstring-only false survivor, the syntax-error
 false kill, and the four masked tests — and it nearly caused a misattribution.
+
+---
+
+# The suite is now actually deterministic: the `clear_bytecode` bug is fixed
+
+**Date:** 2026-11-10. **Orchestrator verified by three consecutive full runs: `Ran 914 tests` /
+`OK (skipped=2)` each time.** Before this, failure counts varied run to run and had been
+misattributed all session.
+
+## The root cause, and what it invalidated
+`scripts/run_tests.sh` did `cd "$ROOT"` and then called `clear_bytecode()` **unconditionally**, whose
+first two lines were `find .` across the **entire repo tree** — not `$TESTS_DIR`. So every
+`test_scripts.py` test driving the script against a **synthetic** suite also wiped `__pycache__` and
+every `.pyc` in the real repo **while the outer run was in progress**: a test mutating the shared tree
+the surrounding run depended on.
+
+**Evidence it explains, previously charged to concurrent edits:** pytest reporting **3 failed** then
+**4 failed** with no edits between; a run showing **10** failures where the rerun showed **3**, with
+7 transient and unexplained; and repeated reports that "the failure set changes between runs".
+**The SR-14 owner independently guessed the mechanism** — *"the tests also run `run_tests.sh` on
+synthetic suites, so they may have interfered with each other"* — and that guess was right. The
+orchestrator had been attributing these to in-flight work; some were, but the *varying* counts were
+this.
+
+**The irony, recorded:** the standing rule about clearing bytecode exists because stale `.pyc`
+corrupted mutation results earlier in this session — and the script enforcing that rule was corrupting
+runs by enforcing it **too broadly**.
+
+**It also invalidated a claim the orchestrator had accepted.** SR-15's `--twice` check reported
+`deterministic: run1 == run2`, but that measures the **inner** run; the outer suite's non-determinism
+came from this. The determinism claim was only restored after the fix, by repeated full runs.
+
+## The fix, scoped rather than removed
+`clear_bytecode()` now clears the whole tree **only on the default top-level path** (`SCOPED = 0`),
+and with `--tests-dir` clears **only that directory** — so the standing rule still holds where it
+belongs. The script carries the reasoning inline: *"wiping the repo's bytecode mid-run corrupted the
+surrounding run (varying failure counts)"*. Two tests pin it: a **sentinel** `__pycache__` dropped
+**outside** the synthetic tests-dir must survive, and a structural check that the default path still
+clears everything. Both mutants — always clearing the whole tree, and never setting the scoped flag —
+are killed.
+
+## The Linux failure, fixed and honestly bounded
+Skip reasons containing "case-sensitive" are now accepted in both modes, **capped at 8**, and excluded
+from the bare-mode floor, the torch cap and the baseline — while still being checked against the
+missing-package and "torch present" rules. On the rebuilt case-sensitive APFS stand-in: bare 914 run /
+90 skipped, torch 3 skipped, **both pass and both deterministic**.
+**Three honest bounds the owner stated unprompted:** only **1** filesystem-case skip now remains, not
+the 4 the reviewer measured, because the dashboard tests have changed since; **the stand-in is not
+Linux**; and **real Linux remains unobserved**. The document says all three.
+
+## Prose needles replaced with stable tokens
+Every failure line in `run_tests.sh` now carries a `POLICY:<NAME>` token and the tests match the
+**token, not the prose** — the fix for a maintenance cost that had broken the owner's own tests twice.
+Baseline failures additionally match the module name and counts; lint messages still use prose needles
+such as `.system`.
+
+## M13 and U3b closed, with one honest loose end
+**M13:** a synthetic test now skips **only under unittest**, producing a skip-count mismatch with
+identical collected counts; the test asserts `POLICY:PYTEST_SKIPPED` fires and
+`POLICY:PYTEST_COLLECTED` does not. The removal mutant is killed — so the test can now fail for the
+reason it exists, which it could not before. **U3b:** run 2's **exit code** is now part of the
+determinism comparison, so a test failing only on the second run with identical counts is reported as
+non-deterministic. **Loose end reported rather than glossed:** a weaker mutant (swapping run 2's exit
+code for run 1's) is also killed, though the failed-flag half of the tuple should have covered it, and
+the owner **did not find out why**.
+
+## All eight lint evasions closed
+`import os as o; o.system(...)`, `from os import system`, `f = os.system`, `e = eval`,
+`builtins.exec(...)`, `os.execvp`, `os.spawnl`, `os.posix_spawn` now **all fail** in `src/`. The checks
+cover any attribute named `system`/`popen`/`fork`/`exec*`/`spawn*`/`posix_spawn*`/`import_module` on
+any object; bare `eval`/`exec`/`__import__`/`compile`/`__builtins__` references;
+`from os|posix|nt|builtins import …`; and `builtins`/`posix`/`nt` as banned imports.
+`CLEAN_CLONE.md` gains a **"Lint scope"** section listing what is and is not covered, and the
+"each is checked" sentence is reworded to point at it — closing the gap where that claim sat beside
+eight working evasions.
+
+## Wording survivors and docs
+All five wording survivors (N8, N9, N10, T4, T7) are pinned, as are B6b/B6c (PyYAML **and**
+filesystem skips excluded from the baseline in both generation and comparison), B10 (the default floor
+of 50) and D8 (the demo's generic-exception exit). 19 new mutants, all killed.
+Docs corrected: torch mode needs **PyYAML and pytest**; `CLEAN_CLONE.md` records 3.12.13 measured and
+3.12.4 reproduced; **13** baseline modules; the hard-coded `test_scripts.py` figure is **dropped**
+(it is 87 collected) rather than restated wrongly a third time; bare is 914 run / 89 skipped,
+deterministic across `--twice`. **One stale figure disclosed rather than silently carried:** the
+PyYAML-only row's 87 skips were measured at 874 tests and **not** re-measured at 914, and the document
+says so.
+
+## Scratchpad hygiene resolved
+The owner checked `scripts/` and `test_scripts.py` against every mutation pattern it had used: **no
+mutant text remains**, every restore diff was clean, and the four patterns that no longer match were
+rewritten by its own refactors. Its harnesses are now `sr15_scripts_mut.py` and
+`sr15_scripts_mut5.py`, and the shared `mut.py` is **deleted**.

@@ -205,7 +205,7 @@ class TestNoNetworkImports(unittest.TestCase):
 
     def test_docs_carry_the_honest_ci_caveats(self):
         doc = (ROOT / "docs" / "CLEAN_CLONE.md").read_text(encoding="utf-8")
-        for needle in ("has never been executed", "untested as a combination", "tag, not commit SHA", "estimate"):
+        for needle in ("has never been executed", "untested as a combination", "tag, not commit SHA", "stand-in", "case-sensitive", "has never been observed"):
             self.assertIn(needle, doc)
 
     def test_socket_guard_blocks_connections(self):
@@ -291,7 +291,7 @@ class TestRunTestsSkipPolicyNone(_SyntheticBase):
         self.ok(self.rt({"test_a.py": _mixed_none(50)}, expect="none"))
 
     def test_49_skips_fail_at_the_floor(self):
-        self.bad(self.rt({"test_a.py": _mixed_none(49)}, expect="none"), "expected >= 50 skips")
+        self.bad(self.rt({"test_a.py": _mixed_none(49)}, expect="none"), "POLICY:MIN_NONE_SKIPS")
 
     def test_floor_is_configurable_and_not_off_by_one(self):
         self.ok(self.rt({"test_a.py": _mixed_none(5)}, expect="none", env={"MIN_NONE_SKIPS": "5"}))
@@ -299,7 +299,7 @@ class TestRunTestsSkipPolicyNone(_SyntheticBase):
 
     def test_every_skip_must_have_a_valid_reason_not_just_two(self):
         files = {"test_a.py": _mixed_none(48), "test_b.py": _skip_module(2, "meh installed", cls="M", prefix="test_m")}
-        self.bad(self.rt(files, expect="none"), "does not say a package is missing")
+        self.bad(self.rt(files, expect="none"), "POLICY:NONE_REASON")
 
     def test_reason_case_is_ignored(self):
         files = {"test_a.py": _mixed_none(49), "test_b.py": _skip_module(1, "Torch Not Installed", cls="U", prefix="test_u")}
@@ -307,26 +307,26 @@ class TestRunTestsSkipPolicyNone(_SyntheticBase):
 
     def test_empty_reason_fails(self):
         files = {"test_a.py": _mixed_none(50), "test_b.py": _skip_module(1, "", cls="E", prefix="test_e")}
-        self.bad(self.rt(files, expect="none"), "empty skip reason")
+        self.bad(self.rt(files, expect="none"), "POLICY:EMPTY_REASON")
 
     def test_torch_present_reason_fails_in_none_mode(self):
         files = {"test_a.py": _mixed_none(50), "test_b.py": _skip_module(1, "torch present; torch not installed", cls="T", prefix="test_t")}
-        self.bad(self.rt(files, expect="none"), "torch is present")
+        self.bad(self.rt(files, expect="none"), "POLICY:TORCH_PRESENT")
 
     def test_all_torch_no_numpy_reason_fails(self):
-        self.bad(self.rt({"test_a.py": _skip_module(50, NONE_REASONS[0])}, expect="none"), "no skip mentions numpy")
+        self.bad(self.rt({"test_a.py": _skip_module(50, NONE_REASONS[0])}, expect="none"), "POLICY:NO_NUMPY_REASON")
 
     def test_all_numpy_no_torch_reason_fails(self):
-        self.bad(self.rt({"test_a.py": _skip_module(50, NONE_REASONS[1])}, expect="none"), "no skip mentions torch")
+        self.bad(self.rt({"test_a.py": _skip_module(50, NONE_REASONS[1])}, expect="none"), "POLICY:NO_TORCH_REASON")
 
     def test_silent_passes_instead_of_skips_fail(self):
-        self.bad(self.rt({"test_a.py": _pass_module(60)}, expect="none"), "expected >= 50 skips")
+        self.bad(self.rt({"test_a.py": _pass_module(60)}, expect="none"), "POLICY:MIN_NONE_SKIPS")
 
 
 class TestRunTestsSkipPolicyTorch(_SyntheticBase):
     def test_12_device_skips_pass_and_13_fail(self):
         self.ok(self.rt({"test_a.py": _skip_module(12, "CUDA not available: comparison is UNKNOWN")}, expect="torch"))
-        self.bad(self.rt({"test_a.py": _skip_module(13, "CUDA not available: comparison is UNKNOWN")}, expect="torch"), "at most 12")
+        self.bad(self.rt({"test_a.py": _skip_module(13, "CUDA not available: comparison is UNKNOWN")}, expect="torch"), "POLICY:TORCH_CAP")
 
     def test_allowed_reasons_pass(self):
         files = {"test_a.py": _skip_module(1, "MPS not available (or probe op failed)", cls="A", prefix="test_a"),
@@ -337,7 +337,7 @@ class TestRunTestsSkipPolicyTorch(_SyntheticBase):
         for reason in ("torch is missing", "Torch Not Installed", "numpy not installed (optional)", "CUDA missing",
                        "torch not installed; CUDA not available"):
             with self.subTest(reason=reason):
-                self.bad(self.rt({"test_a.py": _skip_module(1, reason)}, expect="torch"), "skipped as missing")
+                self.bad(self.rt({"test_a.py": _skip_module(1, reason)}, expect="torch"), "POLICY:TORCH_MODE_MISSING")
 
     def test_unexplained_reason_fails(self):
         for reason in ("meh", "torch unavailable", ""):
@@ -351,11 +351,11 @@ class TestRunTestsSkipPolicyTorch(_SyntheticBase):
 class TestRunTestsFloorsAndBaseline(_SyntheticBase):
     def test_min_tests_boundary(self):
         self.ok(self.rt({"test_a.py": _pass_module(5)}, env={"MIN_TESTS": "5"}))
-        self.bad(self.rt({"test_a.py": _pass_module(4)}, env={"MIN_TESTS": "5"}), "MIN_TESTS=5")
+        self.bad(self.rt({"test_a.py": _pass_module(4)}, env={"MIN_TESTS": "5"}), "POLICY:MIN_TESTS")
 
     def test_default_floor_is_650_inclusive(self):
         self.ok(self._default_floor(650))
-        self.bad(self._default_floor(649), "MIN_TESTS=650")
+        self.bad(self._default_floor(649), "POLICY:MIN_TESTS")
 
     def _default_floor(self, n):
         d = self.suite({"test_a.py": _pass_module(n)})
@@ -383,17 +383,17 @@ class TestRunTestsFloorsAndBaseline(_SyntheticBase):
     def test_deleted_tests_fail_by_module_name(self):
         b = self._baseline("test_a 5 3\n")
         r = self.rt({"test_a.py": self._suite3(3, total=4)}, expect="none", baseline=b, env={"MIN_NONE_SKIPS": "1"})
-        self.bad(r, "module test_a ran 4 tests, baseline 5")
+        self.bad(r, "POLICY:BASELINE_TESTS baseline: module test_a ran 4 tests, baseline 5")
 
     def test_deleted_module_fails(self):
         b = self._baseline("test_a 5 3\ntest_gone 2 0\n")
         r = self.rt({"test_a.py": self._suite3(3)}, expect="none", baseline=b, env={"MIN_NONE_SKIPS": "1"})
-        self.bad(r, "module test_gone ran 0")
+        self.bad(r, "POLICY:BASELINE_TESTS baseline: module test_gone ran 0")
 
     def test_guarded_tests_turned_into_silent_passes_fail(self):
         b = self._baseline("test_a 5 3\n")
         r = self.rt({"test_a.py": self._suite3(2)}, expect="none", baseline=b, env={"MIN_NONE_SKIPS": "1"})
-        self.bad(r, "module test_a has 2 bare-environment skips, baseline 3")
+        self.bad(r, "POLICY:BASELINE_SKIPS baseline: module test_a has 2 bare-environment skips, baseline 3")
 
     def test_baseline_skip_floor_not_applied_with_torch(self):
         b = self._baseline("test_a 5 3\n")
@@ -424,11 +424,11 @@ class TestRunTestsFloorsAndBaseline(_SyntheticBase):
 class TestRunTestsMechanics(_SyntheticBase):
     def test_failing_test_fails_run(self):
         body = "import unittest\nclass T(unittest.TestCase):\n    def test_x(self):\n        self.assertEqual(1, 2)\n"
-        self.bad(self.rt({"test_a.py": body}), "unittest suite failed")
+        self.bad(self.rt({"test_a.py": body}), "POLICY:UNITTEST_FAILED")
 
     def test_erroring_test_fails_run(self):
         body = "import unittest\nclass T(unittest.TestCase):\n    def test_x(self):\n        raise RuntimeError('boom')\n"
-        self.bad(self.rt({"test_a.py": body}), "unittest suite failed")
+        self.bad(self.rt({"test_a.py": body}), "POLICY:UNITTEST_FAILED")
 
     def test_unimportable_module_fails_run(self):
         self.bad(self.rt({"test_a.py": "import definitely_not_a_module_xyz\n"}))
@@ -458,6 +458,31 @@ class TestRunTestsMechanics(_SyntheticBase):
         (d / "__pycache__" / "stale.cpython-312.pyc").write_bytes(b"\0")
         self.ok(self.rt({}, suite_dir=d))
         self.assertFalse((d / "__pycache__").exists())
+
+    def test_scoped_run_does_not_touch_bytecode_outside_its_tests_dir(self):
+        """Regression: a nested run once wiped the REAL repo's __pycache__ mid-way through the outer run."""
+        sentinel = ROOT / "tests" / "toy_tests" / "__pycache__" / "sr15_sentinel.cpython-312.pyc"
+        sentinel.parent.mkdir(exist_ok=True)
+        sentinel.write_bytes(b"\0")
+        def _cleanup():
+            if sentinel.exists():
+                sentinel.unlink()
+            try:
+                sentinel.parent.rmdir()      # only if empty
+            except OSError:
+                pass
+        self.addCleanup(_cleanup)
+        outside = self.dir / "elsewhere" / "__pycache__"
+        outside.mkdir(parents=True)
+        (outside / "keep.pyc").write_bytes(b"\0")
+        self.ok(self.rt({"test_a.py": _pass_module(1)}))
+        self.assertTrue(sentinel.exists(), "scoped run deleted bytecode in the real repo")
+        self.assertTrue((outside / "keep.pyc").exists(), "scoped run deleted bytecode outside its tests dir")
+
+    def test_unscoped_default_run_clears_whole_tree_by_construction(self):
+        t = RUN_TESTS.read_text(encoding="utf-8")
+        self.assertIn('if [ "$SCOPED" = 0 ]; then', t)
+        self.assertIn("SCOPED=1", t)
 
     def test_network_guard_blocks_each_entry_point(self):
         body = textwrap.dedent("""
@@ -489,7 +514,7 @@ class TestRunTestsMechanics(_SyntheticBase):
         os.chmod(self.shim / "python3", 0o755)
         r = self.rt({"test_a.py": _pass_module(1)})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("canary did not trigger", r.stdout + r.stderr)
+        self.assertIn("POLICY:CANARY", r.stdout + r.stderr)
 
     def test_twice_detects_nondeterminism_and_accepts_determinism(self):
         state = self.dir / "state_flag"
@@ -503,7 +528,7 @@ class TestRunTestsMechanics(_SyntheticBase):
                     # same NUMBER of skips both times, different reason: only the skip-list comparison can see it
                     self.skipTest("torch not installed; run A" if first else "torch not installed; run B")
         """)
-        self.bad(self.rt({"test_a.py": body}, "--twice", env={"STATE": str(state)}), "non-deterministic")
+        self.bad(self.rt({"test_a.py": body}, "--twice", env={"STATE": str(state)}), "POLICY:NONDETERMINISTIC")
         self.ok(self.rt({"test_a.py": _pass_module(3)}, "--twice"))
         self.assertIn("deterministic: run1 == run2", self.rt({"test_a.py": _pass_module(3)}, "--twice").stdout)
 
@@ -520,12 +545,110 @@ class TestRunTestsMechanics(_SyntheticBase):
                 s.addTests(loader.loadTestsFromTestCase(Extra)); return s
         """)
         r = self.rt({"test_a.py": body}, pytest=True)
-        self.bad(r, "pytest collected")
+        self.bad(r, "POLICY:PYTEST_COLLECTED")
         self.ok(self.rt({"test_a.py": _pass_module(3)}, pytest=True))
 
     @unittest.skipUnless(__import__("importlib.util").util.find_spec("pytest"), "pytest not installed (optional)")
     def test_pytest_skip_count_mismatch_is_compared(self):
         self.assertIn("pytest: passed=3 skipped=0", self.rt({"test_a.py": _pass_module(3)}, pytest=True).stdout)
+
+
+class TestRunTestsPolicyDetails(_SyntheticBase):
+    FS_REASON = "case-sensitive filesystem: case variants are different directories here"
+
+    def _fs(self, n, cls="F", prefix="test_f"):
+        return _skip_module(n, self.FS_REASON, cls=cls, prefix=prefix)
+
+    # --- filesystem-case skips (first observed failure on a case-sensitive FS) ---
+    def test_fs_case_skips_are_accepted_in_none_mode_but_do_not_count_toward_the_floor(self):
+        self.ok(self.rt({"test_a.py": _mixed_none(50), "test_f.py": self._fs(4)}, expect="none"))
+        self.bad(self.rt({"test_a.py": _mixed_none(49), "test_f.py": self._fs(4)}, expect="none"), "POLICY:MIN_NONE_SKIPS")
+
+    def test_fs_case_skips_are_accepted_in_torch_mode_and_capped_at_8(self):
+        self.ok(self.rt({"test_a.py": _skip_module(12, "CUDA not available: x"), "test_f.py": self._fs(8)}, expect="torch"))
+        self.bad(self.rt({"test_a.py": _pass_module(1), "test_f.py": self._fs(9)}, expect="torch"), "POLICY:FS_CAP")
+        self.bad(self.rt({"test_a.py": _mixed_none(50), "test_f.py": self._fs(9)}, expect="none"), "POLICY:FS_CAP")
+
+    def test_fs_reason_cannot_launder_a_missing_package_or_torch_present(self):
+        self.bad(self.rt({"test_a.py": _skip_module(1, "torch not installed; case-sensitive filesystem")}, expect="torch"), "POLICY:TORCH_MODE_MISSING")
+        self.bad(self.rt({"test_a.py": _mixed_none(50), "test_b.py": _skip_module(1, "torch present; case-sensitive", cls="Q", prefix="test_q")},
+                         expect="none"), "POLICY:TORCH_PRESENT")
+
+    # --- reason wording (none mode) ---
+    def test_none_mode_accepts_each_listed_phrase_and_package(self):
+        for reason in ("torch missing", "numpy unavailable", "PyYAML not installed", "pytest not installed (optional)",
+                       "TORCH NOT AVAILABLE", "pyyaml missing"):
+            with self.subTest(reason=reason):
+                self.ok(self.rt({"test_a.py": _mixed_none(49), "test_b.py": _skip_module(1, reason, cls="W", prefix="test_w")}, expect="none"))
+
+    def test_none_mode_requires_a_package_name_and_a_phrase(self):
+        for reason in ("not installed", "something is missing", "meh installed", "\t \n", "torch", "optional dependency absent"):
+            with self.subTest(reason=reason):
+                self.bad(self.rt({"test_a.py": _mixed_none(49), "test_b.py": _skip_module(1, reason, cls="W", prefix="test_w")}, expect="none"))
+
+    def test_default_none_floor_is_50(self):
+        self.ok(self.rt({"test_a.py": _mixed_none(50)}, expect="none", env={"MIN_NONE_SKIPS": ""}))
+        self.bad(self.rt({"test_a.py": _mixed_none(49)}, expect="none", env={"MIN_NONE_SKIPS": ""}), "POLICY:MIN_NONE_SKIPS")
+
+    # --- reason wording (torch mode) ---
+    def test_torch_mode_numpy_mention_is_denied_even_with_an_allowed_word(self):
+        self.bad(self.rt({"test_a.py": _skip_module(1, "CUDA not available; numpy absent")}, expect="torch"), "POLICY:TORCH_MODE_MISSING")
+
+    def test_torch_mode_device_words_are_whole_words_and_case_insensitive(self):
+        for reason in ("CUDAx", "xcuda", "mpsx", "ampsy"):
+            with self.subTest(reason=reason):
+                self.bad(self.rt({"test_a.py": _skip_module(1, reason)}, expect="torch"), "POLICY:TORCH_MODE_UNEXPLAINED")
+        for reason in ("cuda", "MPS", "Torch Present", "no CUDA here"):
+            with self.subTest(reason=reason):
+                self.ok(self.rt({"test_a.py": _skip_module(1, reason)}, expect="torch"))
+
+    # --- baseline exclusions ---
+    def test_baseline_generation_excludes_pyyaml_and_fs_skips(self):
+        b = self.dir / "gen_baseline.txt"
+        files = {"test_a.py": _mixed_none(2) + _skip_module(1, "PyYAML not installed", cls="Y", prefix="test_y").replace("import unittest\n", "")
+                 + _skip_module(1, self.FS_REASON, cls="Z", prefix="test_z").replace("import unittest\n", "")
+                 + _pass_module(2, cls="H", prefix="test_h").replace("import unittest\n", "")}
+        self.ok(self.rt(files, "--update-baseline", expect="none", baseline=str(b), env={"MIN_NONE_SKIPS": "1"}))
+        self.assertIn("test_a 6 2", b.read_text(encoding="utf-8").splitlines())
+
+    def test_pyyaml_or_fs_skip_cannot_mask_a_missing_package_skip_in_the_baseline_check(self):
+        b = self.dir / "cmp_baseline.txt"
+        b.write_text("test_a 5 3\n", encoding="utf-8")
+        for extra in ("PyYAML not installed", self.FS_REASON):
+            files = {"test_a.py": _mixed_none(2) + _skip_module(1, extra, cls="Y", prefix="test_y").replace("import unittest\\n", "")
+                     + _pass_module(2, cls="H", prefix="test_h").replace("import unittest\\n", "")}
+            with self.subTest(extra=extra):
+                self.bad(self.rt(files, expect="none", baseline=str(b), env={"MIN_NONE_SKIPS": "1"}), "POLICY:BASELINE_SKIPS")
+
+    # --- pytest vs unittest skip counts (M13) ---
+    @unittest.skipUnless(__import__("importlib.util").util.find_spec("pytest"), "pytest not installed (optional)")
+    def test_pytest_unittest_skip_count_mismatch_fails(self):
+        body = textwrap.dedent("""
+            import sys, unittest
+            class T(unittest.TestCase):
+                def test_differs(self):
+                    if "pytest" not in sys.modules:       # true under `python -m unittest`, false under pytest
+                        self.skipTest("torch not installed; skipped by unittest only")
+        """)
+        r = self.rt({"test_a.py": body}, pytest=True)
+        self.bad(r, "POLICY:PYTEST_SKIPPED")
+        self.assertNotIn("POLICY:PYTEST_COLLECTED", r.stdout)          # same collected count: ONLY the skip comparison can fail
+
+    # --- determinism incl. run-2 exit status (U3b) ---
+    def test_failure_only_in_second_run_is_nondeterminism(self):
+        state = self.dir / "run2_flag"
+        body = textwrap.dedent("""
+            import os, unittest
+            class T(unittest.TestCase):
+                def test_fails_second_time(self):
+                    p = os.environ["STATE"]
+                    second = os.path.exists(p)
+                    open(p, "w").close()
+                    self.assertFalse(second, "fails only on the second run")
+        """)
+        r = self.rt({"test_a.py": body}, "--twice", env={"STATE": str(state)})
+        self.bad(r, "POLICY:NONDETERMINISTIC")
+        self.assertIn("rc=1", r.stdout)
 
 
 def _lint(root, extra_env=None):
@@ -589,7 +712,7 @@ class TestLintPolicy(unittest.TestCase):
     def test_process_and_dynamic_imports_banned_in_src(self):
         codes = (("import subprocess\n", "process/dynamic"), ("import importlib\n", "process/dynamic"),
                  ("import ctypes\n", "process/dynamic"), ("__import__('socket')\n", "__import__"),
-                 ("import os\nos.system('curl x')\n", "os.system"), ("import os\nos.popen('x')\n", "os.popen"),
+                 ("import os\nos.system('curl x')\n", ".system"), ("import os\nos.popen('x')\n", ".popen"),
                  ("import importlib\nimportlib.import_module('socket')\n", "import_module"))
         self.batch({f"src/toy/p{i}.py": c for i, c in enumerate(codes)})
 
@@ -605,6 +728,25 @@ class TestLintPolicy(unittest.TestCase):
         r = _lint(self.tree({self.FM: self.FM_OK + "exec('import socket')\n"}))
         self.assertEqual(r.returncode, 1, r.stdout)       # allowed file, extra exec
         self.assertEqual(len([l for l in r.stdout.splitlines() if l.startswith("ERROR:")]), 1)
+
+
+    def test_aliased_and_family_process_evasions_are_caught(self):
+        cases = {
+            "alias_as": ("import os as o\no.system('curl x')\n", ".system"),
+            "from_import": ("from os import system\nsystem('x')\n", "from os import"),
+            "assign_attr": ("import os\nf = os.system\n", ".system"),
+            "assign_eval": ("e = eval\ne('1')\n", "eval used"),
+            "assign_exec": ("f = exec\n", "exec used"),
+            "builtins_exec": ("import builtins\nbuiltins.exec('1')\n", "process/dynamic"),
+            "execvp": ("import os\nos.execvp('x', ['x'])\n", ".execvp"),
+            "spawnl": ("import os\nos.spawnl(0, 'x', 'x')\n", ".spawnl"),
+            "posix_spawn": ("import os\nos.posix_spawn('x', ['x'], {})\n", ".posix_spawn"),
+            "from_posix": ("from posix import system\n", "process/dynamic"),
+            "fork": ("import os\nos.fork()\n", ".fork"),
+            "dunder_builtins": ("__builtins__['exec']('1')\n", "__builtins__"),
+        }
+        errs = self.batch({f"src/toy/ev_{k}.py": v for k, v in cases.items()})
+        self.assertGreaterEqual(len(errs), len(cases))
 
     def test_exec_outside_src_is_not_flagged(self):
         r = _lint(self.tree({"tests/test_x.py": "exec('1')\n", "scripts/x.py": "eval('1')\n"}))
@@ -645,6 +787,19 @@ class TestLintPolicy(unittest.TestCase):
     def test_missing_optional_tools_never_fail(self):
         r = _lint(self.tree({}), {"PATH": str(Path(sys.executable).parent) + ":/usr/bin:/bin"})
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class TestDemoGenericFailure(unittest.TestCase):
+    def test_non_demofailure_exception_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as td:
+            shutil.copytree(ROOT / "src" / "toy", Path(td) / "toy", ignore=shutil.ignore_patterns("__pycache__"))
+            with open(Path(td) / "toy" / "benchmark.py", "a", encoding="utf-8") as f:
+                f.write("\nraise RuntimeError('injected import-time failure')\n")
+            r = subprocess.run([sys.executable, str(SCRIPTS / "demo.py"), "--src", td], capture_output=True, text=True,
+                               env=_env(), cwd=ROOT, timeout=60)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("unexpected RuntimeError", r.stderr)
+        self.assertNotIn("DEMO OK", r.stdout)
 
 
 class TestDemoRepoInodeGuard(unittest.TestCase):
