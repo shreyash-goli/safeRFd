@@ -626,6 +626,37 @@ class DestinationGuards(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "device/pseudo"):
             db.write_dashboard("/dev/zz_dashboard.html", {})
 
+    def test_symlinked_parent_into_device_dir_refused(self):
+        os.symlink("/dev", self.tmp / "devlink")           # parent must be RESOLVED before the device check
+        with self.assertRaisesRegex(ValueError, "device/pseudo"):
+            db.write_dashboard(self.tmp / "devlink" / "zz.html", {})
+
+    def test_is_device_dir_prefix_and_boundary(self):
+        for yes in ("/dev", "/dev/fd", "/dev/fd/3", "/proc", "/proc/1/fd", "/sys", "/sys/kernel"):
+            self.assertTrue(db._is_device_dir(Path(yes)), yes)
+        for no in ("/devices", "/developer", "/processing", "/system", "/tmp", "/"):
+            self.assertFalse(db._is_device_dir(Path(no)), no)
+
+    def test_cleanup_on_keyboard_interrupt(self):
+        out = self.tmp / "d.html"
+        out.write_text("old", encoding="utf-8")
+        with mock.patch.object(db.os, "replace", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                db.write_dashboard(out, {})
+        self.assertEqual(sorted(x.name for x in self.tmp.iterdir()), ["d.html"])
+        self.assertEqual(out.read_text(encoding="utf-8"), "old")
+
+    def test_unreadable_destination_is_a_deliberate_refusal(self):
+        with mock.patch.object(db.os, "lstat", side_effect=PermissionError("denied")):
+            with self.assertRaisesRegex(ValueError, "cannot inspect"):
+                db.write_dashboard(self.tmp / "d.html", {})
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_overlong_path_component_is_value_error_not_raw_oserror(self):
+        for tgt in (self.tmp / ("a" * 300) / "x.html", self.tmp / ("a" * 300)):
+            with self.assertRaises(ValueError):
+                db.write_dashboard(tgt, {})
+
     def test_missing_destination_directory_refused(self):
         with self.assertRaisesRegex(ValueError, "does not exist"):
             db.write_dashboard(self.tmp / "nope" / "x.html", {})
@@ -929,6 +960,43 @@ class VerdictCoreSurvivors(unittest.TestCase):
         self.assertIn("greater " + repr(bm.Margins().delta_S), h)
         self.assertIn("Uncertainty" , db.render_dashboard({"joint": j}))
         self.assertIn(repr(bm.Margins().delta_sel), db.render_dashboard({"joint": j}))
+
+    def test_deleting_components_cannot_launder_a_weak_hypothesis(self):
+        # F1: delete H3's weak component AND its converged counterpart; stored verdict forged to SUPPORTED.
+        weak = joint(expect=None, dms=bm.Margins().delta_sel)
+        self.assertEqual(weak.h3.verdict, bm.Verdict.INCONCLUSIVE)
+        j = weak
+        object.__setattr__(j.h3, "components", (j.h3.components[0],))
+        object.__setattr__(j.h3, "converged_components", (j.h3.converged_components[0],))
+        object.__setattr__(j.h3, "verdict", bm.Verdict.SUPPORTED)
+        h = db.render_scorecard(j)
+        self.assertEqual(hyp_cells(h)["H3"], "INCONCLUSIVE")
+        self.alarmed(h)
+        self.assertNotIn("JOINT_SUPPORTED", h)
+
+    def test_component_set_must_match_protocol_tables_exactly(self):
+        def alarm_for(mutate, hid="h3"):
+            j = joint()
+            mutate(getattr(j, hid))
+            h = db.render_scorecard(j)
+            self.assertEqual(hyp_cells(h)[hid.upper()], "INCONCLUSIVE")
+            self.alarmed(h)
+        alarm_for(lambda x: object.__setattr__(x, "components", (x.components[0],)))                    # deleted
+        alarm_for(lambda x: object.__setattr__(x, "components", (x.components[0], x.components[0])))    # duplicated
+        alarm_for(lambda x: object.__setattr__(x, "converged_components", ()))                          # no converged
+        alarm_for(lambda x: object.__setattr__(x, "converged_components", x.converged_components[:1]))
+        alarm_for(lambda x: object.__setattr__(x, "converged_components", (x.components[0],)))           # substituted
+        alarm_for(lambda x: object.__setattr__(x, "converged_components", (x.components[0],)), "h1")             # stray converged on H1
+        # genuine sets raise no alarm and keep working in any order
+        j = joint()
+        object.__setattr__(j.h3, "components", j.h3.components[::-1])
+        self.assertNotIn("NOT shown", db.render_scorecard(j))
+
+    def test_component_set_check_fails_closed_if_tables_vanish(self):
+        j = joint()
+        with mock.patch.object(bm, "PRIMARY", None):
+            h = db.render_scorecard(j)
+        self.assertNotIn("vd-supported", joint_cell(h))
 
     def test_aggregation_requires_ALL_components_supported(self):
         # a component that is INCONCLUSIVE (interval spans the margin), not UNSUPPORTED: an UNSUPPORTED one would

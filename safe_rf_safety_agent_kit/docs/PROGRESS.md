@@ -2889,3 +2889,59 @@ mutants, all killed.
 
 **Attestation status:** delta-3 is **unattested**, like delta-1 and delta-2. SR-10's checkbox stays
 unchecked pending a final review together with SR-09 r7.
+
+---
+
+## SR-13 — QA verdict: PASS (third pass); F1 fixed; four survivors closed
+
+**Date:** 2026-11-10. `test_dashboard.py` at 103 tests (was 95). Dashboard module suite green.
+
+### The case-insensitivity fix is thoroughly verified, including a prediction of the orchestrator's that was wrong
+Case-varied directory, case-varied repo-root prefix and new-file-via-case-variation are all refused —
+**and still refused with `_casefold_inside` patched to return False**, so the inode-identity layer
+carries the guarantee alone. The reviewer went beyond the brief and **mounted a case-sensitive APFS
+image**: the inode layer is correct there too, all 95 tests passed, and the case-fold layer only ever
+over-refuses. Every exotic route was refused *even with the case-fold layer off and `Path.resolve`
+patched to a no-op*: `PATH_MAX`, a 300-character component, trailing slashes, redundant separators,
+`..`, `/tmp` vs `/private/tmp`, a symlink ancestor (existing and not-yet-created), and target equal to
+the repo root. **The orchestrator predicted the NFC-vs-NFD unicode-normalisation case would be
+missed; it is caught**, because `stat()` follows APFS's own normalisation so the inode matches.
+
+### F1 — the one required fix, and a real hole in the central guarantee
+The reviewer forged the **component set** rather than a margin: it built an H3-INCONCLUSIVE result,
+**deleted H3's weak component and its converged counterpart**, set `h3.verdict = SUPPORTED`, and the
+page rendered **H3 SUPPORTED and JOINT_SUPPORTED with no alarm whatsoever.** Every previous attack
+produced INCONCLUSIVE plus a warning; this produced a confident display in silence — and the
+`_recompute` docstring discussed only the margin residual. **A missing component is exactly how a
+weak hypothesis is laundered into a strong one.**
+**Fixed structurally, as the orchestrator required rather than documented:** a new
+`_component_sets_ok` requires each hypothesis's component metrics to equal `bm.PRIMARY[hid]` exactly,
+requires H3's converged metrics to equal `bm.CONVERGED`, and **rejects converged components on H1 or
+H2**. A deleted, duplicated or substituted component now yields INCONCLUSIVE with the "NOT shown"
+alarm — as loud as a forgery — and **if the protocol tables vanish the check fails closed**.
+Reordering a genuine set correctly raises no alarm. The docstring now states a deleted component is
+**not** a residual limit. Three mutants killed: removing the whole check, skipping the converged-set
+check, skipping the component-set check.
+
+### All four mutation survivors closed, and one led to a better fix than asked for
+- **Parent not resolved:** a symlink into `/dev` is now refused with "device/pseudo"; the
+  skip-resolving-the-parent mutant is killed.
+- **Device refusal exact-match-only:** `_is_device_dir` extracted and tested directly — `/dev/fd/3`,
+  `/proc/1/fd`, `/sys/kernel` refused; `/devices`, `/developer`, `/processing`, `/system` **not**
+  refused, so the prefix matching is correct rather than naive.
+- **`BaseException` → `Exception`:** a `KeyboardInterrupt` during replace now leaves no temp file and
+  the old file intact; the mutant is killed.
+- **The `lstat` `OSError` path was unreachable** because `is_symlink()` raised first. Rather than pin
+  dead code, the builder **replaced that call with a single `lstat` plus an `S_ISLNK` check** — which
+  also converted the two findings the reviewer had classified as *non-bypasses* into deliberate
+  `ValueError`s: the over-`PATH_MAX` path and the permission-denied destination. It traced the
+  over-long-component case to `parent.is_dir()` and wrapped that too. Mutants for the swallowed error
+  and the removed symlink guard are both killed.
+
+### A briefing failure of the orchestrator's, recorded accurately
+The reviewer reported it **never received the list of SR-13's thirteen original mutation survivors**,
+so it could not confirm each was dead and ran its own 46 mutants instead (36 killed). The builder
+likewise confirms it cannot re-verify QA's list from QA. **The accurate status:** those thirteen were
+sent to the *builder* in an earlier round and the builder reported all thirteen killed — so they are
+**builder-verified but not independently QA-verified**. That distinction is recorded rather than
+blurred, and the cause was the orchestrator omitting the list from the reviewer's brief.

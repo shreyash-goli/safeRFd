@@ -414,7 +414,8 @@ def _recompute(c: Any, margins: Any = None) -> Optional[Verdict]:
     margin was edited on its own is therefore an alarm. RESIDUAL LIMIT: the renderer has no second source of
     truth for the registered margins themselves. A result whose Margins object AND component margins were
     forged consistently recomputes consistently and raises no alarm. Margins are shown on the page (see
-    'Uncertainty and protocol limits') but are producer-asserted, not authenticated."""
+    'Uncertainty and protocol limits') but are producer-asserted, not authenticated. (A deleted or substituted
+    COMPONENT is not a residual: `_component_sets_ok` alarms on it.)"""
     try:
         if margins is not None:
             direction, margin = _declared(c.metric, margins)
@@ -449,9 +450,30 @@ def _eff_component(c: Any, withheld: bool, contract_bad: bool, margins: Any = No
     return stored, False
 
 
+def _component_sets_ok(h: Any) -> bool:
+    """The component and converged-component metric sets must be EXACTLY what the protocol tables declare
+    (benchmark.PRIMARY / CONVERGED). A deleted, duplicated or substituted component is how a weak hypothesis
+    would be laundered into a strong one, so it is as loud as a forged one."""
+    try:
+        want = sorted(m for m, _d, _a in bm.PRIMARY[h.hid])
+        if sorted(str(c.metric) for c in h.components) != want:
+            return False
+        if h.hid == "H3":
+            cw = sorted(m for m, _d, _a in bm.CONVERGED)
+            if sorted(str(c.metric) for c in (getattr(h, "converged_components", ()) or ())) != cw:
+                return False
+        elif getattr(h, "converged_components", ()):
+            return False
+        return True
+    except Exception:  # noqa: BLE001 - cannot establish the expected sets: not ok
+        return False
+
+
 def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool, margins: Any = None) -> tuple:
     """(displayed verdict, mismatch). Decisive only if the stored hypothesis verdict equals an independent
     recomputation from recomputed component verdicts, scope-aware gates, and (H3) converged components."""
+    if not _component_sets_ok(h):
+        return Verdict.INCONCLUSIVE, True
     rc = [_recompute(c, margins) for c in h.components]
     mismatch = any(_eff_component(c, False, False, margins)[1] for c in h.components)
     if None in rc:
@@ -719,6 +741,11 @@ def _casefold_inside(r: Path, root: Path) -> bool:
 _DEVICE_PREFIXES = ("/dev", "/proc", "/sys")
 
 
+def _is_device_dir(parent: Path) -> bool:
+    ps = str(parent)
+    return any(ps == d or ps.startswith(d + os.sep) for d in _DEVICE_PREFIXES)
+
+
 def write_dashboard(path: Optional[Any] = None, data: Optional[Mapping] = None) -> Path:
     """Write only to `path` (default: a fresh temp dir).
 
@@ -737,14 +764,16 @@ def write_dashboard(path: Optional[Any] = None, data: Optional[Mapping] = None) 
         raise ValueError("refusing to write the dashboard inside the repository tree")
     try:
         parent = Path(os.path.abspath(out)).parent.resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         raise ValueError("refusing: cannot resolve the destination directory") from None
-    if any(str(parent) == d or str(parent).startswith(d + os.sep) for d in _DEVICE_PREFIXES):
+    if _is_device_dir(parent):
         raise ValueError("refusing to write into a device/pseudo filesystem (/dev, /proc, /sys)")
-    if not parent.is_dir():
+    try:
+        parent_ok = parent.is_dir()
+    except OSError:
+        parent_ok = False
+    if not parent_ok:
         raise ValueError("refusing: destination directory does not exist")
-    if out.is_symlink():
-        raise ValueError("refusing to write through a symlink")
     try:
         st = os.lstat(out)
     except FileNotFoundError:
@@ -752,6 +781,8 @@ def write_dashboard(path: Optional[Any] = None, data: Optional[Mapping] = None) 
     except OSError as ex:
         raise ValueError(f"refusing: cannot inspect the destination ({type(ex).__name__})") from None
     if st is not None:
+        if stat.S_ISLNK(st.st_mode):
+            raise ValueError("refusing to write through a symlink")
         if not stat.S_ISREG(st.st_mode):
             raise ValueError("refusing to overwrite a non-regular file")
         if st.st_nlink > 1:
@@ -762,7 +793,7 @@ def write_dashboard(path: Optional[Any] = None, data: Optional[Mapping] = None) 
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
         os.replace(tmp, out)
-    except BaseException:
+    except BaseException:   # incl. KeyboardInterrupt: never leave a temp file behind
         try:
             os.unlink(tmp)
         except OSError:
