@@ -631,3 +631,51 @@ per README step 1 and to avoid writing to that repo's `main`. No remote is confi
   verdict field and no amendment field, so the verdict currently goes in `notes` and an
   amendment-log hash in `input_hashes` — flagged for SR-14 rather than changing the schema. The
   pre-analysis precision simulation for n=100 was not run, so the adequacy of 100 seeds is UNKNOWN.
+
+---
+
+## SR-02 — Re-work after QA FAIL
+
+- **Date:** 2026-11-09. **Status: RE-IMPLEMENTED, PENDING QA RE-REVIEW.**
+- All eight defects, the citation corrections, both omissions and the two factor-42 caveats were
+  applied to `docs/METHOD_AUDIT.md`. A pre-edit copy was preserved in the scratch directory.
+- **Corrections of substance:**
+  - §3.2 item 2: only the output *radius* equals ‖u‖; the displacement ‖u‖(t̂−û) has radial component
+    ‖u‖(cos θ−1) and magnitude 2‖u‖sin(θ/2).
+  - §3.2 item 3: rewritten as a property of the target map with no verdict on the method. With
+    `c = s·u` and η = 5 the target is `(6−5s)·u`, flipping sign for s > 1.2.
+  - §9: the unsupported `1e-8` sign-convention claim was dropped (D:522-523 and the old D:535 are
+    equivalent because cos is clamped).
+  - `th_dih_v`: NaN inputs give (0,0) there; the (1,0) path fires only on non-finite *results*; only
+    `th_ang_v` returns (1,0) for invalid input (D:525-527). Added that upstream `_preprocess` uses
+    NaN in `alpha` to clear `alpha_mask` (A:565-566), so the fork's change alters that model input.
+  - §3.4: with an all-True mask `diffuse_pose` adds zero delta (A:diffusion.py:103), so `x_t_u` is
+    the recentred, already-T-noised `sample_init` output — not noise-free.
+  - §6: only the gradient chain *across* blocks is truncated; each block's own parameters, and the
+    final block's, still receive gradient.
+  - §11: ancestor `base.yaml` values are now SOURCE OBSERVED — `T: 50`, `partial_T: null`,
+    `crd_scale: 0.25`, `p_drop: 0.15`, `align_motif: True`, `sidechain_input: False` — so
+    `t ∈ 1..49`; register #17 becomes an INFERENCE conditional on the effective `p_drop`. A
+    checkpoint-config override remains possible; `fix_motif` and `symmetry` stay UNKNOWN.
+  - Claims register: the rows previously asserting something was "false" now report mechanical facts
+    only (#8, #9, #11, #13, #16, #23, #26); #2 separates static flags from runtime inference; #9
+    carries the L>1 and slot caveats; #13 splits "does not raise" from "UnboundLocalError if
+    reached"; #26 no longer calls the `main()` example "generic".
+  - Omissions added: `lr_lambda(0) = 0`, so the first optimiser step is a no-op; and the in-place
+    write on the grad-requiring leaf under `sidechain_input: True` (A:542-543, fork clones only in
+    the `else` branch) — not triggered under the default config, and the builder honestly notes it
+    did not trace whether `xyz_t` inside `_preprocess` is the same tensor as `x_t`.
+  - Placeholder slots are now an INFERENCE from A:`util.py:588-589`
+    (`xyzs_in_base_frame = torch.ones(...)`, `base_indices = 0`), so they count in both the loss sum
+    and the per-atom renormalisation.
+  - The runner sentence now reads "necessary given the fork's chosen edit", with the `TypeError` and
+    `AttributeError` supporting detail.
+- **A QA citation was itself wrong, and the builder was right to push back.** QA cited ancestor
+  `rfdiffusion/inference/utils.py:329` for the NaN write-back in `align_to_xt_motif`; the builder
+  cited 360. **Orchestrator adjudication: the builder is correct.** Direct inspection of the ancestor
+  commit shows `px0_[~atom_mask] = float("nan")` at line **360**; line 353 is a separate
+  `px0[~atom_mask] = 0  # convert nans to 0`. The conclusion drawn from the citation is unchanged.
+  Recorded because review must be bidirectional: a reviewer's finding is not automatically correct.
+- **Unverified by the builder, stated honestly:** it did not re-run the numeric checks, so the
+  0.41999998 figure and the worked examples in the document rest on QA's computation rather than its
+  own. Flagged for the QA re-review.
