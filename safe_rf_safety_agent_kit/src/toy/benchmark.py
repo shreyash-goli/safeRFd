@@ -1481,7 +1481,15 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: Optional[Benc
     sound here because the margin of every component is read OUT OF THE RECORD (`margin` metric), never from
     `cfg` -- so no margin a recompute uses can come from the caller at all.
     ORDER: the `loss_check_exempt` / `subject_kind_code` forgery checks run BEFORE the config check, so a
-    config mismatch can never mask a forgery; `cfg` is not consulted by either of them."""
+    config mismatch can never mask a forgery; `cfg` is not consulted by either of them.
+    WHAT THE BINDING DOES NOT DO, stated because "BOUND TO THE CONFIGURATION THE STUDY RAN UNDER" above
+    would otherwise overstate it: the stored `config` hash is itself a stored value, so **rewriting it in
+    every record and passing the cfg that matches the rewrite reaches JOINT_SUPPORTED with no reason
+    recorded.** This is post-hoc tampering in the already-disclosed class -- it grants nothing over forging
+    the `gate_*` metrics directly, and requires write access to every record -- but it was not stated for the
+    config hash specifically, and this module's standard is that the routes are stated rather than left to be
+    discovered. The binding defeats the ORDINARY-CALL defect above and an inconsistent or absent hash; it is
+    not an authentication of the records."""
     cfg = _cfg(cfg)
     by = {}
     for r in records:

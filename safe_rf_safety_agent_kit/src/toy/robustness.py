@@ -454,9 +454,19 @@ class Scorecard:
 
 def build_scorecard(*, probe_id: str, probe_kind: str, seeds: Sequence[int], per_seed: Sequence[MetricValue],
                     cfg: ProbeConfig, status_if_summarized: ProbeStatus, details_always: Mapping,
-                    details_if_summarized: Mapping = MappingProxyType({}), non_claims: Sequence[str] = ()
+                    details_if_summarized: Optional[Mapping] = None, non_claims: Sequence[str] = ()
                     ) -> Scorecard:
-    """The only place a scorecard's evidence labels and summary-vs-insufficient branch are decided."""
+    """The only place a scorecard's evidence labels and summary-vs-insufficient branch are decided.
+
+    `details_if_summarized` defaults to None rather than to a literal `MappingProxyType({})`. The
+    proxy is read-only, but the dict BEHIND it is reachable via `gc.get_referents` -- the route the
+    `Scorecard` docstring lists among its honest limits -- so writes to it persisted into every later
+    no-argument call. It was the last container default in this module after the `ProbeConfig` and
+    `Margins` defaults were fixed; the stakes were low (it feeds descriptive `details` only, never a
+    status, a summary or `min_seeds`), but "low stakes" is not why a shared mutable default should
+    survive in a module whose own threat model includes reaching through read-only wrappers."""
+    if details_if_summarized is None:
+        details_if_summarized = {}
     seeds = _check_seeds(seeds)
     per_seed = tuple(per_seed)
     result = summarize_seeds(per_seed, cfg.min_seeds)

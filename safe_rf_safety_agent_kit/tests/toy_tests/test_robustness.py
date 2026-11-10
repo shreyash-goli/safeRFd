@@ -1126,8 +1126,16 @@ class TestQAHardening(unittest.TestCase):
     def test_probe_config_defaults_are_constructed_per_call(self):
         """Same defect class the dashboard owner found in `benchmark.analyze_scores`: a literal
         `cfg = ProbeConfig()` default is one instance shared by every no-argument call, and
-        `object.__setattr__` reaches through the frozen dataclass into it. Here the stake is the SEED_FLOOR
-        policy itself -- one forged `min_seeds = 1` would license single-example claims process-wide."""
+        `object.__setattr__` reaches through the frozen dataclass into it.
+
+        CORRECTED STAKE. This docstring used to say "one forged `min_seeds = 1` would license
+        single-example claims process-wide". **That is false, and QA measured it.** `summarize_seeds`
+        re-constructs `ProbeConfig(min_seeds)` at the point of use, so a forged value below
+        `SEED_FLOOR` RAISES rather than taking effect: measured `1, 2 -> ValueError`; `3 -> summary
+        n=4`; `5, 9, 10 -> INSUFFICIENT_EVIDENCE`. `SEED_FLOOR` is defended three times over, so the
+        single-example criterion was never the exposure. The real exposure is narrower and worth
+        stating accurately: silently lowering the *policy* minimum from 10 to somewhere in 3-9, which
+        weakens the evidence bar without ever tripping the floor."""
         import inspect
         probes = (rb.seed_sensitivity_probe, rb.probe_shift, rb.probe_missing_inputs, rb.probe_precision,
                   rb.precision_sweep)
@@ -1137,6 +1145,17 @@ class TestQAHardening(unittest.TestCase):
         b = rb.seed_sensitivity_probe(lambda s: float(s % 7), SEEDS)
         self.assertEqual(a.min_seeds, rb.DEFAULT_MIN_SEEDS)
         self.assertEqual(b.min_seeds, rb.DEFAULT_MIN_SEEDS)
+        # The resolver really constructs per call. Asserted on the object `_pcfg(None)` ACTUALLY
+        # RETURNS -- the stand-in forgery below cannot detect a singleton, which is why QA's
+        # `_pcfg`-returns-a-singleton mutant survived all 307 tests while the equivalent `Margins`
+        # mutant died: that guard forged the live resolved object and this one did not.
+        self.assertIsNot(rb._pcfg(None), rb._pcfg(None))
+        self.assertEqual(rb._pcfg(None), rb._pcfg(None))        # equal by value, distinct by identity
+        given = rb.ProbeConfig(7)
+        self.assertIs(rb._pcfg(given), given)                   # an explicit cfg passes through
+        live = rb._pcfg(None)
+        object.__setattr__(live, "min_seeds", 1)                 # forge the LIVE resolved object
+        self.assertEqual(rb._pcfg(None).min_seeds, rb.DEFAULT_MIN_SEEDS)
         # forging a field of one call's resolved config cannot reach a later call
         forged = rb.ProbeConfig()
         object.__setattr__(forged, "min_seeds", 1)
@@ -1144,10 +1163,43 @@ class TestQAHardening(unittest.TestCase):
         self.assertEqual(rb.ProbeConfig().min_seeds, rb.DEFAULT_MIN_SEEDS)
         c = rb.seed_sensitivity_probe(lambda s: float(s % 7), SEEDS)
         self.assertEqual(c.min_seeds, rb.DEFAULT_MIN_SEEDS)
+        # the corrected stake, measured rather than asserted: a sub-floor value RAISES at point of use
+        with self.assertRaises(ValueError):
+            rb.summarize_seeds({s: rb.MetricValue.measured(float(s)) for s in SEEDS}, min_seeds=1)
+        with self.assertRaises(ValueError):
+            rb.summarize_seeds({s: rb.MetricValue.measured(float(s)) for s in SEEDS}, min_seeds=2)
         # and the floor is still refused at construction
         with self.assertRaises(ValueError):
             rb.ProbeConfig(rb.SEED_FLOOR - 1)
         self.assertIn("FRESHLY CONSTRUCTED `ProbeConfig()`", " ".join(rb._pcfg.__doc__.split()))
+
+    def test_build_scorecard_has_no_shared_container_default(self):
+        """QA found the last container default in this module: `details_if_summarized` defaulted to a
+        literal `MappingProxyType({})`. The proxy is read-only, but the dict BEHIND it is reachable
+        via `gc.get_referents` -- the route `Scorecard` lists among its honest limits -- so writes
+        persisted into every later no-argument call. Low stakes (descriptive `details` only, never a
+        status or `min_seeds`), which is exactly why it would have survived indefinitely."""
+        import gc
+        import inspect
+        d = inspect.signature(rb.build_scorecard).parameters["details_if_summarized"].default
+        self.assertIsNone(d, "a container default is shared by every call that omits the argument")
+        # the defect, demonstrated against the shape it used to have, so the test states a mechanism
+        # rather than just a signature fact
+        proxy = rb.MappingProxyType({})
+        backing = [o for o in gc.get_referents(proxy) if isinstance(o, dict)]
+        self.assertTrue(backing, "a MappingProxyType exposes its backing dict to gc.get_referents")
+        backing[0]["injected"] = 1
+        self.assertEqual(dict(proxy), {"injected": 1})   # read-only wrapper, mutated through the back
+        # and a real no-argument call is unaffected by any such poisoning
+        kw = dict(probe_id="p", probe_kind="k", seeds=SEEDS,
+                  per_seed=tuple(rb.MetricValue.measured(float(s)) for s in SEEDS),
+                  cfg=rb.ProbeConfig(), status_if_summarized=rb.ProbeStatus.MEASURED,
+                  details_always={"a": 1})
+        first = rb.build_scorecard(**kw)
+        self.assertNotIn("injected", first.details)
+        second = rb.build_scorecard(**kw)
+        self.assertNotIn("injected", second.details)
+        self.assertEqual(dict(first.details), dict(second.details))
 
     def test_documented_corner_extreme_summary_is_accepted(self):
         s = rb.SeedSummary.from_values([1.7e308] * 3)      # documented, unguarded: see SeedSummary docstring

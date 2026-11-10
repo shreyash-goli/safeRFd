@@ -2115,6 +2115,32 @@ class ProtocolParameterDefaultsAreNotSharedObjects(unittest.TestCase):
         self.assertEqual(bm.analyze_scores(self.scores(), frozen=FZ, registered_digest=FZ.digest,
                                            subject="s", cfg=SMALL).h1.verdict, V.SUPPORTED)
 
+    def test_the_cfg_resolver_really_constructs_per_call(self):
+        """QA found this guard ineffective and the finding was exact. The test below forges a
+        STAND-IN `BenchmarkConfig` and then asserts a FRESHLY constructed one is clean -- which is
+        trivially true whether `_cfg` constructs per call or returns a module-level singleton, since
+        the stand-in is a different object from the singleton either way. Making `_cfg` return a
+        singleton SURVIVED all 307 tests.
+
+        What the signature guard does cover is the ORIGINAL defect form -- a literal default object
+        in the signature -- because that instance is reachable from `inspect.signature(...).default`.
+        What was unpinned is the per-call construction the docstring promises. This asserts it
+        directly, the way the `Margins` guard already did by forging the live resolved object."""
+        self.assertIsNot(bm._cfg(None), bm._cfg(None))
+        self.assertEqual(bm._cfg(None), bm._cfg(None))          # equal by value, distinct by identity
+        # an explicit cfg must be passed through untouched, not copied
+        given = bm.BenchmarkConfig(n_boot=2000)
+        self.assertIs(bm._cfg(given), given)
+        # and the same for the margins resolver, so both halves are pinned the same way
+        self.assertIsNot(bm._margins(None), bm._margins(None))
+        self.assertEqual(bm._margins(None), bm._margins(None))
+        m = bm.Margins(delta_S=0.2)
+        self.assertIs(bm._margins(m), m)
+        # poisoning one resolved default cannot reach the next call
+        first = bm._cfg(None)
+        object.__setattr__(first, "width_tol", 99.0)
+        self.assertEqual(bm._cfg(None).width_tol, 0.25)
+
     def test_forging_a_configs_field_cannot_poison_a_later_default_call(self):
         o = oracle()
         probe = bm.BenchmarkConfig()
@@ -2124,6 +2150,23 @@ class ProtocolParameterDefaultsAreNotSharedObjects(unittest.TestCase):
             o, study_id="f", base_seed=7, timestamp_utc="2025-01-02T03:04:05Z"), SMALL)
         self.assertEqual(rv.reasons, ())
         self.assertEqual(rv.joint, J.JOINT_SUPPORTED)
+
+    def test_seed_list_digest_is_order_sensitive(self):
+        """QA found this unpinned: making `seed_list_digest` order-blind SURVIVED all 307 tests, and
+        order-sensitivity is exactly what the `seed_list_frozen` gate and the repeatability criterion
+        rest on. Without it a reordered seed list still satisfies the gate, and a scorecard's `seeds`
+        tuple could be reversed while `per_seed` stayed put -- misattributing every per-seed value
+        behind a digest that still validates."""
+        seeds = (11, 22, 33, 44, 55)
+        d = bm.seed_list_digest(seeds)
+        self.assertNotEqual(d, bm.seed_list_digest(tuple(reversed(seeds))))
+        self.assertNotEqual(d, bm.seed_list_digest((22, 11, 33, 44, 55)))   # one adjacent swap
+        self.assertEqual(d, bm.seed_list_digest(seeds))                     # stable for the same order
+        # membership, length and duplication stay bound too, so the fix cannot narrow to order alone
+        self.assertNotEqual(d, bm.seed_list_digest((11, 22, 33, 44)))
+        self.assertNotEqual(d, bm.seed_list_digest(seeds + (66,)))
+        self.assertNotEqual(d, bm.seed_list_digest((11, 11, 33, 44, 55)))
+        self.assertNotEqual(d, bm.seed_list_digest((11, 22, 33, 44, 56)))
 
     def test_equal_configs_still_share_the_fixture_caches(self):
         """Per-call construction must not cost a cache miss: frozen dataclasses hash by value."""
