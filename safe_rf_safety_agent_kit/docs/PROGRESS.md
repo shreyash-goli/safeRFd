@@ -3692,6 +3692,18 @@ the owner **did not find out why**.
 > (dropping both is KILLED). That is defensible redundancy in the script, since the real U3b scenario
 > moves both terms; the defect was shipping a false kill as the session's one disclosed loose end.
 > **Lesson:** "mutant killed" is a claim like any other and I recorded it without re-running it.
+>
+> **FURTHER CORRECTION (SR-15 re-attestation).** The paragraph above is right about the two terms it
+> names but **understates the redundancy, which is symmetric and wider.** Measured across six mutants
+> on the determinism comparison: **`$RAN`, `$SKIPPED`, `$BAD` and `$UT_RC` are EACH individually
+> unpinned — four survivors.** Only the **`cmp -s canon1 canon2`** comparison (killed on its own) and
+> the `{$BAD ∧ $UT_RC}` pair are pinned. `$RAN`/`$SKIPPED` are *strictly subsumed* by the canon file,
+> since a differing total implies a differing `ran <module> <n>` or `skip <id> :: <reason>` line — so
+> the canon is the load-bearing term and the four count/flag terms are a convenience. Still
+> defensible redundancy rather than masked tests, but any description of this must say **four terms,
+> not one.** Both non-determinism classes were independently reconstructed: a suite failing only on
+> run 2 (`run2 ... failed=1 rc=1`), and a suite with the same skip *count* but a flipped *reason*,
+> which **only** the canon can see.
 
 ## All eight lint evasions closed
 `import os as o; o.system(...)`, `from os import system`, `f = os.system`, `e = eval`,
@@ -4326,3 +4338,105 @@ neither closed nor widened.
 `isinstance(g, GateResult)`, so seven real gates **plus a duck-typed extra constructs fine** and is
 caught downstream by `_gate_set_ok` at eight names. The gate-set check is therefore *more*
 load-bearing than the builder claimed, not less.
+
+---
+
+# SR-15 re-attestation: FAIL — the suite has been making outbound connections all along
+
+**Date:** 2026-11-10. **The headline criterion itself PASSES.** From a pristine `git clone` of
+`b691224`, bare `venv --without-pip`, following only the documented steps:
+`Ran 1002 tests in 116.060s` / `OK (skipped=89)` / `deterministic: run1 == run2` / `RESULT: OK`,
+demo `DEMO OK in 2.7s`, and **the clone was left byte-clean** (`git status --porcelain` empty, no
+`__pycache__`, no `.pytest_cache`). All six reworked items are real and verified. The FAIL rests on
+five defects, two of which contradict unqualified claims in the sections this round rewrote.
+
+## D5 — the offline suite makes real outbound connection attempts on every run
+`tests/toy_tests/test_scripts.py:719` drives the script with `--no-network-guard` against a synthetic
+suite calling `socket.create_connection(("192.0.2.1", 9), timeout=1)`, `_sock().connect(...)` and
+`_sock().connect_ex(...)`. With `GUARD=0` there is **no `sitecustomize` patch**, so those are three
+live `connect()` calls. `test_missing_guard_is_detected_by_canary` replaces the shim with `python -S`,
+so `run_tests.sh`'s **own canary** runs unguarded too. **Neither test is skipped**; both ran in the
+bare 1002-test run above.
+`192.0.2.1` is TEST-NET-1 — non-routable **by convention, not by the kernel**. The reviewer checked
+the local routing table without generating traffic: `route -n get 192.0.2.1` →
+`gateway: 10.43.220.1, interface: en0`. And the test's own comment — *"without the guard these must
+fail fast, not hang for ~75 s"* — **is a description of TCP SYN retransmission**, i.e. of packets
+being sent and dropped. The evidence that it leaves the host was sitting in the test's own comment.
+
+Against that, two unqualified and false claims:
+- `docs/CLEAN_CLONE.md:4` — "no network access at test time".
+- `.github/workflows/ci.yml:3-4` — "**every** test step runs under a socket guard … that makes
+  **any** connection attempt fail."
+
+TEST-NET-1 makes the practical risk small. That is not the point: **this kit's entire premise is
+structural offline-ness, it audits itself on exactly this class of unqualified claim, and I have
+asserted "no network" in my own reporting all session.** Routed with both halves required — make the
+negative controls stay on loopback *and* make the claims accurate, with disclosure preferred over
+weakening a control that would stop distinguishing guarded from unguarded.
+
+## D2 — my own defect: the refusal guard I added misses every shell-side policy
+It consults only the unittest log's `^OK`/`^FAILED` lines and the Python `bad` list. **`MIN_TESTS`,
+`SKIP_RECORD`, `PYTEST_FAILED`, `PYTEST_COLLECTED` and `PYTEST_SKIPPED` all live in the shell and are
+invisible to it**, so the baseline is still rewritten from a run whose `RESULT` is `FAIL`:
+```
+FAIL: POLICY:MIN_TESTS only 5 tests ran (floor MIN_TESTS=1000)
+baseline written: /tmp/.../base.txt (1 modules)
+RESULT: FAIL
+baseline unchanged: NO
+```
+The reviewer apportioned this precisely: my *brief's* wording was literally accurate, but **the
+comment I wrote in the code is the overclaim** — "REFUSE to record a baseline from a run that is not
+clean". **And the clean shape was offered to me and I declined it:** the previous owner's
+recommendation was to have the Python stage *stage* the file and let the shell move it into place only
+if `FAIL -eq 0`. I implemented the narrower check instead. Routed with that shape specified.
+
+## D1, D3, D4
+- **D1:** `--update-baseline --baseline none` writes a file literally named **`none`** into the repo
+  root (224 bytes of real baseline content). `none` is a sentinel in the comparison branch but not in
+  the update branch, which does an unconditional `open(base, "w")`. In a kit whose `demo.py` carries
+  an inode-identity guard specifically to avoid writing to the repo, and which is not in `.gitignore`.
+- **D3:** `socket.gethostbyaddr` and `socket.getfqdn` are **unblocked and undisclosed** (eleven other
+  entry points are blocked, including the two added last round). The reviewer's framing is the
+  finding: *"the fix patched the two names that reviewer happened to test rather than the family, and
+  the next name a reviewer tests reproduces it."* **That is the third occurrence in this project of
+  patching reported cases instead of enumerating the surface** — after the lint evasions and
+  `_interval`/`_metric_cell`. Routed with the instruction to derive the disclosure list from what is
+  actually patched, rather than adding two names.
+- **D4:** `CLEAN_CLONE.md:287` says "**five** patched `socket`-module functions" where line 273 of the
+  same file correctly lists **seven**. A self-inconsistent count inside the section this round
+  rewrote.
+
+## My 3.13 claim was checked, and it holds
+The reviewer verified it on a second pristine clone with a bare 3.13.11 venv: `Ran 1002 tests` /
+`OK (skipped=89)` / deterministic, then **diffed the two verbose bare runs on `(test id, skip reason)`
+pairs — 89 vs 89, `skip lists identical: True`**, per-module skips identical, collected counts
+identical module-by-module. Scoped correctly, with no leak into Linux. **The baseline I regenerated is
+exact on every one of 13 rows on both interpreters, slack 0 on both columns.**
+
+## Two more corrections to my record
+- **The determinism redundancy is four terms, not one** — corrected in place above.
+- **Transitive dependency pins are *undisclosed*, not disclosed.** I told the reviewer this was a
+  disclosed limitation; nothing in `docs/` or `README.md` mentions transitive pins or
+  `--require-hashes`. It is not *claimed* either, so there is no overclaim — but it is an undisclosed
+  limit and I described it as the opposite. The pins themselves check out: four exact `==` entries,
+  consistent with `requirements-dev.txt`, and **nothing on the offline path needs an install**, proven
+  by the bare run passing with all four packages absent.
+
+## A lint-evasion class reported and deliberately not counted as the FAIL
+The **private C-extension counterparts of banned modules**: `_socket` and `_ctypes` are banned, but
+`_pickle` (arbitrary code via `__reduce__`, demonstrated), `_imp` (`create_dynamic`/`exec_dynamic`),
+`_posixsubprocess.fork_exec`, `_multiprocessing`, `_asyncio`, `_sqlite3`, `_tkinter`, `_curses` are
+not. Also `unittest.TestLoader().loadTestsFromName("os.system")` — a plain static call with a literal
+string, the same shape as the `pkgutil.resolve_name` case rated most important last round — plus
+`vars(os)["system"]`, `os.__dict__["system"]`, `dict(inspect.getmembers(os))["system"]` and
+`sys._getframe().f_builtins["exec"]`.
+**Correctly not scored**, because `CLEAN_CLONE.md` already admits "any stdlib code-execution or server
+entry point nobody has thought of yet" — the rule being that a gap the doc admits is not a finding
+while an overclaim is. Recorded because the `_*` family is one greppable class and the presence of
+exactly `_socket` and `_ctypes` shows two members were already thought of.
+
+## Discipline worth copying from this review
+It restored every mutant and verified the restore **by sha256 against the git blob**, not against its
+own working copy — a strictly stronger check than the standing rule, and now the standing rule. It
+also declined to report the one step it could not finish (`--expect torch --twice`) as established in
+either direction, and told me its budget *was* achievable rather than padding.
