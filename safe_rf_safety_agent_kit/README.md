@@ -25,7 +25,9 @@ This starter includes a source-grounded change audit, dependency-aware task plan
 
 **Termination:** `SR-00` to `SR-16` must have factual evidence, independent QA, passing checks and commits; external scientific claims remain labeled unvalidated until independently supported.
 
-`docs/SOURCE_SNAPSHOT.json` preserves the compare metadata for offline audit. External read-only repository browsing can be used to corroborate it; the `ALLOW_EXTERNAL_NETWORK=false` environment flag applies to the toy application, not to manual source verification.
+`docs/SOURCE_SNAPSHOT.json` preserves the compare metadata for offline audit. External read-only repository browsing can be used to corroborate it; manual source verification (the `curl` commands in `docs/DIFF_EVIDENCE.md`) is a human activity outside the test suite entirely.
+
+**Correction (SR-12 finding F5).** An earlier version of this line said the `ALLOW_EXTERNAL_NETWORK=false` environment flag "applies to the toy application". That was an overstatement: **no code in this kit reads that flag, or any of the other flags in `.env.example`.** They are declarative markers for a human reader, and setting them changes no behaviour. The kit's actual offline guarantees are structural, not flag-driven — `src/toy/` is standard-library only and imports no network module (enforced by `scripts/lint.sh` and `tests/toy_tests/test_scripts.py`), `scripts/run_tests.sh` runs the suite under a socket guard that makes connections and DNS lookups raise, and no model weights exist anywhere in the tree. See `docs/CLEAN_CLONE.md` for the full statement.
 
 ## Offline CI, scripts and clean-clone check (SR-15)
 `./scripts/lint.sh`, `./scripts/run_tests.sh --expect none --twice` and `python3 scripts/demo.py` need only Python 3.12+ and no network or credentials. See `docs/CLEAN_CLONE.md` for exact steps, expected test/skip counts and how to read skips. The demo output is a toy tooling check, not evidence about RFdiffusion or any real capability.

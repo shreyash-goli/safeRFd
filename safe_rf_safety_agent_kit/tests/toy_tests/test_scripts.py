@@ -30,19 +30,26 @@ def _dirty():
 
 
 def _listing():
-    """Every file under the repo (excluding .git and bytecode caches) with size and mtime. Files git already
-    reports as modified are tracked by path only, so a concurrent edit by someone else cannot flake the test,
-    while any created/deleted path and any change to a clean file is still detected."""
-    dirty = _dirty()
+    """Every file under the repo (excluding .git and bytecode caches): path -> (size, mtime), plus the set of paths
+    git reports as modified at that moment (someone else may be editing them concurrently)."""
     out = {}
     for dp, dns, fns in os.walk(ROOT):
         dns[:] = [d for d in dns if d not in (".git", "__pycache__")]
         for fn in fns:
             p = Path(dp) / fn
             st = p.lstat()
-            rel = str(p.relative_to(ROOT))
-            out[rel] = None if any(rel == d or rel.startswith(d) for d in dirty) else (st.st_size, st.st_mtime_ns)
-    return out
+            out[str(p.relative_to(ROOT))] = (st.st_size, st.st_mtime_ns)
+    return out, _dirty()
+
+
+def _same(before, after):
+    """Equal path sets, and equal size/mtime for every file not git-dirty at either snapshot. A concurrent edit by
+    another agent cannot flake this, but any created/deleted path or change to a clean file is detected."""
+    (b, bd), (a, ad) = before, after
+    if set(b) != set(a):
+        return False
+    skip = bd | ad
+    return all(b[k] == a[k] for k in b if not any(k == d or k.startswith(d) for d in skip))
 
 
 class TestScriptsExist(unittest.TestCase):
@@ -85,7 +92,7 @@ class TestDemo(unittest.TestCase):
         self.assertIn("NOT EVIDENCE", r.stdout)
         self.assertIn("RFdiffusion", r.stdout)
         self.assertIn("real biological capability", r.stdout)
-        self.assertEqual(_listing(), before, "demo changed files inside the repository")
+        self.assertTrue(_same(before, _listing()), "demo changed files inside the repository")
         # temp dir was cleaned up
         m = re.search(r"temp dir \(all outputs go here\): (\S+)", r.stdout)
         self.assertIsNotNone(m)
@@ -118,7 +125,7 @@ class TestDemo(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("inside the repository", r.stderr)
         self.assertEqual(leftovers, [], "demo left output inside the repo-local TMPDIR")
-        self.assertEqual(_listing(), before)
+        self.assertTrue(_same(before, _listing()))
 
 
 class TestCiWorkflow(unittest.TestCase):

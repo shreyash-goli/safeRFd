@@ -1905,3 +1905,66 @@ rather than assume.
 
 Still open on this file: the `bonferroni_level` **docstring in `benchmark.py`** says "m=3 → 0.98333"
 while the protocol says m=4 / 98.75% everywhere. Routed to the benchmark owner.
+
+---
+
+## SR-12 fixes landing: F1, F5, and the README overclaim
+
+**F1 fixed (`src/toy/checkpoint.py`).** Both references to the checkpoint key mismatch are rewritten
+with the kit's labelling discipline: **SOURCE OBSERVED** that the keys differ
+(`student_model_state_dict` at S:461/S:481 vs `self.ckpt['model_state_dict']` at
+`A:model_runners.py:234`), so a script-written checkpoint would not load into the unmodified upstream
+sampler; then **INFERENCE, not executed** that because upstream indexes the dict directly with
+`strict=True`, the expected failure is a **loud `KeyError`** — not the "silently incompatible" the
+module previously claimed. The only remaining "silent" in the file is the negation "not a silent one".
+- **The vacuous test is now real.** `test_oversize_refused` previously passed with the cap patched to
+  50 bytes, because the truncated read was invalid JSON anyway; it now builds a *valid* 200-param
+  payload with a valid digest, patches the cap to `size − 1`, and requires `CheckpointFormatError`
+  mentioning "larger than", plus a case where the cap exactly equals the size and is accepted.
+  Disabling the cap now fails it, and it is the only failure.
+- **The previously-unpinned label check is now tested with a recomputed digest:**
+  `test_wrong_label_with_recomputed_digest_refused` rewrites the file with four wrong labels, asserts
+  the recomputed digest genuinely matches, and requires refusal mentioning "label". Disabling the
+  label check fails it, and it is the only failure. 48 tests in file.
+
+**F5 fixed (`docs/CLEAN_CLONE.md`, `scripts/run_tests.sh`, `.github/workflows/ci.yml`).** The
+`.env.example` flags are now described as **"declarative markers only"**, with an explicit statement
+that setting them changes no behaviour. The guarantees the document now claims are **structural**:
+`src/toy/` is standard-library only with no network imports (enforced by `lint.sh` and
+`test_scripts.py`), the socket guard in `run_tests.sh`, and no weight files anywhere. The owner also
+**removed its own inert `export ALLOW_EXTERNAL_NETWORK=false`** from the script and the workflow,
+because exporting it implied enforcement — a good instinct. A new test **fails if any of the five
+flags appears in `src/`, `scripts/` or the workflow**, and asserts the document says "declarative
+markers only" and no longer claims the flags govern the application.
+**Orchestrator independent verification:** `grep` across `src/`, `scripts/` and `.github/` for all
+five flag names returns **nothing**. The flags are genuinely inert, as SR-12 found.
+
+**The README carried the same overclaim, and the owner correctly refused to fix it.** `README.md:28`
+said the `ALLOW_EXTERNAL_NETWORK=false` flag "applies to the toy application". The SR-15 owner
+identified it, noted it was original text outside its ownership, and **reported it rather than
+editing it** — the right call under this kit's file-ownership rules. Fixed by the orchestrator, with
+the correction left visible in the README rather than silently rewritten, pointing at the structural
+guarantees and at `docs/CLEAN_CLONE.md`.
+
+**The apparent torch-version discrepancy is resolved, and was not a stale docstring.** QA reported the
+installed torch as 2.11.0 while docstrings and `constraints.txt` say 2.7.1. There are **two
+interpreters on this machine**: the framework `python3` (3.12.4) has torch 2.7.1 / numpy 2.4.6, and a
+miniconda `python` (3.13) has torch 2.11.0 / numpy 2.4.4 — QA used the latter. Orchestrator confirmed
+the canonical `python3` reports **torch 2.7.1**, so the "measured on torch 2.7.1" provenance is
+accurate for the interpreter the suite and CI target. The owner kept the pin at torch 2.7.1 /
+numpy 1.26.4 for reproducibility and **recorded in `constraints.txt` and `CLEAN_CLONE.md` that no
+local environment matches the pin**, so the `optional-deps` CI job tests a combination never run
+locally. The `numpy<2` ABI rationale holds either way. The suite also passes on the miniconda 3.13
+interpreter (740 tests, 2 skipped).
+
+**SR-15's own honest caveats are now in the shipped documentation**, not just this journal, via a new
+"Known limits" section in `docs/CLEAN_CLONE.md`: the CI workflow **has never been executed**; the
+torch/numpy pin is **untested as a combination**; the actions are pinned by **tag, not SHA**; the
+Linux-CPU skip estimate (~2–8) is an **estimate**, not an observation; and the 86-skip bare-environment
+figure was **measured by SR-12**, confirming the owner's earlier *reasoned* value was right.
+
+**A flaky test the owner fixed and explained rather than re-ran until green:** its
+"demo writes nothing into the repo" test failed once because a teammate's file became git-dirty
+between its two snapshots. It now skips size/mtime comparison for any file git-dirty at either
+snapshot, while still failing on any created or deleted path and any change to a clean file — so it
+tolerates concurrent work without weakening what it actually checks.

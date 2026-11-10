@@ -638,8 +638,9 @@ class ConvergedBudgetAndControlGates(unittest.TestCase):
 
     def go(self, **kw):
         exempt = kw.pop("exempt", False)
+        extra = {"subject_kind": "fixture", "fixture_name": "syn"} if exempt else {}
         return bm.analyze_scores(synth_scores(FZ.seeds, **kw), frozen=FZ, registered_digest=FZ.digest,
-                                 subject="syn", cfg=SMALL, loss_check_exempt=exempt)
+                                 subject="syn", cfg=SMALL, **extra)
 
     def test_baseline_has_both_gates_passing(self):
         r = self.go()
@@ -859,7 +860,7 @@ class TrainedStudentCannotBeExempted(unittest.TestCase):
         r = bm.analyze_scores(sc, frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
         self.assertFalse(next(g for g in r.gates if g.name == "control_adequacy").passed)
         r2 = bm.analyze_scores(sc, frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL,
-                               loss_check_exempt=True)
+                               subject_kind="fixture", fixture_name="declared")
         self.assertTrue(next(g for g in r2.gates if g.name == "control_adequacy").passed)
 
 
