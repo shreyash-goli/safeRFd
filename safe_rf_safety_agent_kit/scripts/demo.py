@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import shutil
 import sys
 import tempfile
@@ -49,6 +50,26 @@ def check(cond, msg):
         raise DemoFailure(msg)
 
 
+def _same_inode(a: Path, b: Path) -> bool:
+    sa, sb = os.stat(a), os.stat(b)
+    return (sa.st_dev, sa.st_ino) == (sb.st_dev, sb.st_ino)
+
+
+def inside_repo(p: Path) -> bool:
+    """True if `p` or any ancestor IS the repo root, by inode identity (st_dev, st_ino), checked for the path as
+    given AND for its symlink-resolved form. A textual prefix test is fooled by case-varied paths on
+    case-insensitive filesystems, symlinks and bind mounts; the inode is not."""
+    for start in (Path(os.path.abspath(p)), Path(os.path.realpath(p))):
+        q = start
+        while True:
+            if q.exists() and _same_inode(q, REPO):
+                return True
+            if q.parent == q:
+                break
+            q = q.parent
+    return False
+
+
 def preflight(src: Path) -> None:
     """Detect a missing/unimportable toy package BEFORE doing any work."""
     missing = []
@@ -75,14 +96,14 @@ def run(src: Path, keep: bool) -> int:
     from toy.schema import EvidenceClass
     from toy.teacher_student import train
 
+    # Output must never land in the repo (e.g. via a TMPDIR pointing inside it). Checked BEFORE anything is created,
+    # by inode identity, so not even a transient file is written into the repo.
+    tmproot = Path(tempfile.gettempdir())
+    if inside_repo(tmproot):
+        raise DemoFailure(f"temp dir root {tmproot} is inside the repository; set TMPDIR elsewhere")
     work = Path(tempfile.mkdtemp(prefix="saferf_demo_")).resolve()
     try:
-        # Output must never land in the repo (e.g. via a TMPDIR pointing inside it).
-        try:
-            work.relative_to(REPO)
-        except ValueError:
-            pass
-        else:
+        if inside_repo(work):   # belt and braces
             raise DemoFailure(f"temp dir {work} is inside the repository; set TMPDIR elsewhere")
         print(f"[0] temp dir (all outputs go here): {work}")
 

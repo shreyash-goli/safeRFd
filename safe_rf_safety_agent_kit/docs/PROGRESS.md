@@ -3130,3 +3130,63 @@ the first place.
 TestDemoRepoInodeGuard` — the SR-15 owner's in-flight implementation of the demo inode guard
 (orchestrator's Priority 4, the case-varied `TMPDIR` in-repo write leak), with its tests written
 ahead of the fix. Not attributable to SR-10 or SR-11.
+
+---
+
+## SR-15 rework: all five priorities closed; the skip policy is now structural
+
+**Date:** 2026-11-10. Suite **green** again (orchestrator verified: `OK (skipped=2)`).
+`test_scripts.py` at 80 tests. Measured counts: **bare 874 run / 88 skipped**; PyYAML only
+874 / 87; torch+numpy+pytest+PyYAML 874 / 2 (pytest 872 passed, 2 skipped); `--twice` identical in
+each. The bare figure rose from 86 to **88** because two script tests now also skip without pytest —
+the owner explained the delta rather than restating the old number.
+
+- **Priority 1 — the policy is no longer text-scraped.** Skips are recorded **exactly (test id plus
+  reason) by a hook inside the unittest process**, which removes the whole class of defects where a
+  policy is enforced by grepping output. Bare mode now requires **every** skip to name
+  torch/numpy/pyyaml/pytest *and* say "not installed", "missing" or "unavailable",
+  case-insensitively, with ≥50 skips, at least one torch and one numpy reason, and no "torch
+  present". Torch mode requires **every** skip to name CUDA, MPS or "torch present", and fails on any
+  "not installed"/"missing"/numpy mention or a 13th skip. **The delete-36-tests hole is closed by a
+  per-module baseline** (`scripts/test_baseline.txt`, 15 modules): fewer tests — or, in bare mode,
+  fewer skips — **fails by module name**, so deleting tests can no longer hide under a loose global
+  floor. Boundary tests pin it: 50 passes / 49 fails, 12 passes / 13 fails, 650 passes / 649 fails.
+- **Priority 2 — the policy logic is now actually tested.** Previously **all 16 `run_tests.sh` and
+  all 8 `lint.sh` mutants survived** because the tests only checked happy paths and text needles.
+  `test_scripts.py` now drives the scripts against **synthetic suites and trees**, covering empty and
+  wrong skip reasons, silent passes, deleted tests, failing and erroring tests, the pinned
+  environment, stale bytecode, each network-guard entry point, the guard canary (which fails if the
+  guard is absent), determinism, and the pytest-count mismatch — plus every `lint.sh` rule.
+- **Priority 3 — the `exec` allowance is now an allowlist of exactly two (file, string) pairs** in
+  `failure_modes.py`. **Orchestrator independently verified:** injecting
+  `exec("import socket; socket.socket()")` into `src/toy/schema.py` now produces **LINT: FAIL**,
+  where it previously passed. Also newly banned in `src/`: `subprocess`, `ctypes`, `importlib`,
+  `__import__`, `os.system`, `os.popen` — and network imports are now banned in **`tests/` and
+  `scripts/`** too, which the previous version did not scan. Remaining gaps documented rather than
+  claimed closed: `getattr` tricks, code built at runtime, and `os.system("curl …")` outside `src/`.
+- **Priority 4 — the in-repo write leak is fixed by inode identity**, and the owner's **first inode
+  version still missed a symlinked `TMPDIR`**, which **its own new test caught**; it then also
+  checked the resolved path. Tests run with `--keep` against case-varied, symlinked and plain in-repo
+  `TMPDIR` values and assert **nothing was written**. One honest negative result: a read-only
+  directory cannot be used for this test, because Python silently falls back to `/tmp`.
+- **Priority 5 — `docs/CLEAN_CLONE.md`** now carries the measured counts, the previously-unmeasured
+  PyYAML row **actually measured**, and a section on the network guard's **real scope**: the
+  `_socket` and UDP bypasses, unpatched `gethostbyname_ex`, `python -I` children (which also ignore
+  the no-`.pyc` rule), and non-Python children such as `curl` — plus the caveats that Linux behaviour
+  has never been observed, CPU-wheel resolution via `--extra-index-url` is untested, and CI has never
+  been executed.
+
+**43 script mutants, and the four survivors were all masked tests rather than missing ones** — the
+most instructive result here. The owner fixed each: the torch-mode reason check used a
+**case-sensitive** regex; the `PYTHONDONTWRITEBYTECODE` export was **masked by the test harness's own
+environment**; the determinism compare was **masked because the run counts already differed**; and
+the demo's repo check was **masked by a later check with a similar message**. Each of those is a test
+that appeared to pass for the right reason and did not. One argued equivalent: removing the
+`create_connection` patch still raises, because `create_connection` calls the patched `getaddrinfo`.
+
+**Operational care worth noting:** the owner observed that mutating `run_tests.sh` or `lint.sh` while
+another run was in flight would corrupt that run, so it only ran mutants when nothing else was using
+the scripts. That is the kind of hazard this session has repeatedly been bitten by (stale `.pyc`,
+moving baselines) and it anticipated it.
+
+**CI remains unexecuted**, as the owner states and as the BLOCKED verdict recorded.
