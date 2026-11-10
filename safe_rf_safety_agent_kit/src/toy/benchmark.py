@@ -76,8 +76,10 @@ Known limits stated plainly:
   patching the `SUBJECT_KIND_CODE` table. `verdict_from_records` cross-checks stored `loss_check_exempt` against
   the stored `subject_kind_code` (exempt=1 with a non-fixture code is refused). THAT CROSS-CHECK IS DEFEATED BY
   THE FLAG ALONE: after relabelling a record to trained/unknown, deleting `loss_check_exempt`, setting it to 0.0,
-  or making it unmeasured is accepted (as is deleting both fields). Only a relabel that leaves the flag at 1.0
-  is caught. The stored code and flag are producer-asserted, not authenticated. All of (a)-(f) are post-hoc tampering or declaration abuse, not routes through
+  or making it unmeasured is accepted (as is deleting both fields). Also accepted: flag 0.0 with an
+  out-of-range code, forging the code to 'fixture' (2.0) with the flag at 1.0 or deleted, and code deleted with
+  flag 0.0. Only a relabel that leaves the flag at 1.0 is caught. The stored code and flag are producer-asserted,
+  not authenticated. All of (a)-(f) are post-hoc tampering or declaration abuse, not routes through
   the public pipeline, which always self-labels. None is reachable by accident.
 * DEFAULT PARAMETERS ARE MARGINAL FOR THE ORACLE'S OWN GATES: on base seeds 23 and 5 (30 seeds, n_boot 2000) the
   oracle fixture is JOINT_INCONCLUSIVE because gate 11(b) (F above eps_fit=0.05) and/or gate 12 (worst-seed
@@ -90,6 +92,7 @@ Known limits stated plainly:
 """
 from __future__ import annotations
 
+import collections.abc
 import dataclasses
 import functools
 import hashlib
@@ -192,6 +195,14 @@ def _constant(v: Sequence[float]) -> bool:
     return all(x == v[0] for x in v)
 
 
+def _as_list(v, what: str) -> list:
+    """Accept only real sequences of numbers (list/tuple/range...). None, dicts, sets, strings, scalars and
+    generators are refused with ValueError (never a raw TypeError/KeyError from deeper in the arithmetic)."""
+    if isinstance(v, (str, bytes)) or not isinstance(v, collections.abc.Sequence):
+        raise ValueError(f"{what} needs a sequence of numbers, got {type(v).__name__}")
+    return list(v)
+
+
 def _check_finite(v: Sequence[float], what: str) -> None:
     try:
         ok = all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in v)
@@ -202,7 +213,8 @@ def _check_finite(v: Sequence[float], what: str) -> None:
 
 
 def mean(v: Sequence[float]) -> float:
-    """Public mean: finite input only (ValueError otherwise)."""
+    """Public mean: finite numeric sequences only (ValueError otherwise)."""
+    v = _as_list(v, "mean")
     _check_finite(v, "mean")
     return _mean(v)
 
@@ -243,6 +255,7 @@ def sample_sd(v: Sequence[float]) -> float:
         reachable by a direct caller. An int too large for float (10**400) raises ValueError.
     (3) FALSE ValueError: a representable SD can still be refused when x - m overflows, e.g.
         [1.7e308, -1.7e308, -1.7e308, -1.7e308]. It fails closed (raises, never mis-reports)."""
+    v = _as_list(v, "sample SD")
     n = len(v)
     if n < 2:
         raise ValueError("sample SD needs n >= 2")
@@ -259,9 +272,12 @@ def sample_sd(v: Sequence[float]) -> float:
             raise ValueError("sample SD is not representable as a finite float")
         return r
     try:
-        return math.sqrt(_sum_sq(v, m) / (n - 1))
+        r = math.sqrt(_sum_sq(v, m) / (n - 1))
     except OverflowError:     # reachable only when n*big^2 overflows (e.g. n above ~1.8e8 near big=1e150)
         raise ValueError("sample SD is not representable as a finite float") from None
+    if not math.isfinite(r):  # a sum that overflowed to inf instead of raising (e.g. a plain-sum implementation)
+        raise ValueError("sample SD is not representable as a finite float")
+    return r
 
 
 def quantile(sorted_v: Sequence[float], p: float) -> float:
@@ -302,6 +318,7 @@ def percentile_interval(stats: Sequence[float], level: float) -> tuple[float, fl
 
 def bootstrap_means(values: Sequence[float], n_boot: int, rng) -> list[float]:
     """n_boot resample means; each resample draws len(values) items with replacement."""
+    values = _as_list(values, "bootstrap")
     if len(values) < 1 or isinstance(n_boot, bool) or not isinstance(n_boot, int) or n_boot < 1:
         raise ValueError("need a nonempty sample and n_boot >= 1")
     n = len(values)
@@ -387,6 +404,7 @@ def t_ppf(p: float, df: float) -> float:
 def t_interval(values: Sequence[float], level: float) -> tuple[float, float]:
     """Two-sided t-interval for the mean, df = n-1 (needs n >= 2)."""
     _check_level(level)
+    values = _as_list(values, "t-interval")
     n = len(values)
     if n < 2:
         raise ValueError("t-interval needs n >= 2")

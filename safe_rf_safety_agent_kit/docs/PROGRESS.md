@@ -3010,3 +3010,51 @@ being run, and **whether the implementation can degrade `E` alone was not checke
   which gates the observation concerned**, a prose leak the orchestrator had not spotted even while
   enforcing the no-prose-outcome rule.
 - A grammar slip in the trailer; header and changelog updated with r8 and the r7 review result.
+
+---
+
+## SR-10 delta-4: last five residuals closed; `eta_star` now pinned
+
+**Date:** 2026-11-10. `test_benchmark.py` at 181 tests; module suite **OK**; 15 module-scoped mutants,
+all killed.
+
+- **The defaults pin is now programmatic and complete.** The old 7-of-17 test is replaced by one that
+  iterates `dataclasses.fields(BenchmarkConfig)` against a recorded table of **all 18** defaults —
+  `eta_star` included — plus the three `Margins` defaults. **Adding a field without a table entry
+  fails the set comparison**, so the gap closes permanently rather than for today's field list.
+  Changing `eta_star`, `n_train`, `n_eval`, `g_min`, `tail_ratio_max`, `n_boot` or a margin default is
+  killed, and the failure message names `eta_star` as **the erasure strength** so its significance is
+  visible at the point of failure. *Orchestrator verified:* the pin is at
+  `tests/toy_tests/test_benchmark.py:1602` in `test_every_config_field_default_is_pinned`;
+  `BenchmarkConfig` has 18 fields and `eta_star` defaults to 0.5.
+- **The overflow guarantee got a better fix than the orchestrator asked for.** The brief suggested
+  mocking `_sum_sq` to return `inf` and asserting the caller converts it. The builder instead made
+  `sample_sd` **reject a non-finite result** outright — so a plain-`sum` `_sum_sq` becomes
+  **behaviourally equivalent through the public API**, because an `inf` result is converted to
+  `ValueError` regardless of how it arose. That **closes** the gap rather than testing around it, and
+  retires the surviving `fsum`→`sum` mutant by making it genuinely equivalent instead of merely
+  unpinned. Tests mock the seam to return both `inf` and `nan`; removing the check is killed.
+- **The stale figure is gone** (orchestrator verified: zero occurrences of `2.2e-324` in the test
+  file), and the comment now states that its line is the **behavioural** check while the arithmetic
+  assertions further down only verify the docstring's figures and never call `sample_sd` — removing
+  the ambiguity the reviewer flagged.
+- **The enumeration is now complete**, covering the three routes it had omitted: flag `0.0` with an
+  out-of-range code; code forged to `fixture` with the flag at 1.0 **or** deleted; and code deleted
+  with flag `0.0` — all accepted, all yielding JOINT_SUPPORTED, all documented. A **text-pin test
+  covers each docstring phrase**, including "(as is deleting both fields)", which previously had no
+  test; removing the phrase is killed.
+- **Non-sequence inputs now fail closed across four functions.** `mean`, `sample_sd`, `t_interval`
+  and `bootstrap_means` accept only real sequences; `None`, dicts, sets, scalars, strings, bytes,
+  generators and plain objects all raise `ValueError`, while lists, tuples and ranges still work.
+  Removing the check from any of the four, or letting strings through, is killed. This retires the
+  last of the raw-exception leaks the reviewer's 29-value sweep had found.
+
+**Routed onward, not SR-10's file:** `SeedSummary.from_values([10**400, …])` in
+`src/toy/robustness.py` raises a raw **`OverflowError`** rather than a `ValueError`. Same contract
+class that SR-06 was failed for; routed to the robustness owner.
+
+**Suite instability during this round, attributed accurately:** unittest counts moved 869 → 871 as a
+teammate's tests landed, with failure counts varying between runs (0, 3, 5). **Every failure the
+builder could read was in `tests/toy_tests/test_scripts.py`** — the SR-15 owner's file, mid-rework on
+the per-module baseline. The builder honestly noted it did **not** capture which test failed on the
+first run, so it cannot confirm that one was also SR-15's.

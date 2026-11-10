@@ -1589,12 +1589,24 @@ class OracleAcrossBaseSeeds(unittest.TestCase):
             self.assertTrue(failed <= {"control_adequacy", "convergence"}, (base, failed))
             self.assertEqual(r.verdict == J.JOINT_SUPPORTED, not failed, base)   # SUPPORTED iff every gate passes
 
-    def test_default_parameters_are_the_ones_the_pins_were_taken_under(self):
-        d = bm.BenchmarkConfig()
-        self.assertEqual((d.tau_conv, d.eps_fit, d.steps, d.steps_conv, d.lr, d.delta_A, d.loss_factor),
-                         (1e-3, 0.05, 300, 1000, 0.3, 0.05, 2.0),
-                         "a gate/budget DEFAULT changed. The EXPECT pins below were measured under the old defaults: "
-                         "re-measure them deliberately and record the change in docs/PROGRESS.md.")
+    DEFAULTS = {"width": 3, "n_train": 24, "n_eval": 32, "steps": 300, "lr": 0.3, "eta_star": 0.5, "g_min": 1e-3,
+                "n_boot": 10_000, "alpha": 0.05, "min_seeds": 30, "max_failure_rate": 0.05, "width_tol": 0.25,
+                "steps_conv": 1000, "tau_conv": 1e-3, "delta_A": 0.05, "eps_fit": 0.05, "loss_factor": 2.0,
+                "tail_ratio_max": 10.0}
+    MARGIN_DEFAULTS = {"delta_S": 0.10, "delta_R": 0.05, "delta_sel": 0.10}
+    HINT = ("a BenchmarkConfig/Margins DEFAULT changed or a field was added. The EXPECT pins below were measured "
+            "under these defaults: record the change in docs/PROGRESS.md, re-measure deliberately, then update this "
+            "table. (eta_star is the erasure strength itself.)")
+
+    def test_every_config_field_default_is_pinned(self):
+        fields = {f.name: f.default for f in dataclasses.fields(bm.BenchmarkConfig)}
+        self.assertEqual(set(fields), set(self.DEFAULTS), self.HINT)       # a new field must be added to the table
+        for name, want in self.DEFAULTS.items():
+            with self.subTest(field=name):
+                self.assertEqual(fields[name], want, self.HINT)
+                self.assertIs(type(fields[name]), type(want), name)
+        mf = {f.name: f.default for f in dataclasses.fields(bm.Margins)}
+        self.assertEqual(mf, self.MARGIN_DEFAULTS, self.HINT)
 
     def test_default_parameter_pins(self):
         for base, want in self.EXPECT.items():
@@ -1663,7 +1675,9 @@ class SdScaleBands(unittest.TestCase):
                 self.fail(f"a representable SD at scale {s} was refused: {e}")
 
     def test_documented_limits_of_the_zero_sd_invariant(self):
-        # (1) float floor: true SD 2.2e-324 rounds to 0.0 although the sample is not constant
+        # (1) float floor: true SD 2.017e-324 (= 5e-324/sqrt(6)) rounds to 0.0 although the sample is not constant.
+        # THIS line is the behavioural check on sample_sd; the arithmetic assertions further down only check the
+        # figures quoted in the docstring and never call sample_sd.
         self.assertEqual(bm.sample_sd([0.0] * 5 + [5e-324]), 0.0)
         # (2) Python ints beyond 2**53 are converted to float
         self.assertEqual(bm.sample_sd([10 ** 20, 10 ** 20 + 1]), 0.0)
@@ -1738,6 +1752,63 @@ class SdOverflowFallback(unittest.TestCase):
         with mock.patch.object(bm, "_sum_sq", side_effect=OverflowError("simulated")):
             with self.assertRaisesRegex(ValueError, "not representable"):
                 bm.sample_sd([1.0, 2.0, 4.0])
+
+
+# ===================================================== QA round 7
+class SumSqSeamPinsTheOverflowGuarantee(unittest.TestCase):
+    def test_a_sum_of_squares_that_overflows_to_inf_becomes_value_error(self):
+        # plain sum() would return inf rather than raise; the guarantee must hold either way
+        with mock.patch.object(bm, "_sum_sq", return_value=float("inf")):
+            with self.assertRaisesRegex(ValueError, "not representable"):
+                bm.sample_sd([1.0, 2.0, 4.0])
+
+    def test_nan_from_the_seam_is_also_refused(self):
+        with mock.patch.object(bm, "_sum_sq", return_value=float("nan")):
+            with self.assertRaisesRegex(ValueError, "not representable"):
+                bm.sample_sd([1.0, 2.0, 4.0])
+
+
+class NonSequenceInputsAreValueErrors(unittest.TestCase):
+    def test_public_statistics_refuse_non_sequences_with_value_error(self):
+        bad = (None, {"a": 1.0, "b": 2.0}, {1.0, 2.0}, 5, 5.0, "12", b"12", object(), (x for x in (1.0, 2.0)))
+        for v in bad:
+            for fn in (bm.mean, bm.sample_sd, lambda x: bm.t_interval(x, 0.95),
+                       lambda x: bm.bootstrap_means(x, 5, make_rng(1))):
+                with self.assertRaises(ValueError, msg=repr(v)):
+                    fn(v)
+
+    def test_real_sequences_still_work(self):
+        for v in ([1.0, 2.0, 4.0], (1.0, 2.0, 4.0), range(1, 4)):
+            self.assertAlmostEqual(bm.mean(v), sum(v) / 3)
+            self.assertGreater(bm.sample_sd(v), 0.0)
+            bm.t_interval(v, 0.95)
+
+
+class RelabelRouteEnumerationIsComplete(unittest.TestCase):
+    TS = "2025-01-02T03:04:05Z"
+
+    def test_additional_accepted_routes(self):
+        syn = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        recs = bm.to_experiment_records(syn, study_id="f", base_seed=7, timestamp_utc=self.TS)
+        j = recs[-1]
+        base = {k: v for k, v in j.metrics.items() if k not in ("subject_kind_code", "loss_check_exempt")}
+        M = MetricValue.measured
+        routes = {"flag 0.0 + out-of-range code 7.0": ({"subject_kind_code": M(7.0), "loss_check_exempt": M(0.0)}, "unknown"),
+                  "code forged to fixture, flag 1.0": ({"subject_kind_code": M(2.0), "loss_check_exempt": M(1.0)}, "fixture"),
+                  "code forged to fixture, flag deleted": ({"subject_kind_code": M(2.0)}, "fixture"),
+                  "code deleted, flag 0.0": ({"loss_check_exempt": M(0.0)}, "unknown"),
+                  "code deleted, flag deleted": ({}, "unknown")}
+        for name, (extra, kind) in routes.items():
+            rec = dataclasses.replace(j, metrics={**base, **extra})
+            rv = bm.verdict_from_records(recs[:-1] + [rec], SMALL)
+            self.assertEqual((rv.subject_kind, rv.joint), (kind, J.JOINT_SUPPORTED), name)    # accepted: documented
+
+    def test_docstring_claims_are_text_pinned(self):
+        doc = " ".join(bm.__doc__.split())
+        for needle in ("(as is deleting both fields)", "flag 0.0 with an out-of-range code",
+                       "forging the code to 'fixture' (2.0) with the flag at 1.0 or deleted",
+                       "code deleted with flag 0.0", "producer-asserted, not authenticated"):
+            self.assertIn(needle, doc)
 
 
 class IneligibleVersusFailed(unittest.TestCase):
