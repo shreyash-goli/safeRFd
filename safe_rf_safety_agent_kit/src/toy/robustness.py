@@ -32,8 +32,10 @@ Structural rule against single-example claims (checked at construction, not mere
 Honest limits: Python cannot make this impossible. `object.__setattr__`, `object.__new__`, and
 SUBCLASSING `SeedSummary` / `InsufficientEvidence` with a `__post_init__` that skips the checks all build
 unvalidated nested objects (a `Scorecard` still refuses such an object, via the exact-type check, but a
-bare unvalidated subclass instance exists). Edits to module constants also defeat the floor. The guarantee
-is "no supported API path", not a security boundary. The same caveat applies to every "frozen" claim below.
+bare unvalidated subclass instance exists). `gc.get_referents` reaches the writable dict behind a
+`MappingProxyType` (see `Scorecard`, limit (2)). Edits to module constants also defeat the floor. The
+guarantee is "no supported API path", not a security boundary. The same caveat applies to every "frozen"
+claim below.
 
 Scope notes, stated plainly:
 * An INSUFFICIENT_EVIDENCE card still holds `per_seed`: the raw observations (including a lone
@@ -126,6 +128,21 @@ class ProbeConfig:
             raise ValueError(f"min_seeds must be >= {SEED_FLOOR} (absolute floor: no claims from single examples)")
 
 
+def _pcfg(cfg: Optional[ProbeConfig]) -> ProbeConfig:
+    """Resolve a `cfg=None` probe argument to a FRESHLY CONSTRUCTED `ProbeConfig()`.
+
+    Every probe takes `cfg: Optional[ProbeConfig] = None` rather than a literal `cfg = ProbeConfig()`. A
+    literal default object is evaluated ONCE at import, so every call that omits the argument shares that one
+    instance. `ProbeConfig` is frozen, so ordinary code cannot mutate it -- but this kit's own threat model
+    and tests use `object.__setattr__` to simulate tampering (see `Scorecard`'s honest limits), and that
+    reaches through the freeze into the shared default. One
+    `object.__setattr__(<shared default>, "min_seeds", 1)` would defeat the `SEED_FLOOR` policy for every
+    later no-argument probe call in the process, which is exactly the "no claims from single examples"
+    guarantee this module is built around. Identical defect class as `toy.benchmark`'s `_cfg` / `_margins`,
+    where it was measured to flip a verdict from SUPPORTED to UNSUPPORTED."""
+    return ProbeConfig() if cfg is None else cfg
+
+
 @dataclasses.dataclass(frozen=True)
 class InsufficientEvidence:
     """Explicit 'no number' result. Deliberately has NO mean/sd/min/max attributes."""
@@ -182,15 +199,40 @@ class SeedSummary:
 
     @classmethod
     def from_values(cls, values: Sequence[float]) -> "SeedSummary":
+        """Build a summary from a sequence of real numbers.
+
+        ACCEPTED NUMERIC CONTRACT, decided and stated here (pinned by
+        `test_robustness.test_from_values_numeric_type_contract`): a value is accepted iff its TYPE provides
+        `__float__` or `__index__` AND it is not a `bool` -- so `float`, `int`, `decimal.Decimal`,
+        `fractions.Fraction` and any other `numbers.Real` are accepted and converted with `float(v)`.
+        Everything else raises `ValueError`, INCLUDING two types that used to slip through:
+        * `bool`: refused so that the three places that judge a boolean now agree. `SeedSummary.__post_init__`
+          rejects `isinstance(v, bool)` and `_to_metric` records a bool outcome as UNMEASURED, but
+          `from_values([True, False, True])` used to SUCCEED, silently coercing to 1.0/0.0. A boolean is never
+          a measurement anywhere in this kit.
+        * `str` / `bytes`: refused because `float("1")` succeeds, so `from_values(["1","2","3"])` used to
+          return a summary of (1.0, 2.0, 3.0). A number parsed out of text is not a measurement either.
+        Only a DIRECT caller can reach either case: `summarize_seeds` feeds `MetricValue.value`, and
+        `MetricValue` already accepts finite floats only (no int/bool coercion).
+        Conversion failures keep the documented `ValueError` family: an int too large for float (10**400)
+        raises `ValueError`, never `OverflowError`, and no raised error chains a context (`from None`)."""
         # NOTE: toy.benchmark.sample_sd's docstring cites this cast as the reason the "Python ints beyond 2**53"
         # limit is unreachable from SR-11 (every value is cast to float here, and SeedSummary.__post_init__
         # rejects non-float values). Keep the cast; if it moves, update that citation.
-        try:
-            vals = tuple(float(v) for v in values)
-        except OverflowError:   # e.g. 10**400: keep the documented ValueError family
-            raise ValueError("a value is too large to represent as a finite float") from None
-        except TypeError as e:
-            raise ValueError(f"values must be real numbers: {e}") from None
+        out = []
+        for v in values:
+            t = type(v)
+            if isinstance(v, bool) or not (hasattr(t, "__float__") or hasattr(t, "__index__")):
+                raise ValueError(
+                    f"values must be real numbers, got {t.__name__}: bool and str are refused on purpose "
+                    "(a boolean outcome and a number parsed out of text are not measurements)") from None
+            try:
+                out.append(float(v))
+            except OverflowError:   # e.g. 10**400: keep the documented ValueError family
+                raise ValueError("a value is too large to represent as a finite float") from None
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"values must be real numbers: {e}") from None
+        vals = tuple(out)
         if len(vals) < SEED_FLOOR:
             raise ValueError(f"a summary needs >= {SEED_FLOOR} measured seeds, got {len(vals)}")
         return cls(*_stats(vals), values=vals)
@@ -307,11 +349,20 @@ def thaw(x: Any) -> Any:
 @dataclasses.dataclass(frozen=True)
 class Scorecard:
     """Immutable record of one probe. Frozen dataclass; containers are read-only (MappingProxyType / tuple),
-    copied defensively at construction. `object.__setattr__` still bypasses the freeze (Python cannot prevent
-    that). The card stores no hash of itself (only `seed_digest`, a hash of the seed list), so tampering is
-    detectable only by comparing a freshly recomputed `content_hash()` with a hash recorded EARLIER, for
-    example the one `scorecard_to_record` places in the record's `input_hashes["scorecard"]`; not impossible,
-    and not detectable without such a recorded value."""
+    copied defensively at construction.
+
+    HONEST LIMITS, the complete list of routes known to this module (Python cannot make this impossible):
+    (1) `object.__setattr__` bypasses the freeze and replaces any field outright.
+    (2) `gc.get_referents(card.details)[0]` returns the WRITABLE dict behind the `MappingProxyType`, so
+        `gc.get_referents(card.details)[0]["injected"] = 1` adds a key to `details` and changes
+        `content_hash()`. The proxy is a read-only VIEW of a dict, not a copy of it, and `gc` can reach the
+        dict through the view. This grants no power (1) does not already grant, and it is equally detectable
+        by the same means, but it is a route and this module's standard is that routes are stated.
+        (`to_dict()` is a true defensive copy: mutating its result cannot reach the card.)
+    The card stores no hash of itself (only `seed_digest`, a hash of the seed list), so tampering by EITHER
+    route is detectable only by comparing a freshly recomputed `content_hash()` with a hash recorded EARLIER,
+    for example the one `scorecard_to_record` places in the record's `input_hashes["scorecard"]`; not
+    impossible, and not detectable without such a recorded value."""
     probe_id: str
     probe_kind: str
     status: ProbeStatus
@@ -452,10 +503,12 @@ def scorecard_to_record(sc: Scorecard, *, run_id: str, timestamp_utc: str, code_
 
 
 # ==================================================== 1. seed-sensitivity probe
-def seed_sensitivity_probe(outcome: Callable[[int], float], seeds: Sequence[int], cfg: ProbeConfig = ProbeConfig(),
+def seed_sensitivity_probe(outcome: Callable[[int], float], seeds: Sequence[int], cfg: Optional[ProbeConfig] = None,
                            *, probe_id: str = "seed_sensitivity") -> Scorecard:
     """Distribution of `outcome(seed)` across a frozen seed list: mean, SD, IQR, min, max, full vector.
-    Fewer than cfg.min_seeds measured seeds => INSUFFICIENT_EVIDENCE scorecard, no scalar."""
+    Fewer than cfg.min_seeds measured seeds => INSUFFICIENT_EVIDENCE scorecard, no scalar.
+    `cfg=None` means a freshly constructed `ProbeConfig()`; see `_pcfg`."""
+    cfg = _pcfg(cfg)
     seeds = _check_seeds(seeds)
     per_seed = tuple(_to_metric(outcome, s) for s in seeds)
     vals = [m.value for m in per_seed if m.is_measured]
@@ -724,12 +777,14 @@ def standard_shifts(reorder_kind: ShiftKind = ShiftKind.INVARIANCE_EXACT, reorde
             shift_scale(1.7), shift_translate(1000.0), shift_column_offsets((3.0, -7.0, 0.5)), shift_jitter(1e-6))
 
 
-def probe_shift(measure: Measure, spec: ShiftSpec, seeds: Sequence[int], cfg: ProbeConfig = ProbeConfig(), *,
+def probe_shift(measure: Measure, spec: ShiftSpec, seeds: Sequence[int], cfg: Optional[ProbeConfig] = None, *,
                 fixture_factory: Callable[[int], MeasureFixture] = make_measure_fixture,
                 probe_id: Optional[str] = None) -> Scorecard:
     """Apply `spec` to a seeded fixture, compare the measure to the ideal expectation. Headline per seed:
     |measure(shifted) - expected| / expected. A violated declared invariance is reported as
-    INVARIANCE_DEFECT (a defect in the measure); an exceeded sensitivity bound as SENSITIVITY_EXCEEDS_BOUND."""
+    INVARIANCE_DEFECT (a defect in the measure); an exceeded sensitivity bound as SENSITIVITY_EXCEEDS_BOUND.
+    `cfg=None` means a freshly constructed `ProbeConfig()`; see `_pcfg`."""
+    cfg = _pcfg(cfg)
     seeds = _check_seeds(seeds)
     exact_kind = spec.kind is ShiftKind.INVARIANCE_EXACT
     rows = []   # (seed, dev, expected, bound) for measured seeds
@@ -851,11 +906,13 @@ def assert_no_silent_default(measure: Measure, seeds: Sequence[int] = (0, 1, 2))
         raise SilentDefaultError("measure returned a value instead of rejecting: " + "; ".join(bad))
 
 
-def probe_missing_inputs(measure: Measure, seeds: Sequence[int], cfg: ProbeConfig = ProbeConfig(), *,
+def probe_missing_inputs(measure: Measure, seeds: Sequence[int], cfg: Optional[ProbeConfig] = None, *,
                          probe_id: Optional[str] = None) -> Scorecard:
     """Per seed the headline is the COUNT of missing-input cases answered with a value (0 = every case
     raised/unmeasured; this is a count of defects, not a measurement default). Also runs two structural
-    checks once: empty seed list => INSUFFICIENT_EVIDENCE, and absent arm => unmeasured."""
+    checks once: empty seed list => INSUFFICIENT_EVIDENCE, and absent arm => unmeasured.
+    `cfg=None` means a freshly constructed `ProbeConfig()`; see `_pcfg`."""
+    cfg = _pcfg(cfg)
     seeds = _check_seeds(seeds)
     per_seed, table = [], {}
     for s in seeds:
@@ -940,7 +997,7 @@ def _precision_outcome(kind: str, param: float, seed: int, measure: Measure = ms
     raise ValueError(f"unknown precision kind {kind!r}")
 
 
-def probe_precision(kind: str, param: float, seeds: Sequence[int], cfg: ProbeConfig = ProbeConfig(), *,
+def probe_precision(kind: str, param: float, seeds: Sequence[int], cfg: Optional[ProbeConfig] = None, *,
                     tol: float = 1e-12, measure: Measure = mse_naive) -> Scorecard:
     """Quantify precision loss of the `toy.stability` path against exact rational arithmetic.
     kind: 'magnitude' (data scaled by 10**param; squares may under/overflow), 'cancellation' (values
@@ -949,7 +1006,9 @@ def probe_precision(kind: str, param: float, seeds: Sequence[int], cfg: ProbeCon
     path (see `plain_loop_mean`: the stability path's accuracy depends on the CPython version). A loud failure
     (validators raise, e.g. overflow) makes that seed unmeasured with the reason; a silent total loss
     (underflow to a measured 0.0 whose exact value is nonzero) is counted as `n_silent_zero`. `measure` (used by
-    'magnitude' only) lets a test supply a measure without the underflow guard."""
+    'magnitude' only) lets a test supply a measure without the underflow guard.
+    `cfg=None` means a freshly constructed `ProbeConfig()`; see `_pcfg`."""
+    cfg = _pcfg(cfg)
     if kind not in ("magnitude", "cancellation", "accumulation"):
         raise ValueError(f"unknown precision kind {kind!r}")
     seeds = _check_seeds(seeds)
@@ -986,6 +1045,7 @@ def probe_precision(kind: str, param: float, seeds: Sequence[int], cfg: ProbeCon
                     "from 3.12); they were produced on the version recorded in details.python_version."))
 
 
-def precision_sweep(kind: str, params: Sequence[float], seeds: Sequence[int], cfg: ProbeConfig = ProbeConfig(),
+def precision_sweep(kind: str, params: Sequence[float], seeds: Sequence[int], cfg: Optional[ProbeConfig] = None,
                     *, tol: float = 1e-12) -> tuple:
-    return tuple(probe_precision(kind, p, seeds, cfg, tol=tol) for p in params)
+    """`cfg=None` means a freshly constructed `ProbeConfig()`; see `_pcfg`."""
+    return tuple(probe_precision(kind, p, seeds, _pcfg(cfg), tol=tol) for p in params)

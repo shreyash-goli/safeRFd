@@ -3755,7 +3755,7 @@ caught**. In `benchmark.py` it needs **nothing but an ordinary call**:
 
 ```
 registered width_tol = 0.10 ; module default = 0.25
-recompute with the STUDY's own cfg       -> h1=INCONCLUSIVE  joint=JOINT_INCONCLUSIVE
+recompute with the STUDY's own cfg       -> h1=SUPPORTED     joint=JOINT_INCONCLUSIVE
 recompute with NO cfg argument (default) -> h1=SUPPORTED     joint=JOINT_SUPPORTED
 default cfg hash == stored config hash?  False
 ```
@@ -4005,7 +4005,12 @@ format-version implications included.
 - **A real defect in `benchmark.py`, routed to its owner:** `analyze_scores(margins=Margins())` is a
   **mutable default argument**, so every fixture built without an explicit `margins=` shares one
   instance and mutating a *field* poisons the scorer's default **process-wide**. It broke 24 of this
-  owner's tests with a confusing `TypeError` before they isolated it. `Margins` being a *frozen*
+  owner's tests with a confusing `TypeError` before they isolated it. *(Two details corrected by the
+  `benchmark.py` owner: each `def` evaluates its **own** `Margins()`, so `analyze_scores` and
+  `run_study` hold **separate** instances and poisoning one does not poison the other — the hazard is
+  **per-function**, process-wide; and forging `delta_S="x"` surfaces as `ValueError: could not convert
+  string to float: 'x'`, not `TypeError`, so the reported `TypeError` came from some other field or
+  path.)* `Margins` being a *frozen*
   dataclass is why nobody looked — but this codebase's test surface routinely uses
   `object.__setattr__` to simulate tampering, and that reaches straight through the freeze into the
   shared default. Same hazard class as the `clear_bytecode` bug: **a test mutating shared state the
@@ -4024,3 +4029,111 @@ format-version implications included.
   implies `bad`, and `if bad: jv = JOINT_INCONCLUSIVE` overrides `_combine`, so removing
   `not gate_set_bad` from `gates_ok` changes no rendered page (verified by rendering both ways).
   Documented in-line rather than pinned by a test that could not fail. That is the correct call.
+
+---
+
+## SR-10 rework landed: masked test #8 is CLOSED, and the recompute is bound to its config
+
+**Date:** 2026-11-10. `test_benchmark.py` **214** (was 189), `test_robustness.py` **93** (was 90);
+**307 combined, OK**, verified by me before commit, plus **388 OK** across the five modules the owner
+did not touch. Zero `.pyc` left behind.
+
+### The citation guard: kept rather than deleted, and the reason is sound
+I had offered "fix it or delete it". The owner kept it with an argument I had not considered: the
+thing it guards is a **cross-module citation** — `sample_sd`'s docstring naming the cast by symbol —
+and **no behaviour test can keep that honest.** A semantic test pins that coercion happens, not that
+the cast is still written at the place the docstring cites. So the tripwire has a job no other test
+can do; the defect was that it did not do it.
+Fix: strip annotation subtrees (`arg.annotation`, `FunctionDef.returns`, `AnnAssign.annotation`)
+before the AST walk. Measured limits, now on **annotated** snippets that model the real target — the
+fixture flaw that created masked test #8:
+
+| mutation (all carry `v: Sequence[float]`) | guard |
+|---|---|
+| live `float(x)` | True |
+| `map(float, v)` | True |
+| dead code after `return` | True (documented limit) |
+| comment decoy | False |
+| cast moved into a helper | False (documented false red) |
+| `x * 1.0` | **False — now red** |
+| cast deleted | **False — now red** |
+
+**Masked test #8 is closed, and `R3` is now killed** by two independent tests. The pin can fail:
+removing the annotation-stripping reds the limits test. **The limits test now asserts ten cases**
+(eight annotated, two unannotated controls) — not four, as this journal twice said, and not the five
+I corrected it to.
+**One of my earlier corrections is now itself historical:** the retracted "exactly the right
+semantics" passage *and* my own correction to it both predate a guard that distinguishes annotation
+from live reference. Moving the cast now correctly turns it **red** — and the old claim that a move
+*should* stay green was the wrong design goal all along, since the citation names the symbol.
+
+### `verdict_from_records` is bound to the config it was registered under
+It now compares `cfg.config_hash()` against the record's own `input_hashes["config"]` **before any
+cfg-derived parameter is used**. Mismatch, absent, or self-disagreeing all fail **closed**:
+`JOINT_INCONCLUSIVE`, three `INCONCLUSIVE`, a reason in the new `RecomputedVerdict.reasons`, and
+`config_hash` recording what it bound to. **Forgery checks were moved *ahead* of the config check so
+a mismatch can never mask a forgery** — an ordering question I did not think to ask about. The
+docstring now names exactly which parameters come from the caller and why that is safe.
+
+### The shared-default defect was worse, and in a second module
+Confirmed and **worse than reported**: forging `delta_S=99.0` flipped a later **no-argument** call
+from SUPPORTED to **UNSUPPORTED**. And the same defect existed in `robustness.py`'s **five probes**,
+where the stake is `SEED_FLOOR` itself — the parameter enforcing "no claims based on single examples",
+which is one of SR-11's two acceptance criteria. Both fixed via per-call construction (`_cfg`,
+`_margins`, `_pcfg`). `lru_cache` behaviour is unaffected because frozen dataclasses hash by value,
+and that is pinned.
+**The ordering hazard is now demonstrated rather than argued:** re-introducing the shared default reds
+**two pre-existing tests** (`RelabelRouteFullGrid.test_additional_accepted_routes`,
+`ValidityGates.test_baseline_synthetic_is_supported`) because the owner's own forgery test leaks into
+them. That is cross-test contamination caught in the act.
+
+### B11: the owner refused an "equivalent" label, and is right
+QA called `fsum`→`sum` **genuinely equivalent**. The owner disagrees with the *label*, not the
+finding: it is a survivor protected by an explicit **non-claim**. The docstring already says "not
+proven value-equivalent", and on 3.12 Neumaier compensation is not guaranteed exactly rounded, so a
+differing float is possible in principle — rarer because `sqrt` halves the ulp error and all terms are
+non-negative. Correct wording: **"undistinguishable by any current test, and the module declines the
+stronger claim."** This is the **seventh** unargued-equivalence label of the session, and the first
+applied by a *reviewer* rather than a builder. The pattern is not specific to role.
+Figure note: the docstring says 220k trials, QA reports 240,080 — different experiments; the docstring
+now quotes the smaller, older one.
+
+### Four more corrections the owner made to figures I supplied
+1. **The item-2 measurement I relayed was wrong.** The journal and my brief both printed
+   `h1=INCONCLUSIVE` for the study's own cfg. Measured at base seed 7, 30 seeds, `n_boot=2000`,
+   `width_tol=0.10`: **`h1=SUPPORTED`**, h2 and h3 INCONCLUSIVE (bootstrap/t width disagreement at
+   10%), joint JOINT_INCONCLUSIVE. **The joint label was right; `h1` was not.** Corrected above.
+2. **"Every fixture shares *one* `Margins` instance" is wrong** — each `def` evaluates its own, so
+   `analyze_scores` and `run_study` hold separate instances. Per-function, process-wide. Corrected.
+3. **The reported `TypeError` is a `ValueError`** (`could not convert string to float: 'x'`, via
+   `float(getattr(margins, mname))` in `evaluate_primary`). Corrected.
+4. **"`alpha` IS pinned" needs precision:** it was pinned only because a mismatched alpha changes
+   `want_level` and the `ci_level` cross-check then **raises**. It was never pinned by *provenance*.
+   After the fix it is pinned by the config hash like everything else.
+
+### Found without being asked
+- **`str` and `bytes` were silently coerced by `from_values`** — `float("1")` and `float(b"1")` both
+  succeed on 3.12.4, so `from_values(["1","2","3"])` returned a summary of `(1.0, 2.0, 3.0)`. Same
+  class as the bool hole and **not reported by QA**. The contract is now stated and pinned: accepted
+  iff `type(v)` provides `__float__` or `__index__` and is not `bool` — so `float`/`int`/`Decimal`/
+  `Fraction` in, `bool`/`str`/`bytes` out, which finally makes `from_values`, `__post_init__` and
+  `_to_metric` agree.
+- **`evaluate_gates`' `margins` parameter is dead** — accepted, never read (verified by AST).
+  Documented as accepted-and-ignored rather than removed, so no reader infers that gate thresholds
+  move with margins.
+- **`config_hash` is now documented as *not* a complete provenance key** (margins are outside it), with
+  the reason the per-record `margin` metric makes recomputation sound anyway.
+- **It wrote and then removed a tautological assertion of its own** — `assertIn(X if X in d else Y, d)`,
+  which can never fail. The exact pattern under audit, caught by the author.
+- **`Scorecard`'s limits list is now a complete list of known routes** with `gc.get_referents` as (2),
+  and the open-routes framing in the module docstring is labelled **"the routes known to us"**, never
+  "the only routes".
+
+### Declined, correctly, and left to me
+The dashboard owner's suggested **optional caller-supplied expected config hash** on
+`render_scorecard`. The `benchmark.py` side does not need a symmetrical hook — it holds the config, so
+its hash comparison is internal and complete. `verdict_from_records` now **exposes** what it bound to
+via `RecomputedVerdict.config_hash`, which is the piece a renderer would need. **Decision deferred,
+not forgotten:** the dashboard's one-sided floor already makes it structurally immune to the specific
+defect, so consuming the hash would buy "which config produced this?" rather than closing a hole. It
+is a public-API change and belongs in a considered round, not bolted onto a FAIL fix.

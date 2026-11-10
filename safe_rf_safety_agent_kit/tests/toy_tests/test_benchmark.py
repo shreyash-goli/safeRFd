@@ -1703,27 +1703,79 @@ class SdScaleBands(unittest.TestCase):
 
     @staticmethod
     def has_live_float_reference(source):
+        """True iff the ANNOTATION-STRIPPED AST of `source` holds a live `ast.Name(id='float', ctx=Load)`.
+
+        The annotation stripping is the whole point. Without it this helper was DEAD against its one real
+        target: `def from_values(cls, values: Sequence[float])` supplies that Name from the ANNOTATION, so the
+        helper returned True for the shipped cast, for `v * 1.0`, for the cast deleted entirely, and for the
+        cast moved into a helper -- every mutation it existed to catch (all four measured). Only stripping the
+        annotation and re-measuring makes it a tripwire rather than a constant."""
         import ast, textwrap
+
+        class StripAnnotations(ast.NodeTransformer):
+            def visit_arg(self, n):
+                n.annotation = None
+                return n
+
+            def visit_FunctionDef(self, n):
+                n.returns = None
+                self.generic_visit(n)
+                return n
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_AnnAssign(self, n):
+                n.annotation = ast.Constant(value=None)
+                if n.value is not None:
+                    n.value = self.visit(n.value)
+                return n
+
+        tree = StripAnnotations().visit(ast.parse(textwrap.dedent(source)))
         return any(isinstance(n, ast.Name) and n.id == "float" and isinstance(n.ctx, ast.Load)
-                   for n in ast.walk(ast.parse(textwrap.dedent(source))))
+                   for n in ast.walk(tree))
 
     def test_the_cited_float_cast_still_exists_in_robustness(self):
-        """TRIPWIRE, NOT A SEMANTIC GUARANTEE. Fails if `SeedSummary.from_values` no longer references the name
-        `float` in live code (a comment cannot satisfy it). It can still be satisfied by dead code, and it turns red
-        if the cast is refactored into a helper or replaced by e.g. `map(float, ...)`-free logic, even when that is
-        harmless. When it fails, look at robustness.py and update sample_sd's docstring; do not just edit this."""
+        """TRIPWIRE ON A CROSS-MODULE CITATION, NOT A SEMANTIC GUARANTEE. `bm.sample_sd`'s docstring cites
+        `the `float(v)` cast in `SeedSummary.from_values`` by symbol; this keeps that citation honest. It is
+        KEPT rather than deleted because no semantic test can: a behaviour test pins that coercion happens,
+        not that the cast is still written at the cited place, and a stale citation is exactly the class of
+        inaccuracy this audit keeps finding. The BEHAVIOUR is pinned separately and semantically by
+        test_robustness.test_from_values_wraps_unrepresentable_and_bad_types_in_valueerror (full cast removal
+        leaks OverflowError there) and test_from_values_numeric_type_contract.
+        Measured limits, pinned case by case in test_the_tripwire_itself_behaves_as_documented: dead code
+        still satisfies it, and moving the cast into a helper turns it red even when that is harmless.
+        When it fails, look at robustness.py and update sample_sd's docstring; do not just edit this."""
         import inspect
         from toy import robustness
-        self.assertTrue(self.has_live_float_reference(inspect.getsource(robustness.SeedSummary.from_values)))
+        src = inspect.getsource(robustness.SeedSummary.from_values)
+        # The real target IS annotated with `float` -- the exact trap this guard fell into. If this line ever
+        # stops holding, the companion test's annotated snippets no longer model the target.
+        self.assertIn("values: Sequence[float]", src)
+        self.assertTrue(self.has_live_float_reference(src))
         self.assertNotIn("robustness.py:", " ".join(bm.sample_sd.__doc__.split()))   # no line-number citation
 
     def test_the_tripwire_itself_behaves_as_documented(self):
-        live = "def f(v):\n    return tuple(float(x) for x in v)\n"
-        self.assertTrue(self.has_live_float_reference(live))
-        self.assertTrue(self.has_live_float_reference("def f(v):\n    return tuple(map(float, v))\n"))
-        self.assertFalse(self.has_live_float_reference("def f(v):\n    # float(v) is cast here\n    return v\n"))
-        self.assertFalse(self.has_live_float_reference("def f(v):\n    return _helper(v)\n"))        # false red (documented)
-        self.assertTrue(self.has_live_float_reference("def f(v):\n    return v\n    float(v)\n"))     # dead code satisfies it
+        """Every case carries the SAME annotation as the one real target, because the previous version of this
+        test fed hand-written ANNOTATION-FREE snippets and so certified behaviour the target did not exhibit.
+        Under the old helper the four `False` annotated cases below were all True: the guard was dead."""
+        ann = "def f(v: Sequence[float]) -> float:\n"
+        cases = {
+            "live cast":                  (ann + "    return tuple(float(x) for x in v)\n", True),
+            "map(float, ...)":            (ann + "    return tuple(map(float, v))\n", True),
+            "dead code after return":     (ann + "    return v\n    float(v)\n", True),
+            "comment decoy only":         (ann + "    # float(v) is cast here\n    return v\n", False),
+            "cast moved into a helper":   (ann + "    return tuple(_coerce(x) for x in v)\n", False),
+            "cast replaced by v * 1.0":   (ann + "    return tuple(x * 1.0 for x in v)\n", False),
+            "cast deleted entirely":      (ann + "    return tuple(v)\n", False),
+            "annotated local, no cast":   (ann + "    out: list[float] = []\n    return tuple(out)\n", False),
+        }
+        for name, (src, want) in cases.items():
+            self.assertEqual(self.has_live_float_reference(src), want, name)
+        self.assertEqual(len(cases), 8)        # eight annotated cases ...
+        # ... plus two unannotated controls, so the fixed helper still agrees with the old one where the old
+        # one was right (the annotation, not the stripping, was the bug).
+        self.assertTrue(self.has_live_float_reference("def f(v):\n    return tuple(float(x) for x in v)\n"))
+        self.assertFalse(self.has_live_float_reference("def f(v):\n    return tuple(v)\n"))
 
     def test_empty_seed_list_fails_failure_rate_even_if_the_limit_is_one(self):
         lax = dataclasses.replace(SMALL, max_failure_rate=1.0)
@@ -1768,6 +1820,327 @@ class RelabelRouteBoundaryIsExactlyAsDocumented(unittest.TestCase):
         j = recs[-1]
         bad = dataclasses.replace(j, metrics={**j.metrics, "loss_check_exempt": MetricValue.unmeasured("x")})
         self.assertEqual(bm.verdict_from_records(recs[:-1] + [bad], SMALL).subject_kind, "fixture")
+
+
+class RecomputeIsBoundToTheStoredConfiguration(unittest.TestCase):
+    """SR-10 item 2. `verdict_from_records` took min_seeds/width_tol/alpha from the caller's `cfg` and never
+    compared `cfg.config_hash()` with the `config` hash the record already carries. Reachable by ORDINARY
+    CALL, not tampering: every pre-existing test passed the study's own config, which is why it survived."""
+    TS = "2025-01-02T03:04:05Z"
+    # width_tol 0.10 vs the module default 0.25; this is the parameter that was shielded by nothing.
+    TIGHT = dataclasses.replace(SMALL, width_tol=0.10)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.res = bm.run_study(FZ, bm.fixture_oracle_gated, subject="oracle_gated",
+                               registered_digest=FZ.digest, cfg=cls.TIGHT)
+        cls.recs = bm.to_experiment_records(cls.res, study_id="f", base_seed=7, timestamp_utc=cls.TS)
+
+    def test_the_studys_own_config_recomputes_and_reports_itself_bound(self):
+        rv = bm.verdict_from_records(self.recs, self.TIGHT)
+        self.assertEqual(rv.reasons, ())
+        self.assertEqual(rv.config_hash, self.res.config_hash)
+        self.assertEqual((rv.joint, rv.h1, rv.h2, rv.h3),
+                         (self.res.verdict, self.res.h1.verdict, self.res.h2.verdict, self.res.h3.verdict))
+
+    def test_omitting_cfg_fails_closed_instead_of_using_module_defaults(self):
+        """THE DEFECT. The default width_tol (0.25) is laxer than the registered 0.10, so before the fix the
+        no-argument call turned this study's JOINT_INCONCLUSIVE into JOINT_SUPPORTED."""
+        self.assertNotEqual(bm.BenchmarkConfig().config_hash(), self.res.config_hash)
+        rv = bm.verdict_from_records(self.recs)                      # no cfg argument at all
+        self.assertEqual((rv.joint, rv.h1, rv.h2, rv.h3),
+                         (J.JOINT_INCONCLUSIVE,) + (V.INCONCLUSIVE,) * 3)
+        self.assertEqual(len(rv.reasons), 1)
+        self.assertIn("does not match the stored study configuration", rv.reasons[0])
+        self.assertNotEqual(rv.joint, J.JOINT_SUPPORTED)
+
+    def test_every_cfg_derived_parameter_is_bound_not_just_width_tol(self):
+        for over in ({"width_tol": 0.9}, {"min_seeds": 5}, {"alpha": 0.01}, {"n_boot": 999},
+                     {"eta_star": 0.25}, {"tau_conv": 1.0}):
+            rv = bm.verdict_from_records(self.recs, dataclasses.replace(self.TIGHT, **over))
+            self.assertEqual((rv.joint, rv.h1, rv.h2, rv.h3),
+                             (J.JOINT_INCONCLUSIVE,) + (V.INCONCLUSIVE,) * 3, over)
+            self.assertIn("does not match the stored study configuration", rv.reasons[0], over)
+
+    def _strip_config(self, recs):
+        return [dataclasses.replace(r, provenance=dataclasses.replace(
+            r.provenance, input_hashes={k: v for k, v in r.provenance.input_hashes.items() if k != "config"}))
+            for r in recs]
+
+    def test_absent_stored_hash_fails_closed(self):
+        rv = bm.verdict_from_records(self._strip_config(self.recs), self.TIGHT)
+        self.assertEqual((rv.joint, rv.h1), (J.JOINT_INCONCLUSIVE, V.INCONCLUSIVE))
+        self.assertIn("no stored config hash", rv.reasons[0])
+        self.assertIsNone(rv.config_hash)
+        # one record missing it is enough: a partial binding is no binding
+        mixed = self.recs[:-1] + self._strip_config(self.recs[-1:])
+        self.assertIn("no stored config hash", bm.verdict_from_records(mixed, self.TIGHT).reasons[0])
+
+    def test_records_disagreeing_about_the_config_fail_closed(self):
+        j = self.recs[-1]
+        lie = dataclasses.replace(j, provenance=dataclasses.replace(
+            j.provenance, input_hashes={**j.provenance.input_hashes, "config": "0" * 64}))
+        rv = bm.verdict_from_records(self.recs[:-1] + [lie], self.TIGHT)
+        self.assertEqual((rv.joint, rv.h1), (J.JOINT_INCONCLUSIVE, V.INCONCLUSIVE))
+        self.assertIn("disagree on the stored config hash", rv.reasons[0])
+
+    def test_a_forgery_is_still_raised_even_under_a_config_mismatch(self):
+        """Ordering pin: the exemption cross-check must not be masked by the new fail-closed return."""
+        j = self.recs[-1]
+        forged = dataclasses.replace(j, metrics={**j.metrics, "subject_kind_code": MetricValue.measured(1.0)})
+        with self.assertRaisesRegex(ValueError, "exemption"):
+            bm.verdict_from_records(self.recs[:-1] + [forged], self.TIGHT)       # matching cfg
+        with self.assertRaisesRegex(ValueError, "exemption"):
+            bm.verdict_from_records(self.recs[:-1] + [forged])                   # mismatching cfg
+        with self.assertRaisesRegex(ValueError, "exemption"):                    # and with no stored hash
+            bm.verdict_from_records(self._strip_config(self.recs[:-1] + [forged]), self.TIGHT)
+
+    def test_a_clean_recompute_never_carries_a_reason(self):
+        self.assertEqual(bm.verdict_from_records(
+            bm.to_experiment_records(oracle(), study_id="f", base_seed=7, timestamp_utc=self.TS), SMALL).reasons, ())
+
+    def test_the_docstring_no_longer_claims_only_stored_metrics(self):
+        doc = " ".join(bm.verdict_from_records.__doc__.split())
+        # the false claim may appear ONLY as an attributed correction, never as the docstring's own promise
+        self.assertNotIn("Rebuild the verdict ONLY from stored metrics", doc)
+        self.assertIn('used to claim "ONLY from stored metrics", which was false', doc)
+        for needle in ("BOUND TO THE CONFIGURATION THE STUDY RAN UNDER",
+                       "`cfg.min_seeds`, `cfg.width_tol` and `cfg.alpha` are not stored as metrics",
+                       "FAIL CLOSED", "never fall back to module defaults"):
+            self.assertIn(needle, doc)
+        mod = " ".join(bm.__doc__.split())
+        self.assertIn("fails CLOSED", mod)
+        # the open-routes list no longer claims every remaining hole is tampering
+        self.assertIn("THAT FRAMING ONCE OVERSTATED THE CASE", mod)
+        self.assertIn('"the routes known to us", never "the only routes"', mod)
+
+
+class MarginsAreNotInTheConfigHash(unittest.TestCase):
+    """SR-10 item 3. Documented, not closed: the per-record `margin` metric is what makes it sound."""
+
+    def test_two_studies_differing_only_in_margins_hash_identically(self):
+        self.assertEqual(SMALL.config_hash(), SMALL.config_hash())
+        self.assertNotIn("delta_S", str(dataclasses.asdict(SMALL)))
+        self.assertNotIn("margins", {f.name for f in dataclasses.fields(bm.BenchmarkConfig)})
+        a = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest, subject="s",
+                              cfg=SMALL, margins=bm.Margins())
+        b = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest, subject="s",
+                              cfg=SMALL, margins=bm.Margins(delta_S=5.0, delta_R=-5.0, delta_sel=5.0))
+        self.assertEqual(a.config_hash, b.config_hash)               # byte-identical provenance ...
+        self.assertNotEqual(a.h1.verdict, b.h1.verdict)              # ... with different verdicts
+
+    def test_the_recompute_reads_the_margin_out_of_the_record_not_out_of_cfg(self):
+        """The mitigation, pinned: change the stored `margin` metric alone and the recomputed verdict moves,
+        which is only possible if `cfg` never supplies a margin."""
+        a = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest, subject="s",
+                              cfg=SMALL, margins=bm.Margins())
+        recs = bm.to_experiment_records(a, study_id="f", base_seed=7, timestamp_utc="2025-01-02T03:04:05Z")
+        h1 = next(r for r in recs if r.name.endswith("/H1"))
+        self.assertEqual(h1.metrics["margin"].value, 0.10)
+        self.assertEqual(bm.verdict_from_records(recs, SMALL).h1, V.SUPPORTED)
+        raised = dataclasses.replace(h1, metrics={**h1.metrics, "margin": MetricValue.measured(9.0)})
+        rv = bm.verdict_from_records([raised if r is h1 else r for r in recs], SMALL)
+        self.assertEqual(rv.h1, V.UNSUPPORTED)
+        self.assertEqual(rv.reasons, ())                  # the config still matched: margins are not in it
+
+    def test_the_gap_and_the_int_float_asymmetry_are_documented(self):
+        mg = " ".join(bm.Margins.__doc__.split())
+        for needle in ("NOT COVERED BY `BenchmarkConfig.config_hash()`",
+                       "TWO STUDIES DIFFERING ONLY IN MARGINS PRODUCE BYTE-IDENTICAL `config_hash`",
+                       "reads the margin OUT OF THE RECORD",
+                       "`config_hash` alone is not a complete provenance key"):
+            self.assertIn(needle, mg)
+        ch = " ".join(bm.BenchmarkConfig.config_hash.__doc__.split())
+        self.assertIn("`Margins` is NOT a field", ch)
+        self.assertIn("compare `==` yet hash DIFFERENTLY", ch)
+        # the safe-direction asymmetry itself
+        self.assertEqual(bm.BenchmarkConfig(eta_star=1), bm.BenchmarkConfig(eta_star=1.0))
+        self.assertNotEqual(bm.BenchmarkConfig(eta_star=1).config_hash(),
+                            bm.BenchmarkConfig(eta_star=1.0).config_hash())
+
+    def test_every_benchmarkconfig_field_still_changes_the_hash(self):
+        base = SMALL.config_hash()
+        bumps = {"width": 4, "n_train": 32, "n_eval": 16, "steps": 301, "lr": 0.4, "eta_star": 0.6,
+                 "g_min": 2e-3, "n_boot": 2001, "alpha": 0.04, "min_seeds": 31, "max_failure_rate": 0.06,
+                 "width_tol": 0.26, "steps_conv": 1001, "tau_conv": 2e-3, "delta_A": 0.06, "eps_fit": 0.06,
+                 "loss_factor": 3.0, "tail_ratio_max": 11.0}
+        self.assertEqual(set(bumps), {f.name for f in dataclasses.fields(bm.BenchmarkConfig)})
+        seen = {base}
+        for k, v in bumps.items():
+            h = dataclasses.replace(SMALL, **{k: v}).config_hash()
+            self.assertNotIn(h, seen, k)
+            seen.add(h)
+        self.assertEqual(len(seen), 19)      # 18 fields + the base, zero collisions
+
+
+class TheExemptionIsReadInExactlyOnePlace(unittest.TestCase):
+    """SR-10 item 4 (B16b). `JointResult.__post_init__` filtered on `isinstance(g, GateResult)` while
+    `to_experiment_records` did not, so the class's stated invariant was false and the mismatch only failed
+    closed one step downstream, at the recompute."""
+    TS = "2025-01-02T03:04:05Z"
+
+    class Duck:                 # not a GateResult, but asserts the exemption just as much
+        name = "control_adequacy"
+        passed = True
+        reason = "duck"
+        exempt = True
+        scope = "all"
+
+    def syn(self):
+        return bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest, subject="s",
+                                 cfg=SMALL)
+
+    def test_a_duck_typed_exempt_gate_is_refused_at_construction(self):
+        syn = self.syn()
+        f = {x.name: getattr(syn, x.name) for x in dataclasses.fields(bm.JointResult)}
+        gates = tuple(syn.gates) + (self.Duck(),)
+        self.assertEqual(sorted(g.name for g in gates if isinstance(g, bm.GateResult)),
+                         sorted(bm.GATE_SCOPES))          # the gate-NAME check cannot catch this
+        for kind in ("trained", "unknown"):
+            with self.assertRaisesRegex(ValueError, "exemption"):
+                bm.JointResult(**{**f, "gates": gates, "subject_kind": kind, "fixture_name": None})
+
+    def test_the_invariant_the_class_states_is_now_true(self):
+        """Before the fix this exact object was ACCEPTED as 'trained' and then emitted
+        loss_check_exempt=1.0 / subject_kind_code=1.0, which verdict_from_records refuses."""
+        syn = self.syn()
+        f = {x.name: getattr(syn, x.name) for x in dataclasses.fields(bm.JointResult)}
+        for extra in ((self.Duck(),), (self.Duck(), self.Duck())):
+            with self.assertRaisesRegex(ValueError, "exemption"):
+                bm.JointResult(**{**f, "gates": tuple(syn.gates) + extra,
+                                  "subject_kind": "trained", "fixture_name": None})
+        # the same gate list under the honest label is accepted, and then agrees with the record it emits
+        ok = bm.JointResult(**{**f, "gates": tuple(syn.gates) + (self.Duck(),),
+                               "subject_kind": "fixture", "fixture_name": "declared"})
+        j = bm.to_experiment_records(ok, study_id="f", base_seed=7, timestamp_utc=self.TS)[-1]
+        self.assertEqual(j.metrics["loss_check_exempt"].value, 1.0)
+        self.assertEqual(j.metrics["subject_kind_code"].value, bm.SUBJECT_KIND_CODE["fixture"])
+        self.assertEqual(bm.verdict_from_records(
+            bm.to_experiment_records(ok, study_id="f", base_seed=7, timestamp_utc=self.TS),
+            SMALL).subject_kind, "fixture")
+
+    def test_both_readers_go_through_the_one_helper_and_are_strict(self):
+        self.assertTrue(bm.carries_exemption([self.Duck()]))
+        self.assertTrue(bm.carries_exemption([bm.GateResult("control_adequacy", True, "r", exempt=True)]))
+        self.assertFalse(bm.carries_exemption([bm.GateResult("min_seeds", True, "r")]))
+        self.assertFalse(bm.carries_exemption([]))
+        for truthy in ("True", 1, [1], 1.0):            # strictness matches GateResult.__post_init__
+            duck = type("D", (), {"name": "control_adequacy", "passed": True, "reason": "", "exempt": truthy,
+                                  "scope": "all"})()
+            self.assertFalse(bm.carries_exemption([duck]), truthy)
+        self.assertFalse(bm.carries_exemption([object()]))     # no `exempt` attribute at all
+        # and the real pipeline still sets it exactly for fixtures
+        self.assertTrue(bm.carries_exemption(oracle().gates))
+        self.assertFalse(bm.carries_exemption(self.syn().gates))
+
+
+class BooleansAreNeverMeasurements(unittest.TestCase):
+    """SR-10 item 5 (B23). `_mv`'s `isinstance(x, bool)` guard, reachable through the public API and
+    previously untested: dropping it makes True/False become measured(1.0)/measured(0.0)."""
+
+    def test_mv_refuses_bools_directly(self):
+        for b in (True, False):
+            mv = bm._mv(b, "why not")
+            self.assertFalse(mv.is_measured, b)
+            self.assertIsNone(mv.value)
+            self.assertEqual(mv.reason, "why not")
+        self.assertTrue(bm._mv(1.0, "x").is_measured)     # control: a real float is measured
+        self.assertTrue(bm._mv(0.0, "x").is_measured)     # including zero, which the bools must not mimic
+        self.assertEqual(bm._mv(0.0, "x").value, 0.0)
+
+    def test_the_public_route_seedscores_from_values(self):
+        s = bm.SeedScores.from_values(0, True, False, True, 1.0)
+        for k in ("S", "L", "delta"):
+            self.assertFalse(s.metrics[k].is_measured, k)
+            self.assertEqual(s.metrics[k].reason, "non-finite", k)
+        self.assertTrue(s.metrics["delta_minus_shuf"].is_measured)      # the one genuine float
+        self.assertEqual(s.metrics["delta_minus_shuf"].value, 1.0)
+        self.assertFalse(s.ok)
+
+    def test_the_optional_argument_route_too(self):
+        s = bm.SeedScores.from_values(0, 1.0, 1.0, 1.0, 1.0, S_U=True, G=False, A=True, F=False,
+                                      E_loss_ratio=True, delta_conv=False, delta_minus_shuf_conv=True,
+                                      conv_grad_ratio=False)
+        for k in ("S_U", "G", "A", "F", "E_loss_ratio", "delta_conv", "delta_minus_shuf_conv",
+                  "conv_grad_ratio"):
+            self.assertFalse(s.metrics[k].is_measured, k)
+        self.assertTrue(s.ok)       # the four primaries are real floats
+
+    def test_a_boolean_gate_input_cannot_satisfy_a_gate(self):
+        """The consequence that matters: a bool must not be able to pass gate 11/12 by looking like 1.0/0.0."""
+        scores = [bm.SeedScores.from_values(s, 1.0, -0.01, 1.0, 1.0, A=True, F=False, E_loss_ratio=False,
+                                            delta_conv=1.0, delta_minus_shuf_conv=1.0, conv_grad_ratio=False,
+                                            rowsets_disjoint=True, mask_ok=True) for s in FZ.seeds]
+        gates = {g.name: g for g in bm.evaluate_gates(scores, FZ, FZ.digest, SMALL)}
+        self.assertFalse(gates["control_adequacy"].passed)
+        self.assertFalse(gates["convergence"].passed)
+        self.assertIn("not measured on every seed", gates["convergence"].reason)
+
+
+class ProtocolParameterDefaultsAreNotSharedObjects(unittest.TestCase):
+    """Reported by the dashboard owner. `cfg`/`margins` were LITERAL default objects, evaluated once at
+    import, so one instance was shared by every no-argument call. Both classes are frozen, but this kit's own
+    threat model uses `object.__setattr__` to simulate tampering and that reaches through the freeze."""
+
+    def scores(self):
+        return synth_scores(FZ.seeds)
+
+    def test_no_signature_declares_a_mutable_protocol_parameter_default(self):
+        import inspect
+        for fn in (bm.analyze_scores, bm.run_study, bm.verdict_from_records):
+            for p in inspect.signature(fn).parameters.values():
+                self.assertNotIsInstance(p.default, (bm.Margins, bm.BenchmarkConfig),
+                                         f"{fn.__name__}({p.name}=) is a shared default object")
+            self.assertIn("cfg", inspect.signature(fn).parameters)
+
+    def test_each_call_gets_its_own_margins_and_config(self):
+        a = bm.analyze_scores(self.scores(), frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        b = bm.analyze_scores(self.scores(), frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        self.assertEqual(a.margins, b.margins)
+        self.assertIsNot(a.margins, b.margins)
+
+    def test_forging_one_results_margins_cannot_poison_a_later_default_call(self):
+        """THE DEFECT, measured: before the fix the fresh call below came back with delta_S = 99.0 and its
+        verdict flipped SUPPORTED -> UNSUPPORTED."""
+        first = bm.analyze_scores(self.scores(), frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        self.assertEqual(first.h1.verdict, V.SUPPORTED)
+        object.__setattr__(first.margins, "delta_S", 99.0)      # exactly how routes (b)/(d) are demonstrated
+        self.assertEqual(first.margins.delta_S, 99.0)           # the forgery really took
+        fresh = bm.analyze_scores(self.scores(), frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        self.assertEqual(fresh.margins.delta_S, 0.10)
+        self.assertEqual(fresh.margins, bm.Margins())
+        self.assertEqual(fresh.h1.verdict, V.SUPPORTED)
+        # and a non-numeric forgery cannot make a later default call raise either
+        object.__setattr__(first.margins, "delta_S", "x")
+        self.assertEqual(bm.analyze_scores(self.scores(), frozen=FZ, registered_digest=FZ.digest,
+                                           subject="s", cfg=SMALL).h1.verdict, V.SUPPORTED)
+
+    def test_forging_a_configs_field_cannot_poison_a_later_default_call(self):
+        o = oracle()
+        probe = bm.BenchmarkConfig()
+        object.__setattr__(probe, "width_tol", 99.0)            # a stand-in for the once-shared instance
+        self.assertEqual(bm.BenchmarkConfig().width_tol, 0.25)
+        rv = bm.verdict_from_records(bm.to_experiment_records(
+            o, study_id="f", base_seed=7, timestamp_utc="2025-01-02T03:04:05Z"), SMALL)
+        self.assertEqual(rv.reasons, ())
+        self.assertEqual(rv.joint, J.JOINT_SUPPORTED)
+
+    def test_equal_configs_still_share_the_fixture_caches(self):
+        """Per-call construction must not cost a cache miss: frozen dataclasses hash by value."""
+        self.assertEqual(bm.BenchmarkConfig(), bm.BenchmarkConfig())
+        self.assertEqual(hash(bm.BenchmarkConfig()), hash(bm.BenchmarkConfig()))
+        before = bm.build_fixture.cache_info()
+        bm.build_fixture(FZ.seeds[0], bm.BenchmarkConfig(n_boot=2000))
+        bm.build_fixture(FZ.seeds[0], bm.BenchmarkConfig(n_boot=2000))
+        after = bm.build_fixture.cache_info()
+        self.assertGreater(after.hits, before.hits)
+
+    def test_the_reason_is_written_down_where_the_next_reader_will_look(self):
+        mod = " ".join(bm.__doc__.split())
+        self.assertIn("LITERAL default objects", mod)
+        self.assertIn("one instance shared by every no-argument call", mod)
+        self.assertIn("CONSTRUCTED PER CALL", " ".join(bm.analyze_scores.__doc__.split()))
+        self.assertIn("constructed per call", " ".join(bm.run_study.__doc__.split()))
 
 
 class SdOverflowFallback(unittest.TestCase):

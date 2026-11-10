@@ -31,8 +31,15 @@ Design points (each traceable to the protocol):
 * The deterministic RNG is `make_rng(derive_seed(...))`; global `random` state
   is never touched.
 
-* A verdict is never stored in `ExperimentRecord.notes`. It is rebuilt from
-  stored metrics only, by `verdict_from_records`.
+* A verdict is never stored in `ExperimentRecord.notes`. It is rebuilt by
+  `verdict_from_records` from stored metrics, BOUND to the stored `config`
+  hash: the three parameters that cannot be stored as metrics (`min_seeds`,
+  `width_tol`, `alpha`) come from the caller's `cfg`, and a `cfg` that does not
+  hash to the record's own `config` hash fails CLOSED (INCONCLUSIVE with a
+  reason in `RecomputedVerdict.reasons`), never falls back to module defaults.
+  That hole was an ORDINARY CALL, not tampering: `width_tol` was shielded by
+  nothing, so omitting `cfg` recomputed a `width_tol=0.10` study at 0.25 and
+  turned JOINT_INCONCLUSIVE into JOINT_SUPPORTED.
 * n >= min_seeds is enforced where a component verdict is produced
   (`interval_verdict`, implemented in `_verdict_from_bounds`), and again by the
   `min_seeds` gate; no component verdict exists below the minimum.
@@ -76,14 +83,24 @@ Known limits stated plainly:
   patching the `SUBJECT_KIND_CODE` table. `verdict_from_records` cross-checks stored `loss_check_exempt` against
   the stored `subject_kind_code` (exempt=1 with a non-fixture code is refused). THAT CROSS-CHECK IS DEFEATED BY
   THE FLAG ALONE: after relabelling a record to trained/unknown, deleting `loss_check_exempt`, setting it to 0.0,
-  or making it unmeasured is accepted (as is deleting both fields). Also accepted: flag 0.0 with an
+  or making it unmeasured is accepted (as is deleting both fields). The exemption is read off a gate list in
+  exactly ONE place, `carries_exemption`, which `JointResult.__post_init__` and `to_experiment_records` share;
+  they used to read it two different ways, so a hand-built 'trained' result carrying a duck-typed gate with
+  `exempt=True` was accepted at construction and only refused one step later, at the recompute. Also accepted: flag 0.0 with an
   out-of-range code, forging the code to 'fixture' (2.0) with the flag at 1.0 or deleted, and code deleted with
   flag 0.0. EXACT RULE (full grid of 7 codes {deleted, unmeasured, 0, 1, 2, 7, -1} x 6 flags {deleted,
   unmeasured, 0, 1, 0.5, 2}: 22 accepted, 20 rejected): a record is accepted iff the flag is deleted,
   unmeasured or 0.0 (any code), or the flag is 1.0 and the decoded code is 'fixture' (2.0). A relabel is caught
   only when the flag is 1.0 with a code other than 2.0, or when the flag is malformed (measured but not 0.0
   or 1.0, e.g. 0.5 or 2.0). The stored code and flag are producer-asserted, not authenticated. All of (a)-(f) are post-hoc tampering or declaration abuse, not routes through
-  the public pipeline, which always self-labels. None is reachable by accident.
+  the public pipeline, which always self-labels. None is reachable by accident. THAT FRAMING ONCE OVERSTATED
+  THE CASE: two routes reachable BY ACCIDENT, through ordinary calls, have since been found and closed, and
+  are recorded here so the list is not read as complete by construction -- (i) `verdict_from_records` took
+  `min_seeds`/`width_tol`/`alpha` from the caller's `cfg` without comparing it to the record's own stored
+  `config` hash, so omitting the argument silently recomputed under module defaults; (ii)
+  `analyze_scores` / `run_study` declared `cfg`/`margins` as LITERAL default objects, one instance shared by
+  every no-argument call, which `object.__setattr__` reaches through the frozen dataclass. The list above is
+  "the routes known to us", never "the only routes".
 * DEFAULT PARAMETERS ARE MARGINAL FOR THE ORACLE'S OWN GATES: on base seeds 23 and 5 (30 seeds, n_boot 2000) the
   oracle fixture is JOINT_INCONCLUSIVE because gate 11(b) (F above eps_fit=0.05) and/or gate 12 (worst-seed
   gradient ratio 1.1e-3..3.4e-3 vs tau_conv=1e-3) fail, while base seeds 7, 11 and 99 give JOINT_SUPPORTED. The
@@ -137,7 +154,18 @@ class JointVerdict(str, Enum):
 # ============================================================== parameters
 @dataclasses.dataclass(frozen=True)
 class Margins:
-    """PROTOCOL PARAMETERS (proposed defaults, arbitrary, no empirical basis), in G_s units."""
+    """PROTOCOL PARAMETERS (proposed defaults, arbitrary, no empirical basis), in G_s units.
+
+    NOT COVERED BY `BenchmarkConfig.config_hash()`, stated because it would otherwise be a silent gap:
+    `Margins` is not a `BenchmarkConfig` field and is not written into `input_hashes`, so TWO STUDIES
+    DIFFERING ONLY IN MARGINS PRODUCE BYTE-IDENTICAL `config_hash` -- and margins change verdicts.
+    Why that is nevertheless sufficient for recomputation, precisely: every component record stores its own
+    `margin` as a measured metric (`_agg_metrics`), and `verdict_from_records` reads the margin OUT OF THE
+    RECORD it is recomputing -- never from a caller's `cfg`, never from `config_hash`. So the margin a
+    recompute uses is always the margin that produced the record, and a changed margin shows up as a changed
+    `margin` metric rather than as a silently reused one.
+    What the gap DOES cost: `config_hash` alone is not a complete provenance key for a study. Do not quote it
+    as one; quote the per-component `margin` metrics (or `JointResult.margins`) alongside it."""
     delta_S: float = 0.10
     delta_R: float = 0.05
     delta_sel: float = 0.10
@@ -189,8 +217,32 @@ class BenchmarkConfig:
             raise ValueError("lr must be > 0 and alpha in (0,1)")
 
     def config_hash(self) -> str:
+        """sha256 over the canonical JSON of all 18 fields; every field changes it (no collisions found).
+        TWO DOCUMENTED GAPS: (1) `Margins` is NOT a field and is not hashed -- see `Margins` for why the
+        per-record `margin` metric makes recomputation sound anyway, and for what the gap costs. (2)
+        `json.dumps` distinguishes int from float, so `BenchmarkConfig(eta_star=1)` and `(eta_star=1.0)`
+        compare `==` yet hash DIFFERENTLY. That direction is safe: it can only produce a spurious MISMATCH,
+        which fails closed, never a spurious match."""
         return hashlib.sha256(json.dumps(dataclasses.asdict(self), sort_keys=True,
                                          separators=(",", ":")).encode()).hexdigest()
+
+
+# PROTOCOL-PARAMETER DEFAULTS ARE CONSTRUCTED PER CALL, NEVER AS LITERAL DEFAULT OBJECTS.
+# A literal `cfg: BenchmarkConfig = BenchmarkConfig()` is evaluated ONCE at import, and every call that omits
+# the argument then shares that one instance. `BenchmarkConfig` and `Margins` are frozen, so ordinary code
+# cannot mutate them -- but this module's own threat model and tests routinely use `object.__setattr__` to
+# simulate tampering (that is how open routes (b) and (d) below are demonstrated), and that reaches straight
+# through the freeze into the shared default. MEASURED consequence before this was fixed: forging
+# `delta_S = 99.0` on one result's `margins` flipped a LATER no-argument `analyze_scores` call from
+# SUPPORTED to UNSUPPORTED, process-wide, and gave tests a hidden ordering dependency. Every such parameter
+# therefore defaults to None and is constructed inside the function (`_cfg` / `_margins`). Equal frozen
+# instances still hash and compare equal, so the `lru_cache`s on `build_fixture` / `_arm_fit` keep hitting.
+def _cfg(cfg: Optional["BenchmarkConfig"]) -> "BenchmarkConfig":
+    return BenchmarkConfig() if cfg is None else cfg
+
+
+def _margins(margins: Optional["Margins"]) -> "Margins":
+    return Margins() if margins is None else margins
 
 
 # ============================================================ statistics
@@ -1112,9 +1164,27 @@ class GateResult:
         return GATE_SCOPES[self.name]
 
 
+def carries_exemption(gates: Sequence) -> bool:
+    """THE ONE PLACE the gate-11(c) exemption is read off a gate list. `JointResult.__post_init__` (which
+    refuses a non-fixture label) and `to_experiment_records` (which stores `loss_check_exempt`) MUST agree:
+    they used to read `exempt` two different ways, and the gap was reachable. Measured: a hand-built
+    `JointResult` labelled 'trained' carrying one extra NON-`GateResult` object with `exempt=True` was
+    ACCEPTED (because `__post_init__` filtered on `isinstance(g, GateResult)`) and then emitted
+    `loss_check_exempt=1.0` with `subject_kind_code=1.0` (because `to_experiment_records` did not filter),
+    which `verdict_from_records` refuses. It failed closed, but one step downstream, and the class's own
+    stated invariant "a gate carries the fixture exemption => subject_kind is 'fixture'" was FALSE.
+    `exempt` is read off ANY object in the list, not only real `GateResult`s: a hand-built list may carry a
+    duck-typed object, and `exempt=True` on one of those asserts exactly as much. `is True` keeps the same
+    strictness `GateResult.__post_init__` applies (no truthy strings/ints)."""
+    return any(getattr(g, "exempt", False) is True for g in gates)
+
+
 def evaluate_gates(scores: Sequence[SeedScores], frozen: FrozenSeedList, registered_digest: Optional[str],
                    cfg: BenchmarkConfig, subject_kind: str = "unknown", margins: Optional[Margins] = None
                    ) -> tuple:
+    # `margins` is ACCEPTED AND IGNORED: no gate threshold depends on a margin (they are all `cfg` fields),
+    # and the body never reads it. Kept in the signature only because `analyze_scores` passes it positionally.
+    # Stated so a reader does not infer that gates move when margins do -- they do not.
     gates = []
     ids = [s.seed for s in scores]
     if registered_digest is None:
@@ -1210,7 +1280,7 @@ class JointResult:
             raise ValueError(f"subject_kind must be one of {SUBJECT_KINDS}")
         if (self.subject_kind == "fixture") != (isinstance(self.fixture_name, str) and bool(self.fixture_name.strip())):
             raise ValueError("fixture_name is required for, and only for, subject_kind='fixture'")
-        if any(isinstance(g, GateResult) and g.exempt for g in self.gates) and self.subject_kind != "fixture":
+        if carries_exemption(self.gates) and self.subject_kind != "fixture":
             raise ValueError("a gate carries the fixture exemption but subject_kind is not 'fixture'")
         names = [g.name for g in self.gates if isinstance(g, GateResult)]
         if sorted(names) != sorted(GATE_SCOPES):
@@ -1241,11 +1311,14 @@ class JointResult:
 
 
 def analyze_scores(scores: Sequence[SeedScores], *, frozen: FrozenSeedList, registered_digest: Optional[str],
-                   subject: str, ineligible: Sequence[int] = (), cfg: BenchmarkConfig = BenchmarkConfig(),
-                   margins: Margins = Margins(), subject_kind: str = "unknown",
+                   subject: str, ineligible: Sequence[int] = (), cfg: Optional[BenchmarkConfig] = None,
+                   margins: Optional[Margins] = None, subject_kind: str = "unknown",
                    fixture_name: Optional[str] = None) -> JointResult:
     """Analyse per-seed scores. `subject_kind` ('trained'/'fixture'/'unknown', default 'unknown' = no gate-11(c)
-    exemption) is recorded in the result; only 'fixture' (which also requires `fixture_name`) is exempt."""
+    exemption) is recorded in the result; only 'fixture' (which also requires `fixture_name`) is exempt.
+    `cfg=None` / `margins=None` mean "the module defaults", CONSTRUCTED PER CALL -- see the comment on
+    `_cfg` / `_margins` for why a literal default object here was a verdict-changing defect."""
+    cfg, margins = _cfg(cfg), _margins(margins)
     scores = tuple(scores)
     gates = evaluate_gates(scores, frozen, registered_digest, cfg, subject_kind, margins)
     by = {g.name: g for g in gates}
@@ -1262,12 +1335,14 @@ def analyze_scores(scores: Sequence[SeedScores], *, frozen: FrozenSeedList, regi
 
 
 def run_study(frozen: FrozenSeedList, treatment: PredictorFactory, *, subject: str,
-              registered_digest: Optional[str], cfg: BenchmarkConfig = BenchmarkConfig(),
-              margins: Margins = Margins()) -> JointResult:
+              registered_digest: Optional[str], cfg: Optional[BenchmarkConfig] = None,
+              margins: Optional[Margins] = None) -> JointResult:
     """Walk the frozen seed list in order, skip ineligible seeds (G_s < g_min or TRAIN mask < 2 rows: both
     teacher/input-only; they are listed and replaced from the reserve in order), score until n_planned seeds
     are attempted. Only a factory DECLARED a scorer-validation fixture is exempt (recorded as subject_kind) from the gate-11(c) loss check;
-    trained and undeclared treatments must pass it (undeclared ones cannot, so they come out INCONCLUSIVE)."""
+    trained and undeclared treatments must pass it (undeclared ones cannot, so they come out INCONCLUSIVE).
+    `cfg=None` / `margins=None` mean the module defaults, constructed per call (see `_cfg` / `_margins`)."""
+    cfg, margins = _cfg(cfg), _margins(margins)
     kind, fname = treatment_kind(treatment), treatment_fixture_name(treatment)
     scores, skipped = [], []
     for s in frozen.seeds:
@@ -1354,7 +1429,7 @@ def to_experiment_records(res: JointResult, *, study_id: str, base_seed: int, ti
                    "n_deferred_checks": MetricValue.measured(float(len(res.deferred_gates))),
                    "subject_kind_code": MetricValue.measured(SUBJECT_KIND_CODE[res.subject_kind]),
                    "loss_check_exempt": MetricValue.measured(
-                       1.0 if any(g.exempt for g in res.gates) else 0.0)})
+                       1.0 if carries_exemption(res.gates) else 0.0)})
     recs.append(ExperimentRecord(
         name=f"evalproto/{study_id}/agg/JOINT", provenance=prov(f"{study_id}-agg-JOINT", base_seed),
         metrics=gate_m, evidence_class=EvidenceClass.TOY_RESULT,
@@ -1378,13 +1453,36 @@ class RecomputedVerdict:
     h2: Verdict
     h3: Verdict
     subject_kind: str = "unknown"   # decoded from the stored metric, never from notes
+    config_hash: Optional[str] = None   # the STORED study config hash this recompute was bound to
+    reasons: tuple = ()                 # nonempty ONLY when the recompute failed closed (see below)
 
 
-def verdict_from_records(records: Sequence[ExperimentRecord], cfg: BenchmarkConfig = BenchmarkConfig()
+def verdict_from_records(records: Sequence[ExperimentRecord], cfg: Optional[BenchmarkConfig] = None
                          ) -> RecomputedVerdict:
-    """Rebuild the verdict ONLY from stored metrics (interval bounds, margins, n, gate states). `notes`,
-    `name` text and every other free-text field are ignored. A missing record raises ValueError; a missing or
-    unmeasured gate counts as failed."""
+    """Rebuild the verdict from stored metrics (interval bounds, margins, n, gate states), BOUND TO THE
+    CONFIGURATION THE STUDY RAN UNDER. `notes`, `name` text and every other free-text field are ignored. A
+    missing record raises ValueError; a missing or unmeasured gate counts as failed.
+
+    WHICH PARAMETERS COME FROM THE CALLER'S `cfg`, AND WHY THAT IS NOW SAFE (the docstring used to claim
+    "ONLY from stored metrics", which was false): `cfg.min_seeds`, `cfg.width_tol` and `cfg.alpha` are not
+    stored as metrics, so they can only come from the caller. Before ANY of them is used,
+    `cfg.config_hash()` is compared with the `config` hash the records already carry (`to_experiment_records`
+    writes `input_hashes = {"seed_list": ..., "config": res.config_hash}` into every record). Three
+    conditions FAIL CLOSED -- JOINT_INCONCLUSIVE, all three hypotheses INCONCLUSIVE, the reason in
+    `RecomputedVerdict.reasons` -- and never fall back to module defaults:
+      * the caller's `cfg` does not hash to the stored config;
+      * no stored `config` hash is present (records that predate it cannot be bound);
+      * the records disagree among themselves about the stored config hash.
+    THE DEFECT THIS CLOSES was an ordinary call, not tampering: `width_tol` was shielded by nothing, so a
+    study registered with `width_tol=0.10` recomputed to JOINT_SUPPORTED when called with no `cfg` argument
+    (module default 0.25) while its own configuration gave JOINT_INCONCLUSIVE. `alpha` was already pinned by
+    the `ci_level` cross-check and `min_seeds` partly by the min-seeds gate; `width_tol` was not.
+    NOT covered by the config hash: `Margins` is not a `BenchmarkConfig` field (see `Margins`). That is
+    sound here because the margin of every component is read OUT OF THE RECORD (`margin` metric), never from
+    `cfg` -- so no margin a recompute uses can come from the caller at all.
+    ORDER: the `loss_check_exempt` / `subject_kind_code` forgery checks run BEFORE the config check, so a
+    config mismatch can never mask a forgery; `cfg` is not consulted by either of them."""
+    cfg = _cfg(cfg)
     by = {}
     for r in records:
         if "/agg/" in r.name:
@@ -1397,6 +1495,36 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: BenchmarkConf
         if r.evidence_class is not EvidenceClass.TOY_RESULT:
             raise ValueError(f"{r.name}: only TOY_RESULT records can carry a recomputed verdict")
 
+    # ---- subject-kind decode and exemption-forgery checks: no `cfg` is consulted, so they run first and a
+    # ---- config mismatch can never mask a forgery.
+    gm = by["JOINT"].metrics
+    code = gm.get("subject_kind_code")
+    kind = next((k for k, c in SUBJECT_KIND_CODE.items() if code is not None and code.value == c), "unknown")
+    ex = gm.get("loss_check_exempt")
+    if ex is not None and ex.is_measured and ex.value not in (0.0, 1.0):
+        raise ValueError(f"loss_check_exempt must be 0.0 or 1.0, got {ex.value!r}")
+    if ex is not None and ex.is_measured and ex.value == 1.0 and kind != "fixture":
+        raise ValueError("records claim the gate-11(c) exemption but subject_kind_code is not 'fixture' "
+                         "(forged or deleted code)")
+
+    # ---- BIND the recompute to the stored configuration before any cfg-derived parameter is used.
+    stored = {r.provenance.input_hashes.get("config") for r in by.values()}
+    want_hash = cfg.config_hash()
+    bound = next(iter(stored)) if len(stored) == 1 else None
+    if None in stored:
+        why = ("no stored config hash on at least one record: the recompute cannot be bound to the "
+               "configuration the study ran under")
+    elif bound is None:
+        why = f"records disagree on the stored config hash: {sorted(h[:12] for h in stored)}"
+    elif bound != want_hash:
+        why = (f"cfg does not match the stored study configuration (cfg {want_hash[:12]} vs stored "
+               f"{bound[:12]}): refusing to recompute with a different min_seeds/width_tol/alpha")
+    else:
+        why = None
+    if why is not None:
+        return RecomputedVerdict(JointVerdict.JOINT_INCONCLUSIVE, Verdict.INCONCLUSIVE, Verdict.INCONCLUSIVE,
+                                 Verdict.INCONCLUSIVE, kind, bound, (why,))
+
     want_level = bonferroni_level(cfg.alpha, N_PRIMARY)
 
     def comp(tag, metric, direction):
@@ -1408,7 +1536,6 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: BenchmarkConf
             raise ValueError(f"{tag}: ci_level {lv.value!r} is not the adjusted level {want_level!r} (m={N_PRIMARY})")
         return ComponentResult(metric, direction, mg.value, _pair_from_record(r), cfg.min_seeds, cfg.width_tol)
 
-    gm = by["JOINT"].metrics
     state = {n: gm.get(f"gate_{n}") for n in GATE_SCOPES}
     failed = [n for n, v in state.items() if v is None or v.value != 1.0]
     glob = [n for n in failed if GATE_SCOPES[n] == "all"]
@@ -1419,16 +1546,8 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: BenchmarkConf
                           (comp("H3a_conv", "delta_conv", "greater"),
                            comp("H3b_conv", "delta_minus_shuf_conv", "greater")),
                           blocking=tuple(glob), supported_blockers=tuple(g12))
-    code = gm.get("subject_kind_code")
-    kind = next((k for k, c in SUBJECT_KIND_CODE.items() if code is not None and code.value == c), "unknown")
-    ex = gm.get("loss_check_exempt")
-    if ex is not None and ex.is_measured and ex.value not in (0.0, 1.0):
-        raise ValueError(f"loss_check_exempt must be 0.0 or 1.0, got {ex.value!r}")
-    if ex is not None and ex.is_measured and ex.value == 1.0 and kind != "fixture":
-        raise ValueError("records claim the gate-11(c) exemption but subject_kind_code is not 'fixture' "
-                         "(forged or deleted code)")
     return RecomputedVerdict(combine_joint(h1.verdict, h2.verdict, h3.verdict, not glob),
-                             h1.verdict, h2.verdict, h3.verdict, kind)
+                             h1.verdict, h2.verdict, h3.verdict, kind, bound, ())
 
 
 def _gate_metrics(s: SeedScores) -> dict:

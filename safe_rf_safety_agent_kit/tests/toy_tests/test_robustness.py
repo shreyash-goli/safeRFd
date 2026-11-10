@@ -1041,6 +1041,109 @@ class TestQAHardening(unittest.TestCase):
                 self.assertIsNone(e.__cause__)
                 self.assertTrue(e.__suppress_context__)   # `from None`: original traceback hidden
 
+    def test_from_values_numeric_type_contract(self):
+        """SR-11 items 8 and 9. `from_values` had NO stated contract on the types it accepts, and the two it
+        silently accepted contradicted the rest of the kit:
+          * `[True, False, True]` SUCCEEDED, coercing to 1.0/0.0, while `SeedSummary.__post_init__` rejects
+            `isinstance(v, bool)` and `_to_metric` records a bool outcome as UNMEASURED -- three places, three
+            answers.
+          * `["1", "2", "3"]` SUCCEEDED too (`float("1")` works). Not reported by QA; found while deciding
+            this contract.
+        The contract now: accepted iff `type(v)` provides `__float__` or `__index__` and is not `bool`."""
+        from decimal import Decimal
+        from fractions import Fraction
+        for good in ([1.0, 2.0, 3.0], [1, 2, 3], [Decimal("1"), Decimal("2"), Decimal("3")],
+                     [Fraction(1, 2), Fraction(1, 3), Fraction(1, 4)], [1, 2.5, Decimal("3")]):
+            s = rb.SeedSummary.from_values(good)
+            self.assertEqual(s.n, 3, good)
+            self.assertTrue(all(type(v) is float for v in s.values), good)
+        # Decimal is the case that distinguishes the shipped `float(v)` cast from the `v * 1.0` mutant (R3):
+        # `Decimal * float` raises TypeError, so this call is what makes that mutant non-equivalent.
+        self.assertEqual(rb.SeedSummary.from_values([Decimal("1"), Decimal("2"), Decimal("3")]).values,
+                         (1.0, 2.0, 3.0))
+        with self.assertRaises(TypeError):
+            Decimal("1") * 1.0                       # the mutant's arithmetic, shown to fail on its own
+        for bad, why in (([True, False, True], "bool"), ([1.0, True, 2.0], "bool"),
+                         (["1", "2", "3"], "str"), ([1.0, "2", 3.0], "str"),
+                         ([b"1", b"2", b"3"], "bytes"), ([1 + 0j, 2 + 0j, 3 + 0j], "complex"),
+                         ([None, 1.0, 2.0], "NoneType"), ([object(), 1.0, 2.0], "object")):
+            with self.assertRaises(ValueError, msg=why) as cm:
+                rb.SeedSummary.from_values(bad)
+            self.assertNotIsInstance(cm.exception, (TypeError, OverflowError), why)
+            self.assertIsNone(cm.exception.__cause__, why)
+            self.assertTrue(cm.exception.__suppress_context__, why)
+        # the three judgements now agree that a boolean is not a measurement
+        self.assertFalse(rb._to_metric(lambda s: True, 0).is_measured)
+        with self.assertRaises(ValueError):
+            rb.SeedSummary(3, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, (True, True, True))
+        with self.assertRaises(ValueError):
+            rb.SeedSummary.from_values([True, True, True])
+        # ... and the probe path could never deliver one anyway: MetricValue refuses non-floats
+        with self.assertRaises(ValueError):
+            MetricValue.measured(True)
+        doc = " ".join(rb.SeedSummary.from_values.__doc__.split())
+        for needle in ("ACCEPTED NUMERIC CONTRACT", "`__float__` or `__index__`", "is not a `bool`",
+                       "A boolean is never a measurement anywhere in this kit",
+                       "number parsed out of text is not a measurement either"):
+            self.assertIn(needle, doc)
+
+    def test_mappingproxy_is_a_view_not_a_copy_and_that_limit_is_stated(self):
+        """SR-11 item 7: an undocumented immutability bypass. `gc.get_referents(card.details)[0]` hands back
+        the WRITABLE dict behind the MappingProxyType. It grants nothing `object.__setattr__` does not already
+        grant and is equally detectable against a previously recorded hash -- but the Scorecard docstring
+        listed only `object.__setattr__`, and this project's standard is that such routes are stated."""
+        import gc
+        sc = sc_simple()
+        before = sc.content_hash()
+        self.assertIsInstance(sc.details, type(rb.MappingProxyType({})))
+        with self.assertRaises(TypeError):                       # the documented, supported-API story
+            sc.details["injected"] = 1
+        backing = gc.get_referents(sc.details)[0]
+        self.assertIsInstance(backing, dict)
+        backing["injected"] = 1
+        self.assertIn("injected", sc.details)                    # the card really changed ...
+        self.assertNotEqual(sc.content_hash(), before)           # ... and so did its content hash
+        self.assertIn("injected", sc.to_dict()["details"])
+        del backing["injected"]
+        self.assertEqual(sc.content_hash(), before)              # detectable against a hash recorded EARLIER
+        # to_dict() by contrast IS a true defensive copy
+        d = sc.to_dict()
+        d["details"]["injected"] = 1
+        d["seeds"].append(999)
+        self.assertNotIn("injected", sc.details)
+        self.assertEqual(sc.content_hash(), before)
+        doc = " ".join(rb.Scorecard.__doc__.split())
+        for needle in ("HONEST LIMITS, the complete list of routes known to this module",
+                       "gc.get_referents(card.details)[0]", "`to_dict()` is a true defensive copy"):
+            self.assertIn(needle, doc)
+        self.assertIn("gc.get_referents", " ".join(rb.__doc__.split()))
+
+    def test_probe_config_defaults_are_constructed_per_call(self):
+        """Same defect class the dashboard owner found in `benchmark.analyze_scores`: a literal
+        `cfg = ProbeConfig()` default is one instance shared by every no-argument call, and
+        `object.__setattr__` reaches through the frozen dataclass into it. Here the stake is the SEED_FLOOR
+        policy itself -- one forged `min_seeds = 1` would license single-example claims process-wide."""
+        import inspect
+        probes = (rb.seed_sensitivity_probe, rb.probe_shift, rb.probe_missing_inputs, rb.probe_precision,
+                  rb.precision_sweep)
+        for fn in probes:
+            self.assertIsNone(inspect.signature(fn).parameters["cfg"].default, fn.__name__)
+        a = rb.seed_sensitivity_probe(lambda s: float(s % 7), SEEDS)
+        b = rb.seed_sensitivity_probe(lambda s: float(s % 7), SEEDS)
+        self.assertEqual(a.min_seeds, rb.DEFAULT_MIN_SEEDS)
+        self.assertEqual(b.min_seeds, rb.DEFAULT_MIN_SEEDS)
+        # forging a field of one call's resolved config cannot reach a later call
+        forged = rb.ProbeConfig()
+        object.__setattr__(forged, "min_seeds", 1)
+        self.assertEqual(forged.min_seeds, 1)
+        self.assertEqual(rb.ProbeConfig().min_seeds, rb.DEFAULT_MIN_SEEDS)
+        c = rb.seed_sensitivity_probe(lambda s: float(s % 7), SEEDS)
+        self.assertEqual(c.min_seeds, rb.DEFAULT_MIN_SEEDS)
+        # and the floor is still refused at construction
+        with self.assertRaises(ValueError):
+            rb.ProbeConfig(rb.SEED_FLOOR - 1)
+        self.assertIn("FRESHLY CONSTRUCTED `ProbeConfig()`", " ".join(rb._pcfg.__doc__.split()))
+
     def test_documented_corner_extreme_summary_is_accepted(self):
         s = rb.SeedSummary.from_values([1.7e308] * 3)      # documented, unguarded: see SeedSummary docstring
         self.assertEqual(s.n, 3)
