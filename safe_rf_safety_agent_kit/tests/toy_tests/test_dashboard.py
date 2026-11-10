@@ -4,6 +4,7 @@ import itertools
 import os
 import random
 import re
+import stat
 import sys
 import tempfile
 import unittest
@@ -513,6 +514,156 @@ class WriteGuards(unittest.TestCase):
         self.assertEqual(sorted(x.name for x in (self.root / "out").iterdir()), ["d.html"])
 
 
+def _fs_case_insensitive(d):
+    probe = Path(d) / "CaseProbe"
+    probe.mkdir()
+    try:
+        return (Path(d) / "caseprobe").exists()
+    finally:
+        probe.rmdir()
+
+
+class IdentityAndCaseGuards(unittest.TestCase):
+    """_inside_repo compares file IDENTITY (dev, inode); case-folded text is only a secondary check."""
+
+    def setUp(self):
+        self._t = tempfile.TemporaryDirectory()
+        self.addCleanup(self._t.cleanup)
+        self.tmp = Path(self._t.name).resolve()
+        self.ci = _fs_case_insensitive(self.tmp)
+        self.base = self.tmp / "ScratchRoot"
+        self.repo = self.base / "Repo"
+        (self.repo / "docs").mkdir(parents=True)
+        self.prog = self.repo / "docs" / "PROGRESS.md"
+        self.prog.write_text("PRECIOUS", encoding="utf-8")
+        for p in (mock.patch.object(db, "REPO_ROOT", self.repo),
+                  mock.patch.object(db, "_casefold_inside", lambda r, root: False)):   # identity layer ALONE
+            p.start()
+            self.addCleanup(p.stop)
+
+    def need_ci(self):
+        if not self.ci:
+            self.skipTest("case-sensitive filesystem: case variants are different directories here "
+                          "(the alias/identity tests below still run)")
+
+    def test_case_varied_directory_component_refused(self):
+        self.need_ci()
+        for v in (self.base / "repo" / "docs" / "PROGRESS.md", self.base / "REPO" / "docs" / "progress.md"):
+            self.assertTrue(db._inside_repo(v), v)
+            with self.assertRaises(ValueError):
+                db.write_dashboard(v, {})
+        self.assertEqual(self.prog.read_text(encoding="utf-8"), "PRECIOUS")
+
+    def test_case_varied_repo_root_prefix_refused(self):
+        self.need_ci()
+        v = self.tmp / "scratchroot" / "repo" / "docs" / "PROGRESS.md"
+        self.assertTrue(db._inside_repo(v))
+        with self.assertRaises(ValueError):
+            db.write_dashboard(v, {})
+        self.assertEqual(self.prog.read_text(encoding="utf-8"), "PRECIOUS")
+
+    def test_new_file_inside_repo_via_case_variation_refused(self):
+        self.need_ci()
+        v = self.base / "REPO" / "docs" / "brand_new.html"
+        with self.assertRaises(ValueError):
+            db.write_dashboard(v, {})
+        self.assertEqual(sorted(x.name for x in (self.repo / "docs").iterdir()), ["PROGRESS.md"])
+        with self.assertRaises(ValueError):                       # deeper, nonexistent intermediate dirs too
+            db.write_dashboard(self.base / "rEPo" / "no" / "such" / "x.html", {})
+
+    def test_alias_detected_by_identity_not_text(self):
+        # FS-independent: the path text never mentions the repo, resolve() is disabled, only inode identity can tell
+        alias = self.tmp / "alias"
+        os.symlink(self.repo, alias)
+        with mock.patch.object(Path, "resolve", lambda self, strict=False: self):
+            self.assertTrue(db._inside_repo(alias / "docs" / "PROGRESS.md"))
+            self.assertTrue(db._inside_repo(alias / "docs" / "new" / "x.html"))
+            self.assertFalse(db._inside_repo(self.tmp / "elsewhere.html"))
+
+    def test_outside_paths_and_siblings_allowed(self):
+        (self.base / "RepoSibling").mkdir()
+        self.assertFalse(db._inside_repo(self.base / "RepoSibling" / "x.html"))
+        self.assertFalse(db._inside_repo(self.tmp / "out.html"))
+        out = db.write_dashboard(self.base / "RepoSibling" / "x.html", {})
+        self.assertTrue(out.exists())
+
+    def test_casefold_secondary_layer_alone(self):
+        with mock.patch.object(db, "_casefold_inside", db_casefold_original):
+            with mock.patch.object(db, "REPO_ROOT", Path("/nonexistent_zz/Repo")):
+                self.assertTrue(db._inside_repo(Path("/NONEXISTENT_ZZ/repo/docs/x.html")))
+                self.assertFalse(db._inside_repo(Path("/nonexistent_zz/RepoSibling/x.html")))
+                self.assertTrue(db._inside_repo(Path("/nonexistent_zz/repo")))
+
+    def test_resolution_error_fails_closed(self):
+        with mock.patch.object(Path, "resolve", side_effect=RuntimeError("loop")):
+            self.assertTrue(db._inside_repo(self.tmp / "x.html"))
+
+
+db_casefold_original = db._casefold_inside
+
+
+class DestinationGuards(unittest.TestCase):
+    def setUp(self):
+        self._t = tempfile.TemporaryDirectory()
+        self.addCleanup(self._t.cleanup)
+        self.tmp = Path(self._t.name).resolve()
+
+    def test_fifo_refused_without_blocking(self):
+        fifo = self.tmp / "pipe"
+        os.mkfifo(fifo)
+        with self.assertRaisesRegex(ValueError, "non-regular"):
+            db.write_dashboard(fifo, {})
+        self.assertTrue(stat.S_ISFIFO(os.lstat(fifo).st_mode))
+
+    def test_directory_refused_as_non_regular(self):
+        with self.assertRaisesRegex(ValueError, "non-regular"):
+            db.write_dashboard(self.tmp, {})
+
+    def test_device_and_pseudo_filesystems_deliberately_refused(self):
+        for target in ("/dev/zz_dashboard.html", "/dev/fd/1", "/dev/null", "/proc/zz.html", "/sys/zz.html"):
+            with self.assertRaises(ValueError, msg=target) as cm:
+                db.write_dashboard(target, {})
+        with self.assertRaisesRegex(ValueError, "device/pseudo"):
+            db.write_dashboard("/dev/zz_dashboard.html", {})
+
+    def test_missing_destination_directory_refused(self):
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            db.write_dashboard(self.tmp / "nope" / "x.html", {})
+
+    def test_temp_file_created_in_destination_directory(self):
+        real_mkstemp, real_replace = tempfile.mkstemp, os.replace
+        seen = {}
+
+        def spy_replace(src, dst):
+            seen["src"], seen["dst"] = Path(src), Path(dst)
+            return real_replace(src, dst)
+        with mock.patch.object(db.tempfile, "mkstemp", wraps=real_mkstemp) as mk, \
+                mock.patch.object(db.os, "replace", spy_replace):
+            out = db.write_dashboard(self.tmp / "d.html", {})
+        self.assertEqual(mk.call_args.kwargs.get("dir"), str(self.tmp))
+        self.assertEqual(seen["src"].parent, self.tmp)             # same filesystem as the target: atomic rename
+        self.assertEqual(seen["dst"], out)
+
+    def test_temp_file_cleaned_up_when_replace_fails(self):
+        out = self.tmp / "d.html"
+        out.write_text("old", encoding="utf-8")
+        with mock.patch.object(db.os, "replace", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                db.write_dashboard(out, {})
+        self.assertEqual(sorted(x.name for x in self.tmp.iterdir()), ["d.html"])
+        self.assertEqual(out.read_text(encoding="utf-8"), "old")
+
+    def test_temp_file_cleaned_up_when_write_fails(self):
+        with mock.patch.object(db, "render_dashboard", side_effect=RuntimeError("render")):
+            with self.assertRaises(RuntimeError):
+                db.write_dashboard(self.tmp / "d.html", {})
+        self.assertEqual(list(self.tmp.iterdir()), [])
+
+    def test_replaced_file_mode_is_private_0600(self):         # documented side effect, pinned so it is deliberate
+        out = db.write_dashboard(self.tmp / "d.html", {})
+        self.assertEqual(stat.S_IMODE(os.lstat(out).st_mode), 0o600)
+
+
 class CspAndBadges(unittest.TestCase):
     def test_csp_meta_present_and_strict(self):
         h = db.render_dashboard({})
@@ -718,6 +869,148 @@ class ScorecardVerdictCore(unittest.TestCase):
             if j.verdict is not bm.JointVerdict.JOINT_SUPPORTED:
                 self.assertNotIn("vd-supported", joint_cell(h), kw)
                 self.assertNotIn("NOT shown", h, kw)             # and the honest scorer result raises no alarm
+
+
+class VerdictCoreSurvivors(unittest.TestCase):
+    """Pins for failure modes that must end in INCONCLUSIVE plus an alarm, never in a decisive display."""
+
+    def alarmed(self, h):
+        self.assertIn("NOT shown", h)
+        self.assertNotIn("vd-supported", joint_cell(h))
+        self.assertNotIn("vd-unsupported", joint_cell(h))
+
+    def comps(self, j):
+        return [c for h in (j.h1, j.h2, j.h3) for c in (*h.components, *h.converged_components)]
+
+    def test_recompute_exception_is_inconclusive_with_alarm(self):
+        j = joint()
+        for c in self.comps(j):
+            object.__setattr__(c, "margin", "oops")                # float("oops") raises inside recomputation
+        h = db.render_scorecard(j)
+        self.assertEqual(hyp_cells(h), {"H1": "INCONCLUSIVE", "H2": "INCONCLUSIVE", "H3": "INCONCLUSIVE"})
+        self.assertNotIn("vd-supported", h)
+        self.alarmed(h)
+
+    def test_recompute_exception_in_single_hypothesis(self):
+        for hid in ("h1", "h2", "h3"):
+            j = joint()
+            h_ = getattr(j, hid)
+            object.__setattr__(h_.components[0], "direction", "sideways")     # interval_verdict raises ValueError
+            h = db.render_scorecard(j)
+            self.assertEqual(hyp_cells(h)[hid.upper()], "INCONCLUSIVE", hid)
+            self.alarmed(h)
+
+    def test_recompute_exception_in_converged_component_only(self):
+        j = joint()
+        object.__setattr__(j.h3.converged_components[1], "margin", "oops")
+        h = db.render_scorecard(j)
+        self.assertEqual(hyp_cells(h)["H3"], "INCONCLUSIVE")
+        self.assertEqual((hyp_cells(h)["H1"], hyp_cells(h)["H2"]), ("SUPPORTED", "SUPPORTED"))
+        self.alarmed(h)
+
+    def test_edited_component_margin_alone_is_an_alarm(self):
+        # consistent edit of one component (verdict recomputes the same under it) is still caught via Margins
+        j = joint()
+        c = j.h1.components[0]
+        object.__setattr__(c, "margin", c.margin / 2)
+        h = db.render_scorecard(j)
+        self.assertEqual(hyp_cells(h)["H1"], "INCONCLUSIVE")
+        self.alarmed(h)
+        j = joint()
+        object.__setattr__(j.h3.converged_components[0], "direction", "less")
+        self.alarmed(db.render_scorecard(j))
+
+    def test_documented_limit_consistent_forgery_of_margins_object_is_not_detected(self):
+        # Honest boundary: margins are producer-asserted. Forging the Margins object AND the component margin
+        # consistently, while keeping the verdict derivable, is not detectable by the renderer. Pin that we
+        # KNOW this (the page prints the margins it used so a reader can see them).
+        j = joint()
+        h = db.render_scorecard(j)
+        self.assertIn("greater " + repr(bm.Margins().delta_S), h)
+        self.assertIn("Uncertainty" , db.render_dashboard({"joint": j}))
+        self.assertIn(repr(bm.Margins().delta_sel), db.render_dashboard({"joint": j}))
+
+    def test_aggregation_requires_ALL_components_supported(self):
+        # a component that is INCONCLUSIVE (interval spans the margin), not UNSUPPORTED: an UNSUPPORTED one would
+        # trip the separate 'any UNSUPPORTED' branch and mask an all->any aggregation mutant
+        weak = joint(expect=None, dms=bm.Margins().delta_sel)
+        self.assertEqual(weak.h3.components[1].verdict, bm.Verdict.INCONCLUSIVE)
+        j = joint()
+        object.__setattr__(j.h3, "components", (j.h3.components[0], weak.h3.components[1]))   # one strong, one weak
+        h = db.render_scorecard(j)
+        self.assertEqual(hyp_cells(h)["H3"], "INCONCLUSIVE")        # 'any SUPPORTED' would show SUPPORTED
+        self.alarmed(h)
+
+    def test_converged_requires_ALL_components_supported(self):
+        weak = joint(expect=None, dms=0.0)
+        self.assertNotEqual(weak.h3.converged_components[1].verdict, bm.Verdict.SUPPORTED)
+        self.assertEqual(weak.h3.converged_components[0].verdict, bm.Verdict.SUPPORTED)
+        j = joint()
+        object.__setattr__(j.h3, "converged_components", (j.h3.converged_components[0], weak.h3.converged_components[1]))
+        h = db.render_scorecard(j)
+        self.assertEqual(hyp_cells(h)["H3"], "INCONCLUSIVE")
+        self.alarmed(h)
+        weak0 = joint(expect=None, d=0.0)
+        self.assertNotEqual(weak0.h3.converged_components[0].verdict, bm.Verdict.SUPPORTED)
+        self.assertEqual(weak0.h3.converged_components[1].verdict, bm.Verdict.SUPPORTED)
+        j = joint()
+        object.__setattr__(j.h3, "converged_components", (weak0.h3.converged_components[0], j.h3.converged_components[1]))
+        self.assertEqual(hyp_cells(db.render_scorecard(j))["H3"], "INCONCLUSIVE")
+
+    def test_non_bool_gate_passed_values_fail_closed(self):
+        for val in (1, "True", "yes", None, 1.0, object()):
+            j = joint()
+            g = next(g for g in j.gates if g.name == "control_adequacy")
+            object.__setattr__(g, "passed", val)
+            h = db.render_scorecard(j)
+            self.assertEqual(set(hyp_cells(h).values()), {"INCONCLUSIVE"}, repr(val))
+            self.alarmed(h)
+            self.assertIn("FAIL", h)
+
+    def test_unknown_gate_name_is_global_blocker(self):
+        j = joint()
+        g = j.gates[0]
+        object.__setattr__(g, "name", "mystery_gate")               # .scope now raises KeyError
+        object.__setattr__(g, "passed", False)
+        h = db.render_scorecard(j)
+        self.assertEqual(set(hyp_cells(h).values()), {"INCONCLUSIVE"})
+        self.alarmed(h)
+
+    def test_unknown_gate_scope_value_blocks_and_flags_contract(self):
+        j = joint()
+        with mock.patch.dict(bm.GATE_SCOPES, {"convergence": "H9"}):
+            fail_gate(j, "convergence")
+            h = db.render_scorecard(j)
+        self.assertIn("CONTRACT PROBLEM", h)
+        self.assertEqual(set(hyp_cells(h).values()), {"INCONCLUSIVE"})
+        self.alarmed(h)
+        # and the blocking clause itself, with the contract banner not involved
+        j = joint()
+        with mock.patch.dict(bm.GATE_SCOPES, {"convergence": "H9"}):
+            fail_gate(j, "convergence")
+            with mock.patch.object(db, "_contract_problems", lambda: []):
+                h = db.render_scorecard(j)
+        self.assertEqual(set(hyp_cells(h).values()), {"INCONCLUSIVE"})
+        self.alarmed(h)
+
+    def test_empty_or_missing_gates_refused(self):
+        for bad in ((), None, [], "gates"):
+            j = joint()
+            object.__setattr__(j, "gates", bad)
+            h = db.render_scorecard(j)
+            self.assertIn("REFUSED", h)
+            self.assertNotIn("Suppression", h)
+        j = joint()
+        object.__setattr__(j, "gates", (object(),))
+        self.assertIn("REFUSED", db.render_scorecard(j))
+
+    def test_conditional_note_names_deferred_gate_count(self):
+        h = db.render_scorecard(joint())
+        self.assertIn(f"CONDITIONAL on {len(bm.DEFERRED_GATES)} unimplemented gate(s)", joint_cell(h))
+        self.assertGreater(len(bm.DEFERRED_GATES), 0)
+        self.assertIn("Complete gate coverage: NO", h)
+        j = joint(expect=bm.JointVerdict.JOINT_UNSUPPORTED, S=0.0)
+        self.assertIn("CONDITIONAL on", joint_cell(db.render_scorecard(j)))
 
 
 class OneSidedScorecard(unittest.TestCase):

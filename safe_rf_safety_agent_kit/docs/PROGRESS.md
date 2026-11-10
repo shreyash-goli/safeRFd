@@ -1574,3 +1574,204 @@ attributed to anyone.
   fixtures, and raises no false alarm on honest ones.
 
 **Suite: 656 tests, OK (2 skipped) under unittest; 654 passed, 2 skipped under pytest.**
+
+---
+
+## SR-11 — QA verdict: PASS (marked `[x]`); SR-13 second FAIL then fixed; SR-14 PASS + F1 fixed
+
+### SR-11 — PASS
+- **Both of the builder's push-backs were adjudicated in its favour, and the orchestrator's
+  instruction would have been wrong.** QA checked what the invariance probes actually feed in:
+  `reorder_rows`, `replace_masked_out_rows` and `scale_1024` each produce the value set `{0.0}`
+  across 10 seeds, so rejecting repeated values — as the orchestrator had instructed — **would have
+  turned every passing invariance probe into INSUFFICIENT**. The narrowed docstring is accurate.
+  On the lone datum, QA confirmed a 2-value card has `summary=None`, `details` holding only
+  `outcome_name` and `python_version`, record metrics all unmeasured and evidence class UNKNOWN —
+  nothing *derived* leaks.
+- QA independently confirmed the nested re-validation: forging each of eight statistics via
+  `object.__setattr__` then calling `replace()` is refused every time, as are truncated `values`,
+  NaN in `values`, swapped `values`, a *consistent* forged summary, a one-value `SeedSummary` via
+  `object.__new__`, and every forged `InsufficientEvidence` field. Subclasses of both types are
+  refused via `replace` and the direct constructor.
+- **The oracle was verified against two independent arbitrary-precision implementations** (`decimal`
+  at 6000 digits and a big-integer fixed-point one) over 36 fixtures including 10^±150 scaling —
+  zero mismatches.
+- 38 mutants: 31 killed; the builder's `mse_fsum` equivalence claim confirmed correct (removing
+  either finite check alone survives because the other catches inf; removing both is killed).
+- **Two survivors then pinned:** the `_recheck_insufficient` ordering check (`n_measured >=
+  n_required`) — the only guard against a forged card claiming INSUFFICIENT while holding enough
+  measured values, now tested at 10-of-10, 11-of-10 and 12-values-in-a-full-card; and the text of the
+  last `STANDARD_NON_CLAIMS` entry, which is precisely what makes the `per_seed` retention
+  defensible and which QA relied on when accepting the push-back. `abs_bias_fsum` also leaked a raw
+  `OverflowError` on mixed-sign extremes and now raises `NonFiniteError`, matching the contract SR-06
+  was failed for violating. 85 tests.
+- **Status: PASS — blueprint checkbox marked `[x]`.**
+
+### SR-13 — second FAIL (a real platform-specific bypass), now fixed
+- **The hardlink fix held.** QA's hardlink attack is refused, and the temp-file-plus-`os.replace`
+  design was confirmed to leave an existing inode untouched even under TOCTOU — both the
+  hardlink-after-guards and symlink-swap-after-guards races are harmless because `os.replace` swaps
+  the directory entry. FIFOs, directories, `/dev/null` and `/dev/stdout` all refused.
+- **But the path guard was defeated by case.** This machine's APFS volume is case-insensitive and
+  `Path.resolve()` does **not** normalise case, so for a repo at `<root>/t13b/` the path
+  `<root>/T13B/docs/PROGRESS.md` made `_inside_repo` return False; the write proceeded, `nlink` was
+  1, and `os.replace` **overwrote the real `docs/PROGRESS.md`** with HTML in QA's scratch copy.
+  Creating a *new* file inside the repo this way also succeeded. A case variant of the **file's own
+  name** was correctly refused because `resolve()` canonicalises the final component — so the hole
+  was specifically in *directory* components, which is exactly why the existing tests missed it.
+- **Fixed by comparing file identity, not text.** `_inside_repo` now walks every existing ancestor of
+  the resolved target and compares `(st_dev, st_ino)` against the repo root, with a case-folded text
+  prefix check retained as a *secondary* layer in a separate function (so tests can disable it and
+  exercise the identity layer alone — which they do). It fails closed on any resolution error, and
+  now deliberately refuses `/dev`, `/proc`, `/sys`, a missing destination directory, and any `lstat`
+  error other than not-found. Case-variant tests skip on a case-sensitive volume; a symlink-alias
+  test with `resolve()` patched out exercises inode identity on **any** filesystem.
+- **The most dangerous surviving mutant was user-visible and is now pinned:** treating a hypothesis
+  **recompute failure** as SUPPORTED survived every test — with `"oops"` as every component margin the
+  real code shows INCONCLUSIVE, but the mutant rendered **`JOINT_SUPPORTED` with all three
+  hypotheses SUPPORTED**, the precise failure this renderer exists to prevent. Now INCONCLUSIVE with
+  the alarm, and a recompute failure in a converged component downgrades only H3.
+- **The builder corrected a flaw in its own test design:** its first aggregation test used an
+  UNSUPPORTED component, which tripped a separate branch and let the `all`→`any` mutant survive; it
+  switched to an INCONCLUSIVE component and added both weak-first and weak-second orders for the
+  converged pair.
+- Also pinned: non-bool gate `passed` values (1, "True", "yes", None, 1.0, an object) fail closed; an
+  unknown gate name or scope blocks every hypothesis; empty/None/list/string `gates` are refused with
+  no figures; the "CONDITIONAL on N unimplemented gate(s)" note must carry the real count; the temp
+  file must be created in the **destination** directory (placing it in the cwd previously passed,
+  which would break atomicity across filesystems) and is cleaned up when either the replace or the
+  render fails. All thirteen listed mutants now killed. 95 tests.
+- **Partial fix, honestly scoped, on the margin question:** each component's margin and direction are
+  now cross-checked against what `benchmark.PRIMARY`/`CONVERGED` declare for that metric under the
+  result's own `Margins`, so editing a single component's margin raises an alarm. **Forging the
+  `Margins` object and the component margins *consistently* remains undetectable**, because the
+  renderer has no second source of truth. The builder deliberately did not compare against
+  `Margins()` defaults, since that would false-alarm on legitimate custom margins, and the page
+  prints the margins it used.
+- Documented limits: a filesystem not reporting link counts would defeat the nlink guard (the
+  temp-file design still protects the old inode); a replaced file ends up mode 0600, now pinned by a
+  test so it stays deliberate.
+
+### SR-14 — QA PASS, F1 fixed
+- QA enumerated **500 combinations** (5 actual states × 5 claimed `from_state` × 4 `to_state` × 5
+  actions) against real ledgers: exactly 5 accepted, 495 refused, **none mutating the ledger**, and
+  the 95 invalid-triple count confirmed. `verify_chain()` named the first broken link correctly in
+  six attack classes. ~1,750 fuzzed field mutations never loaded a bad ledger.
+- **F1 fixed (a contract bug, not a test gap):** a bad `evidence_class` raised a plain `ValueError`
+  rather than a `ClaimLedgerError`, contradicting the module's documented base-class contract — and
+  **the existing test hid it** by accepting `(EventFormatError, ValueError)`. Every unwrapped call
+  into `toy.schema` or an enum constructor is now wrapped, and the test requires `EventFormatError`.
+- **The builder found a further real hole while fixing:** `evidence_refs` given as `{}`, `set()` or an
+  iterator was **silently treated as an empty list**. Only a list or tuple is accepted now, because
+  ref order is content. It also refused an `object.__new__` `EvidenceRef` and a boolean `seq` with a
+  recomputed digest (`True == 1` previously slipped through).
+- **F2 addressed:** `append`, `claim_state()` and `summary()` now run `verify_chain()` first and raise
+  `ChainIntegrityError` on a tampered in-memory ledger, and rebuild derived caches from the events so
+  a forged `_states` entry is ignored. `summary(verify=False)` is an explicit forensic escape hatch.
+- **F4 addressed:** `max_future_skew_seconds` (default 86400) rejects a far-future event with
+  `TimestampFutureError`, so a 2999-dated event can no longer permanently brick a claim — QA had
+  shown every later real-time event would raise `TimestampOrderError` forever. A `clock` option lets
+  tests pin "now". The bound applies at append, not on load.
+- `DuplicateEventIdError` now reports `original_timestamp_utc`, so a retrying caller knows which
+  timestamp to reuse — closing the usability trap QA reproduced. F5: 15 subclasses plus the base,
+  asserted by a test.
+- The import check became an **allowlist** (strictly stronger than the deny-list), banning `eval`,
+  `exec`, `__import__` and `getattr` — the module's single `getattr` call was removed so it could be
+  banned — with a test recording the remaining blind spot (dangerous members of allowed modules, e.g.
+  `from os import system`). 35 mutants, all killed after one iteration added single-digit
+  month/day/hour timestamp cases. 87 tests.
+- **Still an honest limit, now in the docstring:** evidence is checked for *shape only* and review is
+  self-attested, so a single reviewer can reach SUPPORTED citing `sha256(b"nothing at all")`. No
+  four-eyes rule; `known_evidence` is opt-in and off by default. Tail truncation *with* a corrected
+  `head_digest` is accepted — QA erased a RETRACT this way and the claim reverted to SUPPORTED — so
+  `head_digest` must be pinned out of band.
+
+### Suite runtime — a new observation for SR-15
+The suite grew from ~15s to ~50s. The orchestrator's first hypothesis was that SR-14's per-call
+`verify_chain()` had made ledger construction quadratic; **that was wrong** — `test_claim_ledger`
+runs in 0.81s. Measured per module: **`test_benchmark` 49.6s** (bootstrap resampling plus the new
+`C_conv` arm's extra training runs), `test_scripts` 13.7s (it runs the offline demo),
+`test_dashboard` 4.3s, `test_robustness` 4.3s. Relevant to CI wall-clock, and recorded so the cost
+is attributed to the right place.
+
+**Suite: 739 tests, OK (2 skipped).**
+
+---
+
+## SR-15 — Deterministic CI, scripts, pinning, offline demo, clean-clone docs
+
+- **Task ID and date:** SR-15, 2026-11-09. **Owner:** ui-infra teammate.
+  **Files:** `.github/workflows/ci.yml`, `scripts/run_tests.sh`, `scripts/lint.sh`, `scripts/demo.py`,
+  `requirements-dev.txt`, `constraints.txt`, `docs/CLEAN_CLONE.md`,
+  `tests/toy_tests/test_scripts.py` (17 tests), plus a pointer section in `README.md` and
+  tooling-cache entries in `.gitignore`.
+- **Status: IMPLEMENTED, PENDING INDEPENDENT QA.**
+- **CI matrix:** `core-no-deps` on Python 3.12 **and 3.13**, installing **nothing** and first
+  asserting torch, numpy, pytest and yaml are *absent*, then running lint, the suite twice, and the
+  demo — this is the clean-clone proof. `optional-deps` on 3.12 only, installing `numpy==1.26.4` and
+  `torch==2.7.1` CPU wheels via `constraints.txt`, asserting numpy is 1.x. Both jobs run read-only,
+  no secrets, `PYTHONHASHSEED=0`, `ALLOW_EXTERNAL_NETWORK=false`. The numpy pin is the `numpy<2` ABI
+  lesson from the surrounding RFdiffusion repo; numpy 1.26 has no 3.13 wheels, which is why
+  `optional-deps` is 3.12 only. **Honestly reported by the builder:** the workflow has not been
+  executed, the torch/numpy pin is untested, and the actions are pinned by tag rather than SHA.
+- **The builder corrected a figure the orchestrator gave it.** The orchestrator stated ~54 tests skip
+  with torch absent; the real number is **85** (84 with numpy present), because numpy-guarded tests
+  skip too. The 86 figure for a bare environment includes one further skip from the optional
+  YAML-parse test, and the builder notes it *reasoned* that number from the measured 85 rather than
+  running it with PyYAML absent. Its Linux-CPU estimate of ~2–8 skips is explicitly labelled an
+  estimate it has not observed.
+- **The skip policy is loose on counts and strict on reasons** — the right design, since exact counts
+  move as teammates land work: with `--expect none`, at least 50 skips, at least one "torch not
+  installed" and one "numpy not installed", and **none** saying "torch present"; with
+  `--expect torch`, **no** skip may say "not installed" and at most 12 are allowed; always, every
+  skip must carry a reason, pytest counts must match unittest, and the total must be >= 650. A
+  negative test confirms `--expect none` **fails loudly** when torch is in fact installed, so a
+  silent-pass regression is caught rather than tolerated.
+- **No-network enforcement is layered, not merely asserted:** `run_tests.sh` runs a canary and then
+  the whole suite under a `sitecustomize` guard making socket connect, `create_connection` and DNS
+  lookups raise, inherited by child processes; `lint.sh` fails if anything in `src/` imports a
+  network module; and `test_scripts.py` repeats the scan with its own AST check over `src/toy` and
+  `demo.py`, asserts no `curl`/`wget` appears in the scripts or workflow, and asserts the socket
+  guard actually blocks a connection. The only network use anywhere is the pip install in
+  `optional-deps`. `docs/DIFF_EVIDENCE.md`'s manual audit commands are documentation for a human and
+  are correctly excluded from the suite.
+- **`run_tests.sh` encodes the kit's standing rule**: `PYTHONDONTWRITEBYTECODE=1` and a cleared
+  `__pycache__`, with the reason documented in the script — three agents in this session got
+  contaminated mutation results from stale `.pyc`, and one spurious 10-failure spike was
+  misattributed to teammates because of it.
+- **`lint.sh` requires nothing installed:** `compileall` plus an AST check the builder wrote (bare
+  `except`, mutable defaults, `assert` on tuples, `is` with literals, shadowed test methods,
+  `eval`/`exec` of non-literals, network imports), with ruff/pyflakes advisory if present. It found
+  that `src/toy/failure_modes.py` legitimately uses `exec` of a literal string (the ER-01
+  demonstration) and allowed exactly that case. `compileall` bytecode is redirected to a temp dir and
+  pytest runs with `-p no:cacheprovider`, so neither leaves artifacts in the tree.
+- **The demo writes nothing into the repo, tested three ways:** it sets `sys.dont_write_bytecode`,
+  writes only to `mkdtemp` and deletes it, and **refuses a temp dir inside the repo**; one test diffs
+  a full repo file listing (path, size, mtime) before and after; another points `TMPDIR` inside the
+  repo and confirms the demo fails leaving nothing behind; a third runs it with a missing module and
+  confirms a non-zero exit.
+- **Orchestrator independent verification:** `python3 scripts/demo.py` → exit 0 in 6.3s, six steps
+  (toy train 0.2403 → 0.0579; checkpoint saved, verified, and a **tampered copy rejected**;
+  ORACLE_GATED on 30 seeds → JOINT_SUPPORTED, labelled as a test *of the scorer*; robustness probe →
+  INVARIANCE_HOLDS; a claim opened and reviewed, chain verified, **state REVIEWED and explicitly not
+  SUPPORTED**; dashboard rendered byte-identically twice), with the "TOY DEMO. NOT EVIDENCE." banner
+  at both start and end. `./scripts/lint.sh` → LINT: OK (ruff clean).
+  `./scripts/run_tests.sh --expect torch` → unittest ran=739 skipped=2 rc=0; pytest 737 passed,
+  2 skipped; skip policy satisfied with 0 "not installed". **`git status --porcelain` before and
+  after the full run is byte-identical**, confirming the suite leaves no trace in the tree.
+
+---
+
+## SR-14 — QA verdict: PASS (marked `[x]`)
+F1 (the `ValueError`-not-`ClaimLedgerError` contract bug whose own test concealed it) is fixed, along
+with the silently-dropped non-list `evidence_refs`, the `object.__new__` `EvidenceRef`, the boolean
+`seq`, F2 self-verification, the F4 future-timestamp bound, and the F5 count. 87 tests; 35 mutants
+all killed. Remaining limits are documented in the module rather than overclaimed: evidence is
+shape-checked only and review is self-attested (no four-eyes rule, `known_evidence` opt-in and off by
+default), and tail truncation with a corrected `head_digest` is accepted, so `head_digest` must be
+pinned out of band. **Status: PASS — blueprint checkbox marked `[x]`.**
+
+## Verified: 11 of 17 — SR-00…SR-06, SR-08, SR-09, SR-11, SR-14.
+Outstanding: SR-07 and SR-10 QA in progress; SR-13 fixed after a second FAIL, awaiting a third
+review; SR-15 built, awaiting QA; SR-12 and SR-16 not started; SR-17 out of autonomous scope by
+design.

@@ -1,0 +1,68 @@
+# Offline, read-only CI for the TOY safety-audit kit. No secrets, no deploy, no pushes, no artifacts uploaded.
+# Network is used ONLY by the pip-install step of the optional-deps job; every test step runs under a socket
+# guard (scripts/run_tests.sh) that makes any connection attempt fail.
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  # Fixed so hash-order effects are identical run to run; see scripts/run_tests.sh.
+  PYTHONHASHSEED: "0"
+  ALLOW_EXTERNAL_NETWORK: "false"
+
+jobs:
+  core-no-deps:
+    name: core, nothing installed (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Confirm nothing third-party is installed
+        run: |
+          python -c "import sys; print(sys.version)"
+          for m in torch numpy pytest yaml; do
+            if python -c "import $m" 2>/dev/null; then echo "unexpected: $m is installed"; exit 1; fi
+          done
+      - name: Lint (stdlib only)
+        run: ./scripts/lint.sh
+      - name: Offline suite, run twice (torch/numpy tests must be SKIPPED with a reason)
+        run: ./scripts/run_tests.sh --expect none --twice
+      - name: Offline demo
+        run: python scripts/demo.py
+
+  optional-deps:
+    name: torch+numpy pinned (py3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned optional dependencies (the only network use in this workflow)
+        run: |
+          python -m pip install --upgrade "pip<26"
+          python -m pip install -c constraints.txt -r requirements-dev.txt numpy \
+            torch --extra-index-url https://download.pytorch.org/whl/cpu
+          python -c "import numpy, torch; print('numpy', numpy.__version__, 'torch', torch.__version__)"
+          python -c "import numpy; assert numpy.__version__.startswith('1.'), 'numpy must stay <2'"
+      - name: Lint
+        run: ./scripts/lint.sh
+      - name: Offline suite under unittest and pytest, run twice (torch tests must RUN)
+        run: ./scripts/run_tests.sh --expect torch --twice
+      - name: Offline demo
+        run: python scripts/demo.py

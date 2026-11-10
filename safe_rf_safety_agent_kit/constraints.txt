@@ -1,0 +1,11 @@
+# Pins for OPTIONAL dev dependencies (pip install -c constraints.txt ...). Nothing here is required by the kit.
+# These constrain versions only; they never cause a package to be installed.
+pytest==8.4.1
+pyyaml==6.0.3
+# numpy<2: the surrounding RFdiffusion repo hit a NumPy/torch ABI mismatch and pinned numpy<2 (commit
+# "Pin numpy<2 in CI to fix NumPy/torch ABI mismatch"). We respect that lesson explicitly: numpy 1.26.4 with
+# torch 2.7.1 (CPU wheels) on Python 3.12. numpy 1.26 has no Python 3.13 wheels, hence the marker; the torch
+# job runs on 3.12 only. NOTE: the maintainer's local interpreter has torch 2.7.1 + numpy 2.4.6 and the suite
+# passes there too; the numpy 1.26.4 combination is the CI pin and has not been exercised locally.
+numpy==1.26.4; python_version < "3.13"
+torch==2.7.1

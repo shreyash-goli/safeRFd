@@ -1,0 +1,9 @@
+# DEV / OPTIONAL tooling only. The kit itself (src/toy) needs NOTHING beyond the Python 3.12+ standard library;
+# the full offline suite passes with none of these installed (torch/numpy tests then report as skipped).
+#
+#   pip install -c constraints.txt -r requirements-dev.txt          # test tooling
+#   pip install -c constraints.txt -r requirements-dev.txt numpy torch   # + optional autograd/device tests
+#
+# Versions are pinned in constraints.txt, not here. numpy must stay <2 for the pinned torch (see there).
+pytest
+pyyaml

@@ -73,7 +73,7 @@ from toy.schema import (SCHEMA_VERSION, TOY_LABEL, EvidenceClass, ExperimentReco
                         canonical_json, current_python_version, derive_seed, make_rng)
 
 CODE_VERSION = "toy-robustness-v1"
-SEED_FLOOR = 3            # absolute minimum distinct measured seeds for any summary; not configurable below
+SEED_FLOOR = 3            # absolute minimum NUMBER of measured values (seeds) for any summary; not configurable below
 DEFAULT_MIN_SEEDS = 10    # PROTOCOL PARAMETER (proposed default, arbitrary, no empirical basis)
 EPS = sys.float_info.epsilon  # 2**-52
 U = EPS / 2                    # unit roundoff 2**-53
@@ -146,7 +146,9 @@ class InsufficientEvidence:
 
 @dataclasses.dataclass(frozen=True)
 class SeedSummary:
-    """Distribution of an outcome over >= SEED_FLOOR measured seeds. Cannot be built from fewer."""
+    """Distribution of an outcome over >= SEED_FLOOR measured seeds. Cannot be built from fewer.
+    Known unguarded corner: finite values near the float maximum are accepted (e.g. three copies of 1.7e308)
+    and such a summary serializes; no overflow check is made on the statistics beyond finiteness."""
     n: int
     mean: float
     sd: float
@@ -567,7 +569,11 @@ def abs_bias_naive(pred, target, mask) -> float:
 def abs_bias_fsum(pred, target, mask) -> float:
     """Same quantity with exactly rounded accumulation."""
     d = _signed_diffs(pred, target, mask)
-    return abs(math.fsum(x for r in d for x in r) / (len(d) * len(d[0])))
+    try:
+        res = math.fsum(x for r in d for x in r) / (len(d) * len(d[0]))
+    except OverflowError:   # fsum raises OverflowError on intermediate overflow; keep the documented ValueError family
+        raise stability.NonFiniteError("signed sum overflowed") from None
+    return abs(res)
 
 
 def exact_masked_mse(pred, target, mask) -> Fraction:

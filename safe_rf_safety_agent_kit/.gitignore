@@ -15,3 +15,10 @@ checkpoints/
 *.npz
 *.pdb
 *.cif
+
+# SR-15 tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+saferf_demo_*/

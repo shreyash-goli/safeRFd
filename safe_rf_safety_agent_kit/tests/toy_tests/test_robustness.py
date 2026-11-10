@@ -947,6 +947,48 @@ class TestQAHardening(unittest.TestCase):
             r = rb.probe_shift(rb.mse_fsum, sp, SEEDS, CFG).details["max_dev_over_bound"]
             self.assertTrue(1e-3 < r < 1.0, (sp.name, r))
 
+    def test_insufficient_ordering_guard(self):
+        """A forged card claiming INSUFFICIENT while holding >= min_seeds measured values is refused (the only
+        guard for that state), at the object level and inside a card."""
+        c = self.insufficient_card()
+        for n, req in ((10, 10), (11, 10)):
+            forged = rb.InsufficientEvidence(1, 10, "x")
+            object.__setattr__(forged, "n_measured", n)
+            object.__setattr__(forged, "n_required", req)
+            with self.assertRaises(ValueError):
+                rb._recheck_insufficient(forged)
+            with self.assertRaises(ValueError):
+                dataclasses.replace(c, insufficient=forged)
+        full = rb.seed_sensitivity_probe(lambda s: float(s % 5), SEEDS, CFG)
+        forged = rb.InsufficientEvidence(1, 10, "x")
+        object.__setattr__(forged, "n_measured", 12)
+        with self.assertRaises(ValueError):
+            dataclasses.replace(full, summary=None, insufficient=forged, status=PS.INSUFFICIENT_EVIDENCE,
+                                evidence_labels=(EvidenceClass.NOT_VALIDATED, EvidenceClass.UNKNOWN))
+
+    def test_raw_observation_non_claim_is_pinned(self):
+        self.assertIn("raw observations only", rb.STANDARD_NON_CLAIMS[-1])
+        self.assertIn("support no claim", rb.STANDARD_NON_CLAIMS[-1])
+        self.assertIn("INSUFFICIENT_EVIDENCE", rb.STANDARD_NON_CLAIMS[-1])
+        self.assertEqual(len(rb.STANDARD_NON_CLAIMS), 6)
+        for c in (self.insufficient_card(), sc_simple()):
+            self.assertIn(rb.STANDARD_NON_CLAIMS[-1], c.does_not_establish)
+        with self.assertRaises(ValueError):   # dropping that entry from a card is refused
+            c = self.insufficient_card()
+            dataclasses.replace(c, does_not_establish=tuple(x for x in c.does_not_establish
+                                                                if x != rb.STANDARD_NON_CLAIMS[-1]))
+
+    def test_extreme_mixed_sign_input_raises_valueerror_family(self):
+        big = ((1.7e308,), (1.7e308,), (-1.7e308,))
+        for m in (rb.abs_bias_fsum, rb.abs_bias_naive, rb.mse_fsum, rb.mse_naive):
+            with self.assertRaises(ValueError, msg=m.__name__):
+                m(big, ((0.0,),) * 3, (True,) * 3)
+
+    def test_documented_corner_extreme_summary_is_accepted(self):
+        s = rb.SeedSummary.from_values([1.7e308] * 3)      # documented, unguarded: see SeedSummary docstring
+        self.assertEqual(s.n, 3)
+        self.assertIn("1.7e308", rb.SeedSummary.__doc__)
+
     # --- independent oracle check for exact_masked_mse
     def test_exact_masked_mse_against_independent_decimal_arithmetic(self):
         import decimal

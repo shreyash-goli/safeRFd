@@ -59,6 +59,39 @@ replay still rejects impossible histories such as a SUPPORT with no evidence).
 It does not authenticate reviewers and cannot detect truncation of the tail.
 To pin the history, store `head_digest` through a separate trusted channel.
 
+Honest limits of what the ledger guarantees (read before relying on it):
+- Self-verification is opt-out, not absent: `append`, `claim_state()` and `summary()`
+  run `verify_chain()` first and raise `ChainIntegrityError` on a tampered in-memory
+  ledger (`summary(verify=False)` is a forensic escape hatch). Any OTHER renderer that
+  reads `events` directly must call `verify_chain()` or go through `load_ledger` itself.
+- Evidence is checked for SHAPE only and review is SELF-ATTESTED. A single reviewer can
+  OPEN, REVIEW and SUPPORT a claim citing `sha256(b"nothing at all")` and it will reach
+  SUPPORTED. That is the main route to a hollow SUPPORTED. There is no four-eyes rule,
+  and `known_evidence` (which would at least require refs to be registered) is OPT-IN and
+  OFF by default. A SUPPORTED state therefore proves a reviewer clicked, not that the
+  evidence is real or sufficient.
+- Future-dated events: per-claim timestamps may not go backwards, so one event dated far
+  in the future would brick the claim. `append` therefore rejects timestamps more than
+  `max_future_skew_seconds` (default 86400) ahead of the ledger clock
+  (`TimestampFutureError`). The bound is applied at append time only; a loaded file is
+  verified for ordering, not against today's clock.
+- Tail truncation: removing the last N events leaves a valid prefix chain. `load_ledger`
+  catches it only because the file's own `head_digest` no longer matches; an attacker who
+  also fixes `head_digest` (e.g. erasing a RETRACT so the claim reverts to SUPPORTED) is
+  accepted. `head_digest` MUST be pinned out of band (compare the value returned by
+  `save_ledger` against a trusted channel) for truncation to be detectable.
+- Timestamp is part of an event's content, so a retry with a different timestamp is a
+  conflict, not a replay. A caller retrying must reuse the first `timestamp_utc`
+  (`AppendResult.event.timestamp_utc`, and `DuplicateEventIdError.original_timestamp_utc`
+  report it). Evidence-ref ORDER is content too: the same refs in another order conflict.
+  Both are strict and fail closed on purpose.
+- Operator workflow: UNSUPPORTED is terminal, so a mistaken REJECT cannot be corrected in
+  place (an un-reject would make a REJECT quietly undoable). Open a NEW claim id whose
+  statement/justification cites the old claim id and the REJECT event id.
+- The AST import check in the tests is an ALLOWLIST of this module's imports plus a ban on
+  eval/exec/__import__ names. Still hygiene, not proof (it cannot see what an allowed
+  module does, e.g. `os.system`).
+
 Evidence class vs. state: `ClaimState` is not an `EvidenceClass`. A claim's
 evidence class is fixed at OPEN and never changes; SUPPORTED never relabels
 anything SOURCE_OBSERVED. `summary()` returns structured dicts for the dashboard
@@ -81,7 +114,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 from toy.schema import EvidenceClass, TOY_LABEL, canonical_json
 
@@ -94,6 +127,7 @@ MAX_LEDGER_BYTES = 8 << 20
 MAX_JUSTIFICATION = 10_000
 MAX_STATEMENT = 2_000
 MAX_REVIEWER = 200
+DEFAULT_MAX_FUTURE_SKEW_SECONDS = 86_400
 EVIDENCE_KINDS = ("content_hash", "checkpoint_digest")
 SUMMARY_CAVEAT = ("A review verdict recorded by a named human about referenced evidence. "
                   "Not a safety claim; no evidence class was changed by it.")
@@ -145,8 +179,17 @@ class TimestampOrderError(ClaimLedgerError):
     """Event timestamp is earlier than the claim's previous event."""
 
 
+class TimestampFutureError(ClaimLedgerError):
+    """Event timestamp is further in the future than the allowed skew (would brick the claim)."""
+
+
 class DuplicateEventIdError(ClaimLedgerError):
-    """Same event id reused with different content."""
+    """Same event id reused with different content. `original_timestamp_utc` is the timestamp
+    of the event already stored under that id (a retrying caller must reuse it)."""
+
+    def __init__(self, message: str, original_timestamp_utc: Optional[str] = None):
+        super().__init__(message)
+        self.original_timestamp_utc = original_timestamp_utc
 
 
 class ChainIntegrityError(ClaimLedgerError):
@@ -230,6 +273,13 @@ def evidence_from_record(record: Any) -> EvidenceRef:
     return EvidenceRef("content_hash", record.content_hash())
 
 
+def _parse_class(v: Any) -> EvidenceClass:
+    try:
+        return EvidenceClass.parse(v)
+    except (ValueError, TypeError) as e:
+        raise EventFormatError(f"invalid evidence_class: {e}") from None
+
+
 def _now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -261,8 +311,8 @@ def _ts(v: Any) -> str:
 
 
 def _refs(v: Any) -> tuple:
-    if isinstance(v, (str, bytes)) or not isinstance(v, Iterable):
-        raise EventFormatError("evidence_refs must be a sequence of EvidenceRef")
+    if not isinstance(v, (list, tuple)):  # not dict/set/str/generator: order is content
+        raise EventFormatError("evidence_refs must be a list or tuple of EvidenceRef")
     out = []
     for r in v:
         if isinstance(r, dict):
@@ -272,7 +322,10 @@ def _refs(v: Any) -> tuple:
         if not isinstance(r, EvidenceRef):
             raise EventFormatError(f"evidence_refs entries must be EvidenceRef, got {type(r).__name__}")
         # re-run validation even on EvidenceRef objects built via object.__new__/setattr tricks
-        EvidenceRef(r.kind, r.value)
+        try:
+            EvidenceRef(r.kind, r.value)
+        except AttributeError:
+            raise EventFormatError("malformed EvidenceRef object") from None
         if r in out:
             raise EventFormatError(f"duplicate evidence ref {r.value}")
         out.append(r)
@@ -354,7 +407,7 @@ class LedgerEvent:
         except (ValueError, TypeError):
             raise EventFormatError("unknown action/state value in event") from None
         ec = d["evidence_class"]
-        evidence_class = None if ec is None else EvidenceClass.parse(ec)
+        evidence_class = None if ec is None else _parse_class(ec)
         for k in ("prev_digest", "digest"):
             if not isinstance(d[k], str) or not _HEX_RE.fullmatch(d[k]):
                 raise EventFormatError(f"{k} must be a lowercase 64-char sha256 hex string")
@@ -437,7 +490,7 @@ def _validate_and_build(req: EventRequest, prior: Sequence[LedgerEvent],
     if action is Action.OPEN:
         if req.evidence_class is None:
             raise EventFormatError("OPEN requires evidence_class")
-        evidence_class = EvidenceClass.parse(req.evidence_class)
+        evidence_class = _parse_class(req.evidence_class)
         if not isinstance(req.statement, str) or not req.statement.strip():
             raise EventFormatError("OPEN requires a non-empty statement")
         statement = _text("statement", req.statement, MAX_STATEMENT)
@@ -483,9 +536,9 @@ def verify_events(events: Sequence[LedgerEvent],
     seen_ids: set = set()
     for i, e in enumerate(events):
         def bad(reason, detail=None):
-            return ChainVerification(False, i, i, getattr(e, "event_id", None), reason, detail)
+            return ChainVerification(False, i, i, (e.event_id if isinstance(e, LedgerEvent) else None), reason, detail)
         try:
-            if e.seq != i:
+            if type(e.seq) is not int or e.seq != i:
                 return bad("seq_mismatch", f"seq {e.seq} at index {i}")
             if e.prev_digest != prev:
                 return bad("prev_digest_mismatch")
@@ -513,7 +566,11 @@ class ClaimLedger:
     update/delete API. (Python cannot make memory truly immutable; `verify_chain()` exists
     precisely to catch in-process or on-disk tampering.)"""
 
-    def __init__(self, *, known_evidence: Optional[Iterable[str]] = None):
+    def __init__(self, *, known_evidence: Optional[Iterable[str]] = None,
+                 max_future_skew_seconds: int = DEFAULT_MAX_FUTURE_SKEW_SECONDS,
+                 clock: Optional[Callable[[], str]] = None):
+        self._max_skew = max_future_skew_seconds
+        self._clock = clock or _now_utc
         self._events: list = []
         self._ids: dict = {}
         self._states: dict = {}
@@ -537,7 +594,24 @@ class ClaimLedger:
 
     __hash__ = None  # type: ignore[assignment]
 
+    def _reindex(self) -> None:
+        self._ids, self._states, self._last_ts = {}, {}, {}
+        for e in self._events:
+            self._ids[e.event_id] = e.seq
+            self._states[e.claim_id] = e.to_state
+            self._last_ts[e.claim_id] = e.timestamp_utc
+
+    def _checked(self) -> None:
+        """Fail closed: verify the whole chain and rebuild the derived caches from the events."""
+        res = self.verify_chain()
+        if not res.ok:
+            raise ChainIntegrityError(
+                f"ledger fails verification at index {res.first_broken_index} "
+                f"({res.first_broken_event_id!r}): {res.reason}", res)
+        self._reindex()
+
     def claim_state(self, claim_id: str) -> ClaimState:
+        self._checked()
         try:
             return self._states[claim_id]
         except KeyError:
@@ -557,7 +631,8 @@ class ClaimLedger:
         Same event_id + different content -> DuplicateEventIdError (never silently merged)."""
         if not isinstance(req, EventRequest):
             raise EventFormatError("append requires an EventRequest")
-        ts = req.timestamp_utc if req.timestamp_utc is not None else _now_utc()
+        self._checked()
+        ts = req.timestamp_utc if req.timestamp_utc is not None else self._clock()
         req = EventRequest(req.event_id, req.claim_id, req.action, req.from_state, req.to_state,
                            req.reviewer, req.justification, req.evidence_refs, ts,
                            req.evidence_class, req.statement)
@@ -576,8 +651,14 @@ class ClaimLedger:
                 same = False
             if same:
                 return AppendResult(False, existing)
-            raise DuplicateEventIdError(f"event id {eid!r} already used with different content")
+            raise DuplicateEventIdError(
+                f"event id {eid!r} already used with different content; a retry must reuse the original "
+                f"timestamp {existing.timestamp_utc} and evidence-ref order", existing.timestamp_utc)
         content = _validate_and_build(req, self._events, self._states, self._last_ts, self._known)
+        limit = datetime.strptime(self._clock(), "%Y-%m-%dT%H:%M:%SZ").timestamp() + self._max_skew
+        if datetime.strptime(content["timestamp_utc"], "%Y-%m-%dT%H:%M:%SZ").timestamp() > limit:
+            raise TimestampFutureError(
+                f"timestamp {content['timestamp_utc']} is more than {self._max_skew}s ahead of the ledger clock")
         payload = {**content, "seq": len(self._events), "prev_digest": self.head_digest}
         event = LedgerEvent.from_dict({**payload, "digest": _digest(payload)})
         self._events.append(event)
@@ -617,9 +698,12 @@ class ClaimLedger:
                                         refs, ts))
 
     # --- derived summary for renderers
-    def summary(self) -> list:
+    def summary(self, *, verify: bool = True) -> list:
         """Structured, JSON-able per-claim summaries derived by replay. Status comes only
-        from the state machine, never from any text field."""
+        from the state machine, never from any text field. By default the chain is verified
+        first and a tampered ledger raises ChainIntegrityError instead of rendering."""
+        if verify:
+            self._checked()
         out = []
         for cid in self.claim_ids():
             evs = [e for e in self._events if e.claim_id == cid]
@@ -689,23 +773,28 @@ class ClaimLedger:
         expected_head = events[-1].digest if events else GENESIS_DIGEST
         if not isinstance(head, str) or not hmac.compare_digest(head, expected_head):
             raise ChainIntegrityError("head_digest does not match the last event (tail truncated or edited)")
-        for e in events:
-            ledger._events.append(e)
-            ledger._ids[e.event_id] = e.seq
-            ledger._states[e.claim_id] = e.to_state
-            ledger._last_ts[e.claim_id] = e.timestamp_utc
+        ledger._events.extend(events)
+        ledger._reindex()
         return ledger
+
+
+def _enum(cls, v):
+    try:
+        return cls(v)
+    except (ValueError, TypeError):
+        raise EventFormatError(f"unknown {cls.__name__} value {v!r}") from None
 
 
 def _replay_content(req: EventRequest) -> dict:
     """Normalised content of a request with no state rules applied (idempotency comparison)."""
     return LedgerEvent.from_dict({
         "event_id": req.event_id, "claim_id": req.claim_id,
-        "action": Action(req.action).value, "from_state": None if req.from_state is None else ClaimState(req.from_state).value,
-        "to_state": ClaimState(req.to_state).value, "reviewer": req.reviewer,
+        "action": _enum(Action, req.action).value,
+        "from_state": None if req.from_state is None else _enum(ClaimState, req.from_state).value,
+        "to_state": _enum(ClaimState, req.to_state).value, "reviewer": req.reviewer,
         "timestamp_utc": req.timestamp_utc, "justification": req.justification,
         "evidence_refs": [r.to_dict() for r in _refs(req.evidence_refs)],
-        "evidence_class": None if req.evidence_class is None else EvidenceClass.parse(req.evidence_class).value,
+        "evidence_class": None if req.evidence_class is None else _parse_class(req.evidence_class).value,
         "statement": req.statement, "seq": 0, "prev_digest": GENESIS_DIGEST, "digest": GENESIS_DIGEST,
     }).content_dict()
 

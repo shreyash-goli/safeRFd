@@ -396,9 +396,30 @@ def _contract_problems() -> list:
     return probs
 
 
-def _recompute(c: Any) -> Optional[Verdict]:
-    """Verdict recomputed from the interval alone. None means 'could not recompute' (treated as a mismatch)."""
+def _declared(metric: Any, margins: Any) -> tuple:
+    """(direction, margin) the PROTOCOL tables declare for this metric, margin read from the result's Margins."""
+    for table in (*bm.PRIMARY.values(), bm.CONVERGED):
+        for m, direction, attr in table:
+            if m == metric:
+                return direction, float(getattr(margins, attr))
+    raise LookupError(f"metric {metric!r} not in the protocol tables")
+
+
+def _recompute(c: Any, margins: Any = None) -> Optional[Verdict]:
+    """Verdict recomputed from the interval alone. None means 'could not recompute' (always treated as a
+    mismatch and shown INCONCLUSIVE with an alarm, never as SUPPORTED).
+
+    If `margins` is given, the component's own margin/direction must equal what the protocol tables
+    (benchmark.PRIMARY / CONVERGED) declare for that metric under the result's Margins; a component whose
+    margin was edited on its own is therefore an alarm. RESIDUAL LIMIT: the renderer has no second source of
+    truth for the registered margins themselves. A result whose Margins object AND component margins were
+    forged consistently recomputes consistently and raises no alarm. Margins are shown on the page (see
+    'Uncertainty and protocol limits') but are producer-asserted, not authenticated."""
     try:
+        if margins is not None:
+            direction, margin = _declared(c.metric, margins)
+            if c.direction != direction or float(c.margin) != margin:
+                return None
         v, _ = bm.interval_verdict(c.pair, float(c.margin), c.direction,
                                    getattr(c, "width_tol", 0.25), getattr(c, "min_n", 30))
         return Verdict(v)
@@ -417,10 +438,10 @@ def _failed(g: Any) -> bool:
     return getattr(g, "passed", None) is not True
 
 
-def _eff_component(c: Any, withheld: bool, contract_bad: bool) -> tuple:
+def _eff_component(c: Any, withheld: bool, contract_bad: bool, margins: Any = None) -> tuple:
     """(displayed verdict or None, mismatch). Decisive only if stored AND recomputed agree and nothing withholds it."""
     stored = _vcoerce(Verdict, getattr(c, "verdict", None))
-    rec = _recompute(c)
+    rec = _recompute(c, margins)
     if stored is None or rec is None or rec is not stored:
         return Verdict.INCONCLUSIVE, True
     if withheld or contract_bad:
@@ -428,11 +449,11 @@ def _eff_component(c: Any, withheld: bool, contract_bad: bool) -> tuple:
     return stored, False
 
 
-def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool) -> tuple:
+def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool, margins: Any = None) -> tuple:
     """(displayed verdict, mismatch). Decisive only if the stored hypothesis verdict equals an independent
     recomputation from recomputed component verdicts, scope-aware gates, and (H3) converged components."""
-    rc = [_recompute(c) for c in h.components]
-    mismatch = any(_eff_component(c, False, False)[1] for c in h.components)
+    rc = [_recompute(c, margins) for c in h.components]
+    mismatch = any(_eff_component(c, False, False, margins)[1] for c in h.components)
     if None in rc:
         return Verdict.INCONCLUSIVE, True
     blocked = bool(getattr(h, "blocking", ())) or any(
@@ -450,7 +471,7 @@ def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool) -> tuple:
         rv = Verdict.INCONCLUSIVE
     if rv is Verdict.SUPPORTED and h.hid == "H3":
         conv = tuple(getattr(h, "converged_components", ()) or ())
-        if sup_block or not conv or not all(_recompute(c) is Verdict.SUPPORTED for c in conv):
+        if sup_block or not conv or not all(_recompute(c, margins) is Verdict.SUPPORTED for c in conv):
             rv = Verdict.INCONCLUSIVE
     stored = _vcoerce(Verdict, getattr(h, "verdict", None))
     if stored is not rv:
@@ -505,7 +526,7 @@ def render_scorecard(joint: Any) -> str:
     eff = {}
     rows = ""
     for h in (joint.h1, joint.h2, joint.h3):
-        ev, mm = _eff_hypothesis(h, gates, bad)
+        ev, mm = _eff_hypothesis(h, gates, bad, joint.margins)
         eff[h.hid] = ev
         if mm:
             mismatch.append(h.hid)
@@ -516,7 +537,7 @@ def render_scorecard(joint: Any) -> str:
         for comps, suffix in groups:
             for c in comps:
                 pair = c.pair
-                ecv, cmm = _eff_component(c, any_failed, bad)
+                ecv, cmm = _eff_component(c, any_failed, bad, joint.margins)
                 if cmm and h.hid not in mismatch:
                     mismatch.append(h.hid)
                 margin = c.margin if isinstance(c.margin, (int, float)) and not isinstance(c.margin, bool) \
@@ -659,12 +680,43 @@ def render_dashboard(data: Optional[Mapping] = None) -> str:
         "</main></body></html>\n")
 
 
+def _same_file(a: os.stat_result, b: os.stat_result) -> bool:
+    return a.st_dev == b.st_dev and a.st_ino == b.st_ino
+
+
 def _inside_repo(p: Path) -> bool:
+    """True if `p` is, or would be created inside, the repository tree. Fails CLOSED (True) on any doubt.
+
+    Primary check is IDENTITY, not text: every existing ancestor of the resolved target is compared by
+    (st_dev, st_ino) with the repo root, so case-varied directory components on a case-insensitive volume
+    (resolve() does not normalise those), bind mounts and aliases are all caught, and the check stays correct
+    on a case-sensitive mount. A case-folded textual prefix comparison is a secondary belt-and-braces check
+    (it can only over-refuse)."""
     try:
-        p.resolve().relative_to(REPO_ROOT)
+        r = Path(os.path.abspath(p)).resolve()
+        root = REPO_ROOT.resolve()
+    except (OSError, RuntimeError, ValueError):
         return True
-    except ValueError:
-        return False
+    try:
+        root_st = os.stat(root)
+    except OSError:
+        root_st = None
+    for a in (r, *r.parents):
+        try:
+            st = os.stat(a)
+        except OSError:
+            continue                       # does not exist (yet): keep walking up to one that does
+        if root_st is not None and _same_file(st, root_st):
+            return True
+    return _casefold_inside(r, root)
+
+
+def _casefold_inside(r: Path, root: Path) -> bool:
+    rs, ks = str(r).casefold(), str(root).casefold()
+    return rs == ks or rs.startswith(ks.rstrip(os.sep) + os.sep)
+
+
+_DEVICE_PREFIXES = ("/dev", "/proc", "/sys")
 
 
 def write_dashboard(path: Optional[Any] = None, data: Optional[Mapping] = None) -> Path:
@@ -673,16 +725,32 @@ def write_dashboard(path: Optional[Any] = None, data: Optional[Mapping] = None) 
     Guards (path AND inode level): refuse a path that resolves inside the repo tree; refuse symlinks; refuse an
     existing target that is not a regular file; refuse an existing target with more than one hard link (a
     hardlink's path can lie outside the repo while its inode is a repo file); and write via a temp file +
-    os.replace so that even a missed case replaces the directory entry and never modifies an existing inode."""
+    os.replace so that even a missed case replaces the directory entry and never modifies an existing inode.
+    The temp file is created in the DESTINATION directory (rename is atomic only within one filesystem).
+
+    Side effects / limits, stated plainly: the replaced file gets mode 0600 (mkstemp), not the umask default;
+    a filesystem that does not report link counts (some FUSE/network mounts) would defeat the st_nlink guard,
+    though the temp-file design still leaves the old inode untouched; /dev, /proc and /sys destinations are
+    refused deliberately."""
     out = Path(path) if path is not None else Path(tempfile.mkdtemp(prefix="saferf_dashboard_")) / "dashboard.html"
     if _inside_repo(out):
         raise ValueError("refusing to write the dashboard inside the repository tree")
+    try:
+        parent = Path(os.path.abspath(out)).parent.resolve()
+    except (OSError, RuntimeError):
+        raise ValueError("refusing: cannot resolve the destination directory") from None
+    if any(str(parent) == d or str(parent).startswith(d + os.sep) for d in _DEVICE_PREFIXES):
+        raise ValueError("refusing to write into a device/pseudo filesystem (/dev, /proc, /sys)")
+    if not parent.is_dir():
+        raise ValueError("refusing: destination directory does not exist")
     if out.is_symlink():
         raise ValueError("refusing to write through a symlink")
     try:
         st = os.lstat(out)
     except FileNotFoundError:
         st = None
+    except OSError as ex:
+        raise ValueError(f"refusing: cannot inspect the destination ({type(ex).__name__})") from None
     if st is not None:
         if not stat.S_ISREG(st.st_mode):
             raise ValueError("refusing to overwrite a non-regular file")

@@ -245,8 +245,9 @@ class RequiredFields(unittest.TestCase):
     def test_open_requires_class_and_statement_and_others_forbid_them(self):
         lg = ClaimLedger()
         for kw in (dict(evidence_class=None, statement="s"), dict(evidence_class="TOY_RESULT", statement=""),
-                   dict(evidence_class="BOGUS", statement="s")):
-            with self.assertRaises((EventFormatError, ValueError)):
+                   dict(evidence_class="BOGUS", statement="s"),
+                   dict(evidence_class="toy_result", statement="s"), dict(evidence_class=5, statement="s")):
+            with self.assertRaises(EventFormatError):
                 lg.open_claim(event_id="e", claim_id="c", reviewer="a", justification="j", timestamp_utc=T0, **kw)
         lg = ledger_in(S.DRAFT)
         with self.assertRaises(EventFormatError):  # cannot relabel the evidence class mid-life
@@ -611,9 +612,471 @@ class SourceHygiene(unittest.TestCase):
         self.assertEqual(banned_imports("import json\n'pickle in a string'"), [])
         self.assertTrue(banned_imports(self.SRC + "\nimport pickle\n"))
 
+    ALLOWED = {"__future__", "hashlib", "hmac", "json", "os", "re", "tempfile", "dataclasses", "datetime",
+               "enum", "typing", "toy.schema"}
+
+    @staticmethod
+    def imported(source):
+        out = set()
+        for n in ast.walk(ast.parse(source)):
+            if isinstance(n, ast.Import):
+                out |= {a.name for a in n.names}
+            elif isinstance(n, ast.ImportFrom):
+                out.add(n.module or "")
+        return out
+
+    def test_imports_are_a_strict_allowlist_and_no_dynamic_exec(self):
+        self.assertLessEqual(self.imported(self.SRC), self.ALLOWED)
+        names = {n.id for n in ast.walk(ast.parse(self.SRC)) if isinstance(n, ast.Name)}
+        self.assertFalse(names & {"eval", "exec", "compile", "__import__", "getattr", "setattr"})
+
+    def test_allowlist_check_is_not_vacuous(self):
+        for extra in ("import socket", "import subprocess", "import ctypes", "from urllib import request",
+                      "import yaml"):
+            self.assertFalse(self.imported(self.SRC + "\n" + extra) <= self.ALLOWED, extra)
+        # Documented blind spot: an allowed module's dangerous member is invisible to the scan.
+        self.assertLessEqual(self.imported("from os import system"), self.ALLOWED)
+
     def test_scanned_file_is_the_ledger_module(self):
         self.assertTrue(cl.__file__.endswith(os.path.join("toy", "claim_ledger.py")))
         self.assertIn("def verify_events", self.SRC)
+
+def rewrite_keep_seq(dicts):
+    """Like rewrite() but keeps each event's own (possibly forged) seq; recomputes the hash links."""
+    prev, out = cl.GENESIS_DIGEST, []
+    for d in dicts:
+        d = dict(d, prev_digest=prev)
+        d.pop("digest", None)
+        d["digest"] = cl._digest(d)
+        prev = d["digest"]
+        out.append(d)
+    return out
+
+
+def rehash_first(dicts, **edits):
+    d = copy.deepcopy(dicts)
+    d[0].update(edits)
+    d[0].pop("digest")
+    d[0]["digest"] = cl._digest(d[0])
+    return d
+
+
+class ErrorContract(unittest.TestCase):
+    """F1: every failure is a ClaimLedgerError, never a bare ValueError/TypeError/AttributeError."""
+
+    def test_every_exception_class_derives_from_base(self):
+        classes = [c for c in vars(cl).values() if isinstance(c, type) and issubclass(c, Exception)
+                   and c.__module__ == cl.__name__]
+        self.assertIn(cl.ClaimLedgerError, classes)
+        for c in classes:
+            self.assertTrue(issubclass(c, ClaimLedgerError), c)
+        self.assertEqual(len(classes) - 1, 15)
+        for bad in ({}, set(), "", b"", iter(())):  # non-sequence containers are not an empty ref list
+            with self.assertRaises(EventFormatError):
+                ledger_in(S.REVIEWED).support(event_id="e", claim_id="c1", reviewer="a", justification="j",
+                                              evidence_refs=bad, timestamp_utc=T2)  # subclasses of the base (documented count)
+
+    def test_bad_evidence_class_is_event_format_error_everywhere(self):
+        for bad in ("BOGUS", "toy_result", 5, None, [], {}, True):
+            if bad is None:
+                continue
+            with self.subTest(bad=bad):
+                with self.assertRaises(EventFormatError):
+                    ClaimLedger().open_claim(event_id="e", claim_id="c", reviewer="a", justification="j",
+                                             statement="s", evidence_class=bad, timestamp_utc=T0)
+                with self.assertRaises(EventFormatError):
+                    ClaimLedger().append(req("e", "c", Action.OPEN, None, S.DRAFT, evidence_class=bad, statement="s"))
+                d = [e.to_dict() for e in ledger_in(S.DRAFT).events]
+                d[0]["evidence_class"] = bad
+                with self.assertRaises(EventFormatError):
+                    LedgerEvent.from_dict(d[0])
+                with self.assertRaises(EventFormatError):
+                    ClaimLedger.from_dict(doc(d))
+                with tempfile.TemporaryDirectory() as td:
+                    pth = Path(td) / "l.json"
+                    pth.write_text(canonical_json(doc(d)))
+                    with self.assertRaises(EventFormatError):
+                        load_ledger(pth)
+
+    def test_replay_with_bad_enum_values_is_ledger_error(self):
+        lg = ledger_in(S.DRAFT)
+        for kw in (dict(action="NOPE"), dict(to_state=[]), dict(from_state=5)):
+            base = dict(event_id="e-rev", claim_id="c1", action=Action.REVIEW, from_state=S.DRAFT,
+                        to_state=S.REVIEWED, reviewer="a", justification="read it", timestamp_utc=T1)
+            base.update(kw)
+            with self.assertRaises(ClaimLedgerError):
+                lg.append(EventRequest(**base))
+
+    def test_evidence_ref_built_via_object_new_is_ledger_error(self):
+        bad = object.__new__(EvidenceRef)
+        lg = ledger_in(S.REVIEWED)
+        with self.assertRaises(EventFormatError):
+            lg.support(event_id="e", claim_id="c1", reviewer="a", justification="j", evidence_refs=(bad,),
+                       timestamp_utc=T2)
+        self.assertIs(lg.claim_state("c1"), S.REVIEWED)
+
+    def test_field_fuzz_never_leaks_a_non_ledger_exception(self):
+        good = full_ledger().to_dict()
+        junk = [None, 5, True, 1.5, [], {}, "x", "", "toy_result", [1], {"a": 1}]
+        n = 0
+        for i, ev in enumerate(good["events"]):
+            for k in ev:
+                for j in junk:
+                    if ev[k] == j and type(ev[k]) is type(j):
+                        continue
+                    d = copy.deepcopy(good)
+                    d["events"][i][k] = j
+                    try:
+                        ClaimLedger.from_dict(d)
+                    except ClaimLedgerError:
+                        n += 1
+                    else:
+                        self.fail(f"mutated {k}={j!r} on event {i} loaded")
+        self.assertGreater(n, 300)
+        for k in good:
+            for j in junk:
+                d = copy.deepcopy(good)
+                d[k] = j
+                if d == good:
+                    continue
+                with self.assertRaises(ClaimLedgerError):
+                    ClaimLedger.from_dict(d)
+
+    def test_non_dict_inputs(self):
+        for bad in (None, 5, [], "x"):
+            with self.assertRaises(ClaimLedgerError):
+                ClaimLedger.from_dict(bad)
+            with self.assertRaises(ClaimLedgerError):
+                LedgerEvent.from_dict(bad)
+        with self.assertRaises(EventFormatError):
+            ClaimLedger().append({"event_id": "e"})
+        with self.assertRaises(EventFormatError):
+            ClaimLedger().append(None)
+
+
+class BoundaryAndSingleFieldMutants(unittest.TestCase):
+    def test_equal_timestamps_on_same_claim_are_allowed(self):
+        lg = ledger_in(S.DRAFT)  # open at T0
+        lg.review(event_id="e-eq", claim_id="c1", reviewer="a", justification="j", timestamp_utc=T0)
+        self.assertIs(lg.claim_state("c1"), S.REVIEWED)
+
+    def test_hash_length_exactly_64(self):
+        for n in (63, 65, 0, 128):
+            with self.assertRaises(EventFormatError):
+                EvidenceRef("content_hash", "a" * n)
+        d = [e.to_dict() for e in ledger_in(S.DRAFT).events][0]
+        for key in ("prev_digest", "digest"):
+            for n in (63, 65):
+                with self.assertRaises(EventFormatError):
+                    LedgerEvent.from_dict({**d, key: "a" * n})
+        good = full_ledger().to_dict()
+        for n in (63, 65):
+            with self.assertRaises(ChainIntegrityError):
+                ClaimLedger.from_dict({**good, "head_digest": "a" * n})
+
+    def test_idempotency_single_field_conflicts(self):
+        base = dict(event_id="e-rev", claim_id="c1", action=Action.REVIEW, from_state=S.DRAFT,
+                    to_state=S.REVIEWED, reviewer="a", justification="read it", evidence_refs=(),
+                    timestamp_utc=T1)
+        variants = dict(claim_id="c-other", action=Action.REJECT, to_state=S.UNSUPPORTED,
+                        from_state=S.REVIEWED, reviewer="b", justification="read it.", timestamp_utc=T2,
+                        evidence_refs=EV)
+        for f, v in variants.items():
+            with self.subTest(field=f):
+                lg = ledger_in(S.REVIEWED)
+                head = lg.head_digest
+                with self.assertRaises(DuplicateEventIdError):
+                    lg.append(EventRequest(**{**base, f: v}))
+                self.assertEqual(lg.head_digest, head)
+        # control: the unmodified replay is a no-op
+        self.assertFalse(ledger_in(S.REVIEWED).append(EventRequest(**base)).appended)
+
+    def test_idempotency_open_event_statement_and_class_conflicts(self):
+        base = dict(event_id="e-open", claim_id="c1", reviewer="a", justification="draft", statement="toy claim",
+                    evidence_class=EvidenceClass.TOY_RESULT, timestamp_utc=T0)
+        for f, v in (("statement", "other"), ("evidence_class", EvidenceClass.HYPOTHESIS)):
+            with self.subTest(field=f):
+                lg = ledger_in(S.DRAFT)
+                with self.assertRaises(DuplicateEventIdError):
+                    lg.open_claim(**{**base, f: v})
+        self.assertFalse(ledger_in(S.DRAFT).open_claim(**base).appended)
+
+    def test_evidence_ref_order_is_content(self):
+        r2 = EvidenceRef("checkpoint_digest", H2)
+        lg = ledger_in(S.REVIEWED)
+        lg.support(event_id="e-s", claim_id="c1", reviewer="a", justification="j", evidence_refs=(EV[0], r2),
+                   timestamp_utc=T2)
+        self.assertFalse(lg.support(event_id="e-s", claim_id="c1", reviewer="a", justification="j",
+                                    evidence_refs=(EV[0], r2), timestamp_utc=T2).appended)
+        with self.assertRaises(DuplicateEventIdError):
+            lg.support(event_id="e-s", claim_id="c1", reviewer="a", justification="j",
+                       evidence_refs=(r2, EV[0]), timestamp_utc=T2)
+
+    def test_timestamp_retry_trap_reports_original_timestamp(self):
+        lg = ClaimLedger(clock=lambda: "2025-06-01T00:00:00Z")
+        r = lg.open_claim(event_id="e", claim_id="c", reviewer="a", justification="j", statement="s",
+                          evidence_class="TOY_RESULT")
+        self.assertEqual(r.event.timestamp_utc, "2025-06-01T00:00:00Z")
+        lg._clock = lambda: "2025-06-01T00:00:09Z"
+        with self.assertRaises(DuplicateEventIdError) as cm:
+            lg.open_claim(event_id="e", claim_id="c", reviewer="a", justification="j", statement="s",
+                          evidence_class="TOY_RESULT")
+        self.assertEqual(cm.exception.original_timestamp_utc, "2025-06-01T00:00:00Z")
+        self.assertIn("2025-06-01T00:00:00Z", str(cm.exception))
+        self.assertFalse(lg.open_claim(event_id="e", claim_id="c", reviewer="a", justification="j", statement="s",
+                                       evidence_class="TOY_RESULT", timestamp_utc="2025-06-01T00:00:00Z").appended)
+
+    def test_future_timestamp_cannot_brick_a_claim(self):
+        lg = ledger_in(S.DRAFT)
+        lg._clock = lambda: "2025-01-02T03:04:10Z"
+        with self.assertRaises(cl.TimestampFutureError):
+            lg.review(event_id="e-f", claim_id="c1", reviewer="a", justification="j",
+                      timestamp_utc="2999-01-01T00:00:00Z")
+        lg.review(event_id="e-ok", claim_id="c1", reviewer="a", justification="j",
+                  timestamp_utc="2025-01-03T03:04:10Z")  # exactly within 24h skew
+        lg2 = ledger_in(S.DRAFT)
+        lg2._clock = lambda: "2025-01-02T03:04:10Z"
+        with self.assertRaises(cl.TimestampFutureError):
+            lg2.review(event_id="e-f", claim_id="c1", reviewer="a", justification="j",
+                       timestamp_utc="2025-01-03T03:04:11Z")  # 1s beyond
+        self.assertIs(lg2.claim_state("c1"), S.DRAFT)
+
+    def test_literal_limits_and_boundaries(self):
+        self.assertEqual((cl.MAX_JUSTIFICATION, cl.MAX_STATEMENT, cl.MAX_REVIEWER, cl.MAX_LEDGER_BYTES),
+                         (10_000, 2_000, 200, 8 << 20))
+        self.assertEqual(cl.DEFAULT_MAX_FUTURE_SKEW_SECONDS, 86_400)
+        lg = ledger_in(S.DRAFT)
+        lg.review(event_id="e-j", claim_id="c1", reviewer="r" * 200, justification="j" * 10_000, timestamp_utc=T1)
+        for kw in (dict(reviewer="r" * 201, justification="j"), dict(reviewer="r", justification="j" * 10_001)):
+            with self.assertRaises(EventFormatError):
+                ledger_in(S.DRAFT).review(event_id="e-j", claim_id="c1", timestamp_utc=T1, **kw)
+        ClaimLedger().open_claim(event_id="e", claim_id="c", reviewer="a", justification="j",
+                                 statement="s" * 2_000, evidence_class="HYPOTHESIS", timestamp_utc=T0)
+        with self.assertRaises(EventFormatError):
+            ClaimLedger().open_claim(event_id="e", claim_id="c", reviewer="a", justification="j",
+                                     statement="s" * 2_001, evidence_class="HYPOTHESIS", timestamp_utc=T0)
+
+    def test_id_regex_strict(self):
+        ok = ClaimLedger()
+        ok.open_claim(event_id="e" * 128, claim_id="A.b_c:d-1", reviewer="a", justification="j", statement="s",
+                      evidence_class="HYPOTHESIS", timestamp_utc=T0)
+        for bad in ("e" * 129, "", "has space", "tab\t", "new\n", "unié", "a/b", "a;b"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(EventFormatError):
+                    ClaimLedger().open_claim(event_id=bad, claim_id="c", reviewer="a", justification="j",
+                                             statement="s", evidence_class="HYPOTHESIS", timestamp_utc=T0)
+                with self.assertRaises(EventFormatError):
+                    ClaimLedger().open_claim(event_id="e", claim_id=bad, reviewer="a", justification="j",
+                                             statement="s", evidence_class="HYPOTHESIS", timestamp_utc=T0)
+
+    def test_timestamp_regex_strict(self):
+        for bad in ("2025-01-02T03:04:05Z\n", " 2025-01-02T03:04:05Z", "2025-01-02T03:04:05z",
+                    "2025-01-02T03:04:05.5Z", "2025-01-02T03:04:05+00:00", "2025-1-2T3:4:5Z", "2025-1-02T03:04:05Z", "2025-01-2T03:04:05Z", "2025-01-02T3:04:05Z",
+                    "2025-02-30T03:04:05Z", "２025-01-02T03:04:05Z"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(EventFormatError):
+                    ClaimLedger().open_claim(event_id="e", claim_id="c", reviewer="a", justification="j",
+                                             statement="s", evidence_class="HYPOTHESIS", timestamp_utc=bad)
+
+
+class ChainMutants(unittest.TestCase):
+    def setUp(self):
+        self.lg = full_ledger()
+        self.dicts = [e.to_dict() for e in self.lg.events]
+
+    def test_forged_seq_with_recomputed_digests(self):
+        for i, forged in ((0, 1), (2, 7), (3, 2)):
+            with self.subTest(i=i):
+                d = copy.deepcopy(self.dicts)
+                d[i]["seq"] = forged
+                res = verify_dicts(rewrite_keep_seq(d))
+                self.assertEqual((res.ok, res.first_broken_index, res.reason), (False, i, "seq_mismatch"))
+
+    def test_bool_seq_is_not_int(self):
+        with self.assertRaises(EventFormatError):
+            LedgerEvent.from_dict({**self.dicts[1], "seq": True})
+        evs = [LedgerEvent.from_dict(d) for d in self.dicts]
+        forged = dict(self.dicts[1], seq=True)  # True == 1 in Python
+        forged.pop("digest")
+        forged["digest"] = cl._digest(forged)
+        evs[1] = LedgerEvent(**{**{k: getattr(evs[1], k) for k in LedgerEvent.__dataclass_fields__},
+                                "seq": True, "digest": forged["digest"]})
+        self.assertEqual(evs[1].seq, 1)
+        res = verify_events(evs)
+        self.assertFalse(res.ok)
+        self.assertEqual(res.first_broken_index, 1)
+
+    def test_duplicate_event_id_with_otherwise_valid_transition(self):
+        d = copy.deepcopy(self.dicts)
+        # a second, perfectly valid OPEN of a NEW claim that reuses the first event's id
+        d.append(dict(d[0], claim_id="c3", timestamp_utc=T3))
+        res = verify_dicts(rewrite(d))
+        self.assertEqual((res.ok, res.first_broken_index, res.reason),
+                         (False, len(d) - 1, "DuplicateEventIdError"))
+        # control: same event with a fresh id is valid
+        d[-1]["event_id"] = "e-fresh"
+        self.assertTrue(verify_dicts(rewrite(d)).ok)
+
+    def test_first_event_prev_digest_must_be_genesis(self):
+        for bad in ("f" * 64, "1" + "0" * 63):
+            res = verify_dicts(rehash_first(self.dicts, prev_digest=bad))
+            self.assertEqual((res.ok, res.first_broken_index, res.reason), (False, 0, "prev_digest_mismatch"))
+
+    def test_events_checked_counts_verified_prefix(self):
+        self.assertEqual(verify_events([]).events_checked, 0)
+        self.assertTrue(verify_events([]).ok)
+        self.assertEqual(self.lg.verify_chain().events_checked, 6)
+        d = copy.deepcopy(self.dicts)
+        d[2]["reviewer"] = "x"
+        res = verify_dicts(d)
+        self.assertEqual((res.first_broken_index, res.events_checked), (2, 2))
+
+    def test_known_evidence_enforced_on_verify_and_load(self):
+        lg = ledger_in(S.SUPPORTED, known_evidence={H1})
+        self.assertTrue(lg.verify_chain().ok)
+        lg._known = frozenset({H2})  # private poke: verify_chain must consult it
+        res = lg.verify_chain()
+        self.assertEqual((res.ok, res.reason), (False, "UnknownEvidenceError"))
+        d = ledger_in(S.SUPPORTED).to_dict()
+        with self.assertRaises(ChainIntegrityError) as cm:
+            ClaimLedger.from_dict(d, known_evidence={H2})
+        self.assertEqual(cm.exception.result.reason, "UnknownEvidenceError")
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "l.json"
+            save_ledger(p, ledger_in(S.SUPPORTED))
+            with self.assertRaises(ChainIntegrityError):
+                load_ledger(p, known_evidence={H2})
+            self.assertEqual(len(load_ledger(p, known_evidence={H1})), 3)
+            # the registry stays active on a loaded ledger
+            save_ledger(p, ledger_in(S.REVIEWED))
+            loaded = load_ledger(p, known_evidence={H2})
+            with self.assertRaises(UnknownEvidenceError):
+                loaded.support(event_id="e-s", claim_id="c1", reviewer="a", justification="j", evidence_refs=EV,
+                               timestamp_utc=T2)
+
+    def test_loaded_ledger_restores_last_timestamps_and_ids(self):
+        loaded = ClaimLedger.from_dict(ledger_in(S.REVIEWED).to_dict())  # last event at T1
+        with self.assertRaises(TimestampOrderError):
+            loaded.support(event_id="e-s", claim_id="c1", reviewer="a", justification="j", evidence_refs=EV,
+                           timestamp_utc=T0)
+        with self.assertRaises(DuplicateEventIdError):
+            loaded.reject(event_id="e-rev", claim_id="c1", reviewer="a", justification="j", timestamp_utc=T2)
+        self.assertIs(loaded.claim_state("c1"), S.REVIEWED)
+
+
+class SelfVerification(unittest.TestCase):
+    """F2: tampered in-memory ledgers do not render or grow."""
+
+    def test_summary_claim_state_and_append_refuse_tampered_ledger(self):
+        lg = ledger_in(S.REVIEWED)
+        object.__setattr__(lg._events[-1], "to_state", S.SUPPORTED)
+        self.assertEqual(lg.verify_chain().reason, "digest_mismatch")
+        with self.assertRaises(ChainIntegrityError):
+            lg.summary()
+        with self.assertRaises(ChainIntegrityError):
+            lg.claim_state("c1")
+        with self.assertRaises(ChainIntegrityError):
+            lg.reject(event_id="e-x", claim_id="c1", reviewer="a", justification="j", timestamp_utc=T3)
+        self.assertEqual(len(lg), 2)
+        # forensic escape hatch exists and is explicit
+        self.assertEqual(lg.summary(verify=False)[0]["state"], "SUPPORTED")
+
+    def test_forged_state_cache_is_ignored(self):
+        lg = ledger_in(S.DRAFT)
+        lg._states["c1"] = S.SUPPORTED
+        self.assertIs(lg.claim_state("c1"), S.DRAFT)
+        self.assertEqual(lg.summary()[0]["state"], "DRAFT")
+        lg._states["c1"] = S.SUPPORTED  # append must not trust the cache either
+        with self.assertRaises(StateMismatchError):  # cache rebuilt from events: really DRAFT
+            lg.append(req("e-x", "c1", Action.SUPPORT, S.REVIEWED, S.SUPPORTED, evidence_refs=EV, timestamp_utc=T3))
+        self.assertEqual(len(lg), 1)
+
+
+class StructureMutants(unittest.TestCase):
+    def test_events_is_immutable_snapshot(self):
+        lg = ledger_in(S.DRAFT)
+        self.assertIsInstance(lg.events, tuple)
+        with self.assertRaises(AttributeError):
+            lg.events.append(None)
+        self.assertIsNot(lg.events, lg._events)
+        self.assertEqual(len(lg.events), 1)
+
+    def test_reviewers_exclude_the_open_author(self):
+        lg = ClaimLedger()
+        lg.open_claim(event_id="e1", claim_id="c", reviewer="author", justification="j", statement="s",
+                      evidence_class="HYPOTHESIS", timestamp_utc=T0)
+        self.assertEqual(lg.summary()[0]["reviewers"], [])
+        lg.review(event_id="e2", claim_id="c", reviewer="rev-b", justification="j", timestamp_utc=T1)
+        self.assertEqual(lg.summary()[0]["reviewers"], ["rev-b"])
+
+    def test_equality_is_by_events(self):
+        a, b = ledger_in(S.DRAFT), ledger_in(S.REVIEWED)
+        self.assertNotEqual(a, b)
+        self.assertEqual(a, ledger_in(S.DRAFT))
+        self.assertNotEqual(a, "x")
+        self.assertNotEqual(a, None)
+        with self.assertRaises(TypeError):
+            hash(a)
+
+    def test_evidence_from_record_kind_and_value(self):
+        r = train(seed=2, steps=2, timestamp_utc=T0)
+        ref = cl.evidence_from_record(r.record)
+        self.assertEqual(ref.kind, "content_hash")
+        self.assertNotEqual(ref.kind, "checkpoint_digest")
+        self.assertEqual(ref.value, r.record.content_hash())
+
+    def test_append_type_check(self):
+        for bad in (None, {}, "x", req):
+            with self.assertRaises(EventFormatError):
+                ClaimLedger().append(bad)
+
+
+class AtomicWrite(unittest.TestCase):
+    def test_fsync_called_and_replace_sees_complete_tmp(self):
+        lg = full_ledger()
+        seen = {}
+        real_replace, real_fsync = os.replace, os.fsync
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "l.json"
+
+            def spy_replace(src, dst):
+                seen["target_existed_before_replace"] = Path(dst).exists()
+                seen["tmp_complete"] = Path(src).read_text() == lg.to_json()
+                seen["same_dir"] = os.path.dirname(os.path.abspath(src)) == os.path.dirname(os.path.abspath(dst))
+                return real_replace(src, dst)
+
+            def spy_fsync(fd):
+                seen["fsync"] = seen.get("fsync", 0) + 1
+                return real_fsync(fd)
+            from unittest import mock
+            with mock.patch.object(cl.os, "replace", spy_replace), mock.patch.object(cl.os, "fsync", spy_fsync):
+                save_ledger(target, lg)
+            self.assertFalse(seen["target_existed_before_replace"])
+            self.assertTrue(seen["tmp_complete"])
+            self.assertTrue(seen["same_dir"])
+            self.assertGreaterEqual(seen["fsync"], 1)
+            self.assertEqual(os.listdir(td), ["l.json"])
+
+    def test_failed_replace_leaves_original_intact_and_no_tmp(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "l.json"
+            save_ledger(target, ledger_in(S.DRAFT))
+            before = target.read_bytes()
+            with mock.patch.object(cl.os, "replace", side_effect=OSError("boom")):
+                with self.assertRaises(OSError):
+                    save_ledger(target, full_ledger())
+            self.assertEqual(target.read_bytes(), before)
+            self.assertEqual(os.listdir(td), ["l.json"])
+
+    def test_failed_write_leaves_no_partial_target(self):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "new.json"
+            with mock.patch.object(cl.os, "fsync", side_effect=OSError("disk")):
+                with self.assertRaises(OSError):
+                    save_ledger(target, full_ledger())
+            self.assertEqual(os.listdir(td), [])
 
 
 if __name__ == "__main__":
