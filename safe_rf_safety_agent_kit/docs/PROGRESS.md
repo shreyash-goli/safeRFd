@@ -2917,7 +2917,7 @@ weak hypothesis is laundered into a strong one.**
 **Fixed structurally, as the orchestrator required rather than documented:** a new
 `_component_sets_ok` requires each hypothesis's component metrics to equal `bm.PRIMARY[hid]` exactly,
 requires H3's converged metrics to equal `bm.CONVERGED`, and **rejects converged components on H1 or
-H2**. A deleted, duplicated or substituted component now yields INCONCLUSIVE with the "NOT shown"
+H2**. A deleted, duplicated or **name-substituted** component now yields INCONCLUSIVE with the "NOT shown"
 alarm — as loud as a forgery — and **if the protocol tables vanish the check fails closed**.
 Reordering a genuine set correctly raises no alarm. The docstring now states a deleted component is
 **not** a residual limit. Three mutants killed: removing the whole check, skipping the converged-set
@@ -3399,3 +3399,107 @@ module-scoped mutants, all killed.
   forgotten and cannot silently change in either direction.
 - **One honest gap the builder reported unprompted:** the AST rewrite itself is **not covered by
   mutation** — the decoy cases pin its behaviour, but it did not mutate the new parsing code.
+
+---
+
+# Batch attestation round 2: SR-13 PASS (conditional); SR-14 FAIL (tests only); SR-15 FAIL
+
+**Date:** 2026-11-10. Measured on pristine `git archive` copies of `a574cc2`; the reviewer's seven
+target files are byte-identical between `a574cc2` and HEAD. Baseline: **874 tests, OK (2 skipped)**.
+Verbatim tails from the pristine clone: `lint: ruff: OK / LINT: OK`;
+`demo: DEMO OK in 2.6s`; `pytest -q: 872 passed, 2 skipped`; `unittest: Ran 874 ... OK (skipped=2)`;
+`run_tests.sh --expect any --twice: deterministic: run1 == run2 ... RESULT: OK`.
+
+## The most valuable finding of the session: the CI would fail on Linux
+**`run_tests.sh` fails on a case-sensitive filesystem — which is what `ubuntu-latest` uses.** Four
+tests legitimately skip when the filesystem is case-sensitive (three `test_dashboard` `need_ci` tests
+and one `test_scripts` test), and their reasons contain **no package name** and no `cuda`/`mps`, so
+the skip policy rejects them. Measured on a case-sensitive APFS volume as a Linux stand-in:
+- `--expect none` (bare venv): 874 run, **92 skipped**, `FAIL: skip reason does not say a package is
+  missing` ×4, **`RESULT: FAIL`**
+- `--expect torch`: 874 run, **6 skipped**, `FAIL: unexplained skip with torch present` ×4,
+  **`RESULT: FAIL`**
+
+**Both CI jobs would go red on Linux.** `docs/CLEAN_CLONE.md` stated that Linux behaviour had "never
+been observed"; **this is the first observation, and it is a failure.** The reviewer's honest caveat:
+a case-sensitive APFS volume is a *stand-in* for Linux, not Linux. Routed for fix, and for the
+document.
+
+## Orchestrator correction: a false claim I wrote in this journal
+The F1 entry above said "a deleted, duplicated or **substituted** component now yields INCONCLUSIVE".
+That is **false as written** — it is true for a *name*-substituted component, but **a same-name
+component carrying a forged but self-consistent pair produces H3 SUPPORTED, JOINT_SUPPORTED and no
+alarm.** The reviewer demonstrated it. That is the intended producer-asserted limit — a renderer
+cannot know the true interval — but both the `_recompute` docstring and this journal asserted the
+opposite. The journal line is corrected to "name-substituted"; the docstring fix is routed as SR-13
+condition **C1**.
+
+## SR-13 — PASS, conditional on C1 and C2
+**The F1 fix is verified thoroughly.** The original attack now yields INCONCLUSIVE plus the alarm, as
+do duplicated components (primary and converged), a wrong metric name, a right-name component with
+the margin edited to 0, cross-hypothesis components, extra components, and converged components on
+H1/H2. Patching `bm.PRIMARY` to `{}`/`None`/all-empty tuples and `bm.CONVERGED` to `()`/`None`
+**fails closed**, and **reordering a genuine set raises no alarm** — so the guard does not false-fire.
+All four former survivors are dead, and **twelve of the thirteen original survivors are confirmed
+killed**. The thirteenth, S5b, is argued equivalent with its input space stated (the
+hypothesis-level `blocked` already forces all three INCONCLUSIVE for any failed unknown-scope gate).
+**My failure, recorded:** the thirteen-survivor list existed and I omitted it from the earlier
+reviewer's brief, which cost a round.
+- **C1:** the false docstring claim above.
+- **C2 — a fail-open path:** `joint.margins = None` **silently skips the margin cross-check**; with
+  all H3 margins at −1e9 and the verdict forged, the result is **H3 SUPPORTED with no alarm**. It
+  grants no more power than the accepted forged-`Margins` residual, but it **fails open**, which is
+  the wrong default here. Fixing it also makes the **F-h** survivor equivalent — where
+  `margins = None` *plus* `PRIMARY = None` shows H3 SUPPORTED with no alarm, and where the
+  "fails closed if tables vanish" test turns out to be **masked** because `_declared` fails first.
+- **F-i/F-j:** comparing components as a **`set`** rather than a sorted sequence survives, so an
+  **extra duplicate** loses the alarm; the tests cover only size-*reducing* duplicates. An
+  alarm-contract gap, not a laundering route — but the alarm contract is the product.
+
+## SR-14 — FAIL on test gaps; the production code held under every attack
+**Held:** a bad `evidence_class` across **11 types** raises `EventFormatError` from all four entry
+points; `evidence_refs` rejects **15** non-list/tuple types; F2 holds against `object.__setattr__` on
+`reviewer` and `to_state`, swapped events, and forged `_states`/`_ids`/`_last_ts`; F4 holds with the
+claim **never created** for a 2999-dated event and the ±86400s boundary exact; F5 is 15 subclasses
+plus base; and the import allowlist killed injected `getattr`, `eval`, `exec`, `__import__` and
+`import socket`.
+- **G8c — a masked test, the serious one.** `load_ledger` without `_reindex` **survives**, because
+  F2's `_checked()` rebuilds the caches before every `append` and `claim_state`, so the
+  "restores last timestamps and ids on load" test never exercises the load-time reindex.
+  **`claim_ids()` immediately after load returns `()`.** Related **G8d**: a file whose per-claim
+  timestamps run **backwards**, with recomputed digests, **loads** where the original rejects it.
+- **Item 13's required test is unmet.** Both honest limits were **reproduced** — a single reviewer
+  reached SUPPORTED citing `sha256(b"nothing at all")`, and removing the final RETRACT with a
+  corrected `head_digest` loads with the claim reading SUPPORTED again — but **no test demonstrates
+  either**, so neither would be noticed if it silently closed or widened.
+- **A headline overclaim:** line 35's "SUPPORTED without evidence is structurally impossible" is true
+  only for an *empty reference list*; a reference **to nothing** still works.
+- Five more non-equivalent survivors (**F1e** raw `ValueError` on the replay path; **G3k** a malformed
+  retry returning `appended=False` instead of raising; **F4f** the constructor skew ignored; **F4h**
+  the bound applied on load; **G9d** save-path `KeyboardInterrupt` cleanup), plus unvalidated
+  constructor arguments — **`nan` silently disables the future bound**, a negative skew is accepted,
+  and a malformed `clock` leaks raw errors. A weak count: `vars()` counts **aliases twice**.
+
+## SR-15 — FAIL
+Beyond the Linux defect: **two more vacuous/partly-masked tests**, the same class the owner already
+fixed four of. **M13** — removing the pytest-vs-unittest skip comparison survives, because the test
+only asserts the **success string** and never creates a mismatch. **U3b** — the determinism unmasking
+is **partial**: the canon-file `cmp` half is killed but the counts-and-failed-flag half survives, so a
+flaky failure appearing only in run 2 with identical counts is detected by nothing, and run 2's exit
+code is ignored.
+**Eight undocumented lint evasions**, all passing in `src/`: `import os as o; o.system(...)`,
+`from os import system`, `f = os.system`, `e = eval`, `builtins.exec(...)`, `os.execvp`, `os.spawnl`,
+`os.posix_spawn` — while `CLEAN_CLONE.md:97` says "the kit's actual guarantees are structural, and
+each is checked".
+**Two figures the orchestrator gave the reviewer were wrong:** `scripts/test_baseline.txt` has **13**
+modules (15 lines including 2 comments), not 15; and `test_scripts.py` has **71** test methods, not
+80 — a `grep def test` counts defs inside the synthetic-suite strings.
+**What held:** the policy correctly rejects whitespace/tab/newline reasons, "meh installed",
+"not installed" with no package, and "torch present" in none mode; torch mode rejects nine variants
+including `CUDAx`; the per-module baseline works, failing with
+`baseline: module toy_tests.test_schema ran 34 tests, baseline 35` and
+`module toy_tests.test_stability has 0 bare-environment skips, baseline 1`; the 650/649 and 12/13
+boundaries are pinned; the demo's inode guard refuses case-varied, symlinked and plain in-repo
+`TMPDIR` **before anything is created**; all eight lint ban-mutants are killed. The measured counts
+(88 bare / 87 PyYAML-only / 2 full) are confirmed, and the 86→88 explanation checks out: 85
+torch/numpy skips + PyYAML + two pytest-only script tests.
