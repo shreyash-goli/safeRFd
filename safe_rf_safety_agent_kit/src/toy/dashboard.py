@@ -19,8 +19,11 @@ Public API
 
 Structural guards against displaying an unsupported claim as confirmed
   1. There is NO "confirmed" visual style. The only verdict-styled element (CSS class `vd-supported`) is
-     emitted by `_verdict_cell`, which is reachable only from `render_scorecard`, from a *recomputed*
-     structured verdict, and it always carries the text "toy fixture; conditional; not a safety finding".
+     emitted by `_verdict_cell`, which is reachable only from `render_scorecard` and only from a
+     *recomputed* structured verdict. It always carries "conditional; not a safety finding" plus the
+     result's OWN subject kind (SR-12 F4): a scorer-validation fixture says so, a declared trained subject
+     says so, and an absent or unrecognised `subject_kind` renders UNKNOWN. The caveat is never the
+     blanket word "fixture", which would be false the moment a non-fixture result is rendered.
   2. Evidence badges come from one function, `_badge`, mapping EvidenceClass -> a fixed class. HYPOTHESIS,
      NOT_VALIDATED and UNKNOWN get hatched/dashed styles and the words "NOT EVIDENCE". Record evidence
      labels are re-validated; SOURCE_OBSERVED on a run record is an invalid label and is shown as UNKNOWN.
@@ -55,6 +58,7 @@ BANNER = ("NOTHING ON THIS PAGE IS EVIDENCE ABOUT RFdiffusion, THE FORK, OR ANY 
           "No result here bears on real-world safety. Numbers are synthetic, non-biological toy values or "
           "static source metadata. This page does not confirm any safety claim.")
 NOT_EVIDENCE = "NOT EVIDENCE"
+_MISSING = object()   # sentinel: distinguishes an ABSENT attribute from one whose value is None
 MAX_TEXT = 300
 MAX_TABLE_ROWS = 400
 
@@ -357,14 +361,81 @@ def _vcoerce(enum_cls, value):
         return None
 
 
-def _verdict_cell(v: Optional[Verdict], joint: bool = False, note: str = "") -> str:
-    """The only emitter of verdict styling. Callers pass a recomputed enum, never a string from free text."""
+_SUBJECT_KIND_LABELS = {
+    "fixture": ("SCORER-VALIDATION FIXTURE",
+                "a test of the scorer on a fixture whose answer is known by construction; NOT a result "
+                "about any method, model or intervention"),
+    "trained": ("TRAINED SUBJECT (producer-declared)",
+                "the producer declares a trained subject, so the answer was not known by construction; "
+                "this label is self-asserted and is NOT evidence that any model was trained"),
+    "unknown": ("UNKNOWN",
+                "the producer did not record whether the answer was known by construction"),
+}
+# Default caveat for a supported cell when no subject kind was supplied. Deliberately NOT the word
+# "fixture": a blanket 'toy fixture' label becomes FALSE the moment a non-fixture result is rendered (F4).
+_KIND_UNKNOWN_CAVEAT = "subject kind UNKNOWN (not recorded); conditional; not a safety finding"
+
+
+def _subject_kind(joint: Any) -> tuple:
+    """(label, caveat, code_text, problem). Renders `JointResult.subject_kind` and its
+    `benchmark.SUBJECT_KIND_CODE` encoding. An absent, misspelled, non-string or unencodable value renders
+    as UNKNOWN -- never as 'trained' and never as 'fixture'.
+
+    WHAT READING THIS PROVES, AND WHAT IT DOES NOT (benchmark.py's own docstring, routes (a)-(f)).
+    `subject_kind` is PRODUCER-ASSERTED. A caller may DECLARE a trained student a scorer-validation
+    fixture and so obtain the gate-11(c) exemption; `object.__setattr__(result, "subject_kind",
+    "trained")` relabels a result after construction while its gates still record the exemption; a
+    hand-built JointResult labelled 'trained'/'unknown' is refused only if its gates carry `exempt=True`,
+    and that flag is itself producer-set; and `SUBJECT_KIND_CODE` can be patched. This panel therefore
+    reports WHAT THE RESULT CLAIMS ABOUT ITSELF. It is not authentication.
+
+    ONE REAL CROSS-CHECK IS AVAILABLE and is made here: the `control_adequacy` gate may carry
+    `exempt=True` only for subject_kind == 'fixture'. `JointResult.__post_init__` enforces that at
+    construction, so a mismatch means the result was relabelled after construction (route (d)) and is
+    reported as a problem."""
+    raw = getattr(joint, "subject_kind", _MISSING)
+    problem = None
+    if raw is _MISSING:
+        kind = "unknown"
+        problem = "subject_kind is absent from this result; shown as UNKNOWN"
+    elif not isinstance(raw, str) or raw not in _SUBJECT_KIND_LABELS:
+        kind = "unknown"
+        problem = f"subject_kind {_visible(str(raw))[:60]!r} is not one of " \
+                  f"{sorted(_SUBJECT_KIND_LABELS)}; shown as UNKNOWN"
+    else:
+        kind = raw
+    label, caveat = _SUBJECT_KIND_LABELS[kind]
+    try:
+        code = bm.SUBJECT_KIND_CODE[kind]
+        code_text = _num(float(code))
+    except Exception:  # noqa: BLE001 - a patched/missing table is a problem, not a silent pass
+        code_text = None
+        problem = (problem + "; " if problem else "") + \
+                  "benchmark.SUBJECT_KIND_CODE does not encode this kind (table missing or patched)"
+    try:
+        exempt = [g.name for g in joint.gates if getattr(g, "exempt", False) is True]
+    except Exception:  # noqa: BLE001
+        exempt = []
+    relabelled = bool(exempt) and kind != "fixture"
+    if relabelled:
+        problem = (problem + "; " if problem else "") + \
+                  (f"gate(s) {sorted(exempt)} carry the fixture exemption but subject_kind is "
+                   f"{kind!r}: the result was relabelled after construction")
+    return label, caveat, code_text, problem, relabelled
+
+
+def _verdict_cell(v: Optional[Verdict], joint: bool = False, note: str = "",
+                  kind_caveat: Optional[str] = None) -> str:
+    """The only emitter of verdict styling. Callers pass a recomputed enum, never a string from free text.
+
+    `kind_caveat` is the subject-kind-specific caveat attached to a SUPPORTED cell (F4). When a caller
+    supplies none, the UNKNOWN wording is used: this function never asserts 'toy fixture' on its own."""
     if v is None:
         return _unknown("verdict not a valid enum value")
     name = v.value
     kind = name.split("_")[-1].lower()  # supported / unsupported / inconclusive
     cls = {"supported": "vd-supported", "unsupported": "vd-unsupported"}.get(kind, "vd-inconclusive")
-    extra = " (toy fixture; conditional; not a safety finding)" if kind == "supported" else ""
+    extra = " (" + (kind_caveat or _KIND_UNKNOWN_CAVEAT) + ")" if kind == "supported" else ""
     return f'<span class="vd {cls}">{_e(name)}</span><span class="caveat">{_e(extra)}{_e(note)}</span>'
 
 
@@ -405,25 +476,67 @@ def _declared(metric: Any, margins: Any) -> tuple:
     raise LookupError(f"metric {metric!r} not in the protocol tables")
 
 
+def _protocol_params() -> tuple:
+    """The protocol's declared `(width_tol, min_n)`, read from the scorer's own `interval_verdict`
+    signature instead of being hard-coded here, so a protocol-parameter change in `benchmark` is picked up
+    rather than silently contradicted. Raises if either default is missing or not a usable number; the
+    caller turns that into 'could not recompute', and `_contract_problems` reports it on the page."""
+    params = inspect.signature(bm.interval_verdict).parameters
+    out = []
+    for name in ("width_tol", "min_n"):
+        v = params[name].default
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            raise LookupError(f"interval_verdict declares no usable default for {name}")
+        out.append(v)
+    return tuple(out)
+
+
 def _recompute(c: Any, margins: Any = None) -> Optional[Verdict]:
     """Verdict recomputed from the interval alone. None means 'could not recompute' (always treated as a
     mismatch and shown INCONCLUSIVE with an alarm, never as SUPPORTED).
 
     If `margins` is given, the component's own margin/direction must equal what the protocol tables
     (benchmark.PRIMARY / CONVERGED) declare for that metric under the result's Margins; a component whose
-    margin was edited on its own is therefore an alarm. RESIDUAL LIMIT: the renderer has no second source of
-    truth for the registered margins themselves. A result whose Margins object AND component margins were
-    forged consistently recomputes consistently and raises no alarm. Margins are shown on the page (see
-    'Uncertainty and protocol limits') but are producer-asserted, not authenticated. Likewise the intervals
-    themselves are producer-asserted: a same-name component with a self-consistent forged pair is a residual
-    (only missing, extra or wrongly named components are alarmed, by `_component_sets_ok`)."""
+    margin was edited on its own is therefore an alarm.
+
+    PROTOCOL PARAMETERS FAIL CLOSED (SR-13 item 2, same ruling as C2). `min_n` (protocol 6.1, minimum n =
+    30 seeds) and `width_tol` (protocol 6.3, bootstrap/t widths may differ by at most 25%) are read from
+    the component, which is the producer's own assertion. They are therefore never trusted to be WEAKER
+    than the value the scorer declares: the recomputation uses `max(c.min_n, declared)` and
+    `min(c.width_tol, declared)`. A stricter configuration is honoured in full; a weaker one cannot buy a
+    decisive verdict. A missing, non-numeric, non-finite or negative value is 'could not recompute', not a
+    renderer-invented default (the old `getattr(c, 'min_n', 30)` fallback silently supplied one, which is
+    the fail-open this replaces).
+
+    Checked against the scorer, not assumed: `BenchmarkConfig.min_seeds` / `width_tol` ARE settable, and
+    `ComponentResult` carries whatever the config used, so the floor is deliberately NOT a hard-coded
+    30/0.25 but the scorer's declared default. `JointResult` does not carry its `BenchmarkConfig` (only an
+    opaque `config_hash`), so the renderer has no way to learn a non-default value; a configuration weaker
+    than the protocol floor therefore renders INCONCLUSIVE with an alarm. That is intended: protocol 6.1
+    says that below the minimum "no verdict and no registered interval is produced", so a decisive cell
+    for such a run would be the wrong thing to display.
+
+    RESIDUAL LIMITS, stated plainly: the renderer has no second source of truth for the registered margins
+    themselves. A result whose Margins object AND component margins were forged consistently recomputes
+    consistently and raises no alarm. Margins are shown on the page (see 'Uncertainty and protocol limits')
+    but are producer-asserted, not authenticated. Likewise the intervals themselves are producer-asserted:
+    a same-name component with a self-consistent forged pair is a residual (only missing, extra or wrongly
+    named components are alarmed, by `_component_sets_ok`). And a forged protocol parameter that is weaker
+    than the floor but would not have changed this component's verdict anyway raises no alarm, because the
+    floor makes it unable to change what is displayed."""
     try:
         if margins is not None:
             direction, margin = _declared(c.metric, margins)
             if c.direction != direction or float(c.margin) != margin:
                 return None
+        wt_declared, mn_declared = _protocol_params()
+        wt, mn = getattr(c, "width_tol", None), getattr(c, "min_n", None)
+        if isinstance(wt, bool) or not isinstance(wt, (int, float)) or not math.isfinite(wt) or wt < 0:
+            return None
+        if isinstance(mn, bool) or not isinstance(mn, int) or mn < 0:
+            return None
         v, _ = bm.interval_verdict(c.pair, float(c.margin), c.direction,
-                                   getattr(c, "width_tol", 0.25), getattr(c, "min_n", 30))
+                                   min(float(wt), float(wt_declared)), max(mn, int(mn_declared)))
         return Verdict(v)
     except Exception:  # noqa: BLE001
         return None
@@ -474,6 +587,67 @@ def _component_sets_ok(h: Any) -> bool:
         return False
 
 
+def _weaker_than_protocol(joint: Any) -> list:
+    """Components whose DECLARED protocol parameters are weaker than the ones the scorer declares.
+
+    Reported separately from the tampering alarm, because the two are different findings. A run
+    configured with `BenchmarkConfig(min_seeds=5)` is HONEST, but by protocol 6.1 it is non-compliant --
+    "with fewer than 30 completed, eligible seeds, no verdict and no registered interval is produced;
+    whatever is computed is labelled below protocol minimum, exploratory, non-compliant". `_recompute`
+    floors such a run to the protocol value, which makes its stored verdict disagree with the
+    recomputation. Without this note the page would show only the generic "stored verdict disagrees"
+    warning and so imply that somebody edited a field. It says what actually happened instead."""
+    try:
+        wt_declared, mn_declared = _protocol_params()
+    except Exception:  # noqa: BLE001 - a contract problem, already reported by _contract_problems
+        return []
+    out = []
+    try:
+        hyps = (joint.h1, joint.h2, joint.h3)
+    except Exception:  # noqa: BLE001
+        return []
+    for h in hyps:
+        try:
+            comps = (*h.components, *(tuple(getattr(h, "converged_components", ()) or ())))
+        except Exception:  # noqa: BLE001
+            continue
+        for c in comps:
+            mn, wt = getattr(c, "min_n", None), getattr(c, "width_tol", None)
+            if isinstance(mn, int) and not isinstance(mn, bool) and 0 <= mn < mn_declared:
+                out.append(f"{h.hid}/{_visible(str(c.metric))[:40]}: min_n={mn} is below the protocol "
+                           f"minimum {mn_declared}")
+            if isinstance(wt, (int, float)) and not isinstance(wt, bool) and math.isfinite(wt) \
+                    and wt > wt_declared:
+                out.append(f"{h.hid}/{_visible(str(c.metric))[:40]}: width_tol={_num(wt)} is wider than "
+                           f"the protocol tolerance {_num(wt_declared)}")
+    return out
+
+
+def _gate_set_ok(gates: Any) -> bool:
+    """The validity-gate NAMES must be exactly what the scorer declares in `benchmark.GATE_SCOPES`, as
+    sorted sequences (so an extra duplicate alarms too). A deleted, duplicated, extra or wrongly-named
+    gate is alarmed -- the same treatment `_component_sets_ok` gives component metric names.
+
+    Why names and not a count: a FAILED gate swapped for a duplicate of a PASSING one leaves the count
+    unchanged, so no count-based check can see it. Measured on HEAD before this existed: a deleted failing
+    `min_seeds` gate rendered all-SUPPORTED / JOINT_SUPPORTED with no alarm and six gate rows.
+
+    Verified against the scorer, not assumed: `JointResult.__post_init__` already refuses to construct a
+    result whose `GateResult` names are not exactly `sorted(GATE_SCOPES)`, and the honest gate name set was
+    confirmed to be exactly `set(GATE_SCOPES)` across seven fixture variations (default, S=0.0,
+    conv=False, gate_inputs=False, L=1.0, 5 seeds, unregistered digest), 7 of 7. So no legitimate path
+    omits a gate and this check cannot false-fire on an honest result; only post-hoc tampering
+    (`object.__setattr__` on `gates`) reaches it.
+
+    RESIDUAL LIMIT: this checks names only. A gate's `passed` flag is producer-asserted, so flipping a
+    failed gate to passed IN PLACE keeps the name set intact and is not detectable here; it is caught only
+    where the hypothesis-level recomputation disagrees with the stored verdict."""
+    try:
+        return sorted(str(g.name) for g in gates) == sorted(bm.GATE_SCOPES)
+    except Exception:  # noqa: BLE001 - cannot establish the expected set: not ok
+        return False
+
+
 def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool, margins: Any = None) -> tuple:
     """(displayed verdict, mismatch). Decisive only if the stored hypothesis verdict equals an independent
     recomputation from recomputed component verdicts, scope-aware gates, and (H3) converged components."""
@@ -507,6 +681,18 @@ def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool, margins: Any = Non
 
 
 _KNOWN_SCOPES = ("all", "H1H2", "H3")
+
+
+def _gates_ok(gates: tuple) -> bool:
+    """Global-gate state for the joint rule: a failed gate forces JOINT_INCONCLUSIVE if its scope is
+    'all', OR if its scope is not a KNOWN scope (an unrecognised scope is treated as global -- fail safe).
+
+    The unknown-scope clause is DEFENCE IN DEPTH and is masked end-to-end: `_eff_hypothesis`'s `blocked`
+    clause contains the identical test and independently forces every hypothesis INCONCLUSIVE for the same
+    gate, so dropping this clause changes no rendered page. It is extracted into its own function so it can
+    be unit-tested DIRECTLY, with no other layer able to hide it (the F-h lesson)."""
+    return not any(_failed(g) for g in gates
+                   if _gate_scope(g) == "all" or _gate_scope(g) not in _KNOWN_SCOPES)
 
 
 def _combine(h1: Verdict, h2: Verdict, h3: Verdict, gates_ok: bool) -> JointVerdict:
@@ -548,16 +734,26 @@ def render_scorecard(joint: Any) -> str:
                       '<p class="warn">REFUSED: not a complete JointResult (H1 suppression, H2 retention and H3 '
                       'selectivity must be reported together). No figures shown.</p>')
     problems = _contract_problems()
-    bad = bool(problems)
     gates = tuple(joint.gates)
-    any_failed = any(_failed(g) for g in gates)
+    gate_set_bad = not _gate_set_ok(gates)
+    if gate_set_bad:
+        problems = [*problems, "validity-gate NAME set does not match benchmark.GATE_SCOPES: a gate was "
+                               "deleted, duplicated, renamed or swapped, so the gate list cannot be read "
+                               "as a complete set of protocol checks"]
+    bad = bool(problems)
+    kind_label, kind_caveat, kind_code, kind_problem, relabelled = _subject_kind(joint)  # noqa: E501
+    supported_caveat = f"{kind_label}; conditional; not a safety finding"
+    if relabelled:   # post-construction relabel (benchmark route (d)): an integrity failure, not a gap
+        problems = [*problems, "subject_kind contradicts the fixture exemption recorded in the gates"]
+        bad = True
+    any_failed = any(_failed(g) for g in gates) or gate_set_bad
     mismatch = []
     eff = {}
     rows = ""
     for h in (joint.h1, joint.h2, joint.h3):
         ev, mm = _eff_hypothesis(h, gates, bad, joint.margins)
         eff[h.hid] = ev
-        if mm:
+        if mm or gate_set_bad:
             mismatch.append(h.hid)
         groups = [(h.components, "")]
         conv = tuple(getattr(h, "converged_components", ()) or ()) if h.hid == "H3" else ()
@@ -578,13 +774,18 @@ def render_scorecard(joint: Any) -> str:
                     f"<td>{_interval(pair.t_lo, pair.t_hi)}</td>"
                     f"<td>{_e(pair.n) if isinstance(pair.n, int) else _unknown('n')}</td>"
                     f"<td>{_e(_num(pair.level)) if isinstance(pair.level, float) else _unknown('level')}</td>"
-                    f"<td>{_verdict_cell(ecv)}</td></tr>")
-        rows += f"<tr><th colspan=8>{_e(h.hid)} hypothesis verdict</th><td>{_verdict_cell(ev, note=' [hypothesis-level]')}</td></tr>"
+                    f"<td>{_verdict_cell(ecv, kind_caveat=supported_caveat)}</td></tr>")
+        rows += (f"<tr><th colspan=8>{_e(h.hid)} hypothesis verdict</th>"
+                 f"<td>{_verdict_cell(ev, note=' [hypothesis-level]', kind_caveat=supported_caveat)}</td></tr>")
     try:
         stored_j = _vcoerce(JointVerdict, joint.verdict)
     except Exception:  # noqa: BLE001
         stored_j = None
-    gates_ok = not any(_failed(g) for g in gates if _gate_scope(g) == "all" or _gate_scope(g) not in _KNOWN_SCOPES)
+    # `not gate_set_bad` here is REDUNDANT belt-and-braces, and measured to be so: a bad gate set always
+    # appends to `problems`, so `bad` is True, and `if bad: jv = JOINT_INCONCLUSIVE` below overrides
+    # whatever `_combine` returned. Removing this conjunct changes no rendered page, so no test can pin
+    # it; it is kept because it makes the joint rule correct on its own terms rather than only via `bad`.
+    gates_ok = not gate_set_bad and _gates_ok(gates)
     try:
         jv = _combine(eff["H1"], eff["H2"], eff["H3"], gates_ok)   # independent of bm.combine_joint on purpose
     except Exception:  # noqa: BLE001
@@ -607,17 +808,38 @@ def render_scorecard(joint: Any) -> str:
     if bad:
         body += ('<p class="warn">SCORER/RENDERER CONTRACT PROBLEM: ' + _e("; ".join(problems)) +
                  '. All decisive verdicts are withheld (INCONCLUSIVE shown).</p>')
-    body += (f"<p>Subject: {_untrusted(joint.subject, 'subject')}</p><p class=\"caveat\">{_e(fam)}</p>"
+    body += (f"<p>Subject: {_untrusted(joint.subject, 'subject')}</p>"
+             # F4: the ACTUAL scorer-validation distinction, read from the result, not a blanket label.
+             f"<table><tr><th>subject kind (what the result claims about itself)</th>"
+             f"<th>SUBJECT_KIND_CODE</th></tr>"
+             f"<tr><td>{_e(kind_label)} <span class=\"caveat\">{_e(kind_caveat)}</span></td>"
+             f"<td>{f'<span class=\"measured\">{_e(kind_code)}</span>' if kind_code is not None else _unknown('not encoded')}"
+             f"</td></tr></table>"
+             + (f'<p class="warn">SUBJECT KIND PROBLEM: {_e(kind_problem)}</p>' if kind_problem else "")
+             + '<p class="caveat">subject_kind is PRODUCER-ASSERTED: it records what the producer declared, '
+               'not an authenticated fact. A result declared a scorer-validation fixture is a test of the '
+               'scorer, never a result about any method; a result declared trained is not evidence that '
+               'anything was trained.</p>'
+             + f"<p class=\"caveat\">{_e(fam)}</p>"
              f"<table><tr><th>hypothesis</th><th>metric</th><th>direction, margin</th><th>mean</th>"
              f"<th>bootstrap interval</th><th>t interval</th><th>n</th><th>level</th><th>verdict</th></tr>"
              f"{rows}</table>"
-             f"<p><b>Joint verdict:</b> {_verdict_cell(jv, note=cond)}</p>"
+             f"<p><b>Joint verdict:</b> {_verdict_cell(jv, note=cond, kind_caveat=supported_caveat)}</p>"
              f"<p>Attempted {_int_or_unk(joint.n_attempted)}, failed {_int_or_unk(joint.n_failed)}. "
              f"Complete gate coverage: {'yes' if joint.complete_gate_coverage is True else 'NO'}.</p>"
              f"<table><tr><th>validity gate</th><th>result</th><th>detail</th></tr>{gate_rows}</table>")
     if mismatch:
         body += (f'<p class="warn">Stored verdict(s) for {_e(", ".join(mismatch))} disagree with an independent '
                  f'recomputation (or could not be recomputed) and are NOT shown; INCONCLUSIVE is displayed.</p>')
+    weaker = _weaker_than_protocol(joint)
+    if weaker:
+        body += ('<p class="warn">PROTOCOL PARAMETERS WEAKER THAN THE PROTOCOL DECLARES: '
+                 + _e("; ".join(weaker)) +
+                 '. The recomputation used the protocol values, so any decisive verdict is withheld. '
+                 'Protocol 6.1 produces no verdict below the minimum n and labels such a run '
+                 'exploratory and non-compliant; this is a configuration statement, NOT evidence of '
+                 'tampering. The renderer cannot tell the two apart from the result alone, because '
+                 'JointResult carries only an opaque config_hash and not its BenchmarkConfig.</p>')
     body += ('<p class="caveat">Verdicts are shown only when stored and recomputed values agree. They describe a '
              'scorer run on synthetic toy data and say nothing about any real model. Margins are arbitrary '
              'protocol parameters.</p>')
@@ -633,9 +855,22 @@ def _render_uncertainty(joint: Any) -> str:
         return _panel("Uncertainty and protocol limits", EvidenceClass.UNKNOWN,
                       "<p>" + _unknown("no scorecard supplied") + "</p>")
     m = joint.margins
-    marg = "".join(f"<tr><td>{_e(k)}</td><td>{_metric_cell(MetricValue.measured(float(getattr(m, k))))}</td></tr>"
-                   for k in ("delta_S", "delta_R", "delta_sel")
-                   if isinstance(getattr(m, k, None), (int, float)) and math.isfinite(getattr(m, k)))
+    # SR-13 acceptance criterion: "missing results render as UNKNOWN, not 0". A bad margin FIELD inside an
+    # otherwise well-formed Margins must therefore still produce a ROW. The old comprehension filtered the
+    # row out entirely, so a None/NaN/non-numeric margin VANISHED from a panel whose own closing sentence
+    # says "UNKNOWN means unmeasured, never zero" -- a silent blank, which is the failure this criterion
+    # names. (A missing or wrong-TYPE Margins object is a different case: `_joint_wellformed` refuses the
+    # whole card, so nothing here is reached. See C2.)
+    marg = ""
+    for k in ("delta_S", "delta_R", "delta_sel"):
+        v = getattr(m, k, _MISSING)
+        if v is _MISSING:
+            cell = _unknown(f"{k} is absent from the Margins object; NOT zero")
+        elif isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            cell = _unknown(f"{k} is not a finite number; unmeasured, NOT zero")
+        else:
+            cell = _metric_cell(MetricValue.measured(float(v)))
+        marg += f"<tr><td>{_e(k)}</td><td>{cell}</td></tr>"
     body = ("<p>Margins are proposed defaults with no empirical basis (HYPOTHESIS, not findings).</p>"
             f"<table><tr><th>margin</th><th>value</th></tr>{marg}</table>"
             "<p>Unimplemented (deferred) validity gates: "

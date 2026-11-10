@@ -419,7 +419,9 @@ class Attacks(unittest.TestCase):
         s = lg.summary()[0]
         self.assertEqual(s["state"], "REVIEWED")
         self.assertEqual(s["supporting_evidence"], [])
-        self.assertFalse(s["is_safety_claim"])
+        # F15: the ledger performs no classification, so it must not emit a field that reads as one.
+        self.assertNotIn("is_safety_claim", s)
+        self.assertEqual(s["safety_claim_classification"], "NOT_PERFORMED")
         self.assertNotIn("SUPPORTED", s["state_label"])
 
     def test_free_text_in_statement_cannot_set_status(self):
@@ -499,7 +501,9 @@ class Attacks(unittest.TestCase):
         self.assertEqual(s["evidence_class"], "TOY_RESULT")
         self.assertTrue(s["is_toy"])
         self.assertEqual(s["toy_label"], TOY_LABEL)
-        self.assertFalse(s["is_safety_claim"])
+        # F15: the ledger performs no classification, so it must not emit a field that reads as one.
+        self.assertNotIn("is_safety_claim", s)
+        self.assertEqual(s["safety_claim_classification"], "NOT_PERFORMED")
         self.assertIn("TOY", s["state_label"])
         self.assertNotEqual(s["evidence_class"], EvidenceClass.SOURCE_OBSERVED.value)
         self.assertEqual({e.evidence_class for e in lg.events} - {None}, {EvidenceClass.TOY_RESULT})
@@ -512,7 +516,8 @@ class Attacks(unittest.TestCase):
         for s in full_ledger().summary():
             self.assertIn(s["state"], {m.value for m in S})
             self.assertIn(s["evidence_class"], {m.value for m in EvidenceClass})
-            self.assertIs(s["is_safety_claim"], False)
+            self.assertNotIn("is_safety_claim", s)
+            self.assertIs(s["safety_claim_classification"], cl.SAFETY_CLASSIFICATION)
 
 
 class Persistence(unittest.TestCase):
@@ -549,40 +554,79 @@ class Persistence(unittest.TestCase):
             json.loads(raw.decode("ascii"))
 
     def test_corrupted_files_rejected_with_specific_errors(self):
+        """Every case asserts the exception MESSAGE, not just its class.
+
+        SR-14 item 7, the eighth and ninth masked subtests of this project. The assertion used to be
+        `isinstance`-tolerant, so two mutants survived by raising an UNRELATED error of a satisfying type:
+
+          * L34, drop the load size cap: the payload was `b" " * (MAX_LEDGER_BYTES + 1)`, which is not
+            JSON, so without the cap `json.loads` raised `JSONDecodeError`, wrapped as `LedgerFormatError`
+            -- the size refusal never ran. The payload is now a COMPLETE VALID LEDGER padded with JSON
+            whitespace past the cap, so without the cap it parses and loads cleanly and only the
+            non-canonical-bytes error is left; the message check tells the two apart.
+          * L35, drop the duplicate-key hook: the payload was `b'{"format_version":1,"format_version":1}'`,
+            which collapses to one key, so `from_dict` raised `LedgerKeyError` -- a SUBCLASS of the
+            expected `LedgerFormatError`. The payload is now a complete valid ledger with one key
+            duplicated to an IDENTICAL value, so without the hook the parsed dict is exactly the good
+            ledger and loading reaches the canonical-bytes check instead.
+        """
         good = full_ledger().to_dict()
+        valid = canonical_json(good).encode()
 
         def mut(f):
             d = copy.deepcopy(good)
             f(d)
             return canonical_json(d).encode()
+
+        # valid JSON, valid ledger, one byte over the cap: only the size cap can refuse this
+        pad = cl.MAX_LEDGER_BYTES + 1 - len(valid)
+        self.assertGreater(pad, 0)
+        oversize_valid = valid[:-1] + b" " * pad + b"}"
+        self.assertEqual(len(oversize_valid), cl.MAX_LEDGER_BYTES + 1)
+        self.assertEqual(json.loads(oversize_valid.decode()), good)   # parses, and IS the good ledger
+
+        # valid JSON, duplicate key with an identical value: only the dup-key hook can refuse this
+        label_json = json.dumps(cl.LEDGER_LABEL).encode()
+        dup_valid = valid.replace(b'"label":' + label_json,
+                                  b'"label":' + label_json + b',"label":' + label_json, 1)
+        self.assertNotEqual(dup_valid, valid)
+        self.assertEqual(json.loads(dup_valid.decode()), good)        # last-wins parse IS the good ledger
+
         cases = [
-            ("empty", b"", LedgerFormatError),
-            ("truncated", canonical_json(good).encode()[:-20], LedgerFormatError),
-            ("not utf8", b"\xff\xfe{}", LedgerFormatError),
-            ("array", b"[]", LedgerFormatError),
-            ("oversize", b" " * (cl.MAX_LEDGER_BYTES + 1), LedgerFormatError),
-            ("dup key", b'{"format_version":1,"format_version":1}', LedgerFormatError),
-            ("NaN", b'{"format_version":NaN}', LedgerFormatError),
-            ("extra key", mut(lambda d: d.update(x=1)), LedgerKeyError),
-            ("missing key", mut(lambda d: d.pop("head_digest")), LedgerKeyError),
-            ("bad version", mut(lambda d: d.update(format_version=2)), LedgerVersionError),
-            ("bool version", mut(lambda d: d.update(format_version=True)), LedgerVersionError),
-            ("bad label", mut(lambda d: d.update(label="x")), LedgerFormatError),
-            ("events not list", mut(lambda d: d.update(events={})), LedgerFormatError),
-            ("event extra key", mut(lambda d: d["events"][0].update(x=1)), LedgerKeyError),
-            ("event bad state", mut(lambda d: d["events"][0].update(to_state="SAFE")), EventFormatError),
-            ("tampered justification", mut(lambda d: d["events"][1].update(justification="z")), ChainIntegrityError),
-            ("bad head", mut(lambda d: d.update(head_digest="1" * 64)), ChainIntegrityError),
-            ("deleted event", mut(lambda d: d["events"].pop(1)), ChainIntegrityError),
+            ("empty", b"", LedgerFormatError, "ledger file is empty"),
+            ("truncated", valid[:-20], LedgerFormatError, "not valid JSON"),
+            ("not utf8", b"\xff\xfe{}", LedgerFormatError, "not valid UTF-8"),
+            ("array", b"[]", LedgerFormatError, "top level must be an object"),
+            ("oversize", oversize_valid, LedgerFormatError, "larger than"),
+            ("dup key", dup_valid, LedgerFormatError, "duplicate JSON key"),
+            ("NaN", b'{"format_version":NaN}', LedgerFormatError, "non-finite JSON constant"),
+            ("extra key", mut(lambda d: d.update(x=1)), LedgerKeyError, "top-level key mismatch"),
+            ("missing key", mut(lambda d: d.pop("head_digest")), LedgerKeyError, "top-level key mismatch"),
+            ("bad version", mut(lambda d: d.update(format_version=2)), LedgerVersionError,
+             "unsupported format_version"),
+            ("bool version", mut(lambda d: d.update(format_version=True)), LedgerVersionError,
+             "unsupported format_version"),
+            ("bad label", mut(lambda d: d.update(label="x")), LedgerFormatError, "label must equal"),
+            ("events not list", mut(lambda d: d.update(events={})), LedgerFormatError,
+             "events must be a list"),
+            ("event extra key", mut(lambda d: d["events"][0].update(x=1)), LedgerKeyError,
+             "event key mismatch"),
+            ("event bad state", mut(lambda d: d["events"][0].update(to_state="SAFE")), EventFormatError,
+             "unknown action/state value"),
+            ("tampered justification", mut(lambda d: d["events"][1].update(justification="z")),
+             ChainIntegrityError, "verification failed"),
+            ("bad head", mut(lambda d: d.update(head_digest="1" * 64)), ChainIntegrityError,
+             "head_digest does not match"),
+            ("deleted event", mut(lambda d: d["events"].pop(1)), ChainIntegrityError,
+             "verification failed"),
         ]
         with tempfile.TemporaryDirectory() as td:
-            for name, data, exc in cases:
+            for name, data, exc, msg in cases:
                 with self.subTest(name):
-                    p = Path(td) / "c.json"
-                    p.write_bytes(data)
-                    with self.assertRaises(exc) as cm:
-                        load_ledger(p)
-                    self.assertIs(type(cm.exception) is exc or isinstance(cm.exception, exc), True)
+                    q = Path(td) / "c.json"
+                    q.write_bytes(data)
+                    with self.assertRaisesRegex(exc, msg):
+                        load_ledger(q)
 
     def test_non_canonical_bytes_rejected(self):
         with tempfile.TemporaryDirectory() as td:
@@ -992,6 +1036,25 @@ class SelfVerification(unittest.TestCase):
             lg.append(req("e-x", "c1", Action.SUPPORT, S.REVIEWED, S.SUPPORTED, evidence_refs=EV, timestamp_utc=T3))
         self.assertEqual(len(lg), 1)
 
+    def test_forged_state_cache_does_not_invent_a_claim_for_claim_ids(self):
+        """SR-14 item 8. `claim_ids()` read the derived `_states` cache WITHOUT verifying, so a forged
+        entry made it report a claim no event ever opened: `lg._states['phantom'] = SUPPORTED` gave
+        `('c1', 'phantom')`. It was the one unverified reader, and it was the one answering 'which claims
+        exist'. It now verifies like every other read-side accessor."""
+        lg = ledger_in(S.DRAFT)
+        self.assertEqual(lg.claim_ids(), ("c1",))
+        lg._states["phantom"] = S.SUPPORTED
+        self.assertEqual(lg.claim_ids(), ("c1",))          # cache rebuilt from events: no phantom
+        self.assertNotIn("phantom", lg.claim_ids())
+        self.assertEqual([c["claim_id"] for c in lg.summary()], ["c1"])
+        # and on a genuinely tampered chain it refuses rather than listing anything
+        lg2 = ledger_in(S.SUPPORTED)
+        object.__setattr__(lg2._events[1], "justification", "silently rewritten")
+        with self.assertRaises(ChainIntegrityError):
+            lg2.claim_ids()
+        # the documented forensic escape hatch still exists and is explicit
+        self.assertEqual(lg2.claim_ids(verify=False), ("c1",))
+
 
 class StructureMutants(unittest.TestCase):
     def test_events_is_immutable_snapshot(self):
@@ -1196,7 +1259,9 @@ class DocumentedLimitsDemonstrated(unittest.TestCase):
         s = lg.summary()[0]
         self.assertEqual(s["state"], "SUPPORTED")  # known limit: shape-only evidence, self-attested review
         self.assertEqual(s["reviewers"], ["solo"])
-        self.assertFalse(s["is_safety_claim"])
+        # F15: the ledger performs no classification, so it must not emit a field that reads as one.
+        self.assertNotIn("is_safety_claim", s)
+        self.assertEqual(s["safety_claim_classification"], "NOT_PERFORMED")
         self.assertTrue(s["is_toy"])
         # the opt-in mitigation: a registry of known evidence closes this route
         strict = ClaimLedger(known_evidence={H1})
@@ -1227,6 +1292,48 @@ class DocumentedLimitsDemonstrated(unittest.TestCase):
             p = Path(td) / "l.json"
             p.write_text(canonical_json(cut))
             self.assertNotEqual(load_ledger(p).head_digest, pinned)
+
+
+class SafetyClaimClassificationField(unittest.TestCase):
+    """SR-12 F15. `summary()` used to emit the literal `"is_safety_claim": False` for every claim, under a
+    field name that promises a classification the module never performs."""
+
+    def test_no_field_can_be_read_as_a_safety_classification(self):
+        lg = ClaimLedger()
+        lg.open_claim(event_id="e1", claim_id="danger", reviewer="solo", justification="j", timestamp_utc=T0,
+                      statement="safeRFdiffusion is safe and removes hazardous capability.",
+                      evidence_class="TOY_RESULT")
+        lg.review(event_id="e2", claim_id="danger", reviewer="solo", justification="j", timestamp_utc=T1)
+        lg.support(event_id="e3", claim_id="danger", reviewer="solo", justification="trust me",
+                   evidence_refs=EV, timestamp_utc=T2)
+        s = lg.summary()[0]
+        self.assertEqual(s["state"], "SUPPORTED")          # the hollow-SUPPORTED route, still open by design
+        # the old field is GONE, so a stale consumer gets a KeyError, not a confident False
+        self.assertNotIn("is_safety_claim", s)
+        with self.assertRaises(KeyError):
+            s["is_safety_claim"]
+        # and the replacement states that no classification happened
+        self.assertEqual(s["safety_claim_classification"], "NOT_PERFORMED")
+        self.assertEqual(s["safety_claim_classification"], cl.SAFETY_CLASSIFICATION)
+        self.assertIn("NO classification", s["safety_claim_classification_note"])
+        self.assertIn("is NOT a finding that the claim is harmless",
+                      s["safety_claim_classification_note"])
+        # No field this module WORDS asserts that the claim is not a safety claim. `toy_label` is
+        # excluded deliberately: its text is `toy.schema.TOY_LABEL`, which this owner does not own --
+        # it still reads "...; not a safety claim" and is reported upwards rather than edited here.
+        owned = {k: v for k, v in s.items()
+                 if k not in ("toy_label", "safety_claim_classification_note")}
+        self.assertNotIn("not a safety claim", json.dumps(owned).lower())
+        self.assertIn("not a safety claim", s["toy_label"].lower())   # the carve-out, pinned so it is visible
+        json.dumps(s)
+
+    def test_classification_value_is_the_same_for_every_claim_and_says_so(self):
+        """It is still a constant -- but a constant whose VALUE is 'no classification was performed',
+        which cannot be misread as 'this claim is not a safety claim'."""
+        rows = full_ledger().summary()
+        self.assertGreater(len(rows), 1)
+        self.assertEqual({r["safety_claim_classification"] for r in rows}, {"NOT_PERFORMED"})
+        self.assertNotIn("False", {str(r["safety_claim_classification"]) for r in rows})
 
 
 def datetime_add(ts, seconds):

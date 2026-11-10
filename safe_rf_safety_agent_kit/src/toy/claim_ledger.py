@@ -61,10 +61,12 @@ It does not authenticate reviewers and cannot detect truncation of the tail.
 To pin the history, store `head_digest` through a separate trusted channel.
 
 Honest limits of what the ledger guarantees (read before relying on it):
-- Self-verification is opt-out, not absent: `append`, `claim_state()` and `summary()`
-  run `verify_chain()` first and raise `ChainIntegrityError` on a tampered in-memory
-  ledger (`summary(verify=False)` is a forensic escape hatch). Any OTHER renderer that
-  reads `events` directly must call `verify_chain()` or go through `load_ledger` itself.
+- Self-verification is opt-out, not absent: `append`, `claim_state()`, `claim_ids()` and
+  `summary()` run `verify_chain()` first and raise `ChainIntegrityError` on a tampered
+  in-memory ledger (`summary(verify=False)` and `claim_ids(verify=False)` are forensic
+  escape hatches). Every read-side accessor now verifies; no accessor reads the derived
+  `_states` cache unchecked. Any OTHER renderer that reads the `events` tuple directly
+  must still call `verify_chain()` or go through `load_ledger` itself.
 - Evidence is checked for SHAPE only and review is SELF-ATTESTED. A single reviewer can
   OPEN, REVIEW and SUPPORT a claim citing `sha256(b"nothing at all")` and it will reach
   SUPPORTED. That is the main route to a hollow SUPPORTED. There is no four-eyes rule,
@@ -130,8 +132,22 @@ MAX_STATEMENT = 2_000
 MAX_REVIEWER = 200
 DEFAULT_MAX_FUTURE_SKEW_SECONDS = 86_400
 EVIDENCE_KINDS = ("content_hash", "checkpoint_digest")
-SUMMARY_CAVEAT = ("A review verdict recorded by a named human about referenced evidence. "
-                  "Not a safety claim; no evidence class was changed by it.")
+SUMMARY_CAVEAT = ("A review verdict recorded by a named human about referenced evidence. No evidence class "
+                  "was changed by it, and this module performed no classification of what the claim says.")
+
+# SR-12 F15. `summary()` used to emit the literal `"is_safety_claim": False` for EVERY claim. The field NAME
+# promised a classification the code does not perform, so the value was false by construction: a reviewer can
+# take the statement "safeRFdiffusion is safe and removes hazardous capability." to SUPPORTED and the summary
+# would print `is_safety_claim: false` beside it. Documenting a constant was not enough while the name still
+# promised a judgement, so the field is GONE and replaced by one whose VALUE states that no classification
+# happened. A stale consumer reading `is_safety_claim` now gets a KeyError instead of a confident `False`.
+SAFETY_CLASSIFICATION = "NOT_PERFORMED"
+SAFETY_CLASSIFICATION_NOTE = (
+    "This ledger performs NO classification of whether a claim is a safety claim. `statement` is untrusted "
+    "free text and is never inspected or parsed. The absence of a classification is NOT a finding that the "
+    "claim is harmless or out of scope: a single self-attesting reviewer can reach SUPPORTED on a statement "
+    "that is, in plain language, a safety claim (see the module docstring's honest limits). Any consumer "
+    "needing that judgement must make it elsewhere and must not infer it from this record.")
 
 _TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", re.ASCII)
 _HEX_RE = re.compile(r"[0-9a-f]{64}", re.ASCII)
@@ -632,7 +648,22 @@ class ClaimLedger:
         except KeyError:
             raise UnknownClaimError(f"unknown claim {claim_id!r}") from None
 
-    def claim_ids(self) -> tuple:
+    def claim_ids(self, *, verify: bool = True) -> tuple:
+        """Claim ids, verified by default.
+
+        SR-14 item 8. This used to read `_states` with no verification, so a forged cache entry
+        (`lg._states["phantom"] = ClaimState.SUPPORTED`) made `claim_ids()` report a claim that no event
+        ever opened. That was documentation-accurate -- the honest limits named only `append`,
+        `claim_state()` and `summary()` as self-verifying -- but it left the ONE unverified reader as the
+        one that answers "which claims exist", and `_states` is a DERIVED CACHE, not stored data: the
+        purpose of `_checked()` is to rebuild it from the events. An unverified cache reader is therefore
+        strictly worse than a reader of `events`, which at least returns real data. It now verifies, like
+        every other read-side accessor, and a tampered ledger raises `ChainIntegrityError`.
+
+        `verify=False` is the forensic escape hatch, matching `summary(verify=False)`, and is also what
+        `summary()` uses internally once it has already verified (so the chain is not walked twice)."""
+        if verify:
+            self._checked()
         return tuple(sorted(self._states))
 
     def verify_chain(self) -> ChainVerification:
@@ -721,7 +752,7 @@ class ClaimLedger:
         if verify:
             self._checked()
         out = []
-        for cid in self.claim_ids():
+        for cid in self.claim_ids(verify=False):   # already verified above (or deliberately skipped)
             evs = [e for e in self._events if e.claim_id == cid]
             opened = evs[0]
             state = evs[-1].to_state
@@ -731,7 +762,9 @@ class ClaimLedger:
             is_toy = ec is EvidenceClass.TOY_RESULT
             label = STATE_LABELS[state]
             if state is ClaimState.SUPPORTED and is_toy:
-                label = "SUPPORTED (TOY claim; human review verdict; not a safety claim)"
+                # F15 wording: describes this RECORD ("not a safety finding"), never the claim's content
+                # ("not a safety claim"), which this module never classifies.
+                label = "SUPPORTED (TOY claim; human review verdict; not a safety finding)"
             out.append({
                 "claim_id": cid,
                 "state": state.value,
@@ -749,7 +782,10 @@ class ClaimLedger:
                 "last_event_utc": evs[-1].timestamp_utc,
                 "statement": opened.statement,
                 "statement_is_untrusted_text": True,
-                "is_safety_claim": False,
+                # F15: a value that states no classification was made, never a bare `False` under a field
+                # name that promises one. See SAFETY_CLASSIFICATION_NOTE.
+                "safety_claim_classification": SAFETY_CLASSIFICATION,
+                "safety_claim_classification_note": SAFETY_CLASSIFICATION_NOTE,
                 "caveat": SUMMARY_CAVEAT,
             })
         return out
