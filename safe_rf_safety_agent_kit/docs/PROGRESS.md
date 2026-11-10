@@ -1473,3 +1473,104 @@ correctly returned INCONCLUSIVE for fixtures meant to be SUPPORTED or UNSUPPORTE
 Suite: **656 tests, OK (2 skipped).** Outstanding: SR-07 and SR-10 reworked and awaiting QA; SR-11
 and SR-13 in rework after FAIL/BLOCKED; SR-14 built and awaiting QA; SR-12, SR-15, SR-16 not started;
 SR-17 remains out of autonomous scope by design.
+
+---
+
+## SR-10, SR-11, SR-13 — reworks after the SR-11/SR-13 QA round
+
+**Correction to an earlier entry in this journal.** Three builders reported that their "green at HEAD"
+baseline moved underneath them mid-run, and the orchestrator attributed that to concurrent edits —
+"a real cost of this much parallelism". That was **partly wrong**. The SR-13 owner traced the
+10-failure spike to **stale cached bytecode left by its own mutation run**, not to teammates' edits;
+after clearing `__pycache__` the tree was clean and its source was byte-identical to its starting
+state. This is the **third** occurrence of the stale-`.pyc` trap in this session (SR-06 hit it on
+M-S3/M-S11, and it contaminated results there too). So the dominant cause of apparent instability was
+a *tooling* defect in how mutation testing was run, not parallelism. Concurrent edits did cause some
+churn — the dashboard/benchmark reconciles were real — but the orchestrator should not have
+generalised from a symptom to a cause without checking. **Standing rule for this kit, now recorded
+twice over:** any mutation testing must run with `PYTHONDONTWRITEBYTECODE=1` and a cleared
+`__pycache__`, and a surprising failure count should be re-checked with caches cleared before being
+attributed to anyone.
+
+**SR-10 — two further defects fixed; 27 mutants killed in total.**
+- **In-scope gate invariant now enforced in one place.** `JointResult.__post_init__` raises if any
+  global gate failed while any of H1/H2/H3 is still decisive, and if the convergence gate failed
+  while H3 is SUPPORTED — **regardless of how the `HypothesisResult` objects were built**, which
+  closes the hand-built-without-`blocking` hole QA found. `dataclasses.replace` re-runs the check.
+  The implementer chose this over making `blocking` mandatory on `HypothesisResult`, to keep the
+  invariant checkable in a single location — the right call. Previously the *renderer* was catching
+  an invalid scorer verdict, which is backwards; the scorer now refuses to produce it.
+- **Constant-sample numerics.** `sample_sd([0.7]*3)` returned `1.4e-16`; it now returns exactly
+  `0.0`, and `mean` returns the constant exactly rather than `fsum/n` (which can be off by an ulp).
+  Bootstrap resample means use the same `mean`, so a constant sample now yields identical bounds from
+  both interval methods. Tested across n = 2…101 and constants ±0.7, 0.1, −3.3, 1e15+0.5, 1e300,
+  1e-300, `0.0`, `-0.0`, with a near-constant sample confirmed *not* collapsed and a hand-computed
+  sd of √(5/3) for [1,2,3,4] passing. This mattered because SR-11's probes use zero variance as their
+  degenerate-case signal.
+- `DEFERRED_GATES` still lists exactly the six unimplemented checks, now with a test asserting the
+  set, its size, and that the module docstring names each one — the dashboard reads this to label any
+  displayed SUPPORTED as conditional, so completeness has downstream consequences.
+
+**SR-11 — 81 tests (from 64). Two places where the builder pushed back, correctly.**
+- It **declined** to reject repeated values, on the grounds that a constant outcome is legitimate and
+  **every exact-invariance probe produces all-zero deviations by construction**, so the rejection
+  would break the probes. It documented the narrower truth and pinned it with a test instead. The
+  orchestrator's instruction would have been wrong to enforce.
+- On the lone datum surviving on an insufficient card, it **corrected the claim rather than
+  withholding the data**, and added a test proving nothing is *derived* from `per_seed` — no summary,
+  no `case_table`, no `n_silent_value_total` — plus a `STANDARD_NON_CLAIMS` entry stating raw
+  observations support no claim.
+- `replace` laundering closed: `Scorecard.__post_init__` re-validates nested members by **exact
+  type**, checking finite values, the minimum count, and that every statistic matches a recomputation,
+  so a `mean` forged via `object.__setattr__` is refused on `replace`; subclass instances are rejected
+  outright for both `SeedSummary` and `InsufficientEvidence`. Subclassing a summary directly remains a
+  documented limit.
+- Docstring overclaims corrected ("distinct" → counts values, which may repeat; tamper detection
+  requires comparison against a previously recorded hash such as
+  `input_hashes["scorecard"]`; the `replace` claim narrowed to what the code now does), and new
+  scoping notes added for the subclass bypass, `per_seed` retention, the CPython-3.12 dependency
+  (including that a plain-loop `sum` flips even the *default* random-fixture reorder probe), that
+  headline figures are seed-list specific, and that probes cover only enumerated cases.
+- `python_version` is now recorded on **every** card, not only precision cards. `structural_checks`
+  carries a scope note saying it tests library behaviour, not the measure. Three **infinity** cases
+  added to the missing-input probe, closing the gap where a measure substituting `0.0` on ±inf passed
+  as `MISSING_INPUT_HANDLED`. The pre-3.12 reorder assertion is now skipped on older interpreters.
+- The oracle is now independently verified: `exact_masked_mse` checked against `decimal` at **6000
+  digits** across 30 fixtures with magnitude spread, plus a hand case. Six mutants applied; five
+  killed, one demonstrated equivalent (an inf square makes `fsum` return inf, which the result-finite
+  check already rejects).
+
+**SR-13 — hardlink bypass fixed, and every verdict layer now pinned individually. 68 tests (from 43).**
+- **Three guards now, defence in depth:** `write_dashboard` refuses a non-regular existing target;
+  refuses an existing target with `st_nlink > 1` ("may alias another file") — the check that catches
+  QA's hardlink; and writes to a temp file in the destination directory followed by `os.replace`, so
+  **an existing inode is never rewritten even if the nlink check were missed**. Tests run against a
+  scratch repo with `REPO_ROOT` patched, so the real tree is never touched, and a separate test
+  simulates the nlink check being missed to prove the second layer holds. Mutation-proven: disabling
+  the nlink check fails the refusal test; disabling it *and* restoring an in-place write fails the
+  second-layer test; restoring an in-place write alone also fails it.
+- Previously unpinned guards now tested: the CSP string must be exactly
+  `default-src 'none'; style-src 'unsafe-inline'`, appear once, and precede `<style>` (loosening it to
+  `default-src *` is caught); symlinked files, dangling symlinks, symlinked directories into the repo,
+  `..` traversal, a directory target, and dropping `resolve()` are all caught; history rejects NaN,
+  inf, bool, strings and wrong-arity rows **and reports how many rows were omitted**; forged
+  `MetricValue`s holding NaN, inf, `True`, `False`, int `0`, `"0"` or `1`, and non-`MetricValue`
+  objects, all render UNKNOWN; every `EvidenceClass` badge and its caveat text is pinned.
+- **The silent-skip decision was made loud rather than merely tested** — the right call. A
+  non-`ExperimentRecord` entry now renders a "not an ExperimentRecord" warning row without rendering
+  its contents, the panel adds an "N entries not rendered" warning and drops to NOT_VALIDATED (or
+  UNKNOWN if nothing valid remains), a non-iterable `records` value warns instead of crashing, and the
+  400-row cap now shows "TRUNCATED: showing 400 of N" instead of silently dropping rows.
+- **Each verdict layer is now independently demonstrated**, answering QA's point that defence in depth
+  was masking single mutations: hypothesis `blocking` (only the blocked hypothesis downgrades); global
+  gates (`control_adequacy`, `min_seeds`, `seed_list_frozen` each withhold every hypothesis); the
+  scoped convergence gate withholds **only H3** while H1/H2 still show SUPPORTED, proving it is not
+  blanket withholding; H3 converged components missing or weak; forged `supported_blockers`; component
+  recomputation; `_combine` over the **full 27-combination truth table** in both gate states; and
+  joint-mismatch handling for stronger, weaker and bare-string stored verdicts. Gate forgery now uses
+  `object.__setattr__` because `JointResult` refuses `replace` with inconsistent gates — so an
+  existing test was updated accordingly rather than left passing for the wrong reason. A
+  "no promotion" test confirms the renderer never shows more than the scorer across four degraded
+  fixtures, and raises no false alarm on honest ones.
+
+**Suite: 656 tests, OK (2 skipped) under unittest; 654 passed, 2 skipped under pytest.**
