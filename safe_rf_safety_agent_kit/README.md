@@ -34,6 +34,8 @@ This starter includes a source-grounded change audit, dependency-aware task plan
 
 **`--expect none` asserts that nothing third-party is installed**, so use it only on a bare interpreter — a clean clone, CI, or a throwaway `python3 -m venv --without-pip` (which needs no network). Run verbatim on a machine that already has torch, numpy, pytest or PyYAML importable, it fails with 8 policy failures — **by design, not a bug.** An earlier version of this section prescribed `--expect none` with no stated precondition, which made the documented sequence fail on most developer machines.
 
+**An optional developer tool is a different matter, and this kit got it wrong once.** For one round the commands below **failed on any machine without `ruff`** — which is every clean clone and *both* CI jobs — because a test gated on `ruff` carried a skip reason the skip policy rejected. Nothing here installs `ruff`, and the defect was invisible on any machine that had it, so two separate measurements read a clean pass. It is fixed, and an absent optional tool now changes **which tests run**, never whether the suite passes. See `docs/CLEAN_CLONE.md`, "The documented steps used to fail without `ruff`".
+
 ```sh
 ./scripts/lint.sh
 ./scripts/run_tests.sh --expect none  --twice   # bare interpreter only (clean clone / CI)

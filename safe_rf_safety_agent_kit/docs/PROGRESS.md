@@ -4759,3 +4759,105 @@ The reviewer deliberately avoided the previous reviewer's three and derived five
 the exact 24-mean support; and `required_n` against an independent `math.erf` bisection. The one
 `FAIL` it printed was its **own** tolerance — 1.5 ulp at 1e16 magnitude — and it said so.
 Repeatability verified **byte-identical across four processes at `PYTHONHASHSEED=0,1,12345,random`**.
+
+---
+
+# Round-3 fixes: SR-13 and SR-15 closed, and both owners answered the enumeration question properly
+
+**Date:** 2026-11-10. `test_dashboard` **170 → 188**, `test_scripts` **111 → 128**. Both measured by
+their owners; the full-suite figure is mine to re-measure once SR-10's fix lands (it is in the tree
+but its owner has not reported, so nothing is committed over it).
+
+## SR-13: the enumeration is now PERFORMED, not asserted
+This is the answer the last two rounds got wrong, and it is worth recording in full because the
+mechanism generalises.
+1. **A recording probe, not a list.** `IntervalPair`, `ComponentResult`, `Margins` and `JointResult`
+   are swapped for `__getattribute__`-recording subclasses via
+   `object.__setattr__(obj, "__class__", Rec)` — so `isinstance` still holds and the render takes its
+   **real** path — a whole dashboard is rendered, and the attributes **actually read** (by
+   `dashboard.py` *and* by `benchmark.py` underneath it) are compared against the declared table with
+   **set equality in both directions**. Deleting one entry fails it, and the message names the
+   attribute.
+2. **A non-vacuity test for the probe itself**: `n_boot`, `sd`, `iqr`, `minimum`, `maximum` and
+   `max_over_median_abs` are real numeric fields nothing renders, and the probe must **not** see them
+   — so the day something reads one, the probe reports it.
+3. **A source-reading test** tokenizes the module (dropping COMMENT and STRING tokens, which is
+   necessary because the docstrings quote the very patterns they forbid), maps each line to its
+   innermost enclosing function by AST, and fails if `math.isfinite`, `isinstance(..., int/float)` or
+   `float(` appears outside the four kind functions. `float(` now occurs **exactly once** in the
+   module.
+4. **The table drives the forgery sweep**, which asserts the **verdict cell and the alarm** — the rule
+   that would have caught all three rounds.
+
+**G1 fixed:** forged `n=nan` on 29 real seeds went from `JOINT_SUPPORTED / alarm=False / 0 warn
+paragraphs` to `JOINT_INCONCLUSIVE / alarm=True / 1 warn paragraph`, all three hypotheses
+INCONCLUSIVE. **G2 fixed** with no over-refusal (`Margins(delta_S=1)` as an int is still admitted).
+**Found unasked, same shape:** `pair.mean` and `pair.level` were also absent from the guard, so forging
+either gave UNKNOWN with **no alarm**; and the `fam` line leaked `nan`, `inf` and the **string**
+`"0.9875"` as coerced numbers.
+**The owner caught itself:** its first draft admitted each field twice, so deleting the guard changed
+no output and the mutant survived — *"the round-4 fix for an unchecked-consumer defect had grown its
+own masked duplicate."* Restructured so `_admitted` returns the values.
+**And it corrected my brief:** the forged row showed zero warn paragraphs only because the forgery was
+applied *before* `ComponentResult` derived its verdict; forging after construction alarms. That is the
+difference between a laundering fixture and a caught forgery, and my figure elided it.
+
+## SR-15: fixed on the declaration argument, not the precedent
+I leaned toward the filesystem-case precedent. The owner took it **plus** an unconditional structural
+test, on a better argument than mine: shape 2 would have hidden the gap inside an
+`if shutil.which("ruff"):` branch, so the run prints nothing, the skip list shows nothing, and on CI
+the behavioural half silently evaporates — **the same shape as the twelve masked tests.** Closing a
+skip-reason defect by replacing a declared skip with an undeclared one would have been
+self-contradictory. So the skip stays, *declared, named, capped and accounted for*, and the structural
+half runs everywhere.
+Three load-bearing details, each pinned: the exemption phrase is **structured, not a password**
+(near-misses including the old reason get no exemption); it says **"is not on PATH"**, not "is not
+installed", so torch mode's deny loop still rejects a laundered package claim — *"had I bought the
+exemption instead, I would have opened a laundering channel to fix a wording bug"*; and the baseline
+exclusion is **one regex shared by generation and comparison**, replacing two hand-copied inline
+patterns, which is what would have made the skip column 3-with-ruff and 4-without.
+
+## Five corrections to my brief, two of them substantial
+1. **The blast radius was worse than my table.** I scoped it as two of four documented steps.
+   **No CI job installs any linter**, so `core-no-deps` would have failed with `POLICY:NONE_REASON`
+   and `optional-deps` with `POLICY:TORCH_MODE_MISSING` — **every push, both matrix legs.** Recorded
+   as a comment in `ci.yml` so nobody "fixes" the skip by installing a linter without knowing what
+   that changes.
+2. **`_lint`'s tool-free `PATH` was accidental and interpreter-dependent.** Its comment said "PATH
+   without ruff/pyflakes"; it was the **interpreter's own `bin` directory** — exactly where a linter
+   installed into the same environment lives. Measured: framework 3.12 has neither, miniconda has
+   **both**. So under miniconda's `python3` every "missing optional tool" test asserted the
+   missing-tool guarantee **while measuring the tools-present run**. Now a constructed directory
+   holding only a `python3` symlink, which cannot drift.
+3. **The directory `--baseline` broke the comparison branch too**, which I had not mentioned:
+   `open(<dir>)` raises `IsADirectoryError`, so the run died with a traceback and **no `POLICY:` token
+   at all**.
+4. **There was a fourth unasserted token**, `POLICY:PYTEST_FAILED`, found by a coverage check the owner
+   added rather than by review — and it is the sharpest of the four, because a run where pytest goes
+   red while unittest stays green is precisely the case a reader calls a pass. All 26 emitted tokens
+   are now asserted, none excused.
+5. **`_NOT_BLOCKED` was restated in prose in `CLEAN_CLONE.md` with nothing checking the copy** — the
+   same staleness class as "five patched" against seven, which D4 was supposed to have closed. Now
+   checked by iterating the parsed tuple. The test *failed for real* before the disclosure was written.
+
+## `sendmsg_afalg`: disclosed with an argument, and my floor warning acted on
+Disclosed rather than patched, on a claim the owner put its name to: `AF_ALG` is the Linux **kernel
+crypto** socket family, its addresses are algorithm names rather than host/port pairs, it has no peer,
+route or interface, and the `AF_INET` path is `socket.sendmsg`, which **is** patched. Patching it
+would `setattr` onto `socket.socket` a name that does not exist on macOS, putting a `_BLOCK_SOCKET`
+member *outside* the live family; making the enumeration platform-aware would **re-open the gap the
+enumeration exists to close.** Labelled in the document as **reasoned from source, never run.**
+**My warning about the floor was right and was acted on:** `>= 10` was met *exactly*, so a composition
+change would have slipped through. All ten socket-method members are now pinned **by name**,
+demonstrated with a mutant that drops `accept` while *growing* the family past the floor — the count
+floor still passes and the new assertion is what fires.
+
+## Reported rather than churned
+`run_tests.sh` takes the **first** `^Ran (\d+) tests` match, so test output printing `Ran 9999 tests`
+spoofs `ran_log`. The owner checked both directions instead of changing it: spoofing upward passes
+`MIN_TESTS` but is caught by `POLICY:RECORDER`; spoofing downward fails `MIN_TESTS`. Covered both ways,
+so left alone and reported — the right call.
+Three lint evasions closed as names (`get_type_hints`, `getattr_static`, `breakpoint`/`breakpointhook`)
+with the **class** behind the first — "every place a name is spelled as data rather than as code" —
+added to "Still not covered", and an explicit statement that the list "is not an enumeration of
+everything that still passes".
