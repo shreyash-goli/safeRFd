@@ -4440,3 +4440,106 @@ It restored every mutant and verified the restore **by sha256 against the git bl
 own working copy — a strictly stronger check than the standing rule, and now the standing rule. It
 also declined to report the one step it could not finish (`--expect torch --twice`) as established in
 either direction, and told me its budget *was* achievable rather than padding.
+
+---
+
+# Third attestation: SR-13 FAIL (third time), SR-14 PASS
+
+**Date:** 2026-11-10. 170 / 100 tests OK, smoke test passes, 48 mutants with 42 killed. **SR-14
+PASSES and stays unmarked**, because its dependency SR-13 does not.
+
+## The enumeration was asserted, not performed — and the defect recurred inside its own fix
+Round 2's fix introduced `_finite_float` shared across five consumers, in a test class named
+`MetricValueConsumersShareOneCheck` claiming "all four cells and the recomputation now route
+through" it. **I asked this round's reviewer the one question that mattered — is that enumeration
+complete? — and the answer is no. There is a sixth consumer and a seventh.**
+
+**G1, the FAIL ground.** `pair.n` has two consumers that disagree: the display cell (inline
+`isinstance(int) and not isinstance(bool)`) and `_recompute` → `interval_verdict` →
+`_verdict_from_bounds`'s `n < min_n`. `_pair_numbers_ok` validates the four **bounds** only. Since
+`nan < 30` and `inf < 30` are both `False`, a forged `n` passes protocol 6.1's minimum-n floor **as a
+number**. Measured from 29 *real* seeds with an identical gate set in both rows:
+
+```
+pair.n honest -> JOINT_INCONCLUSIVE   n cell '29'          verdict INCONCLUSIVE
+pair.n forged -> JOINT_SUPPORTED      n cell 'UNKNOWN  n'   verdict SUPPORTED
+warn paragraphs on the page: 0
+```
+
+**A genuinely below-minimum run renders a decisive JOINT_SUPPORTED with zero alarms and no visible
+sample size.** A forged *bound* fails closed with an alarm; a forged *n* does not — and closing that
+renderer route is exactly what `_pair_numbers_ok` exists for. The scorer route is safe (the failing
+`min_seeds` gate still blocks it), which is why only a renderer-level attack finds this.
+The existing coverage is **the round-2 habit verbatim**:
+`test_n_cell_excludes_bool_like_every_sibling_count_cell` feeds `nan`, `1.0`, `"30"`, `None` to
+`pair.n` and asserts **only on the n cell**, never asking what the page concluded.
+
+**G2.** `_recompute` still does `float(c.margin)` and `_declared` still does
+`float(getattr(margins, attr))` — the exact "bare `float(code)` which coerces" pattern
+`_finite_float`'s own docstring claims was eliminated. The margin reads UNKNOWN in **both** panels
+while a decisive verdict derived from it displays, unalarmed. It could **not** be driven to a wrong
+verdict (the coerced value must float-equal the declared margin or `_recompute` returns None), so the
+severity is a self-contradicting row plus unalarmed tampering, not a laundered figure.
+
+**The rule that would have caught all three rounds, now the required shape for this module:**
+*for every forged value, assert the verdict cell and the alarm, not just the figure cell.* Every miss
+was a test that checked the number and never asked what the page concluded.
+
+## Two corrections that land on me
+1. **A figure in my own brief did not reproduce — the sixth this session.** I wrote that the
+   laundering fixture (n=29, `min_n` forged to 1) "lands in the *withheld* branch". It does not:
+   `withheld = bool(mismatch) or bad` is `False` there, so it takes the not-withheld branch — and the
+   sentence printed there ("no decisive verdict was withheld on account of these parameters") is
+   **true** in that case, because everything was already INCONCLUSIVE via the failing `min_seeds`
+   gate. The fix is still correct; my stated reason for it was wrong, and my claim that "neither
+   branch is clean" is not supported by that case.
+2. **My earlier strike-through was itself partly wrong, and this is the more interesting one.** I
+   struck the round-3 reviewer's "honest n=29 run laundered into JOINT_SUPPORTED" because the builder
+   could not reproduce it. Confirmed again: it does not reproduce **through `min_n`, via the
+   scorer**. But **the same end state *is* reachable — through `pair.n`, with zero warn paragraphs.**
+   So that finding's severity was not overstated; it was **mis-located**. I recorded "does not
+   reproduce" and moved on, when the right response was "does not reproduce *by this route*" and a
+   search for another. A failed reproduction narrows a claim; it does not retire it.
+
+## Four survivors, argued rather than labelled
+- **M6** `_mv_float` drops the `isinstance(mv, MetricValue)` check: **a real gap.** A duck-typed bound
+  (`.value = 1.0`) in an `IntervalPair` — which has no `__post_init__` — reaches `render_scorecard`;
+  HEAD renders `UNKNOWN / interval not computable`, the mutant renders `[1.0, 1.001]`. No test feeds
+  a non-`MetricValue` bound. HEAD alarms, so it is coverage, not behaviour.
+- **M24** `_int_cell` admits any non-`None`: **a real gap.** `ahead_by` = `True`/`2.5`/`"many"`/`[1]`
+  → HEAD UNKNOWN, mutant a measured value.
+- **M25** `_verdict_cell` drops `or _KIND_UNKNOWN_CAVEAT`: masked through the public API (all three
+  `kind_label`s are non-empty constants) but the documented private behaviour is unpinned.
+- **M19** `gates_ok` keeping `not gate_set_bad`: **genuinely equivalent, argued over the public API** —
+  `gate_set_bad` implies non-empty `problems` implies `bad`, so all three hypotheses are INCONCLUSIVE
+  and `_combine` gives JOINT_INCONCLUSIVE for either value. Verified identical on three fixtures.
+- **M1** dropping `isinstance(x, bool)` from `_finite_float`: **genuinely unpinnable, and verified
+  rather than asserted** — `bool.__mro__` is `(bool, int, object)` so `isinstance(True, float)` is
+  False, and `bool` cannot be subclassed (`TypeError: type 'bool' is not an acceptable base type`).
+  Dead for every possible input.
+
+## SR-14 — PASS, unmarked pending SR-13
+The strongest attestation of the session. **500 transition combinations** (5 current states × 5
+`from_state` × 4 `to_state` × 5 actions) with evidence always supplied so `MissingEvidenceError`
+could not mask anything: exactly the 5 legal transitions accepted, **zero illegal acceptances, zero
+legal transitions refused**, and no non-ledger exception anywhere. Immutability attacked on **all 14
+fields × 3 event indices × 1–4 genuinely different values** — every one detected by `verify_chain`
+*and* by `claim_state`/`claim_ids`/`summary`/`append`/`save_ledger`. **Zero leaks.** Idempotency
+holds for identical replay, for eight content variants including **reordered** evidence refs, for a
+`RETRACT` reusing a `SUPPORT` id, and for a replay arriving after the state has moved on. Both
+documented residuals are open and unchanged, neither closed nor widened.
+**One non-blocking follow-up**, routed separately: `M49`, dropping `verify_events`' normalised-content
+comparison, survives. The reviewer argued equivalence **and said it had not proven it** — 78 targeted
+single-field forgeries with downstream digests recomputed found no input where that comparison is the
+only detector, but a future non-identity normalisation (stripping whitespace in `_text`, say) would
+silently remove a detector nothing pins. That is the right way to report an unproven equivalence.
+
+## What was confirmed sound and must not be churned
+The UNKNOWN-not-zero criterion itself, now attacked properly: **160 scorecard renders** across 10
+`IntervalPair` fields × 16 hostile values — 0 crashes, no `[0.0, 0.0]`, bounds failing closed with an
+alarm — every other panel clean, M27 verified, and **over-refusal checked too** (genuine `0.0`/`0`
+still render as measured everywhere). The alarm contract does not false-fire: gates reversed plus
+three shuffles, components reversed, converged reversed, and all at once → no alarm in every case.
+`_weaker_than_protocol` verified in **both** directions, producing a byte-identical paragraph for
+honest and forged, accusing and exculpating neither. `_contract_problems` fires on a defaultless
+signature and does not false-fire at HEAD. The documented same-name-forged-pair residual is unchanged.
