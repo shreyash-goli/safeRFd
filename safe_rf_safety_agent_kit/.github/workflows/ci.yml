@@ -1,7 +1,15 @@
 # Offline, read-only CI for the TOY safety-audit kit. No secrets, no deploy, no pushes, no artifacts uploaded.
 # (.env.example flags are inert markers read by no code; enforcement is the socket guard.)
-# Network is used ONLY by the pip-install step of the optional-deps job; every test step runs under a socket
-# guard (scripts/run_tests.sh) that makes any connection attempt fail.
+# NETWORK, precisely. Nothing in this workflow reaches a remote host except the pip-install step of the
+# optional-deps job. Every test step runs the suite through scripts/run_tests.sh, whose socket guard makes the
+# patched socket entry points raise (the patched and deliberately-unpatched names are tuples in that script).
+# But the suite does attempt connections, and this comment used to deny it: the guard's own negative controls
+# re-invoke the runner with --no-network-guard, which is what makes them controls, and the runner's canary
+# connect runs unguarded in the test that proves a missing guard is detected. Every one of those targets is
+# LOOPBACK -- a closed port on 127.0.0.1, a loopback bind or UDP sendto, an AF_UNIX socket -- so they are
+# refused by the runner's own stack and no packet reaches an interface. They aimed at 192.0.2.1 (TEST-NET-1,
+# unroutable only by convention) until SR-15. See docs/CLEAN_CLONE.md, "Connection attempts the suite itself
+# makes". No egress allow-list is configured for the runner, so this is a property of the suite, not of CI.
 name: ci
 on:
   push:

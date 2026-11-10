@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Lint for the TOY safety-audit kit (SR-15). Works with NOTHING installed: python3 -m compileall plus an
-# AST-based check written inline below. Optional linters (ruff, pyflakes) are used only if present and their
-# findings are advisory (set LINT_STRICT=1 to make them fatal). A missing tool never fails this script.
+# AST-based check written inline below. Optional linters are used only if present. ruff's correctness
+# rules (E9,F63,F7,F82 -- syntax, undefined names, bad comparisons) are FATAL when ruff is present;
+# pyflakes findings stay advisory (set LINT_STRICT=1 to make them fatal too). A MISSING tool never
+# fails this script, so the bare-interpreter path is unaffected.
 #
 # WHAT THIS IS: a module-name BLOCKLIST plus an attribute-name blocklist, plus (in src/ only) a positive
 # standard-library-only check. A blocklist is a TRIPWIRE and is inherently INCOMPLETE: the Python standard library
@@ -13,9 +15,17 @@
 #     string built at runtime;
 #   * a literal os.system("curl ...") OUTSIDE src/ (the process rules are src/-only by design);
 #   * anything in a third-party package;
+#   * reflection through a MAPPING rather than an attribute: vars(os)["system"], os.__dict__["system"],
+#     dict(inspect.getmembers(os))["system"]. A different shape from the attribute blocklist, and deliberately
+#     left uncovered (see docs/CLEAN_CLONE.md "Still not covered");
 #   * and, most importantly, every stdlib code-execution or server entry point NOT named in the lists below. The
 #     lists were extended after review found many that passed: see docs/CLEAN_CLONE.md "Lint scope" for the
 #     enumeration of what is and is not named, and for the ones still known to pass.
+# One whole class IS closed structurally rather than by name: src/ may import no underscore-prefixed top-level
+# module (`__future__` excepted). The private C-extension counterparts of banned modules -- _pickle (arbitrary
+# code via __reduce__), _imp (create_dynamic/exec_dynamic load a native extension), _posixsubprocess.fork_exec,
+# _multiprocessing, _asyncio, _sqlite3, _tkinter, _curses -- were a systematic evasion of the blocklist, and
+# only _socket and _ctypes had been thought of. A rule beats eight more names.
 # In src/ the rules below (including aliasing like `import os as o`, `f = os.system`, `e = eval`, `builtins.exec`,
 # `from os import system`, and the exec*/spawn*/posix_spawn* family) ban network/process modules, __import__, importlib, os.system/popen and any eval/exec
 # except the two literal strings allow-listed by (file, exact text). The runtime socket guard in run_tests.sh is
@@ -45,7 +55,7 @@ ROOT = pathlib.Path(".")
 BANNED = {"socket", "urllib", "urllib2", "urllib3", "http", "httplib", "requests", "httpx", "aiohttp",
           "ftplib", "smtplib", "poplib", "imaplib", "telnetlib", "xmlrpc", "ssl", "websocket", "websockets",
           "_socket", "socketserver", "asyncio", "selectors", "webbrowser", "nntplib", "smtpd", "wsgiref", "cgi",
-          "pydoc", "antigravity"}
+          "pydoc", "antigravity", "_ssl", "_asyncio"}
 # Dotted names whose PARENT module is legitimate, so BANNED (which matches the top-level name) cannot hold them.
 # logging.config.listen() runs a socket server that exec()s the configuration it receives; logging.handlers has
 # SocketHandler/HTTPHandler/SMTPHandler.
@@ -66,7 +76,11 @@ SRC_IMPORT_OK = set(sys.stdlib_module_names) | {"toy", "torch"}
 # `import os as o; o.system(..)`, `f = os.system`, `builtins.exec(..)`) and as `from os import <name>`.
 # `resolve_name` is listed first because pkgutil.resolve_name("os:system") defeats every other entry in this set
 # in a single line: it returns the function without ever naming it as an attribute.
-DANGEROUS_ATTR = {"resolve_name", "system", "popen", "fork", "forkpty", "startfile", "import_module", "exec",
+# `loadTestsFromName` is listed with `resolve_name` because it is the same shape and the same power:
+# unittest.TestLoader().loadTestsFromName("os.system") is a plain static call with a literal string.
+# `_getframe` reaches the caller's builtins (sys._getframe().f_builtins["exec"]).
+DANGEROUS_ATTR = {"resolve_name", "loadTestsFromName", "_getframe",
+                  "system", "popen", "fork", "forkpty", "startfile", "import_module", "exec",
                   "eval", "__import__", "posix_spawn", "posix_spawnp", "Popen", "check_output", "check_call",
                   "runsource", "runcode", "interact", "run_module", "run_path", "runctx",
                   "load_module", "exec_module", "create_module", "find_module",
@@ -133,6 +147,12 @@ for path in files:
                 errors.append(f"{loc}: network-capable import '{m}' (offline-only kit)")
             if in_src and (top in PROC or m in PROC_FULL):
                 errors.append(f"{loc}: process/dynamic-loading import '{m}' in src/")
+            # STRUCTURAL rule, not another name: the private C-extension counterparts of the banned modules
+            # (_pickle, _imp, _posixsubprocess, _multiprocessing, _asyncio, _sqlite3, _tkinter, _curses, ...)
+            # are one greppable class, and only _socket/_ctypes had been named. src/ imports none of them.
+            if in_src and top.startswith("_") and top != "__future__":
+                errors.append(f"{loc}: private implementation module import '{m}' in src/ (underscore-prefixed "
+                              f"C-extension/internal modules are the counterparts of the banned ones)")
             if in_src and top not in SRC_IMPORT_OK:
                 errors.append(f"{loc}: non-stdlib import '{m}' in src/ (src/ is standard-library only; the only "
                               f"allowed non-stdlib name is the documented optional 'torch')")
@@ -173,13 +193,21 @@ for e in errors: print("ERROR:", e)
 sys.exit(1 if errors else 0)
 PY
 
-echo "== optional linters (advisory) =="
+echo "== optional linters =="
 RAN_ANY=0
 if command -v ruff >/dev/null 2>&1; then
   RAN_ANY=1
-  # Real-error rules only (syntax, undefined names, invalid comparisons); no cache dir written into the repo.
+  # E9/F63/F7/F82 are CORRECTNESS, not style: syntax errors, invalid comparisons, undefined names.
+  # These are FATAL when ruff is present, not advisory. Reason, from a real miss: an undefined `Any`
+  # in a committed annotation in src/toy/benchmark.py went unnoticed because ruff reported it and
+  # this script printed "LINT: OK" anyway -- `from __future__ import annotations` keeps such a name
+  # from raising at runtime, so nothing else caught it either. A linter finding that nobody has to
+  # act on is a linter finding nobody reads.
+  # A MISSING ruff still never fails the script: the bare-interpreter guarantee is unchanged, and
+  # that is why this is gated on `command -v` rather than being required.
   if ruff check --no-cache --select E9,F63,F7,F82 src tests scripts; then echo "ruff: OK"
-  else echo "ruff: findings above"; [ "${LINT_STRICT:-0}" = 1 ] && FAIL=1; fi
+  else echo "ruff: correctness findings above (FATAL: undefined names and syntax errors are not style)"
+       FAIL=1; fi
 fi
 if python3 -m pyflakes --version >/dev/null 2>&1; then
   RAN_ANY=1

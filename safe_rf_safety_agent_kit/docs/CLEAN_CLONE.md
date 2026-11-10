@@ -1,7 +1,12 @@
 # Clean-clone verification (offline, stdlib only)
 
 **The kit downloads nothing and requires no credentials.** It needs only Python 3.12 or newer (the standard library
-is enough). No package manager, no API key, no model weights, no dataset, no network access at test time.
+is enough). No package manager, no API key, no model weights, no dataset, and **nothing the suite does leaves this
+host.** That is deliberately narrower than "the suite opens no socket", because it does: the runner's guard canary
+and the negative-control tests that drive the runner with `--no-network-guard` (which is what makes them controls)
+really attempt connections, and every target is **loopback** — a closed port on `127.0.0.1`, a loopback bind, or an
+AF_UNIX socket. See "Connection attempts the suite itself makes" below; this used to say "no network access at test
+time" while four of those attempts went to a routable address on every run.
 `mse_naive` order-invariance in the robustness tests depends on CPython >= 3.12 compensated `sum()`; do not use
 an older interpreter (some assertions would go red; pre-3.12 is unsupported).
 
@@ -47,7 +52,8 @@ Pick exactly one of (a)-(d). CI uses (a) in `core-no-deps` (the runner installs 
 `optional-deps`. `README.md` carries the same precondition in one line.
 
 `run_tests.sh` removes `__pycache__`, disables bytecode (`PYTHONDONTWRITEBYTECODE=1`), fixes `PYTHONHASHSEED=0`,
-installs a socket guard so any connection attempt fails, runs `python3 -m unittest discover -s tests -v` (and
+installs the socket guard described under "What the network guard does and does not do" (patched names, not
+all sockets), runs `python3 -m unittest discover -s tests -v` (and
 `python3 -m pytest -q tests` only if pytest happens to be installed), checks skip reasons, and with `--twice`
 verifies a second run gives identical counts and an identical skip list. You can also run the suite directly:
 `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests`.
@@ -260,7 +266,10 @@ The kit's guarantees are structural. Each of these is checked (with the scope li
   SR-15 the claim was true only by inspection.
 - `src/toy/` imports no network library. This is a **blocklist** of module names, and therefore a tripwire rather
   than a guarantee — see "Lint scope" below for what it does and does not name.
-- `scripts/run_tests.sh` runs the suite under a socket guard that makes any connection attempt fail.
+- `scripts/run_tests.sh` runs the suite under a socket guard that makes the patched `socket` entry points raise.
+  The patched and the deliberately-unpatched names are tuples in the script; the suite asserts every member of
+  the family is in one of them. The suite's own negative controls run with the guard off, against loopback
+  targets only.
 - No weight files are present or loaded (`.gitignore` excludes common weight formats; nothing in `src/` loads them).
 
 Manual source verification is a human activity outside the suite entirely: `docs/SOURCE_SNAPSHOT.json` preserves the
@@ -269,27 +278,77 @@ who chooses to re-verify against GitHub. No script, test or CI step runs them.
 
 ## What the network guard does and does not do
 
-`scripts/run_tests.sh` installs a Python-level guard (a `sitecustomize` module on `PYTHONPATH`) that makes
-`socket.socket.connect`, `connect_ex`, `socket.create_connection`, `getaddrinfo`, `gethostbyname`,
-`gethostbyname_ex` and `getnameinfo` raise (so `urllib` and `http.client` fail too). Child **Python** processes
-inherit it while they inherit `PYTHONPATH`, and a canary refuses to run the suite if the guard is not active.
-Each patched entry point has a test that drives it through the real script and a negative control that the same
-suite fails under `--no-network-guard`.
+`scripts/run_tests.sh` installs a Python-level guard (a `sitecustomize` module on `PYTHONPATH`) that replaces
+socket's connection and name-resolution entry points with a function that raises (so `urllib` and `http.client`
+fail too). Child **Python** processes inherit it while they inherit `PYTHONPATH`, and a canary refuses to run the
+suite if the guard is not active.
+
+**Do not read the patched list from this document.** It is the `_BLOCK_MODULE` and `_BLOCK_SOCKET` tuples in the
+guard block of `scripts/run_tests.sh`, and the names deliberately left alone are the `_NOT_BLOCKED` tuple beside
+them, each with its reason. Read them there. A hand-written prose copy lived here and went stale twice — most
+recently it counted the patched functions as "five" three lines after correctly listing seven of them — so
+`tests/toy_tests/test_scripts.py` now parses those three tuples out of the script and asserts that
+
+- **every** member of `socket`'s connection and name-resolution family, enumerated from the live `socket` module
+  rather than from a list (`create_connection`, `create_server`, and every `get(addrinfo|fqdn|host*|name*|serv*|proto*)`,
+  plus `connect*`, `bind`, `listen`, `accept*`, `send*` on `socket.socket`), is in exactly one of the three tuples:
+  patched, or disclosed with a reason. A name in neither fails the suite;
+- every patched name has a test that **drives it through the real script**, generated from the patch list, with a
+  negative control in which all of them fail under `--no-network-guard`.
+
+That structure exists because the alternative was measured three times: `gethostbyname_ex`, then `getnameinfo`,
+then `gethostbyaddr` and `getfqdn` were each found unpatched by the next reviewer who tried a name nobody had
+tried before, and each round patched the names that reviewer happened to test rather than the family.
+`gethostbyaddr` is the sharpest of them: for a non-local address it issues a reverse-DNS query that leaves the
+host, and `getfqdn` leaks through it.
 
 **It is not a sandbox.** Known bypasses, tested against a loopback listener by independent review (nothing left
 the host):
-- `_socket.socket().connect(...)` reaches a loopback listener; so does UDP `sendto`. The guard patches the
-  `socket` module, not the `_socket` C extension underneath it.
+- `_socket.socket().connect(...)` reaches a loopback listener. The guard patches the `socket` module, not the
+  `_socket` C extension underneath it. (UDP `sendto` was in this bullet and is now patched on `socket.socket`;
+  `_socket`-level `sendto` is not, for the same reason.)
 - A child started with `python -I` (or `-S`, or a changed `PYTHONPATH`) does not load the guard. `-I` also ignores
   `PYTHONDONTWRITEBYTECODE`, so the "no `.pyc`" rule does not hold for such a child either.
 - Non-Python children (for example `curl`) are not covered. A connection by `curl` was not demonstrated, but nothing
   prevents it.
-- Anything that opens a socket without going through the five patched `socket`-module functions.
+- The `socket.socket` methods and module functions named in `_NOT_BLOCKED`: `gethostname`, `getservbyname`,
+  `getservbyport`, `getprotobyname` (purely local lookups — the host's own name, `/etc/services`,
+  `/etc/protocols` — which originate no traffic; `gethostbyname` and `getfqdn`, which do resolve, are patched,
+  so `gethostbyname(gethostname())` is still blocked) and `send`, `sendall`, `sendfile`, `accept` (reachable
+  only through a `connect`/`bind`/`listen` that is patched).
+- Anything that opens a socket without going through the patched `socket`-module functions and methods — the
+  guard is a tripwire on names, not a sandbox.
 
-`gethostbyname_ex` and `getnameinfo` are in the list above only historically: both used to be unpatched, and
-`getnameinfo` was additionally **undisclosed** — review found it by testing the guard rather than reading the
-list. Both are now blocked and pinned by tests. `connect`, `connect_ex`, `create_connection`, `getaddrinfo`,
-`gethostbyname`, `urlopen` and `HTTPConnection` were confirmed blocked by the same review.
+`connect`, `connect_ex`, `create_connection`, `getaddrinfo`, `gethostbyname`, `gethostbyname_ex`, `getnameinfo`,
+`urlopen`, `HTTPConnection`, `asyncio.open_connection` and `ftplib.FTP(host)` have each been confirmed blocked by
+independent review; `gethostbyaddr` and `getfqdn` were confirmed **not** blocked by the most recent one and are
+now patched and pinned.
+
+### Connection attempts the suite itself makes, and why they are loopback-only
+
+The guard's negative controls have to run with the guard **off** — that is the whole point of a control — so the
+suite genuinely attempts connections on every run. They are:
+
+| where | call | target |
+|---|---|---|
+| `scripts/run_tests.sh`, every guarded run | `create_connection` canary | `127.0.0.1:1` (closed port) |
+| `test_network_guard_blocks_every_patched_entry_point`, `--no-network-guard` arm | one per patched name | closed loopback port, loopback bind, loopback UDP `sendto`/`sendmsg`, AF_UNIX `listen`, numeric lookups |
+| `test_missing_guard_is_detected_by_canary` | the runner's canary under `python -S` | `127.0.0.1:1` |
+
+Each one therefore ends in `ECONNREFUSED` (or `EINVAL`) **from the local stack**, and no packet reaches a network
+interface. Until this round every one of them aimed at `192.0.2.1:9`. `192.0.2.0/24` is TEST-NET-1, which is
+non-routable **by convention, not by the kernel**: on the development host `route -n get 192.0.2.1` returns
+`gateway: 10.43.220.1, interface: en0`, and the tests' own comment — "without the guard these must fail fast, not
+hang for ~75 s" — was a description of TCP SYN retransmission, i.e. of packets being sent and dropped. So a bare
+run of this suite made three outbound connection attempts from the synthetic control suite and a fourth from the
+runner's own canary, while this document said "no network access at test time". A test in
+`TestNetworkGuardSurfaceAndDisclosure` now scans what the runner and every test module *execute* (code lines and
+non-docstring string literals) and fails on any non-loopback target, so the address cannot drift back.
+
+`socket.listen` is the one awkward case: `listen()` on an unbound INET socket auto-binds to the **wildcard**
+address, so driving it that way would briefly open a listener on all interfaces in the unguarded arm. It is
+driven on an AF_UNIX socket instead, which answers the same question (did the guard fire?) with no listener at
+all.
 
 The structural checks in `scripts/lint.sh` and `tests/toy_tests/test_scripts.py` are the first layer and the
 runtime guard is a second, partial one. **Neither is complete**; see "Lint scope" immediately below for what the
@@ -353,7 +412,22 @@ four "not covered" buckets — `getattr`-style tricks, runtime-built names, thin
 packages — and **none of those nineteen fell into any of them**, so the enumeration implied that plain static
 attribute calls were covered when they were not.
 
+**One whole class is closed by a rule rather than by more names.** `src/` may import **no underscore-prefixed
+top-level module** (`__future__` excepted). The private C-extension counterparts of the banned modules were a
+systematic evasion — `_socket` and `_ctypes` were named, which shows that two members had been thought of, while
+`_pickle` (arbitrary code via `__reduce__`, demonstrated), `_imp` (`create_dynamic`/`exec_dynamic` load a native
+extension), `_posixsubprocess.fork_exec`, `_multiprocessing`, `_asyncio`, `_sqlite3`, `_tkinter` and `_curses`
+were not. `unittest.TestLoader().loadTestsFromName("os.system")` and `sys._getframe().f_builtins["exec"]` were
+closed too, because they are the same shape as `pkgutil.resolve_name` (a static call with a literal string) and
+cost one name each. This class was reported as **not** part of the failing criterion, and was closed because it
+was cheap; chasing completeness is explicitly not the goal.
+
 **Still not covered** (checked, and left uncovered deliberately — extending a tripwire forever is not the goal):
+- Reflection through a **mapping** rather than an attribute: `vars(os)["system"]`, `os.__dict__["system"]`,
+  `dict(inspect.getmembers(os))["system"]`. All three pass, all three are a plain static call with a literal
+  string, and all three are a different shape from the attribute blocklist. Left open on purpose: banning the
+  names `vars`/`__dict__`/`getmembers` in `src/` would reject ordinary introspection, and the subscript form
+  would need a new rule for each container.
 - `getattr(os, "sys" + "tem")`-style tricks and any name or code built at runtime.
 - `os.system("curl ...")` and similar **outside** `src/`: the process and code-execution rules are `src/`-only by
   design, since `tests/` and `scripts/` legitimately use `subprocess` to drive the scripts.
@@ -385,6 +459,19 @@ This is hygiene, not a sandbox; the runtime socket guard is a second, partial la
   The `numpy<2` rationale (NumPy/torch ABI mismatch seen in the RFdiffusion repo) holds regardless.
 - **Whether `torch==2.7.1` resolves to the CPU wheel via `--extra-index-url` on Linux is untested.**
 - **Actions are pinned by tag, not commit SHA** (`actions/checkout@v4`, `actions/setup-python@v5`).
+- **Only the direct optional dependencies are pinned; their transitive dependencies are not.**
+  `constraints.txt` and `requirements-dev.txt` pin what the `optional-deps` job asks for by name, and `pip`
+  then resolves everything underneath them freely: there is no `--require-hashes` and no lock file, so that job
+  is not byte-reproducible over time. Nothing in the kit claims otherwise — this bullet exists because the
+  limit had never been written down, not because a claim was wrong. The `core-no-deps` job and every documented
+  clean-clone step install nothing at all and are unaffected.
+- **The determinism check is deliberately redundant, and four of its terms are individually unpinned.**
+  `--twice` compares `$RAN`, `$SKIPPED`, `$BAD` and `$UT_RC` *and* the canonical per-module/skip-list file.
+  Mutating any one of those four terms alone leaves the check still failing, because the canon comparison or
+  the remaining terms catch the same difference (`$RAN`/`$SKIPPED` are strictly subsumed by the canon: a
+  differing total implies a differing `ran`/`skip` line). Only the canon comparison and the `$BAD`-with-`$UT_RC`
+  pair are pinned individually. This is defensible redundancy rather than a set of masked tests, but it is four
+  terms, not the one the record previously named.
 - **The case-sensitive-filesystem counts come from the stand-in**, not from Linux. The 1/3/4 table under
   "Filesystem-case skips" is from a real case-sensitive APFS disk image, which is still a stand-in: it shows
   which *variable* drives each skip, not that Linux behaves identically in other respects.
@@ -395,7 +482,10 @@ This is hygiene, not a sandbox; the runtime socket guard is a second, partial la
   `any` cannot reach them; the baseline *test-count* comparison, which does apply in every mode, compares counts
   that do not depend on which packages are installed (a skipped test still starts, so it is still counted). The
   mode's behaviour is exercised by the synthetic-suite tests, not by a full real-suite run in this environment.
-- The script tests (see test collection for the count; `scripts/test_baseline.txt` records 13 modules) take about a minute because they run the scripts on synthetic suites and trees.
+- The script tests (see test collection for the count; `scripts/test_baseline.txt` records 13 modules) take one
+  to two minutes because they run the scripts on synthetic suites and trees — 92 s for the 110 tests of
+  `tests/toy_tests/test_scripts.py` measured serially on this host, and longer under any concurrent load. Do
+  not read a figure here as current; the point is the order of magnitude and that it grows with the module.
 
 ## What CI does
 

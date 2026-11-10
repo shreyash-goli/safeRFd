@@ -33,6 +33,116 @@ def _lint_blocklists():
 BANNED, BANNED_FULL = _lint_blocklists()
 
 
+def _guard_source():
+    """The socket-guard block exactly as scripts/run_tests.sh appends it to the sitecustomize shim."""
+    text = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")
+    m = re.search(r"<<'PY'\n(import socket as _s\n.*?)\nPY\n", text, re.S)
+    if m is None:
+        raise AssertionError("scripts/run_tests.sh no longer appends a socket-guard heredoc beginning with "
+                             "`import socket as _s`; this file parses it (see _guard_source) and must be "
+                             "updated together with it")
+    return m.group(1)
+
+
+def _guard_lists():
+    """(patched socket-module names, patched socket-method names, disclosed-unpatched names) -- parsed OUT of the
+    guard in scripts/run_tests.sh rather than restated here.
+
+    The guard used to be a run of assignments that grew one name per review round (gethostbyname_ex, then
+    getnameinfo, then gethostbyaddr/getfqdn), and the disclosure was hand-written prose that went stale twice
+    (docs/CLEAN_CLONE.md said "five patched socket-module functions" while the script patched seven). Parsing
+    makes the test, the drive table and the documentation derive from the script.
+    """
+    src = _guard_source()
+    out = []
+    for name in ("_BLOCK_MODULE", "_BLOCK_SOCKET", "_NOT_BLOCKED"):
+        m = re.search(rf"(?m)^{name} = (\(.*?\))\n", src, re.S)
+        if m is None:
+            raise AssertionError(f"the socket guard in scripts/run_tests.sh no longer defines {name} as a plain "
+                                 f"tuple literal; this file parses it (see _guard_lists)")
+        out.append(frozenset(ast.literal_eval(m.group(1))))
+    return out
+
+
+PATCHED_MODULE, PATCHED_SOCKET, GUARD_DISCLOSED = _guard_lists()
+
+# One driving expression per patched entry point, keyed exactly as the guard names it ("socket." prefix = a
+# method on socket.socket). test_network_guard_blocks_every_patched_entry_point builds a synthetic suite out of
+# this table and asserts the keys are EXACTLY the parsed patch set, so a name cannot be added to the guard
+# without a test that drives it through the real script, and the table cannot claim coverage of a name the guard
+# no longer patches.
+#
+# EVERY TARGET IS LOOPBACK, and that is not cosmetic: the negative control runs these with the guard DISABLED
+# (--no-network-guard), because that is what makes it a control. They used to aim at 192.0.2.1:9, so a bare run
+# of this suite made three real outbound connection attempts (plus a fourth from the runner's canary) while the
+# docs said no network was touched at test time. 127.0.0.1:1 is a closed port -- ECONNREFUSED comes back from
+# the local stack, nothing is transmitted, and it is instant instead of waiting out SYN retransmission.
+# socket.listen is driven on an AF_UNIX socket because listen() on an unbound INET socket auto-binds to the
+# wildcard address; AF_UNIX gives the same "did the guard fire?" answer without any listener at all.
+GUARD_CALLS = {
+    "create_connection": 'socket.create_connection(("127.0.0.1", 1), timeout=1)',
+    "create_server": 'socket.create_server(("127.0.0.1", 0)).close()',
+    "getaddrinfo": 'socket.getaddrinfo("127.0.0.1", 80)',
+    "getfqdn": 'socket.getfqdn("127.0.0.1")',
+    "gethostbyaddr": 'socket.gethostbyaddr("127.0.0.1")',
+    "gethostbyname": 'socket.gethostbyname("127.0.0.1")',
+    "gethostbyname_ex": 'socket.gethostbyname_ex("127.0.0.1")',
+    "getnameinfo": 'socket.getnameinfo(("127.0.0.1", 80), socket.NI_NUMERICHOST | socket.NI_NUMERICSERV)',
+    "socket.bind": '_tcp().bind(("127.0.0.1", 0))',
+    "socket.connect": '_tcp().connect(("127.0.0.1", 1))',
+    "socket.connect_ex": '_tcp().connect_ex(("127.0.0.1", 1))',
+    "socket.listen": '_unix().listen(1)',
+    "socket.sendmsg": '_udp().sendmsg([b""], [], 0, ("127.0.0.1", 9))',
+    "socket.sendto": '_udp().sendto(b"", ("127.0.0.1", 9))',
+}
+
+
+def _guard_suite_body():
+    """A synthetic suite with one test per patched entry point, generated from GUARD_CALLS.
+
+    With the guard on, each must raise OSError("NETWORK BLOCKED ..."). With --no-network-guard each must NOT:
+    the calls then either return normally (bind, sendto, every resolver) or raise a local OSError whose message
+    is "Connection refused" / "Invalid argument", so every single test fails. That difference is the control.
+    """
+    lines = ["import socket, unittest",
+             "def _tcp():",
+             "    s = socket.socket(); s.settimeout(1); return s",
+             "def _udp():",
+             "    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(1); return s",
+             "def _unix():",
+             "    return socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)",
+             "def blocked(fn):",
+             "    def t(self):",
+             "        with self.assertRaises(OSError) as cm:",
+             "            fn()",
+             "        self.assertIn('NETWORK BLOCKED', str(cm.exception))",
+             "    return t",
+             "class T(unittest.TestCase):"]
+    for name, call in sorted(GUARD_CALLS.items()):
+        lines.append(f"    test_{name.replace('.', '_')} = blocked(lambda: {call})")
+    return "\n".join(lines) + "\n"
+
+
+def _code_string_literals(path):
+    """(lineno, text) for every string literal in a .py file that is NOT a docstring, or every non-comment line
+    of a .sh file. The historical record of the 192.0.2.1 defect lives in comments and docstrings on purpose;
+    this is for scanning what the files actually EXECUTE."""
+    text = path.read_text(encoding="utf-8")
+    if path.suffix != ".py":
+        return [(i, l) for i, l in enumerate(text.splitlines(), 1) if not l.lstrip().startswith("#")]
+    tree = ast.parse(text)
+    docs = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and body:
+            first = body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) \
+                    and isinstance(first.value.value, str):
+                docs.add(id(first.value))
+    return [(n.lineno, n.value) for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs]
+
+
 def _env(**extra):
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONHASHSEED="0")
     env.update(extra)
@@ -299,13 +409,129 @@ class TestNoNetworkImports(unittest.TestCase):
             self.assertIn(needle, steps, f"Steps section does not mention {needle}")
 
     def test_socket_guard_blocks_connections(self):
-        """The guard run_tests.sh installs must make connection attempts fail (checked in a child process)."""
-        t = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")
-        guard = re.search(r"<<'PY'\n(import socket as _s.*?)\nPY\n", t, re.S)
-        self.assertIsNotNone(guard)
-        code = guard.group(1) + "\ntry:\n    _s.create_connection(('192.0.2.1', 9), timeout=1)\nexcept OSError as e:\n    print('BLOCKED', e)\n"
+        """The guard run_tests.sh installs must make connection attempts fail (checked in a child process).
+        The target is a closed LOOPBACK port: if a future edit broke the patch, this snippet would really
+        connect, and it must not be able to leave the host when it does."""
+        code = _guard_source() + "\ntry:\n    _s.create_connection(('127.0.0.1', 1), timeout=1)\nexcept OSError as e:\n    print('BLOCKED', e)\n"
         r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
         self.assertIn("BLOCKED", r.stdout, r.stderr)
+
+
+class TestNetworkGuardSurfaceAndDisclosure(unittest.TestCase):
+    """D3/D4/D5. Three separate defects with one cause: the guard's patch list, the list of connection targets
+    and the prose describing both were maintained by hand in four places.
+
+    D3: `socket.gethostbyaddr` and `socket.getfqdn` were neither patched nor disclosed, and `gethostbyaddr` of a
+    non-local address issues a reverse-DNS query that leaves the host. That was the third round of patching the
+    names a reviewer happened to test instead of the family, so the patch list is now data in the script and
+    this class enumerates the family from the live `socket` module against it.
+
+    D4: docs/CLEAN_CLONE.md said "the five patched socket-module functions" while its own list, and the script,
+    had seven. The documentation now points at the tuples instead of counting them.
+
+    D5: every connection target in the runner and in this file was 192.0.2.1 (TEST-NET-1), which is unroutable
+    by convention and not by the kernel -- `route -n get 192.0.2.1` on this host returns a real gateway and
+    interface. The negative controls run with the guard deliberately off, so those were real outbound SYNs on
+    every run of the suite, while the docs said "no network access at test time".
+    """
+
+    DOC = ROOT / "docs" / "CLEAN_CLONE.md"
+    # socket's connection + name-resolution surface, enumerated from the LIVE module so that a name added by a
+    # future Python (gethostbyname2, say) is caught rather than quietly joining the gap.
+    MODULE_FAMILY = re.compile(r"^(get(?:addrinfo|fqdn|host\w*|name\w*|serv\w*|proto\w*)"
+                               r"|create_connection|create_server)$")
+    SOCKET_FAMILY = re.compile(r"^(connect\w*|bind|listen|accept\w*|send\w*)$")
+
+    def test_every_family_member_is_either_patched_or_disclosed(self):
+        # `import socket` would be rejected by scripts/lint.sh in tests/ as well as src/ (it is in BANNED);
+        # the file's established idiom for a module it must reach anyway is __import__, as with importlib.util.
+        socket = __import__("socket")
+        fam_mod = {n for n in dir(socket) if self.MODULE_FAMILY.match(n) and callable(getattr(socket, n, None))}
+        fam_sock = {n for n in dir(socket.socket)
+                    if self.SOCKET_FAMILY.match(n) and callable(getattr(socket.socket, n, None))}
+        # not vacuous: if the regexes stopped matching, the whole check would pass by matching nothing
+        self.assertGreaterEqual(len(fam_mod), 12, sorted(fam_mod))
+        self.assertGreaterEqual(len(fam_sock), 10, sorted(fam_sock))
+        self.assertLessEqual(PATCHED_MODULE, fam_mod, "a patched name is outside the enumerated family")
+        self.assertLessEqual(PATCHED_SOCKET, fam_sock, "a patched method is outside the enumerated family")
+        unaccounted = sorted((fam_mod | fam_sock) - PATCHED_MODULE - PATCHED_SOCKET - GUARD_DISCLOSED)
+        self.assertEqual(unaccounted, [], "socket entry point neither patched by scripts/run_tests.sh nor named "
+                                          "in its _NOT_BLOCKED disclosure list: patch it or disclose it")
+        # and the disclosure is not a dumping ground: nothing may be in both lists
+        self.assertEqual(sorted(GUARD_DISCLOSED & (PATCHED_MODULE | PATCHED_SOCKET)), [])
+        for n in ("gethostbyaddr", "getfqdn"):          # the two D3 names, now really in the patch set
+            self.assertIn(n, PATCHED_MODULE, n)
+
+    def test_every_patched_entry_point_has_a_driving_call(self):
+        """The guard and the drive table cannot diverge: this is what "do not just add two more names" means."""
+        self.assertEqual(set(GUARD_CALLS), set(PATCHED_MODULE) | {f"socket.{n}" for n in PATCHED_SOCKET})
+
+    def test_the_documentation_derives_the_list_instead_of_restating_it(self):
+        """D4: "five patched socket-module functions" against the same document's list of seven, three lines
+        apart. A number that has to be kept in step by hand is the defect, so there is no number any more."""
+        doc = self.DOC.read_text(encoding="utf-8")
+        script = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")
+        for ident in ("_BLOCK_MODULE", "_BLOCK_SOCKET", "_NOT_BLOCKED"):
+            self.assertIn(ident, script, ident)
+            self.assertIn(ident, doc, f"docs/CLEAN_CLONE.md must point at {ident} rather than restate it")
+        self.assertNotRegex(doc.replace("\n", " "),
+                            r"(?i)\b(two|three|four|five|six|seven|eight|nine|ten|\d+)\s+patched\b")
+
+    def test_no_executed_connection_target_in_the_suite_is_non_loopback(self):
+        """D5(a). Scans what the runner and the tests EXECUTE (code lines / non-docstring string literals), so
+        the record of the 192.0.2.1 defect can stay in the comments where it belongs. A mutant that puts the old
+        address back into GUARD_CALLS or into the runner's canary fails here."""
+        quad = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+        # the (host, port) tuple form, which is what every socket call takes -- so sqlite3.connect(':memory:')
+        # and other same-named calls on non-sockets are not swept up
+        addr = re.compile(r"""(?:create_connection|create_server|\.connect|\.connect_ex)\(\s*\(\s*['"]([^'"]+)['"]""")
+        targets, bad = 0, set()
+        for p in [SCRIPTS / "run_tests.sh", SCRIPTS / "lint.sh", Path(__file__)] + \
+                 sorted((ROOT / "tests").rglob("test_*.py")):
+            for lineno, s in _code_string_literals(p):
+                for ip in quad.findall(s):
+                    targets += 1
+                    if not ip.startswith("127."):
+                        bad.add(f"{p.name}:{lineno}: {ip}")
+                for host in addr.findall(s):
+                    targets += 1
+                    if host not in ("127.0.0.1", "localhost"):
+                        bad.add(f"{p.name}:{lineno}: host {host!r}")
+        self.assertEqual(sorted(bad), [], "non-loopback connection target in the offline suite: the negative "
+                                          "controls run with the guard DISABLED, so such a target really "
+                                          "leaves the host")
+        self.assertGreaterEqual(targets, 10, "the scan found almost nothing: it has stopped looking")
+
+    def test_docs_and_ci_do_not_claim_the_suite_attempts_no_connection(self):
+        """D5(b). Both documents made an unqualified claim that the measured behaviour contradicted:
+        "no network access at test time" and "EVERY test step runs under a socket guard ... that makes ANY
+        connection attempt fail". Understating this is worse than the defect, so the claim is now the narrower
+        true one: the attempts exist, they are loopback-only, and the documents say which tests make them."""
+        doc = self.DOC.read_text(encoding="utf-8")
+        ci = CI.read_text(encoding="utf-8")
+        # The claim must be gone from the summary a reader takes it from, and anywhere it still appears it must
+        # be marked as retracted rather than restated as current.
+        self.assertNotIn("no network access at test time", doc.split("## Steps", 1)[0])
+        for line in doc.splitlines():
+            if "no network access at test" in line:
+                self.assertRegex(line, r"used to say|this document said",
+                                 "the retracted claim is restated as if it were current")
+        self.assertNotIn("makes any connection attempt fail", ci.lower())
+        self.assertNotIn("any connection attempt", ci.lower())
+        for needle in ("loopback", "--no-network-guard", "no packet reaches a network interface"):
+            self.assertIn(needle, doc.replace("\n", " "), f"docs/CLEAN_CLONE.md must disclose: {needle}")
+        for needle in ("loopback", "--no-network-guard"):
+            self.assertIn(needle, ci, f".github/workflows/ci.yml must disclose: {needle}")
+
+    def test_docs_disclose_the_transitive_dependency_pins_and_the_determinism_redundancy(self):
+        """Two corrections to the record that were not overclaims but were undisclosed: nothing pinned the
+        transitive dependencies (no --require-hashes), and the determinism comparison has FOUR individually
+        unpinned terms (RAN, SKIPPED, BAD, UT_RC), not one."""
+        doc = self.DOC.read_text(encoding="utf-8").replace("\n", " ")
+        for needle in ("--require-hashes", "transitive"):
+            self.assertIn(needle, doc, needle)
+        if "individually unpinned" in doc:
+            self.assertRegex(doc, r"four\s+(?:of\s+)?(?:its\s+)?(?:terms|redundan)")
 
 
 # ======================================================================================================
@@ -565,6 +791,92 @@ class TestRunTestsFloorsAndBaseline(_SyntheticBase):
         self.assertIn("skip-policy failure(s)", r.stdout)
         self.assertEqual(b.read_text(encoding="utf-8"), before)
 
+    def test_update_baseline_with_baseline_none_is_a_usage_error(self):
+        """D1. `none` is the sentinel that DISABLES the baseline. It was honoured in the comparison branch
+        (`elif base != "none"`) and not in the update branch, which did an unconditional open(base, "w"), so
+
+            ./scripts/run_tests.sh --expect none --tests-dir <synth> --baseline none --update-baseline
+            baseline written: none (1 modules)
+            $ ls -la none     ->  -rw-r--r--  224 bytes of real baseline content
+
+        dropped a file literally named `none` into the repository root -- untracked, not in .gitignore -- for a
+        user who had just asked for no baseline at all. In a kit whose demo.py carries an inode-identity guard
+        specifically so it cannot write there.
+
+        Part (a) drives a COPY of the live script in a throwaway root, so if the sentinel is not honoured the
+        junk file lands there, where it is visible and harmless, instead of in the real repo. The suite is green
+        in `none` mode, which is what the old code needed in order to reach the write at all.
+        """
+        root = self.synth_root(self._suite3(3))
+        r = self.run_default(root, "--expect", "none", "--update-baseline", env={"MIN_NONE_SKIPS": "1"})
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("--update-baseline requires a baseline FILE", r.stderr)
+        self.assertFalse((root / "none").exists(), "a file named 'none' was written into the repo root")
+        self.assertEqual(sorted(p.name for p in root.iterdir()), ["scripts", "tests"])
+        self.assertNotIn("baseline written", r.stdout)
+        # (b) the real script, in the real repository: same usage error, and the repo is untouched
+        before = _listing()
+        r2 = self.rt({"test_a.py": self._suite3(3)}, "--update-baseline", expect="none", baseline="none",
+                     env={"MIN_NONE_SKIPS": "1"})
+        self.assertEqual(r2.returncode, 2, r2.stdout + r2.stderr)
+        self.assertFalse((ROOT / "none").exists())
+        self.assertTrue(_same(before, _listing()), "the run changed files inside the repository")
+
+    def test_update_baseline_is_refused_by_every_shell_side_policy_failure_too(self):
+        """D2. The refusal consulted only the unittest log's ^OK/^FAILED lines and the Python stage's own `bad`
+        list. POLICY:MIN_TESTS, SKIP_RECORD, PYTEST_FAILED, PYTEST_COLLECTED, PYTEST_SKIPPED and
+        NONDETERMINISTIC are all decided in the SHELL and were invisible to it, so the in-code comment --
+        "REFUSE to record a baseline from a run that is not clean ... a baseline captured from a red or
+        mid-refactor tree silently encodes whatever was broken at that moment as the floor" -- was an overclaim.
+        Measured before the fix:
+
+            $ MIN_TESTS=1000 ./scripts/run_tests.sh --expect none --tests-dir <synth> \\
+                             --baseline <file> --update-baseline
+            FAIL: POLICY:MIN_TESTS only 5 tests ran (floor MIN_TESTS=1000)
+            baseline written: /tmp/.../base.txt (1 modules)
+            RESULT: FAIL
+
+        The Python stage now STAGES the file and the shell moves it into place only once FAIL is still 0, so the
+        predicate is the run's whole RESULT. Both arms below are shell-side and leave the unittest run green, so
+        nothing but the staging split can stop them.
+        """
+        b = self.dir / "shell_side_baseline.txt"
+        b.write_text("test_a 5 3\n", encoding="utf-8")        # must SURVIVE byte-identically
+        before = b.read_text(encoding="utf-8")
+        # (a) a global-floor failure: the tests pass, the skip policy passes, MIN_TESTS does not
+        r = self.rt({"test_a.py": self._suite3(3)}, "--update-baseline", expect="none", baseline=str(b),
+                    env={"MIN_NONE_SKIPS": "1", "MIN_TESTS": "1000"})
+        self.bad(r, "POLICY:MIN_TESTS")
+        self.assertIn("POLICY:BASELINE_REFUSED", r.stdout)
+        self.assertIn("baseline is UNCHANGED", r.stdout)
+        self.assertNotIn("baseline written", r.stdout)
+        self.assertEqual(b.read_text(encoding="utf-8"), before)
+        # (b) a determinism failure, which is decided after BOTH runs and after the pytest block
+        state = self.dir / "flaky_flag"
+        flaky = textwrap.dedent("""
+            import os, unittest
+            class V(unittest.TestCase):
+                def test_flaky_reason(self):
+                    p = os.environ["STATE"]
+                    first = not os.path.exists(p)
+                    open(p, "w").close()
+                    self.skipTest("torch not installed; run A" if first else "torch not installed; run B")
+        """)
+        r2 = self.rt({"test_a.py": self._suite3(3), "test_v.py": flaky}, "--update-baseline", "--twice",
+                     expect="none", baseline=str(b), env={"MIN_NONE_SKIPS": "1", "STATE": str(state)})
+        self.bad(r2, "POLICY:NONDETERMINISTIC")
+        self.assertIn("POLICY:BASELINE_REFUSED", r2.stdout)
+        self.assertNotIn("baseline written", r2.stdout)
+        self.assertEqual(b.read_text(encoding="utf-8"), before)
+        # ...and the same shape of run, made clean, DOES write it: the refusal is not just always-on.
+        # (test_v.py is overwritten rather than left behind: self.rt reuses one synthetic suite directory.)
+        r3 = self.rt({"test_a.py": self._suite3(3), "test_v.py": _pass_module(1, cls="V", prefix="test_v")},
+                     "--update-baseline", "--twice", expect="none", baseline=str(b),
+                     env={"MIN_NONE_SKIPS": "1"})
+        self.ok(r3)
+        self.assertIn(f"baseline written: {b}", r3.stdout)
+        self.assertIn("test_a 5 3", b.read_text(encoding="utf-8").splitlines())
+
     def test_repo_baseline_exists_and_covers_every_test_module(self):
         lines = [l.split() for l in (SCRIPTS / "test_baseline.txt").read_text(encoding="utf-8").splitlines()
                  if l.strip() and not l.startswith("#")]
@@ -691,41 +1003,73 @@ class TestRunTestsMechanics(_SyntheticBase):
         self.assertEqual(r.stdout.splitlines(), header, "--help is not exactly the leading comment header")
         self.assertNotIn("set -u", r.stdout)                                  # and stops before the code
 
-    def test_network_guard_blocks_each_entry_point(self):
-        body = textwrap.dedent("""
-            import socket, unittest
-            def _sock():
-                s = socket.socket()
-                s.settimeout(1)          # without the guard these must fail fast, not hang for ~75 s
-                return s
-            def blocked(fn):
-                def t(self):
-                    with self.assertRaises(OSError) as cm:
-                        fn()
-                    self.assertIn("NETWORK BLOCKED", str(cm.exception))
-                return t
-            class T(unittest.TestCase):
-                test_create_connection = blocked(lambda: socket.create_connection(("192.0.2.1", 9), timeout=1))
-                test_connect = blocked(lambda: _sock().connect(("192.0.2.1", 9)))
-                test_connect_ex = blocked(lambda: _sock().connect_ex(("192.0.2.1", 9)))
-                test_getaddrinfo = blocked(lambda: socket.getaddrinfo("localhost", 80))
-                test_gethostbyname = blocked(lambda: socket.gethostbyname("localhost"))
-                # Added after review found getnameinfo was an UNDISCLOSED bypass (gethostbyname_ex was a disclosed
-                # one). Both are name-resolution entry points on the socket module itself, so both are now patched.
-                test_gethostbyname_ex = blocked(lambda: socket.gethostbyname_ex("localhost"))
-                test_getnameinfo = blocked(lambda: socket.getnameinfo(("127.0.0.1", 80), 0))
-        """)
-        self.ok(self.rt({"test_a.py": body}))
-        r = self.rt({"test_a.py": body}, "--no-network-guard")
-        self.bad(r)   # without the guard the same suite fails: the test above really depends on the guard
+    def test_network_guard_blocks_every_patched_entry_point(self):
+        """The suite is GENERATED from GUARD_CALLS, which is pinned to the guard's own patch tuples by
+        TestNetworkGuardSurfaceAndDisclosure. Before that, this test named the entry points by hand and the
+        guard named them by hand in a different place: `gethostbyaddr`/`getfqdn` were in neither, and the
+        reviewer who tested them found the same defect for the third time.
+
+        The negative control asserts EVERY generated test fails without the guard, not merely that the run
+        fails: a single surviving assertion would hide a name the guard had stopped patching. The targets are
+        loopback-only -- see GUARD_CALLS for why that matters here specifically.
+        """
+        body = _guard_suite_body()
+        r = self.rt({"test_a.py": body})
+        self.ok(r)
+        self.assertIn(f"ran={len(GUARD_CALLS)}", r.stdout)            # all of them really ran
+        r2 = self.rt({"test_a.py": body}, "--no-network-guard")
+        self.bad(r2)
+        self.assertIn(f"failures={len(GUARD_CALLS)}", r2.stdout)      # and all of them depend on the guard
 
     def test_missing_guard_is_detected_by_canary(self):
+        """`python -S` loads no sitecustomize, so the runner's own canary connect runs unguarded. That canary
+        now aims at a closed loopback port; with 192.0.2.1 this very test put a SYN on the wire every run."""
         (self.shim / "python3").unlink()
         (self.shim / "python3").write_text(f'#!/bin/sh\nexec "{sys.executable}" -S "$@"\n', encoding="utf-8")   # -S: no site, no sitecustomize
         os.chmod(self.shim / "python3", 0o755)
         r = self.rt({"test_a.py": _pass_module(1)})
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("POLICY:CANARY", r.stdout + r.stderr)
+
+    def test_policy_helper_names_its_own_arity_instead_of_aborting_the_shell(self):
+        """Reported by another owner: `run_tests.sh: line 220: $3: unbound variable`, once, under concurrent
+        test execution, not reproducible serially.
+
+        It is NOT a latent call path -- there are exactly two `policy` call sites and both pass three arguments.
+        The cause is reproducible on demand: this script's own tests COPY the live script (synth_root) and run
+        the copy, so a concurrent run read the file inside the window in which `policy` had grown its third
+        parameter (the baseline staging path, D2) and the call sites had not yet been updated. Reconstructing
+        that intermediate file reproduces the message at line 220 exactly.
+
+        Which way it fails matters more than the cause, so: under `set -u` an unset positional is a FATAL SHELL
+        ERROR, not a failed command. The shell exits 1 at that line, `|| FAIL=1` never runs, and neither the
+        policy verdicts nor `RESULT:` are ever printed -- so the abort cannot silently drop a verdict and
+        cannot be mistaken for a pass (though `unittest: ran=N ... rc=0` may already have been printed above
+        it, which is why a scraper must read the exit status and `RESULT:`, as self.ok() does).
+
+        The fix names the arity so a miscall is a red run with a stable token instead of a bash diagnostic. It
+        is deliberately not a default value: a default would let a wrongly-called policy() stage a baseline
+        nowhere anyone asked for, which is D2 over again.
+        """
+        src = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")
+        m = re.search(r"(?ms)^policy\(\) \{\n.*?^\}\n", src)
+        self.assertIsNotNone(m, "scripts/run_tests.sh no longer defines policy() as a top-level function; this "
+                                "test extracts it by text and must be updated with it")
+        prelude = "EXPECT=any BASELINE=none UPDATE=0\nexport MIN_NONE_SKIPS=50\n"
+        two = subprocess.run(["bash", "-u", "-o", "pipefail", "-c",
+                              prelude + m.group(0) + '\npolicy a b\necho "returned: $?"'],
+                             capture_output=True, text=True, timeout=60)
+        self.assertIn("POLICY:INTERNAL", two.stdout + two.stderr)
+        self.assertIn("returned: 2", two.stdout)                 # a return, so the caller's || FAIL=1 still runs
+        self.assertNotIn("unbound variable", two.stderr)         # not a fatal shell abort any more
+        three = subprocess.run(["bash", "-u", "-o", "pipefail", "-c", prelude + m.group(0) + "\npolicy a b c\n"],
+                               capture_output=True, text=True, timeout=60)
+        self.assertNotIn("POLICY:INTERNAL", three.stdout + three.stderr)   # the gate is not blanket-firing
+        # and the real call sites are all three-argument ones
+        calls = re.findall(r"(?m)^\s*policy (.+)$", src)
+        self.assertEqual(len(calls), 2, calls)
+        for c in calls:
+            self.assertEqual(len(re.findall(r'"[^"]*"', c.split("|")[0].split(">")[0])), 3, c)
 
     def test_twice_detects_nondeterminism_and_accepts_determinism(self):
         state = self.dir / "state_flag"
@@ -895,6 +1239,34 @@ class TestLintPolicy(unittest.TestCase):
         if needle:
             self.assertIn(needle, r.stdout)
 
+    @unittest.skipUnless(shutil.which("ruff"), "ruff is not installed (optional linter)")
+    def test_ruff_correctness_findings_are_fatal_not_advisory(self):
+        """An undefined name is correctness, not style. This was found the hard way: an undefined
+        `Any` in a committed annotation in `src/toy/benchmark.py` survived because ruff reported it
+        and `lint.sh` printed `LINT: OK` anyway -- `from __future__ import annotations` stops such a
+        name from raising at runtime, so nothing else caught it either. A linter finding nobody has
+        to act on is a finding nobody reads.
+        The companion guarantee, pinned in `test_lint_passes_with_nothing_installed`, is that a
+        MISSING ruff still never fails the script -- so the bare-interpreter path is unchanged."""
+        # `_lint` strips ruff from PATH deliberately (synthetic runs stay fast), so this test must
+        # put it back -- otherwise it would assert the fatal path while measuring the skipped one,
+        # which is the masked-test shape this project has hit twelve times.
+        ruff_dir = str(Path(shutil.which("ruff")).parent)
+        with_ruff = {"PATH": ruff_dir + ":" + str(Path(sys.executable).parent) + ":/usr/bin:/bin"}
+        r = _lint(self.tree({"src/toy/undef.py": "def f() -> Any:\n    return 1\n"}), with_ruff)
+        self.assertIn("ruff:", r.stdout, "ruff did not run; this test would prove nothing")
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("LINT: FAIL", r.stdout)
+        self.assertIn("FATAL: undefined names and syntax errors are not style", r.stdout)
+        self.assertIn("F821", r.stdout)
+        # and a clean tree still passes with ruff present, so this is not a blanket refusal
+        ok = _lint(self.tree({}), with_ruff)
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        self.assertIn("ruff: OK", ok.stdout)
+        # the header must not still describe these findings as advisory
+        head = (SCRIPTS / "lint.sh").read_text(encoding="utf-8")
+        self.assertIn("are FATAL when ruff is present", head)
+
     def test_clean_tree_passes(self):
         r = _lint(self.tree({}))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -1000,6 +1372,37 @@ class TestLintPolicy(unittest.TestCase):
         }
         errs = self.batch({f"src/toy/x_{k}.py": v for k, v in cases.items()})
         self.assertGreaterEqual(len(errs), len(cases))
+
+    def test_private_c_extension_counterparts_of_banned_modules_are_blocked_in_src(self):
+        """Reported but NOT the FAIL ground, and closed anyway because it is one greppable class: the private
+        C-extension counterparts of the banned modules. `_socket` and `_ctypes` were named -- which shows two
+        members had been thought of -- while `_pickle` (arbitrary code via `__reduce__`), `_imp`
+        (`create_dynamic`/`exec_dynamic` load a native extension), `_posixsubprocess.fork_exec`,
+        `_multiprocessing`, `_asyncio`, `_sqlite3`, `_tkinter` and `_curses` were not. The lint now rejects ANY
+        underscore-prefixed top-level import in src/ (a rule, not eight more names), so the next member of the
+        family is closed before anyone tests it. `__future__` is the one exception and src/ relies on it.
+        """
+        cases = {f"src/toy/priv_{m}.py": (f"import {m}\nprint({m})\n", "private implementation module")
+                 for m in ("_pickle", "_imp", "_posixsubprocess", "_multiprocessing", "_asyncio", "_sqlite3",
+                           "_tkinter", "_curses", "_socket", "_ctypes", "_ssl", "_random")}
+        cases["src/toy/priv_from.py"] = ("from _imp import create_dynamic\nprint(create_dynamic)\n",
+                                         "private implementation module")
+        self.batch(cases)
+        # the exception, and the rule's scope: `from __future__` passes, and tests/ and scripts/ are not covered
+        r = _lint(self.tree({"src/toy/fut.py": "from __future__ import annotations\nx: int = 1\n",
+                             "tests/test_priv.py": "import _pickle\nprint(_pickle)\n",
+                             "scripts/priv.py": "import _pickle\nprint(_pickle)\n"}))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_static_literal_name_resolution_calls_are_blocked_in_src(self):
+        """`unittest.TestLoader().loadTestsFromName("os.system")` is a plain static call with a literal string --
+        the same shape as `pkgutil.resolve_name`, which defeated the whole attribute blocklist in one line and
+        was rated the most important of that round. `sys._getframe()` reaches the caller's builtins."""
+        self.batch({
+            "src/toy/lt.py": ("import unittest\nunittest.TestLoader().loadTestsFromName('os.system')\n",
+                              "loadTestsFromName"),
+            "src/toy/gf.py": ("import sys\nprint(sys._getframe().f_builtins['exec'])\n", "_getframe"),
+        })
 
     def test_non_stdlib_imports_in_src_are_rejected(self):
         """The positive check behind the "src/ is standard-library only" claim. `import numpy` / `pandas` /

@@ -120,7 +120,7 @@ import json
 import math
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Any, Callable, Mapping, Optional, Sequence
 
 from toy.schema import (TOY_LABEL, EvidenceClass, ExperimentRecord, MetricValue, RunProvenance,
                         current_python_version, derive_seed, make_rng)

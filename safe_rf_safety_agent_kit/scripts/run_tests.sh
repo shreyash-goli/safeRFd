@@ -20,7 +20,10 @@
 #                   fails, and with --expect none so does a module with FEWER skips than recorded: deleting tests,
 #                   or turning a torch-guarded test into a silent early-return pass, is caught by module name
 #                   rather than hidden under a loose global floor.
-#   --update-baseline  rewrite the baseline from this run (requires --expect none; the diff is reviewable).
+#   --update-baseline  rewrite the baseline from this run (requires --expect none and a baseline FILE, so
+#                   `--baseline none --update-baseline` is a usage error rather than a file named `none` in the
+#                   repo root; the diff is reviewable). The new file is STAGED by the Python stage and moved into
+#                   place by the shell only if the WHOLE run ends RESULT: OK -- see "WHY the baseline is staged".
 #
 # Every policy failure line carries a stable token `POLICY:<NAME>`; tests match the token, not the prose.
 # SKIP POLICY (case-insensitive; reasons are the only defence against a torch test passing silently):
@@ -46,12 +49,27 @@
 #   non-determinism bug rather than hash-order noise. (The suite is also expected to pass under other seeds;
 #   override with PYTHONHASHSEED=<n> to check.)
 #
+# WHY the baseline is staged rather than written where it is computed: the Python stage below can see only the
+#   unittest log and its own skip-policy list. MIN_TESTS, SKIP_RECORD, PYTEST_FAILED, PYTEST_COLLECTED,
+#   PYTEST_SKIPPED and NONDETERMINISTIC are all decided in the SHELL and were invisible to it, so
+#   `MIN_TESTS=1000 ... --update-baseline` printed `baseline written:` and `RESULT: FAIL` in the same run and the
+#   floor was recorded from a failing tree anyway. Python now writes a staging file and the shell moves it into
+#   place only when FAIL is still 0, so "not written from a run that is not clean" covers EVERY policy failure.
+#
 # NETWORK (the .env.example flags are inert markers read by no code; this guard is the real mechanism, and it is
-#   PYTHON-LEVEL ONLY): a sitecustomize shim makes socket.socket.connect / connect_ex, socket.create_connection,
-#   getaddrinfo, gethostbyname, gethostbyname_ex and getnameinfo raise for the run, children included while they
-#   inherit PYTHONPATH. It does NOT stop _socket.socket().connect, UDP sendto, `python -I` children, or non-Python
-#   children (curl). See docs/CLEAN_CLONE.md for the full known-bypass list. The manual `curl` commands in
-#   docs/DIFF_EVIDENCE.md are documentation for a human and are never executed here.
+#   PYTHON-LEVEL ONLY): a sitecustomize shim replaces socket's connection and name-resolution entry points with a
+#   function that raises, for the run and for children while they inherit PYTHONPATH. The patched names are the
+#   `_BLOCK_MODULE`/`_BLOCK_SOCKET` tuples in the guard below and the deliberately unpatched ones are
+#   `_NOT_BLOCKED`, each with its reason; read those tuples rather than any prose list, here or in the docs,
+#   because the prose list went stale twice. It does NOT stop _socket.socket().connect, `python -I`/`-S`
+#   children, or non-Python children (curl). See docs/CLEAN_CLONE.md for the full known-bypass list. The manual
+#   `curl` commands in docs/DIFF_EVIDENCE.md are documentation for a human and are never executed here.
+#
+# NETWORK, the other direction: this script and its own tests must not emit a packet that leaves the host, so the
+#   canary below and the negative controls in tests/toy_tests/test_scripts.py aim at a CLOSED LOOPBACK PORT
+#   (127.0.0.1:1 -> ECONNREFUSED from the local stack). They used to aim at 192.0.2.1:9 (TEST-NET-1, which is
+#   non-routable by convention only), and with the guard deliberately disabled -- which is how the negative
+#   controls prove the guard is load-bearing -- that was a real outbound SYN on every run of the suite.
 set -u -o pipefail
 
 INVOKED_FROM="$PWD"   # saved before the cd to ROOT: a relative --tests-dir/--baseline means the CALLER's cwd
@@ -81,6 +99,15 @@ while [ $# -gt 0 ]; do
 done
 case "$EXPECT" in none|torch|any) ;; *) echo "--expect must be none|torch|any" >&2; exit 2 ;; esac
 if [ "$UPDATE" = 1 ] && [ "$EXPECT" != none ]; then echo "--update-baseline requires --expect none" >&2; exit 2; fi
+# `none` is the sentinel that DISABLES the baseline. It was honoured in the comparison branch and not in the
+# update branch, which did an unconditional open(base, "w"): `--baseline none --update-baseline` wrote a real
+# baseline into a file literally named `none` in the repo root (untracked, not in .gitignore) for a user who had
+# just asked for no baseline at all. Erroring matches the --expect check immediately above.
+if [ "$UPDATE" = 1 ] && [ "$BASELINE" = none ]; then
+  echo "--update-baseline requires a baseline FILE: --baseline none disables the baseline, and updating it would" >&2
+  echo "write a file literally named 'none' into the repository root. Pass --baseline <path>, or drop --update-baseline." >&2
+  exit 2
+fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Paths are resolved HERE, after ROOT is known: the DEFAULT tests dir and baseline belong to the repo the script
@@ -139,18 +166,37 @@ if [ "$GUARD" = 1 ]; then
 import socket as _s
 def _blocked(*a, **k):
     raise OSError("NETWORK BLOCKED by scripts/run_tests.sh: the offline suite must not touch the network")
-_s.socket.connect = _blocked
-_s.socket.connect_ex = _blocked
-_s.create_connection = _blocked
-_s.getaddrinfo = _blocked
-_s.gethostbyname = _blocked
-_s.gethostbyname_ex = _blocked
-_s.getnameinfo = _blocked
+# The patch list is DATA, not a sequence of assignments, because the assignment version grew one name per review
+# round -- gethostbyname_ex, then getnameinfo, then gethostbyaddr/getfqdn -- each time patching the names that
+# reviewer happened to test instead of the family, so the next name anyone tested reproduced the defect.
+# tests/toy_tests/test_scripts.py parses these three tuples out of this file and asserts that
+#   (1) EVERY member of socket's connection/name-resolution family, enumerated from the live `socket` module,
+#       is named in exactly one of them -- so a name that is neither patched nor disclosed fails the suite; and
+#   (2) every patched name has a test that drives it through this script with the guard on and off.
+# docs/CLEAN_CLONE.md points at these tuples instead of restating them, so the disclosure cannot go stale.
+_BLOCK_MODULE = ("create_connection", "create_server", "getaddrinfo", "getfqdn", "gethostbyaddr",
+                 "gethostbyname", "gethostbyname_ex", "getnameinfo")
+_BLOCK_SOCKET = ("connect", "connect_ex", "bind", "listen", "sendto", "sendmsg")
+# KNOWN-UNPATCHED and therefore DISCLOSED, each with the reason it is left alone:
+#   gethostname, getservbyname, getservbyport, getprotobyname -- purely local lookups (the host's own name,
+#     /etc/services, /etc/protocols); they originate no traffic. gethostbyname/getfqdn, which DO resolve, are
+#     patched, so gethostbyname(gethostname()) is still blocked.
+#   send, sendall, sendfile, accept -- reachable only through a connect/bind/listen that IS patched.
+# This is still a Python-level tripwire, not a sandbox: see the NETWORK note in the header.
+_NOT_BLOCKED = ("gethostname", "getservbyname", "getservbyport", "getprotobyname",
+                "send", "sendall", "sendfile", "accept")
+for _n in _BLOCK_MODULE:
+    setattr(_s, _n, _blocked)
+for _n in _BLOCK_SOCKET:
+    setattr(_s.socket, _n, _blocked)
 PY
 fi
 export PYTHONPATH="$TMP/guard${PYTHONPATH:+:$PYTHONPATH}"
 if [ "$GUARD" = 1 ]; then
-  CANARY="$(python3 -c "import socket; socket.create_connection(('192.0.2.1', 9), timeout=1)" 2>&1 || true)"
+  # 127.0.0.1:1 is a CLOSED LOOPBACK PORT: if the guard is missing this fails instantly with "connection
+  # refused" from the local stack and nothing leaves the host. It used to be 192.0.2.1:9, which is unroutable
+  # only by convention -- the kernel still sent the SYN, on every run where the guard was absent.
+  CANARY="$(python3 -c "import socket; socket.create_connection(('127.0.0.1', 1), timeout=1)" 2>&1 || true)"
   case "$CANARY" in *"NETWORK BLOCKED"*) ;; *)
     echo "FAIL: POLICY:CANARY network guard canary did not trigger; refusing to run" >&2; exit 1 ;;
   esac
@@ -168,11 +214,28 @@ run_unittest() {  # $1 = log path; skips/starts are recorded to $1.jsonl
   return $?
 }
 
-# policy LOG CANON_OUT -> prints counts, applies skip/baseline policy, writes canonical summary; exit 1 on violation
+# policy LOG CANON_OUT STAGE -> prints counts, applies skip/baseline policy, writes canonical summary; exit 1 on
+# violation. STAGE is where an --update-baseline run leaves the NEW baseline for the shell to move into place.
 policy() {
-  EXPECT="$EXPECT" LOG="$1" CANON="$2" BASELINE="$BASELINE" UPDATE="$UPDATE" python3 - <<'PY'
+  # ARITY, checked rather than assumed. Under `set -u` a missing $3 is not a command failure but a FATAL SHELL
+  # ERROR: bash prints `line 220: $3: unbound variable` and the whole script exits 1 on the spot -- before any
+  # policy verdict, before the pytest block and before `RESULT:` is printed. (Reproduced deliberately: the run
+  # had already printed `unittest: ran=1 ... rc=0`, so a scraper reading only that line could be misled, but the
+  # exit status is 1 and `RESULT: OK` never appears, so no verdict can be silently dropped and no caller can
+  # mistake it for a pass. `|| FAIL=1` does not even run.)
+  # This was reported once under concurrent test execution. It is NOT a latent call path: there are exactly two
+  # call sites and both pass three arguments. The cause is that this script's own tests COPY the live script
+  # (see synth_root in tests/toy_tests/test_scripts.py) and run the copy, so a concurrent run read the file
+  # inside the window in which `policy` had grown its third parameter and the two call sites had not yet been
+  # updated. That is the same class as the stale-.pyc and read-mid-edit incidents in docs/CLEAN_CLONE.md.
+  # The arity is therefore named: a wrong count now fails loudly as POLICY:INTERNAL (red run, stable token)
+  # instead of as a bash diagnostic. Deliberately NOT a default (`${3:-...}`) -- defaulting would let a
+  # genuinely miscalled policy() stage a baseline somewhere nobody asked for, which is the D2 defect again.
+  [ "$#" -eq 3 ] || { echo "FAIL: POLICY:INTERNAL policy() takes 3 arguments (log, canon-out, baseline-stage), got $#"; return 2; }
+  EXPECT="$EXPECT" LOG="$1" CANON="$2" STAGE="$3" BASELINE="$BASELINE" UPDATE="$UPDATE" python3 - <<'PY'
 import json, os, re, sys
 mode, base, update = os.environ["EXPECT"], os.environ["BASELINE"], os.environ["UPDATE"] == "1"
+stage = os.environ["STAGE"]
 min_none = int(os.environ["MIN_NONE_SKIPS"])
 text = open(os.environ["LOG"], encoding="utf-8", errors="replace").read()
 m = re.search(r"^Ran (\d+) tests?", text, re.M)
@@ -229,6 +292,12 @@ if update and mode == "none":
     # A refused update does NOT fall through to the comparison branch below: it is still an update
     # attempt, and comparing a red run against the old baseline would pile POLICY:BASELINE_* failures
     # on top of the real cause and bury it.
+    # "A run that is not clean" means the run's whole RESULT, not just the part visible here. The two
+    # predicates below (the unittest log ended in OK; `bad` is empty) are everything a process that sees
+    # only the log and the skip recorder CAN check -- MIN_TESTS, SKIP_RECORD, the three PYTEST_* checks and
+    # NONDETERMINISTIC are decided in the shell. So this branch does not write `base`; it STAGES the new
+    # content and the shell moves it into place only if FAIL is still 0 at the end of the run. Before that
+    # split, `MIN_TESTS=1000 ... --update-baseline` printed "baseline written:" and then "RESULT: FAIL".
     run_ok = re.search(r"^OK\b", text, re.M) is not None and re.search(r"^FAILED\b", text, re.M) is None
     if bad or not run_ok:
         why = []
@@ -238,11 +307,11 @@ if update and mode == "none":
                    + "; ".join(why) + ". Regenerate only on a quiet, green tree.")
     else:
         rows = sorted((k, ran_mod[k], sum(1 for e in skips if mod(e["id"]) == k and not re.search("yaml|case[- ]sensitive", e["reason"], re.I))) for k in ran_mod)
-        with open(base, "w", encoding="utf-8") as f:
+        with open(stage, "w", encoding="utf-8") as f:
             f.write("# module  tests  bare-environment-skips   (generated: scripts/run_tests.sh --expect none --update-baseline)\n")
             f.write("# Fewer tests, or (bare mode) fewer skips, than recorded here fails the run. Raise only by regenerating.\n")
             for k, r, s_ in rows: f.write(f"{k} {r} {s_}\n")
-        print(f"baseline written: {base} ({len(rows)} modules)")
+        print(f"baseline staged for {base} ({len(rows)} modules); it is written only if this run ends RESULT: OK")
 elif base != "none" and os.path.exists(base):
     for line in open(base, encoding="utf-8"):
         if not line.strip() or line.startswith("#"): continue
@@ -284,7 +353,7 @@ read -r RAN SKIPPED BAD < <(summarize "$TMP/ut1.log")
 echo "unittest: ran=$RAN skipped=$SKIPPED failed=$BAD rc=$UT_RC"
 [ "$UT_RC" -eq 0 ] || { echo "FAIL: POLICY:UNITTEST_FAILED unittest suite failed"; grep -E "^(FAIL|ERROR):" "$TMP/ut1.log" | head -30; FAIL=1; }
 [ "$RAN" -ge "$MIN_TESTS" ] || { echo "FAIL: POLICY:MIN_TESTS only $RAN tests ran (floor MIN_TESTS=$MIN_TESTS)"; FAIL=1; }
-policy "$TMP/ut1.log" "$TMP/canon1.txt" || FAIL=1
+policy "$TMP/ut1.log" "$TMP/canon1.txt" "$TMP/base.staged" || FAIL=1
 if [ -f "$TMP/canon1.txt.counts" ]; then
   read -r _ NSK < "$TMP/canon1.txt.counts"
   [ "$NSK" = "$SKIPPED" ] || { echo "FAIL: POLICY:SKIP_RECORD recorded skips ($NSK) != reported skips ($SKIPPED)"; FAIL=1; }
@@ -313,12 +382,30 @@ if [ "$TWICE" = 1 ]; then
   clear_bytecode
   if run_unittest "$TMP/ut2.log"; then UT_RC2=0; else UT_RC2=$?; fi
   read -r RAN2 SKIPPED2 BAD2 < <(summarize "$TMP/ut2.log")
-  policy "$TMP/ut2.log" "$TMP/canon2.txt" >/dev/null || true
+  # A separate staging path: only run 1's staged baseline is ever moved into place, so run 2 cannot overwrite it.
+  policy "$TMP/ut2.log" "$TMP/canon2.txt" "$TMP/base2.staged" >/dev/null || true
   if [ "$RAN $SKIPPED $BAD $UT_RC" = "$RAN2 $SKIPPED2 $BAD2 $UT_RC2" ] && cmp -s "$TMP/canon1.txt" "$TMP/canon2.txt"; then
     echo "deterministic: run1 == run2 (ran=$RAN skipped=$SKIPPED failed=$BAD, identical per-module counts and skip list)"
   else
     echo "FAIL: POLICY:NONDETERMINISTIC non-deterministic: run1 ran=$RAN skipped=$SKIPPED failed=$BAD rc=$UT_RC ; run2 ran=$RAN2 skipped=$SKIPPED2 failed=$BAD2 rc=$UT_RC2"
     diff "$TMP/canon1.txt" "$TMP/canon2.txt" | head -20; FAIL=1
+  fi
+fi
+
+# --update-baseline, second half: the Python stage STAGED the new baseline (it can see only the unittest log and
+# its own skip policy); it is moved into place HERE, after every shell-side check has had its say, and only if the
+# run is still clean. This is the point of the split -- POLICY:MIN_TESTS, SKIP_RECORD, PYTEST_FAILED,
+# PYTEST_COLLECTED, PYTEST_SKIPPED and NONDETERMINISTIC are all set out here and were invisible to the refusal.
+if [ "$UPDATE" = 1 ] && [ -f "$TMP/base.staged" ]; then
+  if [ "$FAIL" -eq 0 ]; then
+    if mv "$TMP/base.staged" "$BASELINE"; then
+      echo "baseline written: $BASELINE ($(grep -cv '^#' "$BASELINE" || true) modules)"
+    else
+      echo "FAIL: POLICY:BASELINE_WRITE could not write the staged baseline to $BASELINE"; FAIL=1
+    fi
+  else
+    echo "FAIL: POLICY:BASELINE_REFUSED --update-baseline refused and the baseline is UNCHANGED: this run's"\
+         "RESULT is FAIL (see the failures above). Regenerate only on a quiet, green tree."
   fi
 fi
 
