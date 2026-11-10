@@ -1567,23 +1567,109 @@ class SmallPins(unittest.TestCase):
 
 
 class OracleAcrossBaseSeeds(unittest.TestCase):
-    """The default gate thresholds are marginal for the oracle's own gates. This makes that seed-dependence visible
-    instead of latent. It documents the DEFAULTS (eps_fit, tau_conv); it is not a result about any method."""
+    """Five base seeds, 30 seeds each, n_boot=2000 (NOT the protocol default 10,000). Split in two on purpose:
+    the invariants below hold under any gate configuration; the pins depend on the DEFAULT eps_fit/tau_conv/steps."""
     EXPECT = {7: J.JOINT_SUPPORTED, 11: J.JOINT_SUPPORTED, 99: J.JOINT_SUPPORTED,
               23: J.JOINT_INCONCLUSIVE, 5: J.JOINT_INCONCLUSIVE}
+    RUNS = {}
 
-    def test_scorer_logic_is_sound_on_every_base_seed_and_gates_decide_the_rest(self):
-        for base, want in self.EXPECT.items():
-            r = study(bm.fixture_oracle_gated, f"o{base}", base=base)
+    @classmethod
+    def run_for(cls, base):
+        if base not in cls.RUNS:
+            cls.RUNS[base] = study(bm.fixture_oracle_gated, f"o{base}", base=base)
+        return cls.RUNS[base]
+
+    def test_config_independent_invariants(self):
+        for base in self.EXPECT:
+            r = self.run_for(base)
             comps = [c.verdict for h in (r.h1, r.h2, r.h3) for c in h.components + h.converged_components]
-            self.assertEqual(set(comps), {V.SUPPORTED}, base)       # the intervals themselves are always clear-cut
+            self.assertEqual(set(comps), {V.SUPPORTED}, base)          # intervals are clear-cut for the oracle
             self.assertNotEqual(r.verdict, J.JOINT_UNSUPPORTED, base)
-            self.assertEqual(r.verdict, want, base)
             failed = {g.name for g in r.gates if not g.passed}
-            if want is J.JOINT_SUPPORTED:
-                self.assertEqual(failed, set(), base)
-            else:
-                self.assertTrue(failed <= {"control_adequacy", "convergence"} and failed, (base, failed))
+            self.assertTrue(failed <= {"control_adequacy", "convergence"}, (base, failed))
+            self.assertEqual(r.verdict == J.JOINT_SUPPORTED, not failed, base)   # SUPPORTED iff every gate passes
+
+    def test_default_parameter_pins(self):
+        for base, want in self.EXPECT.items():
+            got = self.run_for(base).verdict
+            self.assertEqual(
+                got, want,
+                f"base seed {base}: oracle verdict {got.value} != pinned {want.value}. These pins record that the "
+                f"DEFAULT eps_fit/tau_conv/steps are marginal for the oracle's own gates (see module docstring and "
+                f"docs/PROGRESS.md). If you changed a default or the training budget: register the parameters in the "
+                f"pre-registration record and update docs/PROGRESS.md FIRST; do not just edit EXPECT.")
+
+
+# ===================================================== QA round 5
+class RelabelDetectionEndToEnd(unittest.TestCase):
+    TS = "2025-01-02T03:04:05Z"
+
+    def relabelled(self, kind):
+        r = dataclasses.replace(oracle())                       # fresh instance; the shared oracle is untouched
+        object.__setattr__(r, "subject_kind", kind)             # post-hoc tampering (documented open route)
+        object.__setattr__(r, "fixture_name", None)
+        return r
+
+    def test_relabel_then_records_then_refusal(self):
+        for kind in ("trained", "unknown"):
+            recs = bm.to_experiment_records(self.relabelled(kind), study_id="f", base_seed=7, timestamp_utc=self.TS)
+            j = recs[-1]
+            self.assertEqual(j.metrics["subject_kind_code"].value, bm.SUBJECT_KIND_CODE[kind])
+            self.assertEqual(j.metrics["loss_check_exempt"].value, 1.0)       # derived from the GATES, not the label
+            with self.assertRaisesRegex(ValueError, "exemption"):
+                bm.verdict_from_records(recs, SMALL)
+
+    def test_deleted_flag_does_not_crash_and_is_documented_as_undetectable(self):
+        recs = bm.to_experiment_records(oracle(), study_id="f", base_seed=7, timestamp_utc=self.TS)
+        j = recs[-1]
+        gone = dataclasses.replace(j, metrics={k: v for k, v in j.metrics.items() if k != "loss_check_exempt"})
+        rv = bm.verdict_from_records(recs[:-1] + [gone], SMALL)               # old-format records: no AttributeError
+        self.assertEqual(rv.subject_kind, "fixture")
+        syn = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        srecs = bm.to_experiment_records(syn, study_id="f", base_seed=7, timestamp_utc=self.TS)
+        j2 = srecs[-1]
+        gone2 = dataclasses.replace(j2, metrics={k: v for k, v in j2.metrics.items() if k != "loss_check_exempt"})
+        self.assertEqual(bm.verdict_from_records(srecs[:-1] + [gone2], SMALL).subject_kind, "unknown")
+
+    def test_flag_value_must_be_exactly_zero_or_one(self):
+        recs = bm.to_experiment_records(oracle(), study_id="f", base_seed=7, timestamp_utc=self.TS)
+        j = recs[-1]
+        for v in (2.0, -1.0, 0.5):
+            bad = dataclasses.replace(j, metrics={**j.metrics, "loss_check_exempt": MetricValue.measured(v)})
+            with self.assertRaisesRegex(ValueError, "must be 0.0 or 1.0"):
+                bm.verdict_from_records(recs[:-1] + [bad], SMALL)
+
+
+class SdScaleBands(unittest.TestCase):
+    def test_every_magnitude_band_gives_the_exact_answer(self):
+        # SD of [0, s, 3s] is s*sqrt(7/3) ... (mean 4s/3; deviations -4s/3, -s/3, 5s/3; var = (16+1+25)/9/2 s^2)
+        k = math.sqrt(42 / 18)
+        for s in (1e-200, 1e-160, 1e-155, 1e-151, 1e-149, 1e-100, 1.0, 1e100, 1e149, 1e151, 1e154, 1e160, 1e199,
+                  1e200, 1e204):
+            self.assertAlmostEqual(bm.sample_sd([0.0, s, 3 * s]) / (s * k), 1.0, places=11, msg=s)
+
+    def test_huge_band_does_not_raise(self):
+        for s in (1e154, 1e160, 1e199):
+            try:
+                bm.sample_sd([0.0, s, 3 * s])
+            except ValueError as e:
+                self.fail(f"a representable SD at scale {s} was refused: {e}")
+
+    def test_documented_limits_of_the_zero_sd_invariant(self):
+        # (1) float floor: true SD 2.2e-324 rounds to 0.0 although the sample is not constant
+        self.assertEqual(bm.sample_sd([0.0] * 5 + [5e-324]), 0.0)
+        # (2) Python ints beyond 2**53 are converted to float
+        self.assertEqual(bm.sample_sd([10 ** 20, 10 ** 20 + 1]), 0.0)
+        # (3) fails closed with a false ValueError (x - m overflows)
+        with self.assertRaises(ValueError):
+            bm.sample_sd([1.7e308, -1.7e308, -1.7e308, -1.7e308])
+        for needle in ("FLOAT FLOOR", "PYTHON INTS", "FALSE ValueError", "SR-11"):
+            self.assertIn(needle, bm.sample_sd.__doc__)
+
+    def test_empty_seed_list_fails_failure_rate_even_if_the_limit_is_one(self):
+        lax = dataclasses.replace(SMALL, max_failure_rate=1.0)
+        g = next(x for x in bm.evaluate_gates([], FZ, FZ.digest, lax) if x.name == "failure_rate")
+        self.assertFalse(g.passed)
 
 
 class IneligibleVersusFailed(unittest.TestCase):

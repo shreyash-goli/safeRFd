@@ -50,6 +50,8 @@ Known limits stated plainly:
 * PYTHON VERSION: sums use `math.fsum`, never the built-in `sum` (which is only compensated from Python 3.12:
   `sum([1e16,1,-1e16,1])/4` is 0.25 on 3.9). Developed and tested on 3.12.4 only; no claim for other versions
   beyond what CI runs.
+* AUTHORITATIVE RECORD: the measured figures quoted in this docstring (oracle gate marginality) are a second copy;
+  `docs/PROGRESS.md` is the authoritative location of record and wins if the two drift.
 * NOT IMPLEMENTED (see `DEFERRED_GATES`; a favourable verdict is conditional on
   them, `JointResult.complete_gate_coverage` is always False): configuration-
   shift sensitivity arm (gate 1), ERROR_REGISTER cross-check (gate 2), V-set
@@ -218,7 +220,17 @@ def _mean(v: Sequence[float]) -> float:
 
 def sample_sd(v: Sequence[float]) -> float:
     """Sample SD, divisor n-1. Exactly 0.0 for a constant sample (no cancellation residue: a zero-variance
-    series must be recognisable as such). Otherwise two-pass with an exactly-rounded mean."""
+    series must be recognisable as such). Otherwise two-pass with an exactly-rounded mean.
+
+    LIMITS OF THE 'SD == 0 iff constant' INVARIANT (stated so nobody relies on more than is true):
+    (1) FLOAT FLOOR: a non-constant sample returns 0.0 when its true SD is below ~2.5e-324 (the smallest
+        subnormal), because 0.0 is then the correctly rounded value, e.g. [0.0]*5 + [5e-324] (true SD 2.2e-324).
+        Consumers (SR-11 robustness probes) must NOT read zero-SD as 'constant' for samples within a few
+        subnormal steps of each other.
+    (2) PYTHON INTS beyond 2**53 are converted to float, so sample_sd([10**20, 10**20+1]) is 0.0. SR-11 casts to
+        float first, so this is only reachable by a direct caller.
+    (3) FALSE ValueError: a representable SD can still be refused when x - m overflows, e.g.
+        [1.7e308, -1.7e308, -1.7e308, -1.7e308]. It fails closed (raises, never mis-reports)."""
     n = len(v)
     if n < 2:
         raise ValueError("sample SD needs n >= 2")
@@ -236,7 +248,7 @@ def sample_sd(v: Sequence[float]) -> float:
         return r
     try:
         return math.sqrt(math.fsum((x - m) ** 2 for x in v) / (n - 1))
-    except OverflowError:     # defensive: unreachable for 1e-150 < big < 1e150 and n < 1e150
+    except OverflowError:     # reachable only when n*big^2 overflows (e.g. n above ~1.8e8 near big=1e150)
         raise ValueError("sample SD is not representable as a finite float") from None
 
 
@@ -1369,6 +1381,8 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: BenchmarkConf
     code = gm.get("subject_kind_code")
     kind = next((k for k, c in SUBJECT_KIND_CODE.items() if code is not None and code.value == c), "unknown")
     ex = gm.get("loss_check_exempt")
+    if ex is not None and ex.is_measured and ex.value not in (0.0, 1.0):
+        raise ValueError(f"loss_check_exempt must be 0.0 or 1.0, got {ex.value!r}")
     if ex is not None and ex.is_measured and ex.value == 1.0 and kind != "fixture":
         raise ValueError("records claim the gate-11(c) exemption but subject_kind_code is not 'fixture' "
                          "(forged or deleted code)")

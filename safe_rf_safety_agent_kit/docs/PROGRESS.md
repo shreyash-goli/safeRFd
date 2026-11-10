@@ -2722,3 +2722,47 @@ that the journal is mutable and that **the commit pin is what makes the referenc
 also noted — for the **fourth** time on this file — that it checked by **grep only**, so the full
 read and token extraction still need doing independently. That self-report is why r6 will get a
 review rather than being taken on trust.
+
+---
+
+## SR-10 delta-2: all review findings closed; the oracle test split as recommended
+
+**Date:** 2026-11-10. Suite **800, OK (2 skipped)**; `test_benchmark.py` at 170 tests.
+
+- **R3 (security-relevant) closed.** The source **already** wrote the records flag from the gates, so
+  no logic change was needed — the defect was purely the missing test. The new
+  `test_relabel_then_records_then_refusal` drives the full path: relabel a fixture result to `trained`
+  or `unknown`, write records, confirm `verdict_from_records` **refuses**, and check the flag stays
+  1.0 while the code changes. Writing the flag from the *label* instead of the gates is now killed.
+- **V4 closed:** records lacking `loss_check_exempt` no longer risk an `AttributeError`, with a test
+  deleting the flag from both fixture and non-fixture records — and it **documents that deleting the
+  flag together with the code remains undetectable**, rather than implying the hole is closed.
+- **S3 closed** by a magnitude-band test from 1e-200 to 1e204 (including 1e154, 1e160 and 1e199)
+  against `s·√(7/3)`; raising the upper threshold to 1e200 **and** lowering the lower one to 1e-200
+  are both killed. **The wrong comment is corrected:** the overflow fallback is reachable only when
+  n·big² overflows (~1.8e8 samples near 1e150), where it raises `ValueError`.
+- **Both low-severity survivors closed:** `verdict_from_records` now accepts the exempt flag only as
+  exactly `0.0` or `1.0` (killing both the `2.0` and `!= 0.0` variants), and the empty-seed-list
+  `failure_rate` case is pinned under `max_failure_rate=1.0`.
+- **The three zero-SD limits are now documented with a test pinning each**, including a test that the
+  docstring itself mentions them — so the caveat cannot silently rot. The docstring states explicitly
+  that **SR-11 must not read zero-SD as "constant" for samples within a few subnormal steps of each
+  other**, which is the cross-task boundary of the invariant.
+- **The oracle test is split, as the reviewer recommended and the orchestrator agreed.** The
+  config-*independent* **invariants** (all intervals SUPPORTED, verdict never UNSUPPORTED, failures
+  only from gates 11/12, SUPPORTED exactly when no gate failed) now run separately from the
+  config-*dependent* **pins** — and changing the default `tau_conv` kills **only the pins test**,
+  leaving the invariants passing. Critically, **the pins test's failure message instructs the reader
+  to register the parameters and update `docs/PROGRESS.md` before touching `EXPECT`**, which addresses
+  the reviewer's actual concern that the next person would simply edit the expectation. It records
+  that it runs at `n_boot=2000`, not the protocol default of 10,000.
+- **The drift risk between the two copies of the figures is resolved by precedence:** the module
+  docstring now names `docs/PROGRESS.md` as the **authoritative** record, which wins if they diverge.
+- 8 module-scoped mutants covering each new test: all killed.
+
+**Orchestrator verified:** suite 800 OK (2 skipped); the three zero-SD limits appear in
+`src/toy/benchmark.py`; the authoritative-record line is present.
+
+**Attestation status:** this delta-2 is **unattested**, like delta-1 before it. SR-10's checkbox stays
+unchecked until a reviewer confirms it — the same discipline applied to SR-05, and the reason six
+downstream tasks remain blocked.
