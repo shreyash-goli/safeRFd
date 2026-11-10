@@ -1321,3 +1321,68 @@ latter rebuilds from the same stored metrics the stored verdict came from and wo
 independent witness.
 
 **Suite at this point:** 593 tests under unittest (2 skipped), 591 passed under pytest. Green.
+
+---
+
+## Gate-11 extension implemented; SR-13 fixture coupling fixed at its root
+
+**SR-10 — gate 11 implementation of the orchestrator's decision.** `control_adequacy` now forces H1,
+H2 and H3 — and therefore JOINT — to INCONCLUSIVE. The implementer went further than instructed and
+moved it into the **global** gate set (scope `"all"`), having checked that *every* hypothesis,
+including the converged-budget H3 contrasts, subtracts `C0`; it found no case where gate 11 should
+invalidate less than the global gates do. Only gate 12 (`convergence`) remains scoped and block-only.
+`verdict_from_records` applies the same rule, so a tampered gate-11 record also yields INCONCLUSIVE.
+**All nine new mutants killed**, including scoping gate 11 back to H1/H2 (9 tests fail), not applying
+it to the H3 verdict (4 tests), setting the gate or converged interval level to 0.95, treating an
+unknown treatment as exempt, defaulting `analyze_scores` to exempt, and ignoring gate 11 in the
+records recompute. Confirmed: the converged-budget intervals and gate 11's own intervals both use the
+same adjusted level (m=4, 98.75%), and gate 11 can only block — passing never creates a verdict.
+*The exemption hole is closed structurally:* `score_seed` no longer accepts a `trained` argument at
+all (passing one raises `TypeError`); `treatment_kind(factory)` returns `trained`/`fixture`/
+`unknown`, with only the three scorer-validation fixtures declared `fixture` via a decorator and
+declaring both raising `ValueError`; an **undeclared** factory — including a wrapper around a trained
+student that loses its attributes — is **not** exempt, so its `E_loss_ratio` stays unmeasured, gate 11
+fails, and the verdict is INCONCLUSIVE; `analyze_scores` takes `loss_check_exempt` defaulting to
+**False**; and the loss ratio is read from the factory's own arm name rather than a hardcoded `"E"`.
+*Threshold provenance, in the implementer's own words and worth preserving verbatim in substance:*
+none of the six thresholds was changed after seeing fixture behaviour; they were chosen before the
+first run that used them by reasoning about the conditioning of the affine fit; `steps_conv` went
+2000 → 1000 while thinking about runtime, **before any run**, not after seeing outcomes; **there is
+no tuning log beyond the conversation, so it cannot offer more than its word**; and they were
+**never checked against a real `E` run**, so whether `loss_factor=2.0` and `tau_conv` suit the real
+erasure arm is UNKNOWN. The same applies to the earlier fixture defaults (`steps=300`, `lr=0.3`,
+`n_train=24`, `n_eval=32`, `g_min=1e-3`).
+
+**SR-13 — second reconcile, and the coupling fixed at its root rather than patched again.**
+All four failures had a single cause: the fixture supplied `A`, `F` and `conv_grad_ratio` but **not**
+`E_loss_ratio`, so with gate 11 global and the loss check no longer exempt by default, the scorer
+correctly returned INCONCLUSIVE for fixtures meant to be SUPPORTED or UNSUPPORTED.
+- **Orchestrator speculation corrected by the builder.** The orchestrator suggested that
+  `test_semantics_drift_same_signature_is_detected` might be the dashboard's own drift guard
+  correctly firing on a real upstream semantic change. **It was not.** It failed on its own
+  *precondition* — the test asserts its `S=0.0` fixture is genuinely `JOINT_UNSUPPORTED`, and the
+  incomplete fixture made the scorer return INCONCLUSIVE. The builder said so plainly rather than
+  accepting the more flattering reading, and did not weaken the test: the fixture is now complete and
+  the assertion is unchanged.
+- **The renderer itself needed no change**, because it reads each gate's scope from `GATE_SCOPES`
+  (`dashboard.py:389`) instead of hard-coding which gate blocks what — so `control_adequacy` moving
+  to scope `"all"` was absorbed automatically. A design decision validating itself under a change it
+  did not anticipate.
+- **Root-cause fix for the repeated breakage.** Offered three options, the builder chose the single
+  fixture-contract helper and explained why it rejected the others. `make_scores()`
+  (`test_dashboard.py:24`) is now the only place in the file that knows how to build a valid scorer
+  input; it builds `SeedScores` directly from `bm.SEED_METRICS` rather than via `from_values`
+  defaults, derives values from the scorer's own `Margins`/`BenchmarkConfig` with a 10× cushion, and
+  **raises a "FIXTURE CONTRACT" error naming the specific metrics if the scorer adds or drops any**.
+  `joint(expect=...)` makes each fixture declare the verdict it is meant to produce, so a rule change
+  fails **once, at the fixture, with a message pointing at `make_scores()`**, instead of as dozens of
+  unrelated assertions. `_contract_problems()` additionally rejects any `GATE_SCOPES` scope the
+  renderer does not understand, showing the loud banner and withholding verdicts. It deliberately did
+  **not** make `_contract_problems()` assert an exact metric set, reasoning that the renderer does not
+  consume metrics so such a check would only warn when nothing was wrong — a correct instinct against
+  adding a guard that produces false alarms.
+- The default fixture still reaches a **genuine** `JOINT_SUPPORTED`, and
+  `test_genuine_supported_has_no_false_alarm` still passes against it, so the two guards that matter
+  are intact.
+
+**Suite: 606 tests under unittest (2 skipped), 604 passed under pytest. Green.**

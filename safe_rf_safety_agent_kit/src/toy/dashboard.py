@@ -386,8 +386,11 @@ def _contract_problems() -> list:
         probs.append("Verdict members changed")
     if {v.value for v in JointVerdict} != {"JOINT_SUPPORTED", "JOINT_UNSUPPORTED", "JOINT_INCONCLUSIVE"}:
         probs.append("JointVerdict members changed")
-    if not isinstance(getattr(bm, "GATE_SCOPES", None), dict):
+    scopes = getattr(bm, "GATE_SCOPES", None)
+    if not isinstance(scopes, dict):
         probs.append("GATE_SCOPES missing")
+    elif not set(scopes.values()) <= set(_KNOWN_SCOPES):
+        probs.append(f"unknown gate scope(s) {sorted(set(scopes.values()) - set(_KNOWN_SCOPES))}")
     return probs
 
 

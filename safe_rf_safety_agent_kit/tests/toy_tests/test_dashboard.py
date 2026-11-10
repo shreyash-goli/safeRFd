@@ -20,30 +20,61 @@ FZ = bm.freeze_seed_list(7, 30)
 TS = "2026-01-01T00:00:00Z"
 
 
-def joint(S=None, L=0.0, d=None, dms=None, seeds=None, registered="auto", conv=True, gates_inputs=True):
-    """Built through the REAL entry point (analyze_scores). Every level is derived from the scorer's own
-    margins/thresholds with a 10x cushion and noise 1/20 of the margin, so a Bonferroni-level change does not
-    flip the intended verdict. Pass S=0.0 etc. to make a genuinely non-supporting fixture."""
+# ---------------------------------------------------------------------------------------------------------
+# FIXTURE CONTRACT: the ONLY place in this file that knows how to build a valid scorer input.
+# Every scorecard fixture goes through joint() -> make_scores() -> bm.analyze_scores. When the scorer gains a
+# metric, gate or required input, exactly this block fails (loudly, naming what changed); the ~40 tests that
+# consume joint() do not need touching. Values are derived from the scorer's own Margins/BenchmarkConfig with a
+# 10x cushion, so a level or threshold change does not flip the intended verdict.
+# ---------------------------------------------------------------------------------------------------------
+DECLARED_UNMEASURED = ("e_c_T", "e_u_U")   # metrics the scorer itself leaves unmeasured in synthetic scores
+
+
+def make_scores(seeds, S=None, L=0.0, d=None, dms=None, conv=True, gate_inputs=True, rng_seed=1):
     m, cfg = bm.Margins(), SMALL
     S = 10 * m.delta_S if S is None else S
     d = 10 * m.delta_sel if d is None else d
     dms = 10 * m.delta_sel if dms is None else dms
-    r = random.Random(1)
-    seeds = FZ.seeds if seeds is None else seeds
-    kw = {}
-    sc = []
-    for s_ in seeds:
-        extra = {}
-        if gates_inputs:
-            extra = dict(A=cfg.delta_A * 10 + r.gauss(0, cfg.delta_A / 10), F=cfg.eps_fit / 10,
-                         conv_grad_ratio=cfg.tau_conv / 10)
+    r = random.Random(rng_seed)
+    out = []
+    for seed in seeds:
+        v = {"S": S + r.gauss(0, m.delta_S / 20), "L": L + r.gauss(0, m.delta_R / 20),
+             "delta": d + r.gauss(0, m.delta_sel / 20), "delta_minus_shuf": dms + r.gauss(0, m.delta_sel / 20),
+             "G": 1.0}
+        v["S_U"] = v["S"]
+        if gate_inputs:     # gate 11 (A, F, E loss fell) and gate 12 (converged-budget gradient ratio)
+            v.update(A=cfg.delta_A * 10 + r.gauss(0, cfg.delta_A / 10), F=cfg.eps_fit / 10,
+                     E_loss_ratio=1.0 / (10 * cfg.loss_factor), conv_grad_ratio=cfg.tau_conv / 10)
         if conv:
-            extra.update(delta_conv=d + r.gauss(0, m.delta_sel / 20), delta_minus_shuf_conv=dms + r.gauss(0, m.delta_sel / 20))
-        sc.append(bm.SeedScores.from_values(
-            s_, S + r.gauss(0, m.delta_S / 20), L + r.gauss(0, m.delta_R / 20), d + r.gauss(0, m.delta_sel / 20),
-            dms + r.gauss(0, m.delta_sel / 20), rowsets_disjoint=True, mask_ok=True, **extra))
-    return bm.analyze_scores(sc, frozen=FZ, registered_digest=FZ.digest if registered == "auto" else registered,
-                             subject="synthetic", cfg=cfg)
+            v.update(delta_conv=d + r.gauss(0, m.delta_sel / 20),
+                     delta_minus_shuf_conv=dms + r.gauss(0, m.delta_sel / 20))
+        unknown = set(bm.SEED_METRICS) - set(v) - set(DECLARED_UNMEASURED)
+        if gate_inputs and conv and unknown:
+            raise AssertionError(f"FIXTURE CONTRACT: scorer metric(s) {sorted(unknown)} are not covered by "
+                                 f"make_scores(); add them here (the only place)")
+        extra = set(v) - set(bm.SEED_METRICS)
+        if extra:
+            raise AssertionError(f"FIXTURE CONTRACT: make_scores() supplies {sorted(extra)} which the scorer dropped")
+        metrics = {k: (MetricValue.measured(float(v[k])) if k in v else MetricValue.unmeasured(f"{k} not supplied"))
+                   for k in bm.SEED_METRICS}
+        out.append(bm.SeedScores(seed, metrics, True, True))
+    return out
+
+
+def joint(expect="auto", seeds=None, registered="auto", **kw):
+    """Scorer-produced JointResult. `expect` is the verdict the fixture is MEANT to produce (default
+    JOINT_SUPPORTED, or None to skip the check for deliberately degraded fixtures). If the scorer's rules move so
+    that it no longer does, fail here with a pointer, not in 40 unrelated assertions."""
+    seeds = FZ.seeds if seeds is None else seeds
+    j = bm.analyze_scores(make_scores(seeds, **kw), frozen=FZ,
+                          registered_digest=FZ.digest if registered == "auto" else registered,
+                          subject="synthetic", cfg=SMALL)
+    if expect == "auto":
+        expect = bm.JointVerdict.JOINT_SUPPORTED
+    if expect is not None and j.verdict is not expect:
+        raise AssertionError(f"FIXTURE CONTRACT: joint({kw}) now yields {j.verdict.value}, intended "
+                             f"{expect.value}; update make_scores() (scorer rules changed)")
+    return j
 
 
 def rec(name="n", notes=None, ec=EC.TOY_RESULT, run_id="r1", code="c1", metrics=None):
@@ -159,7 +190,7 @@ class UnknownVsZero(unittest.TestCase):
         self.assertRegex(db.render_dashboard({"snapshot": s2}), r"vs its merge base\)</td><td><span class=\"measured\">0<")
 
     def test_unmeasured_interval_unknown(self):
-        j = joint(seeds=FZ.seeds[:1])
+        j = joint(expect=None, seeds=FZ.seeds[:1])
         h = db.render_scorecard(j)
         self.assertIn("UNKNOWN", h)
         self.assertNotIn("vd-supported", h)
@@ -241,7 +272,7 @@ class CannotDisplayUnsupportedAsConfirmed(unittest.TestCase):
                             before.rfind('class="untrusted"') > before.rfind("</section>") - 0)
 
     def test_notes_cannot_flip_inconclusive_scorecard(self):
-        j = joint(S=0.0)  # H1 not supported
+        j = joint(expect=bm.JointVerdict.JOINT_UNSUPPORTED, S=0.0)  # H1 not supported
         self.assertNotEqual(j.verdict, bm.JointVerdict.JOINT_SUPPORTED)
         j = dataclasses.replace(j, subject=self.CONFIRM)
         h = db.render_scorecard(j)
@@ -278,7 +309,7 @@ class CannotDisplayUnsupportedAsConfirmed(unittest.TestCase):
             self.assertEqual(h.split("</aside>")[1].count('data-evidence="TOY_RESULT"'), 0)
 
     def test_forged_stored_verdicts_not_shown(self):
-        j = joint(S=0.0)
+        j = joint(expect=bm.JointVerdict.JOINT_UNSUPPORTED, S=0.0)
         for name in ("h1", "h2", "h3"):
             h_ = getattr(j, name)
             object.__setattr__(h_, "verdict", bm.Verdict.SUPPORTED)
@@ -288,7 +319,7 @@ class CannotDisplayUnsupportedAsConfirmed(unittest.TestCase):
         self.assertNotIn("JOINT_SUPPORTED", h)
 
     def test_supported_without_intervals_downgraded(self):
-        j = joint(seeds=FZ.seeds[:1])
+        j = joint(expect=None, seeds=FZ.seeds[:1])
         object.__setattr__(j.h1.components[0], "verdict", bm.Verdict.SUPPORTED)
         self.assertNotIn("vd-supported", db.render_scorecard(j))
 
@@ -303,7 +334,7 @@ class CannotDisplayUnsupportedAsConfirmed(unittest.TestCase):
         self.assertIn("vd-inconclusive", h)
 
     def test_unregistered_seed_list_not_supported(self):
-        h = db.render_scorecard(joint(registered=None))
+        h = db.render_scorecard(joint(expect=None, registered=None))
         self.assertNotIn("vd-supported", h)
 
     def test_true_supported_is_conditional_and_never_green(self):
@@ -356,7 +387,7 @@ class ScorerDriftFailsLoudly(unittest.TestCase):
     def test_semantics_drift_same_signature_is_detected(self):
         def always_supported(pair, margin, direction, width_tol=0.25, min_n=30):
             return bm.Verdict.SUPPORTED, "stale"
-        j = joint(S=0.0)                    # genuinely UNSUPPORTED, built before the drift
+        j = joint(expect=bm.JointVerdict.JOINT_UNSUPPORTED, S=0.0)                    # genuinely UNSUPPORTED, built before the drift
         self.assertEqual(j.verdict, bm.JointVerdict.JOINT_UNSUPPORTED)
         with mock.patch.object(bm, "interval_verdict", always_supported):
             h = db.render_scorecard(j)
@@ -376,7 +407,7 @@ class ScorerDriftFailsLoudly(unittest.TestCase):
 
     def test_combine_joint_drift_detected(self):
         with mock.patch.object(bm, "combine_joint", lambda *a, **k: bm.JointVerdict.JOINT_SUPPORTED):
-            j = joint(S=0.0)                # upstream's own stored joint verdict is now wrong too
+            j = joint(expect=None, S=0.0)                # upstream's own stored joint verdict is now wrong too
             self.assertEqual(j.verdict, bm.JointVerdict.JOINT_SUPPORTED)
             h = db.render_scorecard(j)
         self.assertIn("NOT shown", h)
@@ -384,7 +415,7 @@ class ScorerDriftFailsLoudly(unittest.TestCase):
         self.assertNotIn("vd-supported", jp)
 
     def test_h3_without_converged_components_cannot_be_supported(self):
-        j = joint(conv=False)
+        j = joint(expect=bm.JointVerdict.JOINT_INCONCLUSIVE, conv=False)
         self.assertNotEqual(j.h3.verdict, bm.Verdict.SUPPORTED)
         object.__setattr__(j.h3, "verdict", bm.Verdict.SUPPORTED)       # forge past the upstream guard
         h = db.render_scorecard(j)
@@ -392,7 +423,7 @@ class ScorerDriftFailsLoudly(unittest.TestCase):
         self.assertNotIn("JOINT_SUPPORTED", h)
 
     def test_missing_gate_inputs_fail_closed_without_false_alarm(self):
-        j = joint(gates_inputs=False)
+        j = joint(expect=bm.JointVerdict.JOINT_INCONCLUSIVE, gate_inputs=False)
         h = db.render_scorecard(j)
         self.assertEqual(self.decisive(re.search(r"<b>Joint verdict:</b>.*?</p>", h).group(0)), [])
         self.assertNotIn("NOT shown", h)           # genuine upstream INCONCLUSIVE agrees with the recomputation
