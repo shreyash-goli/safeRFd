@@ -183,6 +183,24 @@ class TestNoNetworkImports(unittest.TestCase):
         for p in (SCRIPTS / "run_tests.sh", SCRIPTS / "lint.sh", CI):
             self.assertNotRegex(p.read_text(encoding="utf-8"), r"(?m)^\s*(curl|wget|gh api)\b", p.name)
 
+    def test_env_flags_are_documented_as_inert_and_really_are_unread(self):
+        flags = ("RUN_MODE", "ALLOW_EXTERNAL_NETWORK", "MODEL_WEIGHTS_ENABLED", "BIOLOGICAL_TRAINING_ENABLED", "TOY_SEED")
+        files = list((ROOT / "src").rglob("*.py")) + list(SCRIPTS.iterdir()) + [CI]
+        for p in files:
+            if p.is_file():
+                body = "\n".join(l for l in p.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("#"))
+                for f in flags:
+                    self.assertNotIn(f, body, f"{p.name} references {f}; if a flag becomes real, enforce and test it")
+        doc = (ROOT / "docs" / "CLEAN_CLONE.md").read_text(encoding="utf-8")
+        self.assertIn("declarative markers only", doc)
+        self.assertIn("No code reads any of them", doc.replace("**No code reads any of them**", "No code reads any of them"))
+        self.assertNotRegex(doc, r"flags govern the \*\*toy application")
+
+    def test_docs_carry_the_honest_ci_caveats(self):
+        doc = (ROOT / "docs" / "CLEAN_CLONE.md").read_text(encoding="utf-8")
+        for needle in ("has never been executed", "untested as a combination", "tag, not commit SHA", "estimate"):
+            self.assertIn(needle, doc)
+
     def test_socket_guard_blocks_connections(self):
         """The guard run_tests.sh installs must make connection attempts fail (checked in a child process)."""
         t = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")

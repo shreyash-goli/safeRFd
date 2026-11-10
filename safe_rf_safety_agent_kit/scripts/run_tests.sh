@@ -21,7 +21,8 @@
 #   non-determinism bug rather than hash-order noise. (The suite is also expected to pass under other seeds;
 #   override with PYTHONHASHSEED=<n> to check.)
 #
-# NETWORK: a sitecustomize guard makes socket connect / DNS lookups raise for the whole run (children
+# NETWORK (the .env.example flags are inert markers read by no code; this guard is the real mechanism):
+#   a sitecustomize guard makes socket connect / DNS lookups raise for the whole run (children
 #   included), so any test that reached the network fails loudly. No credentials are read. The manual `curl`
 #   commands in docs/DIFF_EVIDENCE.md are documentation for a human and are never executed here.
 set -u -o pipefail
@@ -45,7 +46,6 @@ cd "$ROOT" || exit 2
 
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONHASHSEED="${PYTHONHASHSEED:-0}"
-export ALLOW_EXTERNAL_NETWORK=false
 export MIN_TESTS="${MIN_TESTS:-650}"   # floor: catches wholesale test deletion; raise as the suite grows
 
 # Clear stale bytecode (outside .git / virtualenvs).

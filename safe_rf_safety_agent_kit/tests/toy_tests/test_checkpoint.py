@@ -18,7 +18,7 @@ from toy.checkpoint import (Checkpoint, CheckpointError, CheckpointFormatError, 
                             CheckpointKeyError, CheckpointNonFiniteError, CheckpointProvenanceError,
                             CheckpointTypeError, CheckpointVersionError, compute_digest, load_checkpoint,
                             save_checkpoint)
-from toy.schema import RunProvenance, _canonical
+from toy.schema import TOY_LABEL, RunProvenance, _canonical
 from toy.stability import NonFiniteError, StabilityError
 from toy.teacher_student import train
 
@@ -350,9 +350,28 @@ class CorruptionMatrix(Base):
             self.assertLoadRaises(CheckpointProvenanceError)
 
     def test_oversize_refused(self):
-        with mock.patch.object(ck, "MAX_CHECKPOINT_BYTES", 50):
-            with self.assertRaises(CheckpointFormatError):
-                load_checkpoint(self.path)
+        # Valid JSON (with a valid-looking body) that is only rejected because of the size cap.
+        d = self.doc()
+        d["params"] = d["params"] + [0.5] * 200
+        self.write_doc(d, recompute=True)
+        size = self.path.stat().st_size
+        self.assertGreater(size, 1000)
+        cp = load_checkpoint(self.path)  # under the real 1 MiB cap it loads fine
+        self.assertEqual(len(cp.params), len(self.result.final_params) + 200)
+        with mock.patch.object(ck, "MAX_CHECKPOINT_BYTES", size - 1):
+            e = self.assertLoadRaises(CheckpointFormatError)
+        self.assertIn("larger than", str(e))
+        with mock.patch.object(ck, "MAX_CHECKPOINT_BYTES", size):  # exactly at the cap is accepted
+            load_checkpoint(self.path)
+
+    def test_wrong_label_with_recomputed_digest_refused(self):
+        for bad in ("TOY RESULT", "not a toy", "", TOY_LABEL + " "):
+            d = self.doc()
+            d["label"] = bad
+            self.write_doc(d, recompute=True)
+            self.assertEqual(self.doc()["digest"], compute_digest({k: v for k, v in d.items() if k != "digest"}))
+            e = self.assertLoadRaises(CheckpointFormatError)
+            self.assertIn("label", str(e))
 
     def test_missing_file_is_oserror_not_checkpoint_error(self):
         with self.assertRaises(FileNotFoundError):

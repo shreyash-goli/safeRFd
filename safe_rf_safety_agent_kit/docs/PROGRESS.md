@@ -1865,3 +1865,43 @@ risks are in `docs/SR12_INDEPENDENT_REVIEW.md`.
 
 **Verified count corrected: 7 of 17** — SR-00, SR-01, SR-02, SR-03, SR-04, SR-06, SR-08.
 The previously claimed 11 was wrong, and the four reverted checkboxes are the reason.
+
+---
+
+## SR-09 → v1-DRAFT-r4: amendment A-1 closes the protocol/scorer divergence
+
+**Date:** 2026-11-10. The divergence the orchestrator created — deciding to extend gate 11 to H3,
+routing the implementation but never the protocol amendment — is now recorded as **amendment A-1**,
+and the protocol matches `benchmark.py`. Verified by the orchestrator: `EVALUATION_PROTOCOL.md:122`
+and `:242` now list `control_adequacy` as **global**, the stale "Open issue for QA (not resolved by
+this document)" paragraph is **gone** (zero matches), and `src/toy/benchmark.py:83` still has
+`"control_adequacy": "all"`. Only gate 12 remains scoped and block-only.
+
+**The amendment is exemplary in its honesty, and is the standard the rest of this kit should be held
+to.** Entry A-1 is headed **"(POST-HOC, LOGGED LATE)"** and states outright that it was not
+pre-registered, that "for a period the scorer and this document disagreed", and that **"that
+divergence is itself a finding against the process, recorded here rather than hidden."** Its fields:
+`timestamp_utc` is when the entry was *written*, explicitly not the decision time;
+`decided_at_utc: UNKNOWN`; `implemented_at_utc` points at commit `ff451e1`; `logged_late: yes`;
+`data_seen_before` records that no registered study has been frozen or run, and that **whether
+development-time fixture runs influenced the decision is UNKNOWN to the author**;
+`effect_on_claims` notes no verdict was demoted because none is registered; and
+**`approved_by: UNKNOWN — the orchestrator proposed and decided it; independent approval is pending
+the review of r4.`** The owner also generalised the lesson into the protocol itself: §7's amendment
+template now *mandates* `implemented_at_utc` and `logged_late` for any late-logged amendment, which
+must be recorded as POST-HOC and "never described as pre-registered".
+
+**A new limit the owner surfaced while making the change:** gate 11's sub-checks 11(a) and 11(b) are
+measured on the **finite-budget `C0` only**. The converged-budget `C0` is covered only by gate 12's
+gradient-ratio diagnostic, with **no A/F fit check** — so an inadequate converged control would not
+be caught by gate 11. Recorded as a limitation, not fixed.
+
+**Scope of the standing attestation is now stated in the document itself:** the header records that
+the earlier QA PASS covered **r2 only**, and that r3's changes (§4.1 items 5–7, §8.1–8.3, the
+scorecard extension) and r4's amendment both fall under a **pending** review. The owner also
+honestly flagged that it did not re-read the file end to end after its last edits, so
+cross-section consistency has had a single grep pass only — which the r4 review must therefore check
+rather than assume.
+
+Still open on this file: the `bonferroni_level` **docstring in `benchmark.py`** says "m=3 → 0.98333"
+while the protocol says m=4 / 98.75% everywhere. Routed to the benchmark owner.

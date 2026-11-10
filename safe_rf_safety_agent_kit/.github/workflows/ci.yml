@@ -1,4 +1,5 @@
 # Offline, read-only CI for the TOY safety-audit kit. No secrets, no deploy, no pushes, no artifacts uploaded.
+# (.env.example flags are inert markers read by no code; enforcement is the socket guard.)
 # Network is used ONLY by the pip-install step of the optional-deps job; every test step runs under a socket
 # guard (scripts/run_tests.sh) that makes any connection attempt fail.
 name: ci
@@ -11,7 +12,6 @@ env:
   PYTHONDONTWRITEBYTECODE: "1"
   # Fixed so hash-order effects are identical run to run; see scripts/run_tests.sh.
   PYTHONHASHSEED: "0"
-  ALLOW_EXTERNAL_NETWORK: "false"
 
 jobs:
   core-no-deps:

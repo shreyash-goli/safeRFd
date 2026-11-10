@@ -9,9 +9,12 @@ Why this exists (audit context, SR-02 / ER-08; STATIC-ANALYSIS-ONLY facts about
 the audited fork script, not re-executed here): the fork script saves with
 `torch.save` (L474) and reloads with an unrestricted `torch.load` (L479),
 records no hash, seed or data provenance, and stores student weights under
-`student_model_state_dict` while upstream loads `model_state_dict` with
-`strict=True`, so those checkpoints are silently incompatible with the
-unmodified sampler. This module is a *toy-data counterpart* that shows the
+`student_model_state_dict` (S:461/S:481), while upstream reads
+`self.ckpt['model_state_dict']` (A:model_runners.py:234). SOURCE OBSERVED: the
+keys differ, so a checkpoint written by the script would not load into the
+unmodified upstream sampler. INFERENCE, not executed: because upstream indexes
+the dict directly (and loads with `strict=True`), the expected failure is a
+loud `KeyError`, not a silent one. This module is a *toy-data counterpart* that shows the
 contrasting properties (non-executable format, recorded provenance, verified
 digest, strict key set). It does NOT fix, patch or validate anything in
 RFdiffusion or in the audited script.
@@ -42,9 +45,11 @@ content are rejected too. Net effect: any single-byte change to the file is
 detected (tested exhaustively on a sample file).
 
 Key-set guard: the loader fails loudly on any unknown or missing top-level key.
-This is the generic analogue of the audited silent key incompatibility
-(`student_model_state_dict` vs `model_state_dict`): a producer and consumer that
-disagree on key names get an error naming the mismatch, not a quiet partial load.
+This is the generic analogue of the audited key incompatibility
+(`student_model_state_dict` vs `model_state_dict`, see the module docstring
+head; that failure is inferred, not executed, to be a loud KeyError): here a
+producer and consumer that disagree on key names get an error naming both the
+unknown and the missing keys, not a quiet partial load.
 
 Float fidelity: Python's `json` writes floats with `repr` (shortest string that
 round-trips) and parses them exactly, so -0.0, subnormals (5e-324) and large

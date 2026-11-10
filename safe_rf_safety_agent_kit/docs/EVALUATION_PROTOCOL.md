@@ -1,6 +1,6 @@
 # EVALUATION_PROTOCOL: independent safety/utility benchmark protocol (task SR-09)
 
-**Owner:** evaluation teammate. **Protocol version:** v1-DRAFT-r3 (revised after QA and after the Level A implementation; see changelog). **Date:** 2026-11-09.
+**Owner:** evaluation teammate. **Protocol version:** v1-DRAFT-r4 = r3 plus amendment A-1 (gate 11 made global, logged post-hoc; see section 7.1 and the changelog). **The independent QA PASS recorded earlier applied to r2, not to r3 or r4; r4 has not yet been independently reviewed.** **Date:** 2026-11-09.
 **Status of this document:** a methodology specification. It contains **zero measured results**. Nothing here asserts that any concept-erasure method works, reduces any capability, retains utility, or is safe. No model was run, no weights were retrieved, no experiment was executed in writing it.
 
 ## 0. Labels, conventions, and the no-numbers rule
@@ -119,7 +119,7 @@ A method that degrades everything is not a success, and a method that leaves eve
 > (iii) H3 is SUPPORTED, i.e. H3a and H3b are both SUPPORTED, **including the converged-budget requirement of section 4.1**.
 >
 > **JOINT_UNSUPPORTED** iff any of H1, H2, H3a, H3b is UNSUPPORTED.
-> **JOINT_INCONCLUSIVE** otherwise, or if any **global** validity gate fails (section 8.1). A **scoped** gate failure (gate 11 for H1/H2; gate 12 for H3) makes only the hypotheses in its scope INCONCLUSIVE (or, for gate 12, un-SUPPORTABLE); JOINT_UNSUPPORTED is still reached if another hypothesis is UNSUPPORTED on its own evidence, and JOINT_SUPPORTED is unreachable while any scoped gate has failed (a scoped-gate hypothesis is then not SUPPORTED).
+> **JOINT_INCONCLUSIVE** otherwise, or if any **global** validity gate fails (section 8.1). The global gates are `seed_list_frozen`, `min_seeds`, `failure_rate`, `rowsets_disjoint`, `mask_correct` and, **since amendment A-1, `control_adequacy` (gate 11)**; a global failure forces H1, H2, H3 and JOINT to INCONCLUSIVE, so JOINT_UNSUPPORTED cannot be driven by any hypothesis computed against a failed gate. The only **scoped** gate is gate 12 (`convergence`, H3, block-only): it makes H3 un-SUPPORTABLE but does not make it INCONCLUSIVE by itself, so an H3 that is UNSUPPORTED from its finite-budget components stays UNSUPPORTED, and JOINT_SUPPORTED is unreachable while gate 12 has failed.
 >
 > **Conditionality of JOINT_SUPPORTED.** While any check in section 8.2 is unimplemented or unrun, JOINT_SUPPORTED is a **conditional** verdict and must be reported as "JOINT_SUPPORTED (conditional on deferred checks: <list>)". The implementation exposes this as a read-only `complete_gate_coverage` property that is always False and a `deferred_gates` list; the document and the code are required to tell the same story. An unconditional JOINT_SUPPORTED label requires every deferred check to be implemented, run, passed and independently attested by QA.
 
@@ -131,12 +131,12 @@ Proposed defaults (PROTOCOL PARAMETERS, arbitrary, to be frozen at registration;
 - Suppression alone is satisfied by `GLOBAL_DEGRADER`, by random noise, and by any procedure that breaks the student. A large `S` with no retention information is uninterpretable.
 - Retention alone is satisfied by doing nothing (`C_init`, or a student that never moved). A small `L` with no suppression information is uninterpretable.
 - Even both together are insufficient without selectivity: both can hold by luck of the region geometry or by a small `δ` on one side. (iii), including the shuffled-mask contrast, ties the suppression to the *targeting*.
-- A retention margin that is relative to `C0` is only meaningful if `C0` is itself a well-trained control: if `C0` is undertrained, both arms are poor, `L` is small and H2 passes vacuously. Gate 11 (section 8) therefore also requires an absolute-fit check.
+- A retention margin that is relative to `C0` is only meaningful if `C0` is itself a well-trained control: if `C0` is undertrained, both arms are poor, `L` is small and H2 passes vacuously. Gate 11 (section 8) therefore also requires an absolute-fit check, and a failure is global (amendment A-1).
 - A retention margin must be relative to the `eta=0` control, not to the teacher, because training itself moves the student (section 2, `C0`). Comparing against the untouched teacher would attribute training drift to erasure.
 
 **Mapping to evidence class.** Even JOINT_SUPPORTED on the toy is recorded as `EvidenceClass.TOY_RESULT`. It never upgrades any statement about a real system (section 11).
 
-**Open issue for QA (not resolved by this document).** `C0` is subtracted in `Δ` as well as in `S` and `L`, so gate 11 arguably bears on H3 too; the implementation scopes it to H1/H2 only, which permits an H3 verdict (including SUPPORTED) to coexist with a failed gate 11 (JOINT still cannot be SUPPORTED). This document records the implemented scope as the v1 rule and flags the question; a decision to extend gate 11 to H3 (as a block on SUPPORTED) is a protocol amendment.
+**Resolution of the former "gate 11 versus H3" open issue (amendment A-1, section 7.1; recorded post-hoc).** Gate 11 is **global**: if it fails, H1, H2, H3 and JOINT are all INCONCLUSIVE. Reasoning, on the record: `C0` is subtracted in `Δ` exactly as in `S` and `L`, so an undertrained control corrupts the selectivity contrast too. Under the earlier scoping (gate 11 on H1/H2 only), **a JOINT_UNSUPPORTED could be driven by an H3 computed against a control already known to be inadequate**, which is an unreliable number presented as a verdict (and an H3 could even be SUPPORTED alongside a failed gate). This applies the kit's standing rule that an unreliable measurement must come out INCONCLUSIVE, not a verdict in either direction. This is equivalent to membership in the global gate set, because every hypothesis, including the converged-budget H3 contrasts, subtracts a `C0`. **Limit:** sub-checks 11(a) and 11(b) are measured on the finite-budget `C0` only; the converged-budget `C0` is covered only by gate 12's gradient-ratio diagnostic, not by an `A`/`F` fit check. Gate 11 is deliberately a **true gate** (forces INCONCLUSIVE), unlike gate 12, which stays **block-only** (section 4.1 item 6): gate 12's concern is specifically that a finite-budget SUPPORTED would be over-read, whereas gate 11 invalidates the contrast itself in both directions.
 
 ## 6. Uncertainty
 
@@ -207,6 +207,8 @@ approved_by       : <reviewer other than the proposer>
 
 An amendment made after any registered arm's results were computed demotes every affected verdict to EXPLORATORY. Both the original and amended analyses are reported.
 
+**Late-logged amendments.** An amendment decided or implemented before it was documented must say so. Two extra fields are mandatory in that case: `implemented_at_utc` (commit or equivalent) and `logged_late: yes`; it is recorded as POST-HOC and never described as pre-registered. If the study it affects has no frozen registration yet, no verdict is demoted, but the divergence period is stated.
+
 ## 8. Alternative explanations and validity gates
 
 A SUPPORTED verdict requires each of the following to be ruled out by a *recorded* check. A failed check forces INCONCLUSIVE **for the hypotheses in its scope (section 8.1; global gates force every hypothesis and JOINT)** and the failure is reported. A JOINT_SUPPORTED is additionally conditional on the deferred checks of section 8.2. Each check's status in a run record is `UNKNOWN — not measured` until it is run.
@@ -223,12 +225,12 @@ A SUPPORTED verdict requires each of the following to be ruled out by a *recorde
 | 8 | **Training-induced drift mistaken for erasure** | `C0` contrast (section 2) | Raw `E` numbers alone are not reportable |
 | 9 | **Metric rewards any structure / scorer always says yes** | `C_init`, `C_all`, `C_rand`, `C_shuf` and the three scorer-validation fixtures | Scorer defect: fix and re-register |
 | 10 | **Mask or region implementation error** | A deterministic unit test that the region mask on `TRAIN` selects only region rows; `C_shuf` differs from `E` in mask only | Verdict INCONCLUSIVE |
-| 11 | **Undertrained control: `C0` is poor, so differences against it are vacuous (H2 passing for no reason)** | Absolute-fit gate, from stored metrics: (a) the mean of `A(s)` (section 3) has adjusted lower bound above a registered `δ_A`, i.e. `C0` is genuinely trained relative to `C_init`; (b) the mean of `F(s)` has adjusted upper bound below a registered `ε_fit`; (c) arm `E`'s own training loss has fallen by at least a registered factor in every run. `δ_A`, `ε_fit` and the factor are PROTOCOL PARAMETERS set at registration from teacher statistics/pilot only | H1 and H2 verdicts INCONCLUSIVE ("control not adequately trained") |
+| 11 | **Undertrained control: `C0` is poor, so differences against it are vacuous (H2 passing for no reason)** | Absolute-fit gate, from stored metrics: (a) the mean of `A(s)` (section 3) has adjusted lower bound above a registered `δ_A`, i.e. `C0` is genuinely trained relative to `C_init`; (b) the mean of `F(s)` has adjusted upper bound below a registered `ε_fit`; (c) arm `E`'s own training loss has fallen by at least a registered factor in every run. `δ_A`, `ε_fit` and the factor are PROTOCOL PARAMETERS set at registration from teacher statistics/pilot only | **Global (amendment A-1)**: H1, H2, H3 and JOINT INCONCLUSIVE ("control not adequately trained") |
 | 12 | **Partial-convergence artefact mistaken for a selectivity mechanism** | `C_conv` converged-budget contrasts (section 4.1); end-of-training gradient norms recorded; `steps`/`lr` registered | H3 cannot be SUPPORTED; review triggered |
 
 ## 8.1 Gate scope: what a failed check forces to INCONCLUSIVE
 
-Section 8 says a failed check forces INCONCLUSIVE. The scope of each runtime-checked gate is fixed here (this specifies the implementation's behaviour; it was an implementer's judgement call that the earlier text left open):
+Section 8 says a failed check forces INCONCLUSIVE. The scope of each runtime-checked gate is fixed here. The scope of gate 11 was changed from H1/H2 to global by amendment A-1 (section 7.1), which the code implemented before this document recorded it:
 
 | Gate (implementation name) | Section 8 row / source | Scope when it fails |
 |---|---|---|
@@ -237,14 +239,14 @@ Section 8 says a failed check forces INCONCLUSIVE. The scope of each runtime-che
 | `failure_rate` | section 7 stop rule | **Global** |
 | `rowsets_disjoint` | 3, 4 | **Global** |
 | `mask_correct` | 10 | **Global** |
-| `control_adequacy` (gate 11) | 11 | **H1 and H2 only**: both INCONCLUSIVE. H3 is still evaluated and reported with the gate status alongside (see the open issue in section 5) |
+| `control_adequacy` (gate 11) | 11 | **Global (amendment A-1, post-hoc)**: H1, H2, H3 and JOINT are all INCONCLUSIVE. A true gate, not block-only |
 | `convergence` (gate 12) | 12 | **H3 only, block-only**: H3 cannot be SUPPORTED (it can still be UNSUPPORTED from its finite-budget components) |
 
-Rows 6, 7, 8, 9 are design/process requirements enforced by construction, by the scorer-validation fixtures, or by review; they are not runtime gates. Rows 1 and 2 are deferred (section 8.2). Global failures yield JOINT_INCONCLUSIVE; scoped failures follow section 5. Known limit: `seed_list_frozen` verifies only that the digest supplied by the caller equals the digest of the seeds analysed; it **cannot prove** the digest was recorded before any arm ran (producer-asserted).
+Rows 6, 7, 8, 9 are design/process requirements enforced by construction, by the scorer-validation fixtures, or by review; they are not runtime gates. Rows 1 and 2 are deferred (section 8.2). Global failures yield JOINT_INCONCLUSIVE; the one scoped gate (12) follows section 5. The implementation additionally refuses to construct a result in which a global gate failed but any of H1, H2, H3 is decisive, and refuses an H3 that is SUPPORTED while gate 12 failed. Known limit: `seed_list_frozen` verifies only that the digest supplied by the caller equals the digest of the seeds analysed; it **cannot prove** the digest was recorded before any arm ran (producer-asserted).
 
 **Gate 11 sub-checks.** (a) the mean of `A(s)` has bootstrap lower bound above `delta_A`; (b) the mean of `F(s)` has bootstrap upper bound below `eps_fit`; (c) arm `E`'s own training loss fell, in **every** run, by at least `loss_factor` (final/initial loss ratio <= 1/`loss_factor`). The intervals in (a) and (b) are percentile bootstrap intervals over seeds at the primary adjusted level (m = 4, 98.75%, so a single bound used one-sidedly is conservative). They are gate intervals, not family members: they can only block, never support.
 
-**Exemption of sub-check (c), stated explicitly.** Sub-check (c) is **not applicable** (N/A) if and only if the subject predictor is **not a trained student**, i.e. it is one of the scorer-validation fixtures (`ORACLE_GATED`, `GLOBAL_DEGRADER`, `IDENTITY_TEACHER_UNCOND`, which have no training loss). Conditions: (1) N/A is determined by the subject type *declared by the subject's constructor* (a `trained_student` attribute set by the factory that builds a trained student), never by the data or by the outcome; (2) the N/A branch must be written into the gate's reason string ("E-loss check n/a (not a trained student)") and carried to the report; (3) sub-checks (a) and (b) still apply to such fixtures; (4) **arm `E` and any other trained student can never use the exemption**; (5) a JOINT_SUPPORTED obtained under the exemption (e.g. by the oracle fixture) is a **scorer-validation outcome only**, is not a result for any method, and must not be recorded as a method's `TOY_RESULT`. Known limit: the declaration is producer-asserted (a mislabelled trained student would escape check (c)); QA should test that a trained student cannot be passed as non-trained through the public entry points, and note that the lower-level `score_seed` defaults to "not trained".
+**Exemption of sub-check (c), stated explicitly.** Sub-check (c) is **exempt** if and only if the subject predictor is a **declared scorer-validation fixture** (`ORACLE_GATED`, `GLOBAL_DEGRADER`, `IDENTITY_TEACHER_UNCOND`, which have no training loss). Conditions: (1) the exemption is granted only by a **positive declaration** on the subject's factory (`scorer_validation_fixture`); a trained student carries `trained_student`; **a subject declaring neither ("unknown") gets no exemption and gate 11(c) fails closed**; declaring both is an error; (2) the exemption never depends on the data or the outcome; (3) the exempt branch is written into the gate's reason string ("E-loss check exempt (declared scorer-validation fixture)") and carried to the report; (4) sub-checks (a) and (b) still apply to such fixtures; (5) **arm `E` and any other trained student can never use the exemption**; (6) a JOINT_SUPPORTED obtained under the exemption (e.g. by the oracle fixture) is a **scorer-validation outcome only**, is not a result for any method, and must not be recorded as a method's `TOY_RESULT`. Known limit: the declaration is producer-asserted, so a trained student mislabelled as a fixture would escape check (c); QA should test that this cannot happen through the public entry points. (Earlier revisions described this exemption as "not a trained student" with a caller-supplied flag; that wording is superseded.)
 
 ## 8.2 Deferred checks: JOINT_SUPPORTED is conditional on them
 
@@ -383,8 +385,34 @@ Any claim that a real concept-erasure intervention reduced a harmful capability 
 
 | Date | Version | Change |
 |---|---|---|
+| 2026-11-10 | v1-DRAFT-r4 | Amendment A-1 (post-hoc, logged late): gate 11 `control_adequacy` is global. Open-issue paragraph replaced by its resolution; section 5, section 8 row 11 and section 8.1 updated; gate 11(c) exemption rewritten to the positive-declaration, fail-closed mechanism now implemented; amendment log section 7.1 created with entry A-1; statement that the QA PASS covered r2 only; consistency pass over sections 5, 7, 8.1, 8.2, 8.3, 8a (m = 4, 98.75% everywhere; four primary intervals plus two converged rows). No measured results added. |
 | 2026-11-09 | v1-DRAFT-r3 | Post-implementation disclosure. New sections 8.1-8.3 and 4.1 items 5-7: per-gate scope; block-only converged-budget requirement and why; controls and level of the converged-budget run; explicit gate 11(c) exemption and its conditions; provenance of `steps_conv`, `tau_conv`, `delta_A`, `eps_fit`, `loss_factor`, `tail_ratio_max`; deferred checks D1-D6 and the conditionality of JOINT_SUPPORTED; section 5 gate wording made scope-aware (earlier "any gate failure -> INCONCLUSIVE" is superseded); scorecard template extended to the four-interval family plus converged rows and gates; open issue on gate 11 vs H3 recorded. No measured results added. |
 | 2026-11-09 | v1-DRAFT-r2 | QA revision. (P2) "no selectivity mechanism" restricted to the converged limit; finite-budget dependence on `steps`/`lr` registered; new section 4.1, `C_conv` arm and gate 12; a finite-budget SUPPORTED H3 is partial-convergence evidence and triggers review. (P1) H3 split into H3a/H3b, `Δ_Call` removed, m = 4 (98.75%), simultaneous-interval reading of the joint rule, H3 disconfirmation reconciled with the section 7 table. (P3) H4 withdrawn as a hypothesis and replaced by an exact-identity unit test (I-norm). (P4) gate 11 (absolute fit of `C0`/`E`), fixed pilot-based precision rule for `n_planned`, verdicts recomputed from stored metrics and never parsed from `notes`. Smaller: eligibility enforces >= 2 masked rows; n >= 30 minimum made consistent with the bootstrap assumption and labelled a convention; UNKNOWN vs HYPOTHESIS slot status unified; SR-06 -> SR-05; H5 expectation withdrawn. No measured results added. |
 | 2026-11-09 | v1-DRAFT | Initial protocol (SR-09). **Supersedes `docs/EVALUATION_TEMPLATE.md`**, which is retained unchanged for history and not deleted. Adds: two-level scope; pre-registered hypotheses with disconfirmation including one expected-fail (H3); joint acceptance rule; control arms including eta=0, untrained, random-target, shuffled-mask, all-True; SR-02 baseline-equivalence requirement; bootstrap/t-interval specification, multiplicity rule, minimum n; evidence thresholds, stop rule and amendment log; alternative-explanations gate table; `schema.py` mapping; explicit limits section. No measured results included. |
 
-Amendment log (append-only; empty at v1-DRAFT-r3): `UNKNOWN — none recorded`.
+## 7.1 Amendment log (append-only; placed at the end of the document, referenced from section 7)
+
+**A-1 (POST-HOC, LOGGED LATE).** This entry was written after the change was decided and implemented. It was **not pre-registered**, and for a period the scorer and this document disagreed (the code scoped gate 11 globally while this document still said H1/H2 only). That divergence is itself a finding against the process, recorded here rather than hidden.
+
+```
+amendment_id        : A-1
+timestamp_utc       : 2026-11-10T02:41:14Z   (time this entry was written; NOT the time of the decision)
+decided_at_utc      : UNKNOWN (not recorded; no later than the implementation commit below)
+implemented_at_utc  : 2026-11-10T01:34:52Z   (commit ff451e1, authored 2026-11-09 17:34:52 -0800)
+logged_late         : yes
+changed_item        : gate 11 (control_adequacy) scope: "H1 and H2 only" -> "global" (forces H1, H2, H3 and JOINT to INCONCLUSIVE).
+                      Affected text: section 5 joint rule, section 5 former open issue, section 8 row 11, section 8.1 table.
+reason              : C0 is subtracted in Delta exactly as in S and L, so an undertrained control corrupts the selectivity
+                      contrast too. Under the old scoping a JOINT_UNSUPPORTED could be driven by an H3 computed against a
+                      control already known to be inadequate: an unreliable measurement presented as a verdict. Standing rule:
+                      an unreliable measurement is INCONCLUSIVE, not a verdict in either direction. Equivalent to membership in
+                      the global gate set, since every hypothesis (including converged-budget H3 contrasts) subtracts a C0.
+                      It is a true gate, deliberately unlike gate 12 (block-only).
+data_seen_before    : no registered study has been frozen or run. Fixture and unit-test executions occurred during development;
+                      whether any influenced the decision is UNKNOWN to this author. The reasoning given is structural.
+effect_on_claims    : none demoted, because no registered verdict exists. Behavioural change: when gate 11 has failed, no
+                      hypothesis verdict and no JOINT_UNSUPPORTED can be produced (all INCONCLUSIVE).
+approved_by         : UNKNOWN. Proposed and decided by the orchestrator; independent approval is pending the fresh review of r4.
+```
+
+Other changes since the r2 review (r3 items, also not covered by any QA PASS): sections 4.1 items 5-7, 8.1-8.3 and the scorecard extension. They were made after the r2 review and are subject to the same pending review.

@@ -69,16 +69,36 @@ that is deleted afterwards. It writes nothing into the repository, exits non-zer
 that **nothing it produces is evidence about RFdiffusion, the fork, or any real biological capability.**
 Use `--keep` to retain the temp output for inspection.
 
-## Network flags
+## The `.env.example` flags are declarative markers only
 
-`.env.example` sets `RUN_MODE=TOY_OFFLINE`, `ALLOW_EXTERNAL_NETWORK=false`, `MODEL_WEIGHTS_ENABLED=false`,
-`BIOLOGICAL_TRAINING_ENABLED=false`, `TOY_SEED=42`. These flags govern the **toy application** (which never opens a
-socket). They do **not** govern manual source verification: `docs/SOURCE_SNAPSHOT.json` preserves the compare
-metadata for offline audit, and the `curl` commands recorded in `docs/DIFF_EVIDENCE.md` are documentation for a
-human who chooses to re-verify against GitHub. No script, test or CI step runs them. No `.env` file is needed or read.
+`.env.example` lists `RUN_MODE=TOY_OFFLINE`, `ALLOW_EXTERNAL_NETWORK=false`, `MODEL_WEIGHTS_ENABLED=false`,
+`BIOLOGICAL_TRAINING_ENABLED=false`, `TOY_SEED=42`. **No code reads any of them** (not in `src/`, `scripts/`, tests
+or CI). They document intent for a human reader. **Setting or changing them changes no behaviour**, and setting
+`BIOLOGICAL_TRAINING_ENABLED=false` does not constrain anything. No `.env` file is needed or read.
+
+The kit's actual guarantees are structural, and each is checked:
+- `src/toy/` is standard-library only and imports no network library (AST check in `scripts/lint.sh` and in
+  `tests/toy_tests/test_scripts.py`).
+- `scripts/run_tests.sh` runs the suite under a socket guard that makes any connection attempt fail.
+- No weight files are present or loaded (`.gitignore` excludes common weight formats; nothing in `src/` loads them).
+
+Manual source verification is a human activity outside the suite entirely: `docs/SOURCE_SNAPSHOT.json` preserves the
+compare metadata for offline audit, and the `curl` commands in `docs/DIFF_EVIDENCE.md` are documentation for a human
+who chooses to re-verify against GitHub. No script, test or CI step runs them.
+
+## Known limits of this documentation (read before trusting CI)
+
+- **The CI workflow has never been executed.** It was validated only by parsing and by running its commands locally.
+- **The torch/numpy pin is untested as a combination.** `constraints.txt` pins torch 2.7.1 + numpy 1.26.4 on Python
+  3.12. Locally the suite passes on torch 2.7.1 + numpy 2.4.6 (framework Python 3.12) and torch 2.11.0 + numpy 2.4.4
+  (miniconda Python 3.13), so local runs do not test the pinned combination. The pin is kept for reproducibility.
+  The `numpy<2` rationale (NumPy/torch ABI mismatch seen in the RFdiffusion repo) holds regardless.
+- **Actions are pinned by tag, not commit SHA** (`actions/checkout@v4`, `actions/setup-python@v5`).
+- **The Linux-CPU skip count (~2-8) is an estimate** from the CUDA/MPS skip classes; it has not been observed.
+- The 86-skip bare-environment figure was independently measured by the SR-12 review.
 
 ## What CI does
 
 `.github/workflows/ci.yml`: job `core-no-deps` (Python 3.12 and 3.13, installs nothing, lint, suite twice with
-`--expect none`, demo) and job `optional-deps` (Python 3.12, pinned torch 2.7.1 + numpy 1.26.4, suite twice with
+`--expect none`, demo) and job `optional-deps` (Python 3.12, pinned torch 2.7.1 + numpy 1.26.4 (never executed; see limits above), suite twice with
 `--expect torch`, unittest and pytest, demo). Read-only permissions, no secrets, no publishing.

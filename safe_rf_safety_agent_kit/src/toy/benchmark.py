@@ -56,7 +56,18 @@ Known limits stated plainly:
 * `JointResult` derives every verdict from the intervals it holds and refuses
   an incomplete gate list; a caller can still hand-build intervals, so the
   guarantee is "no verdict without real intervals and a full gate list", not
-  tamper-proofing.
+  tamper-proofing. SPECIFIC ROUTES THAT REMAIN OPEN (documented, not hidden):
+  (a) a caller who DECLARES a trained student a scorer-validation fixture, or
+  monkeypatches `treatment_kind`, or calls `analyze_scores(subject_kind=
+  "fixture", ...)` directly, gets the gate-11(c) exemption (the result then
+  carries subject_kind='fixture' and a fixture_name, and every record stores
+  it, so renderers must show it); (b) `object.__setattr__` can flip a
+  `GateResult.passed` or swap `gates` after construction, which is not
+  re-checked; (c) setting `deferred_gates = ()` on the class makes
+  `complete_gate_coverage` True. None of these is reachable by accident.
+* `subject_kind` ('trained' / 'fixture' / 'unknown') records whether the answer
+  was known by construction. A result with subject_kind == 'fixture' is a test
+  of the scorer and must never be displayed as a method result.
 """
 from __future__ import annotations
 
@@ -166,7 +177,15 @@ def mean(v: Sequence[float]) -> float:
     """Exactly-rounded mean (fsum); a constant sample returns that constant exactly (n*x/n can be off by an ulp)."""
     if len(v) == 0:
         raise ValueError("mean of empty sample")
-    return float(v[0]) if _constant(v) else math.fsum(v) / len(v)
+    if _constant(v):
+        return float(v[0])
+    try:
+        return math.fsum(v) / len(v)
+    except OverflowError:     # the SUM overflows although the mean may not: average the scaled terms instead
+        r = math.fsum(x / len(v) for x in v)
+        if not math.isfinite(r):
+            raise ValueError("mean is not representable as a finite float") from None
+        return r
 
 
 def sample_sd(v: Sequence[float]) -> float:
@@ -178,7 +197,14 @@ def sample_sd(v: Sequence[float]) -> float:
     if _constant(v):
         return 0.0
     m = mean(v)
-    return math.sqrt(math.fsum((x - m) ** 2 for x in v) / (n - 1))
+    try:
+        return math.sqrt(math.fsum((x - m) ** 2 for x in v) / (n - 1))
+    except OverflowError:     # squares overflow: factor out the largest deviation
+        big = max(abs(x - m) for x in v)
+        r = big * math.sqrt(math.fsum(((x - m) / big) ** 2 for x in v) / (n - 1))
+        if not math.isfinite(r):
+            raise ValueError("sample SD is not representable as a finite float") from None
+        return r
 
 
 def quantile(sorted_v: Sequence[float], p: float) -> float:
@@ -196,7 +222,8 @@ def quantile(sorted_v: Sequence[float], p: float) -> float:
 
 
 def bonferroni_level(alpha: float = 0.05, m: int = N_PRIMARY) -> float:
-    """Per-hypothesis two-sided confidence level 1 - alpha/m (alpha=.05, m=3 -> 0.98333...)."""
+    """Per-hypothesis two-sided confidence level 1 - alpha/m. The primary family has m = N_PRIMARY = 4 intervals
+    (alpha=.05 -> 0.9875). The formula is generic: m=3 would give 0.98333, which is NOT the protocol level."""
     if not 0 < alpha < 1 or isinstance(m, bool) or not isinstance(m, int) or m < 1:
         raise ValueError("need 0 < alpha < 1 and integer m >= 1")
     return 1.0 - alpha / m
@@ -745,11 +772,20 @@ def _student_factory(arm: str) -> PredictorFactory:
 ARM_FACTORIES: Mapping[str, PredictorFactory] = {a: _student_factory(a) for a in ARM_NAMES}
 
 
-def _scorer_validation_fixture(f):
-    """Declare a factory to be a scorer-validation fixture (not a trained student). This declaration is the ONLY
-    way to be exempt from the gate-11(c) 'E training loss fell' check; an undeclared factory is NOT exempt."""
-    f.scorer_validation_fixture = True
-    return f
+def _scorer_validation_fixture(name: str):
+    """Declare a factory to be a named scorer-validation fixture (not a trained student). This declaration is the
+    ONLY way to be exempt from the gate-11(c) 'E training loss fell' check; an undeclared factory is NOT exempt.
+    TRUSTED-DECLARATION BOUNDARY: nothing can verify the declaration. A caller who declares a trained student as a
+    fixture gets the exemption, but the result then carries subject_kind='fixture' and the fixture's name."""
+    def deco(f):
+        f.scorer_validation_fixture = True
+        f.fixture_name = name
+        return f
+    return deco
+
+
+SUBJECT_KINDS = ("trained", "fixture", "unknown")
+SUBJECT_KIND_CODE = {"unknown": 0.0, "trained": 1.0, "fixture": 2.0}
 
 
 def treatment_kind(treatment) -> str:
@@ -758,11 +794,19 @@ def treatment_kind(treatment) -> str:
     t, f = getattr(treatment, "trained_student", False) is True, getattr(treatment, "scorer_validation_fixture", False) is True
     if t and f:
         raise ValueError("treatment declares both trained_student and scorer_validation_fixture")
+    if t and getattr(treatment, "arm_name", None) not in ARM_NAMES:
+        raise ValueError("a trained_student treatment must declare a valid arm_name")
+    if f and not (isinstance(getattr(treatment, "fixture_name", None), str) and treatment.fixture_name.strip()):
+        raise ValueError("a scorer-validation fixture must declare a nonempty fixture_name")
     return "trained" if t else "fixture" if f else "unknown"
 
 
+def treatment_fixture_name(treatment) -> Optional[str]:
+    return treatment.fixture_name if treatment_kind(treatment) == "fixture" else None
+
+
 # --------------------------------------------- scorer-validation fixtures
-@_scorer_validation_fixture
+@_scorer_validation_fixture("oracle_gated")
 def fixture_oracle_gated(fx: SeedFixture, cfg: BenchmarkConfig) -> Predictor:
     """ORACLE_GATED: erasure target on region rows, unconditioned output elsewhere. A test of the scorer."""
     def pred(rows):
@@ -789,10 +833,10 @@ def fixture_global_degrader(magnitude: float = 0.5) -> PredictorFactory:
             u = fx.teacher.outputs(tuple(tuple(r) for r in rows)).unconditioned
             return tuple(tuple(v + magnitude * s for v, s in zip(r, signs)) for r in u)
         return pred
-    return _scorer_validation_fixture(factory)
+    return _scorer_validation_fixture("global_degrader")(factory)
 
 
-@_scorer_validation_fixture
+@_scorer_validation_fixture("identity_uncond")
 def fixture_identity_uncond(fx: SeedFixture, cfg: BenchmarkConfig) -> Predictor:
     """IDENTITY_TEACHER_UNCOND: returns the unconditioned output exactly. A test of the scorer."""
     return lambda rows: fx.teacher.outputs(tuple(tuple(r) for r in rows)).unconditioned
@@ -959,13 +1003,21 @@ class GateResult:
     passed: bool
     reason: str
 
+    def __post_init__(self) -> None:
+        if self.name not in GATE_SCOPES:
+            raise ValueError(f"unknown gate {self.name!r}")
+        if self.passed is not True and self.passed is not False:   # no truthy strings / ints / None
+            raise ValueError(f"GateResult.passed must be exactly True or False, got {self.passed!r}")
+        if not isinstance(self.reason, str):
+            raise ValueError("GateResult.reason must be a string")
+
     @property
     def scope(self) -> str:
         return GATE_SCOPES[self.name]
 
 
 def evaluate_gates(scores: Sequence[SeedScores], frozen: FrozenSeedList, registered_digest: Optional[str],
-                   cfg: BenchmarkConfig, loss_check_exempt: bool = False, margins: Optional[Margins] = None
+                   cfg: BenchmarkConfig, subject_kind: str = "unknown", margins: Optional[Margins] = None
                    ) -> tuple:
     gates = []
     ids = [s.seed for s in scores]
@@ -1004,14 +1056,17 @@ def evaluate_gates(scores: Sequence[SeedScores], frozen: FrozenSeedList, registe
             probs.append(f"A lower bound {lo!r} not above delta_A={cfg.delta_A}")
         if key == "F" and not hi < cfg.eps_fit:
             probs.append(f"F upper bound {hi!r} not below eps_fit={cfg.eps_fit}")
-    if not loss_check_exempt:
+    if subject_kind not in SUBJECT_KINDS:
+        raise ValueError(f"subject_kind must be one of {SUBJECT_KINDS}")
+    exempt = subject_kind == "fixture"      # the ONLY exemption; default 'unknown' is NOT exempt
+    if not exempt:
         rs = [s.metrics["E_loss_ratio"].value for s in ok_scores]
         if not rs or any(r is None for r in rs):
             probs.append("E_loss_ratio not measured on every seed")
         elif max(rs) > 1.0 / cfg.loss_factor:
             probs.append(f"E training loss did not fall by factor {cfg.loss_factor} in every run (worst ratio {max(rs)!r})")
     gates.append(GateResult("control_adequacy", not probs, "; ".join(probs) or
-                            ("A, F, E-loss ok" if not loss_check_exempt else
+                            ("A, F, E-loss ok" if not exempt else
                                           "A, F ok; E-loss check exempt (declared scorer-validation fixture)")))
     # gate 12: converged-budget gradient norm
     grs = [s.metrics["conv_grad_ratio"].value for s in ok_scores]
@@ -1045,6 +1100,8 @@ class JointResult:
     registered_digest: Optional[str]
     config_hash: str
     margins: Margins
+    subject_kind: str = "unknown"          # 'trained' | 'fixture' | 'unknown': was the answer known by construction?
+    fixture_name: Optional[str] = None     # required iff subject_kind == 'fixture'
 
     deferred_gates = DEFERRED_GATES   # class-level constant: not an init argument, not settable per instance
 
@@ -1052,6 +1109,10 @@ class JointResult:
         for h, hid in ((self.h1, "H1"), (self.h2, "H2"), (self.h3, "H3")):
             if not isinstance(h, HypothesisResult) or h.hid != hid:
                 raise ValueError(f"JointResult needs HypothesisResult {hid} in its slot")
+        if self.subject_kind not in SUBJECT_KINDS:
+            raise ValueError(f"subject_kind must be one of {SUBJECT_KINDS}")
+        if (self.subject_kind == "fixture") != (isinstance(self.fixture_name, str) and bool(self.fixture_name.strip())):
+            raise ValueError("fixture_name is required for, and only for, subject_kind='fixture'")
         names = [g.name for g in self.gates if isinstance(g, GateResult)]
         if sorted(names) != sorted(GATE_SCOPES):
             raise ValueError(f"gates must contain exactly {sorted(GATE_SCOPES)} (empty gates do not pass vacuously)")
@@ -1082,9 +1143,12 @@ class JointResult:
 
 def analyze_scores(scores: Sequence[SeedScores], *, frozen: FrozenSeedList, registered_digest: Optional[str],
                    subject: str, ineligible: Sequence[int] = (), cfg: BenchmarkConfig = BenchmarkConfig(),
-                   margins: Margins = Margins(), loss_check_exempt: bool = False) -> JointResult:
+                   margins: Margins = Margins(), subject_kind: str = "unknown",
+                   fixture_name: Optional[str] = None) -> JointResult:
+    """Analyse per-seed scores. `subject_kind` ('trained'/'fixture'/'unknown', default 'unknown' = no gate-11(c)
+    exemption) is recorded in the result; only 'fixture' (which also requires `fixture_name`) is exempt."""
     scores = tuple(scores)
-    gates = evaluate_gates(scores, frozen, registered_digest, cfg, loss_check_exempt, margins)
+    gates = evaluate_gates(scores, frozen, registered_digest, cfg, subject_kind, margins)
     by = {g.name: g for g in gates}
     glob = [f"{g.name} ({g.reason})" for g in gates if g.scope == "all" and not g.passed]
     g12 = [f"convergence ({by['convergence'].reason})"] if not by["convergence"].passed else []
@@ -1094,7 +1158,8 @@ def analyze_scores(scores: Sequence[SeedScores], *, frozen: FrozenSeedList, regi
           evaluate_primary("H2", series, margins, cfg, frozen.base_seed, glob),
           evaluate_primary("H3", series, margins, cfg, frozen.base_seed, glob, g12)]
     return JointResult(subject, hs[0], hs[1], hs[2], gates, scores, tuple(ineligible), len(scores),
-                       sum(not s.ok for s in scores), frozen.digest, registered_digest, cfg.config_hash(), margins)
+                       sum(not s.ok for s in scores), frozen.digest, registered_digest, cfg.config_hash(), margins,
+                       subject_kind, fixture_name)
 
 
 def run_study(frozen: FrozenSeedList, treatment: PredictorFactory, *, subject: str,
@@ -1102,9 +1167,9 @@ def run_study(frozen: FrozenSeedList, treatment: PredictorFactory, *, subject: s
               margins: Margins = Margins()) -> JointResult:
     """Walk the frozen seed list in order, skip ineligible seeds (G_s < g_min or TRAIN mask < 2 rows: both
     teacher/input-only; they are listed and replaced from the reserve in order), score until n_planned seeds
-    are attempted. Only a factory DECLARED a scorer-validation fixture is exempt from the gate-11(c) loss check;
+    are attempted. Only a factory DECLARED a scorer-validation fixture is exempt (recorded as subject_kind) from the gate-11(c) loss check;
     trained and undeclared treatments must pass it (undeclared ones cannot, so they come out INCONCLUSIVE)."""
-    exempt = treatment_kind(treatment) == "fixture"
+    kind, fname = treatment_kind(treatment), treatment_fixture_name(treatment)
     scores, skipped = [], []
     for s in frozen.seeds:
         if len(scores) >= frozen.n_planned:
@@ -1120,7 +1185,7 @@ def run_study(frozen: FrozenSeedList, treatment: PredictorFactory, *, subject: s
             pass   # other fixture failures are scored as failed runs by score_seed, never dropped
         scores.append(score_seed(s, treatment, cfg))
     return analyze_scores(scores, frozen=frozen, registered_digest=registered_digest, subject=subject,
-                          ineligible=skipped, cfg=cfg, margins=margins, loss_check_exempt=exempt)
+                          ineligible=skipped, cfg=cfg, margins=margins, subject_kind=kind, fixture_name=fname)
 
 
 # ============================================================== records
@@ -1132,13 +1197,14 @@ _AGG_KEYS = ("mean", "sd", "iqr", "min", "max", "max_over_median_abs", "ci_boot_
              "ci_t_hi")
 
 
-def _agg_metrics(pair: IntervalPair, margin: float, n_failed: int) -> dict:
+def _agg_metrics(pair: IntervalPair, margin: float, n_failed: int, subject_kind: str = "unknown") -> dict:
     m = {"mean": pair.mean, "sd": pair.sd, "iqr": pair.iqr, "min": pair.minimum, "max": pair.maximum,
          "max_over_median_abs": pair.max_over_median_abs,
          "ci_boot_lo": pair.boot_lo, "ci_boot_hi": pair.boot_hi, "ci_t_lo": pair.t_lo, "ci_t_hi": pair.t_hi,
          "n_seeds": MetricValue.measured(float(pair.n)), "n_failed": MetricValue.measured(float(n_failed)),
          "ci_level": MetricValue.measured(float(pair.level)), "n_boot": MetricValue.measured(float(pair.n_boot)),
-         "margin": MetricValue.measured(float(margin))}
+         "margin": MetricValue.measured(float(margin)),
+         "subject_kind_code": MetricValue.measured(SUBJECT_KIND_CODE[subject_kind])}
     return m
 
 
@@ -1176,17 +1242,20 @@ def to_experiment_records(res: JointResult, *, study_id: str, base_seed: int, ti
                 ec = EvidenceClass.TOY_RESULT if c.pair.mean.is_measured else EvidenceClass.UNKNOWN
                 recs.append(ExperimentRecord(
                     name=f"evalproto/{study_id}/agg/{tag}", provenance=prov(f"{study_id}-agg-{tag}", base_seed),
-                    metrics=_agg_metrics(c.pair, c.margin, res.n_failed), evidence_class=ec,
-                    notes=f"{TOY_LABEL} PRIMARY {h.hid} component {c.metric} [{kind}] subject={res.subject}. "
+                    metrics=_agg_metrics(c.pair, c.margin, res.n_failed, res.subject_kind), evidence_class=ec,
+                    notes=f"{TOY_LABEL} PRIMARY {h.hid} component {c.metric} [{kind}] subject={res.subject} "
+                          f"subject_kind={res.subject_kind} fixture_name={res.fixture_name}. "
                           f"Informational only; flags: {list(c.pair.flags)}"))
     gate_m = {f"gate_{g.name}": MetricValue.measured(1.0 if g.passed else 0.0) for g in res.gates}
     gate_m.update({"n_seeds": MetricValue.measured(float(res.n_attempted - res.n_failed)),
                    "n_failed": MetricValue.measured(float(res.n_failed)),
-                   "n_deferred_checks": MetricValue.measured(float(len(res.deferred_gates)))})
+                   "n_deferred_checks": MetricValue.measured(float(len(res.deferred_gates))),
+                   "subject_kind_code": MetricValue.measured(SUBJECT_KIND_CODE[res.subject_kind])})
     recs.append(ExperimentRecord(
         name=f"evalproto/{study_id}/agg/JOINT", provenance=prov(f"{study_id}-agg-JOINT", base_seed),
         metrics=gate_m, evidence_class=EvidenceClass.TOY_RESULT,
-        notes=f"{TOY_LABEL} [{kind}] subject={res.subject}. Informational only; gate states are metrics. "
+        notes=f"{TOY_LABEL} [{kind}] subject={res.subject} subject_kind={res.subject_kind} "
+              f"fixture_name={res.fixture_name}. Informational only; gate states are metrics. "
               f"Unimplemented checks (any favourable outcome is conditional on them): {list(res.deferred_gates)}."))
     return recs
 
@@ -1204,6 +1273,7 @@ class RecomputedVerdict:
     h1: Verdict
     h2: Verdict
     h3: Verdict
+    subject_kind: str = "unknown"   # decoded from the stored metric, never from notes
 
 
 def verdict_from_records(records: Sequence[ExperimentRecord], cfg: BenchmarkConfig = BenchmarkConfig()
@@ -1223,11 +1293,15 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: BenchmarkConf
         if r.evidence_class is not EvidenceClass.TOY_RESULT:
             raise ValueError(f"{r.name}: only TOY_RESULT records can carry a recomputed verdict")
 
+    want_level = bonferroni_level(cfg.alpha, N_PRIMARY)
+
     def comp(tag, metric, direction):
         r = by[tag]
-        mg = r.metrics["margin"]
+        mg, lv = r.metrics["margin"], r.metrics["ci_level"]
         if not mg.is_measured:
             raise ValueError(f"{tag}: margin unmeasured")
+        if not lv.is_measured or abs(lv.value - want_level) > 1e-12:
+            raise ValueError(f"{tag}: ci_level {lv.value!r} is not the adjusted level {want_level!r} (m={N_PRIMARY})")
         return ComponentResult(metric, direction, mg.value, _pair_from_record(r), cfg.min_seeds, cfg.width_tol)
 
     gm = by["JOINT"].metrics
@@ -1241,8 +1315,10 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: BenchmarkConf
                           (comp("H3a_conv", "delta_conv", "greater"),
                            comp("H3b_conv", "delta_minus_shuf_conv", "greater")),
                           blocking=tuple(glob), supported_blockers=tuple(g12))
+    code = gm.get("subject_kind_code")
+    kind = next((k for k, c in SUBJECT_KIND_CODE.items() if code is not None and code.value == c), "unknown")
     return RecomputedVerdict(combine_joint(h1.verdict, h2.verdict, h3.verdict, not glob),
-                             h1.verdict, h2.verdict, h3.verdict)
+                             h1.verdict, h2.verdict, h3.verdict, kind)
 
 
 def _gate_metrics(s: SeedScores) -> dict:
@@ -1268,7 +1344,8 @@ def seed_records(res: JointResult, *, study_id: str, timestamp_utc: Optional[str
             provenance=RunProvenance(run_id=f"{study_id}-{res.subject}-{s.seed}", timestamp_utc=ts, seed=s.seed,
                                      code_version=code_version, python_version=current_python_version(),
                                      toy_only=True, input_hashes=hashes),
-            metrics={**s.metrics, **_gate_metrics(s)},
+            metrics={**s.metrics, **_gate_metrics(s),
+                     "subject_kind_code": MetricValue.measured(SUBJECT_KIND_CODE[res.subject_kind])},
             evidence_class=EvidenceClass.TOY_RESULT if s.ok else EvidenceClass.UNKNOWN,
             notes=f"{TOY_LABEL} arm/subject={res.subject}; PRIMARY inputs; per-seed values only."))
     return out
