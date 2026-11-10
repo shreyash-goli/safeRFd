@@ -1088,7 +1088,11 @@ class SubjectKindField(unittest.TestCase):
             self.assertEqual(bm.verdict_from_records(lying, SMALL).subject_kind, want)
             j = recs[-1]
             flipped = dataclasses.replace(j, metrics={**j.metrics, "subject_kind_code": MetricValue.measured(0.0)})
-            self.assertEqual(bm.verdict_from_records(recs[:-1] + [flipped], SMALL).subject_kind, "unknown")
+            if want == "fixture":      # the exemption flag stored with it makes the flip a detectable forgery
+                with self.assertRaises(ValueError):
+                    bm.verdict_from_records(recs[:-1] + [flipped], SMALL)
+            else:
+                self.assertEqual(bm.verdict_from_records(recs[:-1] + [flipped], SMALL).subject_kind, "unknown")
         sr = bm.seed_records(oracle(), study_id="f", timestamp_utc=ts)
         self.assertEqual(sr[0].metrics["subject_kind_code"].value, 2.0)
 
@@ -1433,6 +1437,153 @@ class BoundaryAndGuardGaps(unittest.TestCase):
         # math.fsum, not built-in sum (sum is compensated only from Python 3.12): the true mean is 0.5
         self.assertEqual(bm.mean([1e16, 1.0, -1e16, 1.0]), 0.5)
         self.assertEqual(bm.mean([0.1] * 10), 0.1)
+
+
+# ===================================================== QA round 4
+class SdUnderflow(unittest.TestCase):
+    def exact_sd(self, v):
+        from fractions import Fraction
+        fr = [Fraction(x) for x in v]
+        m = sum(fr) / len(fr)
+        var = sum((x - m) ** 2 for x in fr) / (len(fr) - 1)
+        import decimal
+        decimal.getcontext().prec = 60
+        return float(decimal.Decimal(var.numerator) / decimal.Decimal(var.denominator)) ** 0.5 if var > 1e-300 else \
+            float((decimal.Decimal(var.numerator) / decimal.Decimal(var.denominator)).sqrt())
+
+    def test_tiny_nonconstant_samples_do_not_report_zero(self):
+        self.assertAlmostEqual(bm.sample_sd([1e-170, 2e-170]) / 7.0710678118654755e-171, 1.0, places=12)
+        self.assertEqual(bm.sample_sd([5e-324, 1e-323, 0.0]), 5e-324)        # deviations are 0, +1 ulp, -1 ulp
+        for v in ([1e-170, 2e-170], [1e-200, 3e-200, 2e-200, 9e-200], [5e-324, 1e-323, 0.0], [0.0, 1e-160, 3e-160]):
+            sd = bm.sample_sd(v)
+            self.assertGreater(sd, 0.0, v)
+            self.assertAlmostEqual(sd / self.exact_sd(v), 1.0, places=9, msg=v)
+
+    def test_zero_sd_if_and_only_if_constant(self):
+        r = random.Random(5)
+        for _ in range(300):
+            scale = 10.0 ** r.randint(-320, 300)
+            base = r.uniform(-1, 1) * scale
+            v = [base + r.choice((0.0, r.uniform(0, 1) * scale * 1e-3)) for _ in range(r.randint(2, 8))]
+            const = len(set(v)) == 1
+            try:
+                sd = bm.sample_sd(v)
+            except ValueError:
+                continue                                  # unrepresentable results are refused, never mis-reported
+            self.assertEqual(sd == 0.0, const, v)
+
+    def test_boundary_scales_agree(self):
+        for scale in (1e-151, 1e-149, 1.0, 1e149, 1e151):
+            sd = bm.sample_sd([0.0, scale, 3 * scale])
+            self.assertAlmostEqual(sd / (scale * 1.5275252316519468), 1.0, places=12, msg=scale)
+
+
+class ExemptionFlagAndForgery(unittest.TestCase):
+    TS = "2025-01-02T03:04:05Z"
+
+    def fields(self, r):
+        return {f.name: getattr(r, f.name) for f in dataclasses.fields(bm.JointResult)}
+
+    def test_gateresult_exempt_is_strict_and_only_for_control_adequacy(self):
+        for bad in ("True", 1, None):
+            with self.assertRaises(ValueError):
+                bm.GateResult("control_adequacy", True, "r", exempt=bad)
+        with self.assertRaises(ValueError):
+            bm.GateResult("min_seeds", True, "r", exempt=True)
+        self.assertTrue(bm.GateResult("control_adequacy", True, "r", exempt=True).exempt)
+
+    def test_pipeline_sets_exempt_exactly_for_fixtures(self):
+        gate_of = lambda r: next(g for g in r.gates if g.name == "control_adequacy")
+        self.assertTrue(gate_of(oracle()).exempt)
+        syn = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        self.assertFalse(gate_of(syn).exempt)
+
+    def test_hand_built_result_with_exempt_gates_must_be_labelled_fixture(self):
+        o = oracle()
+        for kind in ("trained", "unknown"):
+            with self.assertRaisesRegex(ValueError, "exemption"):
+                bm.JointResult(**{**self.fields(o), "subject_kind": kind, "fixture_name": None})
+        # the same gates under the honest label are accepted
+        self.assertEqual(bm.JointResult(**self.fields(o)).subject_kind, "fixture")
+        with self.assertRaises(ValueError):
+            dataclasses.replace(o, subject_kind="trained", fixture_name=None)
+
+    def test_subject_kind_vocabulary_is_checked(self):
+        syn = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        for bad in ("bogus", "", "Fixture", None, 2):
+            with self.assertRaisesRegex(ValueError, "subject_kind must be one of"):
+                bm.JointResult(**{**self.fields(syn), "subject_kind": bad})
+        with self.assertRaises(ValueError):
+            bm.evaluate_gates(gate_scores(), FZ, FZ.digest, SMALL, "bogus")
+
+    def test_records_carry_exempt_flag_and_forgeries_are_refused(self):
+        recs = bm.to_experiment_records(oracle(), study_id="f", base_seed=7, timestamp_utc=self.TS)
+        j = recs[-1]
+        self.assertEqual(j.metrics["loss_check_exempt"].value, 1.0)
+        self.assertEqual(bm.verdict_from_records(recs, SMALL).subject_kind, "fixture")
+        for forged in ({"subject_kind_code": MetricValue.measured(1.0)},        # relabelled trained
+                       {"subject_kind_code": MetricValue.measured(0.0)}):       # relabelled unknown
+            bad = dataclasses.replace(j, metrics={**j.metrics, **forged})
+            with self.assertRaisesRegex(ValueError, "exemption"):
+                bm.verdict_from_records(recs[:-1] + [bad], SMALL)
+        gone = dataclasses.replace(j, metrics={k: v for k, v in j.metrics.items() if k != "subject_kind_code"})
+        with self.assertRaisesRegex(ValueError, "exemption"):                  # deleted code reads 'unknown'
+            bm.verdict_from_records(recs[:-1] + [gone], SMALL)
+        syn = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        srecs = bm.to_experiment_records(syn, study_id="f", base_seed=7, timestamp_utc=self.TS)
+        self.assertEqual(srecs[-1].metrics["loss_check_exempt"].value, 0.0)
+        self.assertEqual(bm.verdict_from_records(srecs, SMALL).subject_kind, "unknown")
+        lie = dataclasses.replace(srecs[-1], metrics={**srecs[-1].metrics, "loss_check_exempt": MetricValue.measured(1.0)})
+        with self.assertRaisesRegex(ValueError, "exemption"):
+            bm.verdict_from_records(srecs[:-1] + [lie], SMALL)
+
+    def test_notes_kind_follows_subject_kind(self):
+        recs = bm.to_experiment_records(oracle(), study_id="f", base_seed=7, timestamp_utc=self.TS)
+        self.assertTrue(all("SCORER-VALIDATION FIXTURE" in r.notes for r in recs))
+        syn = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        srecs = bm.to_experiment_records(syn, study_id="f", base_seed=7, timestamp_utc=self.TS)
+        self.assertTrue(all("SCORER-VALIDATION FIXTURE" not in r.notes and "toy fixture" in r.notes for r in srecs))
+        for res, wrong in ((oracle(), False), (syn, True)):
+            with self.assertRaisesRegex(ValueError, "contradicts"):
+                bm.to_experiment_records(res, study_id="f", base_seed=7, timestamp_utc=self.TS, scorer_validation=wrong)
+        bm.to_experiment_records(oracle(), study_id="f", base_seed=7, timestamp_utc=self.TS, scorer_validation=True)
+
+
+class SmallPins(unittest.TestCase):
+    def test_empty_seed_list_cannot_pass_the_flag_gates(self):
+        g = {x.name: x for x in bm.evaluate_gates([], FZ, FZ.digest, SMALL)}
+        for name in ("rowsets_disjoint", "mask_correct", "failure_rate", "min_seeds"):
+            self.assertFalse(g[name].passed, name)
+
+    def test_missing_tolerances_fail_by_assertion_not_by_crash(self):
+        for kw, name, text in (({"loss": [None] + [0.01] * 29}, "control_adequacy", "E_loss_ratio not measured"),
+                               ({"gr": [None] + [1e-5] * 29}, "convergence", "not measured")):
+            try:
+                g = gate(name, **kw)
+            except Exception as e:                       # a TypeError here would only be a crash, not a verdict
+                self.fail(f"{name} raised {type(e).__name__}: {e}")
+            self.assertFalse(g.passed)
+            self.assertIn(text, g.reason)
+
+
+class OracleAcrossBaseSeeds(unittest.TestCase):
+    """The default gate thresholds are marginal for the oracle's own gates. This makes that seed-dependence visible
+    instead of latent. It documents the DEFAULTS (eps_fit, tau_conv); it is not a result about any method."""
+    EXPECT = {7: J.JOINT_SUPPORTED, 11: J.JOINT_SUPPORTED, 99: J.JOINT_SUPPORTED,
+              23: J.JOINT_INCONCLUSIVE, 5: J.JOINT_INCONCLUSIVE}
+
+    def test_scorer_logic_is_sound_on_every_base_seed_and_gates_decide_the_rest(self):
+        for base, want in self.EXPECT.items():
+            r = study(bm.fixture_oracle_gated, f"o{base}", base=base)
+            comps = [c.verdict for h in (r.h1, r.h2, r.h3) for c in h.components + h.converged_components]
+            self.assertEqual(set(comps), {V.SUPPORTED}, base)       # the intervals themselves are always clear-cut
+            self.assertNotEqual(r.verdict, J.JOINT_UNSUPPORTED, base)
+            self.assertEqual(r.verdict, want, base)
+            failed = {g.name for g in r.gates if not g.passed}
+            if want is J.JOINT_SUPPORTED:
+                self.assertEqual(failed, set(), base)
+            else:
+                self.assertTrue(failed <= {"control_adequacy", "convergence"} and failed, (base, failed))
 
 
 class IneligibleVersusFailed(unittest.TestCase):

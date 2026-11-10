@@ -2479,3 +2479,76 @@ unchanged rather than rewriting history. The converged-`C0` check remains **unad
 
 **r5 is unreviewed.** The header records that r3 and r4 passed their final review and that r5,
 including this removal, has not been independently reviewed.
+
+---
+
+## SR-10 — QA verdict PASS at `9d83f8c`, plus a post-PASS delta (NOT yet attested)
+
+**Date:** 2026-11-10. **The checkbox stays unchecked**, deliberately — see the attestation note at
+the end. Suite: **792 tests, OK (2 skipped)**.
+
+### The PASS, at commit `9d83f8c`
+All five routed gaps confirmed closed, each with a mutant that now dies. The reviewer verified the
+numerics against **exact arithmetic** (`Fraction` plus 800-digit `Decimal`), max relative error 1e-16:
+`[1e200,-1e200]` → SD 1.414213562373095e200 (2.6e-17); `[1e308,1e308,1.0]` → mean at 5e-17; and
+`[1.7e308,-1.7e308]` raising `ValueError`. `GateResult` rejects `'False'`, `1`, `1.0`, `0`, `None`,
+`[]`, `numpy.bool_` and an object with `__bool__` (a `bool` subclass cannot be constructed in
+CPython). `ci_level` rejects 0.5, 0.95, 0.99 and even 0.987500001 across all six component records,
+while accepting a 1e-13 offset inside the stated 1e-12 tolerance. 50 of 64 valid mutants killed, with
+**every mutant verified to compile and to change executable code after stripping docstrings**.
+
+**The exemption claim was tested exhaustively and holds for the public pipeline.** The reviewer set
+`loss_factor=1e6` so a trained arm `E` fails gate 11(c) unless exempted, then tried every route: the
+honest `run_study(E)` path and `analyze_scores(kind="trained"|"unknown")` **do not** obtain the
+exemption; a wrapper, a clone, a monkeypatched `treatment_kind`, and a direct
+`analyze_scores(kind="fixture", name=…)` **do** obtain it — and in every one of those cases **the
+records say `fixture` with its name.** So label and exemption cannot diverge through any public route.
+
+**Orchestrator adjudication of three routes the reviewer flagged and explicitly left to the
+orchestrator rather than deciding silently.** `object.__setattr__` on `subject_kind` after
+construction, a hand-built `JointResult` using gates from `evaluate_gates(subject_kind="fixture")` but
+labelled `trained`, and patching the `SUBJECT_KIND_CODE` table each obtain the exemption **while
+reporting `trained`** — which trips the orchestrator's stated FAIL criterion as written. **PASS
+accepted**, because that criterion was written too absolutely: it failed to distinguish *pipeline*
+routes from *post-hoc tampering*, and the claim under test (self-labelling) holds for every pipeline
+route. The reviewer was right to surface the ambiguity instead of picking a reading.
+
+### The post-PASS delta (fixes to named residuals)
+- **The hand-built route is now closed structurally, not by disclosure.** `GateResult` gained a strict
+  `exempt` flag, valid only on `control_adequacy`, set by the pipeline exactly when the gate-11(c)
+  loss check is waived — which happens only for declared fixtures. **`JointResult` refuses to be built
+  if any gate carries `exempt` while `subject_kind` is not `fixture`.** The JOINT record stores
+  `loss_check_exempt`, and `verdict_from_records` raises if that flag is 1.0 while the stored
+  `subject_kind_code` is not fixture, catching a relabelled or deleted code. A code and flag forged
+  *consistently with each other* remain undetectable, and the docstring says so. All three adjudicated
+  routes are now in the docstring's open-routes list.
+- **The `sample_sd` underflow is fixed — the cross-task defect.** Deviations outside 1e-150…1e150 now
+  use the scaled computation, so a non-constant sample can no longer report `0.0`. This mattered
+  because **SR-11's robustness probes use zero variance as their degenerate-case signal**, so the
+  invariant "zero SD means constant" is relied upon elsewhere. A randomised test across scales from
+  1e-320 to 1e300 asserts the SD is zero **exactly when** the sample is constant.
+  *Orchestrator verified:* `[1e-170, 2e-170]` → **7.071067811865476e-171** (was `0.0`);
+  `[5e-324, 1e-323, 0.0]` → **5e-324**; `[0.7]*3` → exactly `0.0`; `[1e200,-1e200]` →
+  1.414213562373095e200.
+- **The oracle seed-dependence is now reproduced first-hand and pinned by a test.** The builder
+  **reproduced all five base seeds itself**, so this is no longer only relayed. A new test runs the
+  oracle across all five, asserting every interval is SUPPORTED, the verdict is never UNSUPPORTED, and
+  any non-SUPPORTED outcome arises **only** from gate 11 or 12. Notably, **changing the default
+  `tau_conv` breaks that test deliberately** — the test is designed to flag that these defaults need
+  registering rather than to bless them. The module docstring records that the defaults leave the
+  oracle's own gates marginal.
+- Missing-value tolerances for the loss ratio and gate 12 now fail **by assertion** rather than by
+  crash; the empty-seed-list case is pinned for the disjointness and mask gates, `failure_rate` and
+  `min_seeds`; and `notes` takes its `[kind]` text from `res.subject_kind`, with `scorer_validation`
+  now optional and a contradicting value raising.
+- **16 module-scoped mutants, all killed.** Two honest self-reports from the builder: its new
+  exemption check **would have masked** the old vocabulary test (a bad kind on the oracle result raised
+  anyway), so it re-pinned that check against a result with no exemption; and the gate-11 loss mutant
+  is still detected **mostly by crash** rather than assertion, killed by 10 other tests that error.
+
+### Attestation status — why the checkbox stays unchecked
+The QA PASS covers `9d83f8c`. **Everything in the delta above landed after it and is therefore
+unattested.** Marking SR-10 now would repeat precisely the failure SR-12 caught on SR-05, where a
+genuine PASS was followed by six unreviewed residual fixes and the checkbox was marked anyway. A
+focused attestation of this delta has been requested; the checkbox will be marked on that, not before —
+even though SR-11, SR-12, SR-13, SR-14, SR-15 and SR-16 all sit behind it.

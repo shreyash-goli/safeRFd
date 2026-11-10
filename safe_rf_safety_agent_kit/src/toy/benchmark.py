@@ -67,7 +67,19 @@ Known limits stated plainly:
   it, so renderers must show it); (b) `object.__setattr__` can flip a
   `GateResult.passed` or swap `gates` after construction, which is not
   re-checked; (c) setting `deferred_gates = ()` on the class makes
-  `complete_gate_coverage` True. None of these is reachable by accident.
+  `complete_gate_coverage` True; (d) `object.__setattr__(result, "subject_kind", "trained")` after
+  construction relabels a result while its gates still record the exemption; (e) a hand-built `JointResult`
+  labelled 'trained'/'unknown' is refused only if its gates carry `exempt=True` (the flag is producer-set), so
+  gates built by hand with `exempt=False` and a favourable control_adequacy pass are not detectable; (f)
+  patching the `SUBJECT_KIND_CODE` table. `verdict_from_records` cross-checks stored `loss_check_exempt` against
+  the stored `subject_kind_code` (exempt=1 with a non-fixture code is refused) but cannot detect a code AND
+  exempt flag forged consistently. All of (a)-(f) are post-hoc tampering or declaration abuse, not routes through
+  the public pipeline, which always self-labels. None is reachable by accident.
+* DEFAULT PARAMETERS ARE MARGINAL FOR THE ORACLE'S OWN GATES: on base seeds 23 and 5 (30 seeds, n_boot 2000) the
+  oracle fixture is JOINT_INCONCLUSIVE because gate 11(b) (F above eps_fit=0.05) and/or gate 12 (worst-seed
+  gradient ratio 1.1e-3..3.4e-3 vs tau_conv=1e-3) fail, while base seeds 7, 11 and 99 give JOINT_SUPPORTED. The
+  defaults for `eps_fit` and `tau_conv` therefore need setting at registration (they are PROTOCOL PARAMETERS);
+  this is a property of the defaults, not of the fixtures' logic.
 * `subject_kind` ('trained' / 'fixture' / 'unknown') records whether the answer
   was known by construction. A result with subject_kind == 'fixture' is a test
   of the scorer and must never be displayed as a method result.
@@ -214,14 +226,18 @@ def sample_sd(v: Sequence[float]) -> float:
     if _constant(v):
         return 0.0
     m = _mean(v)
-    try:
-        return math.sqrt(math.fsum((x - m) ** 2 for x in v) / (n - 1))
-    except OverflowError:     # squares overflow: factor out the largest deviation
-        big = max(abs(x - m) for x in v)
+    big = max(abs(x - m) for x in v)
+    if big > 0 and not 1e-150 < big < 1e150:
+        # squares would underflow (below ~1e-162 a non-constant sample would report SD 0.0, breaking the invariant
+        # "SD == 0 iff constant") or overflow: factor out the largest deviation, compute, scale back.
         r = big * math.sqrt(math.fsum(((x - m) / big) ** 2 for x in v) / (n - 1))
         if not math.isfinite(r):
-            raise ValueError("sample SD is not representable as a finite float") from None
+            raise ValueError("sample SD is not representable as a finite float")
         return r
+    try:
+        return math.sqrt(math.fsum((x - m) ** 2 for x in v) / (n - 1))
+    except OverflowError:     # defensive: unreachable for 1e-150 < big < 1e150 and n < 1e150
+        raise ValueError("sample SD is not representable as a finite float") from None
 
 
 def quantile(sorted_v: Sequence[float], p: float) -> float:
@@ -1024,8 +1040,13 @@ class GateResult:
     name: str
     passed: bool
     reason: str
+    exempt: bool = False   # True only for control_adequacy when the gate-11(c) loss check was waived (fixtures)
 
     def __post_init__(self) -> None:
+        if self.exempt is not True and self.exempt is not False:
+            raise ValueError("GateResult.exempt must be exactly True or False")
+        if self.exempt and self.name != "control_adequacy":
+            raise ValueError("only control_adequacy can carry an exemption")
         if self.name not in GATE_SCOPES:
             raise ValueError(f"unknown gate {self.name!r}")
         if self.passed is not True and self.passed is not False:   # no truthy strings / ints / None
@@ -1089,7 +1110,8 @@ def evaluate_gates(scores: Sequence[SeedScores], frozen: FrozenSeedList, registe
             probs.append(f"E training loss did not fall by factor {cfg.loss_factor} in every run (worst ratio {max(rs)!r})")
     gates.append(GateResult("control_adequacy", not probs, "; ".join(probs) or
                             ("A, F, E-loss ok" if not exempt else
-                                          "A, F ok; E-loss check exempt (declared scorer-validation fixture)")))
+                                          "A, F ok; E-loss check exempt (declared scorer-validation fixture)"),
+                            exempt=exempt))
     # gate 12: converged-budget gradient norm
     grs = [s.metrics["conv_grad_ratio"].value for s in ok_scores]
     if not grs or any(g is None for g in grs):
@@ -1135,6 +1157,8 @@ class JointResult:
             raise ValueError(f"subject_kind must be one of {SUBJECT_KINDS}")
         if (self.subject_kind == "fixture") != (isinstance(self.fixture_name, str) and bool(self.fixture_name.strip())):
             raise ValueError("fixture_name is required for, and only for, subject_kind='fixture'")
+        if any(isinstance(g, GateResult) and g.exempt for g in self.gates) and self.subject_kind != "fixture":
+            raise ValueError("a gate carries the fixture exemption but subject_kind is not 'fixture'")
         names = [g.name for g in self.gates if isinstance(g, GateResult)]
         if sorted(names) != sorted(GATE_SCOPES):
             raise ValueError(f"gates must contain exactly {sorted(GATE_SCOPES)} (empty gates do not pass vacuously)")
@@ -1237,15 +1261,18 @@ def _tag(hid: str, metric: str, conv: bool = False) -> str:
 
 
 def to_experiment_records(res: JointResult, *, study_id: str, base_seed: int, timestamp_utc: Optional[str] = None,
-                          code_version: str = CODE_VERSION, scorer_validation: bool = False,
+                          code_version: str = CODE_VERSION, scorer_validation: Optional[bool] = None,
                           prereg_hash: Optional[str] = None, amendments_hash: Optional[str] = None) -> list:
     """Serialise onto ExperimentRecord (EvidenceClass.TOY_RESULT for measured data; SOURCE_OBSERVED is rejected
     by the schema). NO verdict is written to `notes`. Interval bounds, margins, n and gate states are stored as
     metrics, and `verdict_from_records` rebuilds the verdict from them alone. `prereg_hash` / `amendments_hash`
     are included in input_hashes only when supplied (a hash field cannot hold 'unmeasured')."""
     ts = timestamp_utc or _now()
+    is_fixture = res.subject_kind == "fixture"
+    if scorer_validation is not None and bool(scorer_validation) != is_fixture:
+        raise ValueError(f"scorer_validation={scorer_validation!r} contradicts subject_kind={res.subject_kind!r}")
     kind = ("SCORER-VALIDATION FIXTURE (a test of the scorer, not a result about any method)"
-            if scorer_validation else "toy fixture")
+            if is_fixture else "toy fixture")
     hashes = {"seed_list": res.seed_list_digest, "config": res.config_hash}
     for k, v in (("registered_seed_list", res.registered_digest), ("prereg", prereg_hash),
                  ("amendments", amendments_hash)):
@@ -1272,7 +1299,9 @@ def to_experiment_records(res: JointResult, *, study_id: str, base_seed: int, ti
     gate_m.update({"n_seeds": MetricValue.measured(float(res.n_attempted - res.n_failed)),
                    "n_failed": MetricValue.measured(float(res.n_failed)),
                    "n_deferred_checks": MetricValue.measured(float(len(res.deferred_gates))),
-                   "subject_kind_code": MetricValue.measured(SUBJECT_KIND_CODE[res.subject_kind])})
+                   "subject_kind_code": MetricValue.measured(SUBJECT_KIND_CODE[res.subject_kind]),
+                   "loss_check_exempt": MetricValue.measured(
+                       1.0 if any(g.exempt for g in res.gates) else 0.0)})
     recs.append(ExperimentRecord(
         name=f"evalproto/{study_id}/agg/JOINT", provenance=prov(f"{study_id}-agg-JOINT", base_seed),
         metrics=gate_m, evidence_class=EvidenceClass.TOY_RESULT,
@@ -1339,6 +1368,10 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: BenchmarkConf
                           blocking=tuple(glob), supported_blockers=tuple(g12))
     code = gm.get("subject_kind_code")
     kind = next((k for k, c in SUBJECT_KIND_CODE.items() if code is not None and code.value == c), "unknown")
+    ex = gm.get("loss_check_exempt")
+    if ex is not None and ex.is_measured and ex.value == 1.0 and kind != "fixture":
+        raise ValueError("records claim the gate-11(c) exemption but subject_kind_code is not 'fixture' "
+                         "(forged or deleted code)")
     return RecomputedVerdict(combine_joint(h1.verdict, h2.verdict, h3.verdict, not glob),
                              h1.verdict, h2.verdict, h3.verdict, kind)
 
