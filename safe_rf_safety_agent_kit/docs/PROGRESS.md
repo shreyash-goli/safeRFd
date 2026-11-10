@@ -2409,7 +2409,14 @@ fork, and nothing about any real capability. No model was run.
 
 **Source and provenance:** measured by the **SR-10 re-review** (independent QA), not by the
 orchestrator and not by the SR-09 owner — who recorded in the protocol that it had neither reproduced
-them nor seen the run records. The orchestrator has likewise **not** reproduced them; they are
+them nor seen the run records. The orchestrator has likewise **not** reproduced them.
+**Provenance updated (correction, found by the SR-09 r5 / SR-10-delta reviewer):** this entry
+originally left the figures as relayed-only. They have since been **reproduced first-hand by the
+SR-10 builder**, which ran all five base seeds itself and pinned them in a test — so the figures now
+rest on two independent runs (the SR-10 re-review and the SR-10 builder), not one. The orchestrator
+still has not reproduced them, and the SR-09 owner still has not; those statements stand. The
+configuration for the observation is **`n_boot=2000` with 30 seeds**, which was previously recorded
+only in a code docstring and not here. They are
 relayed here with attribution, which is what the kit's observed-versus-relayed distinction requires.
 
 **The observation.** The ORACLE_GATED scorer-validation fixture — constructed so that the answer is
@@ -2552,3 +2559,111 @@ unattested.** Marking SR-10 now would repeat precisely the failure SR-12 caught 
 genuine PASS was followed by six unreviewed residual fixes and the checkbox was marked anyway. A
 focused attestation of this delta has been requested; the checkbox will be marked on that, not before —
 even though SR-11, SR-12, SR-13, SR-14, SR-15 and SR-16 all sit behind it.
+
+---
+
+## SR-10 delta and SR-09 r5 — both FAIL; the SR-10 source is correct, the failure is test-only
+
+**Date:** 2026-11-10. Suite **792, OK (2 skipped)**; tree clean; no repo writes by the reviewer.
+
+### SR-10 delta — FAIL (test-only; `benchmark.py` needs no logic change)
+**What held under attack.** The `exempt` flag refused every misuse tried: exempt gates labelled
+`trained`/`unknown` (direct or via `replace`, with or without a name); `exempt` on any gate other than
+`control_adequacy`; `exempt=1`/`"yes"`/`None`; exempt results carrying `trained_student` or `unknown`
+declarations (the flag stays False and the loss check runs); `analyze_scores(fixture)` without a name;
+and a contradicting `scorer_validation`. The pipeline sets the flag **only** for declared fixtures,
+and `exempt = (subject_kind == "fixture")` is the same variable that waives the loss check.
+`verdict_from_records` raises when the flag is 1.0 while the code is a relabelled trained, a relabelled
+unknown, 7.0, deleted, or unmeasured — **and after a post-hoc `object.__setattr__` relabel, the
+written records carry flag 1.0 with code 1.0 and are refused.** That is the only record-level
+detection of the relabel route.
+
+**The `sample_sd` fix verified against the reviewer's own exact oracle** (`Fraction` plus 80-digit
+`Decimal`), not against the implementation: all four cases match (one 1 ulp apart); boundary probes
+just inside and outside **both** the 1e-150 and 1e150 thresholds agree, including mixed signs,
+subnormals and samples spanning both; and a **~600k-sample random sweep from 1e-324 to 1e308** found
+**no** constant sample with non-zero SD and **no** non-zero SD for a sample rounding to zero. The
+exact-constant guarantee and the overflow fallback both still hold.
+
+**R3 — the security-relevant survivor.** Writing the records flag as `kind == "fixture"` instead of
+deriving it **from the gates** survives all 162 tests. The two differ precisely on a result relabelled
+`trained` after construction: the mutant writes flag 0.0 and **`verdict_from_records` no longer
+detects it** — defeating the only defence against the post-hoc relabel route. The source is correct;
+the **relabel → records → refusal** path has no end-to-end test. Also surviving and not equivalent:
+`V4` (removing the `ex is not None` guard, untested for records lacking the flag), `V7`
+(`== 1.0` → `!= 0.0`, so `2.0` is silently accepted), `S3` (raising the upper threshold to 1e200 —
+the band **[1e154, 1e200)** where a valid SD would wrongly raise is untested, since the boundary test
+uses only 1e149 and 1e151), `T4` (`n_att > 0` removed is equivalent only when
+`max_failure_rate < 1`, which the config does not require), and `N5`.
+**A wrong code comment:** "unreachable for n < 1e150" is false — reachable above ~1.8e8 samples near
+1e150, where it raises `ValueError`.
+
+**Three honest limits on the iff-constant invariant, to be documented rather than chased** — the
+first matters across tasks:
+1. **A float floor that makes the invariant unattainable, not merely unmet.** A non-constant sample
+   reports `0.0` when its true SD is below ~2.47e-324, because that value is itself unrepresentable
+   and `0.0` is the correctly-rounded answer (`[0.0]*5+[5e-324]`, true SD 2.2e-324). **All 44 zeros in
+   400k samples were of this kind.** So **SR-11 must not rely on zero-SD-implies-constant for samples
+   within a few subnormal steps of each other** — the honest boundary of the guarantee just fixed.
+2. **Python ints beyond 2^53** (pre-existing): `sample_sd([10**20, 10**20+1])` and
+   `[2**53, 2**53+1, 2**53]` return `0.0`, because `x - m` is computed in float. **Not reachable from
+   SR-11**, which casts to `float` first, but reachable from any direct caller.
+3. **A false `ValueError`** (pre-existing): `[1.7e308, -1.7e308, -1.7e308, -1.7e308]` has a
+   representable SD of 1.7e308 but raises on overflow in `x - m`. Fails closed.
+
+**Design critique of the five-seed oracle test, which the orchestrator accepts.** It is an acceptable
+tripwire but weaker than it looks: the failure message is only `assertEqual(verdict, want, base)`,
+with no instruction to register the parameters or update the journal, so **the next person will simply
+edit `EXPECT`**. It also mixes config-*independent* invariants (all intervals SUPPORTED, verdict never
+UNSUPPORTED, failures only from gates 11/12) with config-*dependent* pins; these are being split so
+the invariants survive a config change. It runs at `n_boot=2000`, not the 10,000 default.
+
+**Both builder self-reports confirmed, and one was understated in the builder's own favour:** crash
+detection is acceptable (each class has at least one assertion-level kill); and on masking, **deleting
+the vocabulary check at `9d83f8c` survived all 150 old tests — the old test was already vacuous before
+the delta**, because `fixture_name` made it raise anyway. The re-pin now kills it.
+
+### SR-09 r5 — FAIL on three defects
+**The numeric invariant held.** The reviewer extracted **599 occurrences / 86 distinct tokens** and
+classified every one: protocol parameters, UNKNOWN placeholders, structural/git facts — and **zero
+measured results**. The removed figures are confirmed absent with no exception clause. Level B is
+**byte-identical** to the previously-passed `c9f52d8` (same md5 from `# LEVEL B` to §12).
+
+**Defect 1 — and the orchestrator's decision on a judgement call the reviewer deliberately left
+open.** §8.3.1 and A-2's `reason` state the observation *qualitatively* — that the oracle's gate
+outcomes are seed-dependent "so the fixture does not reach the same verdict at every base seed".
+**That is a measured outcome in prose.** It escapes a numeric check but contradicts §0's own rule that
+observations live in the journal and never in that document. The reviewer offered two readings: narrow
+the claim to "zero measured **numbers**", or reword the prose as conditional.
+**Decision: reword as conditional.** Narrowing to "numbers" would re-introduce exactly the judgement
+call the figure removal was meant to eliminate — a reviewer would then have to decide whether a given
+*sentence* is a measurement. The protocol will say a fixture's gate outcomes *can* depend on the base
+seed, that this is why validation must span a frozen seed list, and that whether they do at the
+current placeholder values is recorded in the journal — **keeping "zero measured results" literally
+true rather than true-with-a-gloss.**
+**Defect 2:** §8.3.1 item 3 still says "Choosing them from the fixture outputs above" — a leftover,
+since there are no fixture outputs above any more.
+**Defect 3:** the r5 header says r3 and r4 "later passed a final independent review", while the end of
+§7.1 still says the r3 items are "not covered by any QA PASS" and A-1's `approved_by` still reads
+"pending the review of r4". The r4 header was consistent; the r5 edit created the clash.
+
+**The location-of-record pointer is being strengthened:** it was by **file name only, with no commit
+pin or content hash, and the journal is mutable**. It will now pin commit `2b06fff` and state the
+configuration (`n_boot=2000`, 30 seeds), which had been recorded only in a code docstring.
+
+**The known-bad-rejection rule is stated but not operational**, which matters because it is the only
+thing distinguishing "re-calibrated the threshold" from "disabled the gate": only **gate 12** is
+named, with no known-bad case for gates 11(a) or 11(b); "a deliberately under-trained arm" has no
+budget, no definition of the gate "firing", and no seed requirement; and "fixtures that must not be
+SUPPORTED are not" is **satisfied by a scorer that never says SUPPORTED** unless read together with
+§2(iii). Routed for specification.
+
+**Orchestrator journal correction (made above, at the observation entry).** The entry stated the
+figures were relayed-only; they have since been **reproduced first-hand by the SR-10 builder**, so
+they now rest on **two independent runs**. The orchestrator and the SR-09 owner still have not
+reproduced them, and those statements stand. The observation's configuration is now recorded in the
+journal rather than only in code.
+
+**A second copy of the figures now exists** in the `benchmark.py` module docstring. Acceptable for
+code provenance, but it can drift from the journal, so it is being annotated to name
+`docs/PROGRESS.md` as authoritative.
