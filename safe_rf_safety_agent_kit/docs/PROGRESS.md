@@ -2393,3 +2393,89 @@ comment or docstring — and must fail for the intended reason rather than as a 
 
 **Orchestrator independent verification:** the duck-typed component with a verdict and no interval is
 refused with `ValueError` through the public constructor. Suite **780 tests, OK (2 skipped)**.
+
+---
+
+# Scorer-validation observation: the oracle fixture's own gates are seed-dependent
+
+**This is the location of record** that `docs/EVALUATION_PROTOCOL.md` §8.3.1 and amendment A-2 cite.
+The figures are held here, deliberately **not** in the protocol, so that document retains its
+unconditional "zero measured results" property.
+
+**Label: TOY SCORER-VALIDATION OBSERVATION. Not a result about any method.** These numbers describe
+how the *scorer's own validity gates* behave on synthetic fixtures whose answers are known by
+construction. They say nothing about any concept-erasure method, nothing about RFdiffusion or the
+fork, and nothing about any real capability. No model was run.
+
+**Source and provenance:** measured by the **SR-10 re-review** (independent QA), not by the
+orchestrator and not by the SR-09 owner — who recorded in the protocol that it had neither reproduced
+them nor seen the run records. The orchestrator has likewise **not** reproduced them; they are
+relayed here with attribution, which is what the kit's observed-versus-relayed distinction requires.
+
+**The observation.** The ORACLE_GATED scorer-validation fixture — constructed so that the answer is
+known, and whose purpose is to prove the scorer *can* return SUPPORTED — does not do so uniformly:
+
+| Base seed | ORACLE_GATED joint verdict |
+|---|---|
+| 7 | JOINT_SUPPORTED |
+| 11 | JOINT_SUPPORTED |
+| 99 | JOINT_SUPPORTED |
+| 23 | **JOINT_INCONCLUSIVE** |
+| 5 | **JOINT_INCONCLUSIVE** |
+
+Same split at n=30 and at n=60 plus 10 reserve. At base seed 23 the GLOBAL_DEGRADER and
+IDENTITY fixtures also come out INCONCLUSIVE.
+
+**Measured causes:**
+- **gate 11(b):** `F` exceeding `eps_fit = 0.05`.
+- **gate 12:** worst-seed gradient ratio measured in the range **1.1e-3 to 3.4e-3**, against
+  `tau_conv = 1e-3`.
+
+**What this does and does not establish.**
+- SOURCE OBSERVED (by the SR-10 reviewer): the verdicts and ranges above.
+- INFERENCE: `tau_conv = 1e-3` sits *inside* the range the oracle itself produces, so a gate intended
+  to catch non-convergence fires on a fixture that converges by construction. The protocol owner
+  additionally named `steps_conv` as a possible cause and **declined to choose between them** — the
+  training budget may be too short rather than the threshold too strict.
+- The reviewer confirmed neither the thresholds nor the computations changed during the SR-10 rework,
+  so this is a property of the **§8.3 default parameters**, not of the new strictness.
+- **UNKNOWN:** whether this transfers to arm `E`. Nothing here has been checked against a real
+  erasure-arm run.
+- **A corollary that matters methodologically:** because the fixtures' verdicts are seed-dependent, a
+  scorer-validation run **at a single base seed is not sufficient evidence that the scorer can say
+  yes.** The tests pinned base seed 7 only, which is why this stayed latent until a reviewer varied it.
+
+**Protocol consequences, recorded in A-2 (document-only, no verdict affected since no registered
+study exists):** `tau_conv`, `eps_fit` and `steps_conv` are demoted from endorsed v1 defaults to
+**placeholders to be set at registration**; setting them before any registered arm is frozen is a
+pre-registration decision, while changing them afterwards is a post-data amendment that demotes
+affected verdicts to exploratory; and **a value chosen so that the oracle passes is circular** and not
+an acceptable basis on its own.
+
+**Two rules the protocol owner added unprompted, and which are the most valuable output here:**
+1. **A gate must also be shown to reject a known-bad case** — e.g. gate 12 firing on a deliberately
+   under-trained arm. Without this, tuning a threshold until the oracle passes could leave a gate that
+   no longer rejects anything, making "fixed the calibration" and "disabled the gate"
+   indistinguishable.
+2. **Scorer validation must span a frozen list of at least five base seeds, with every seed
+   reported** — "can say yes" requires the oracle at JOINT_SUPPORTED on *every* registered seed and
+   "can say no" requires the degrader at JOINT_UNSUPPORTED on every one, with an **INCONCLUSIVE
+   counting as neither**. The five is labelled a convention, not a derived number.
+
+**Orchestrator decision recorded:** the protocol owner had initially admitted these figures into
+`EVALUATION_PROTOCOL.md` behind a labelled exception to its "zero measured results" property. The
+orchestrator **overruled that**, on the grounds that the unconditional form is a bright-line,
+mechanically checkable invariant — four QA passes have verified it by extracting and classifying every
+numeric token — whereas "none except the labelled ones in §8.3.1" would require every future reviewer
+to exercise judgement about whether a number qualifies, in the one document where that judgement
+should never be needed. The owner's reasoning (these measure the scorer, not a method) was sound; the
+cost to a checkable invariant was the deciding factor. Verified after the change: zero occurrences of
+the figures remain in the protocol, and the unconditional claim is restored at `:4`.
+
+**A-2 label collision, handled correctly by the owner on its own initiative:** A-1's
+`known_residual` had pre-named the converged-`C0` A/F check "A-2". Since the amendment log is
+append-only by its own rule, the owner reassigned that check to **candidate A-3** and left A-1's text
+unchanged rather than rewriting history. The converged-`C0` check remains **unadopted**.
+
+**r5 is unreviewed.** The header records that r3 and r4 passed their final review and that r5,
+including this removal, has not been independently reviewed.
