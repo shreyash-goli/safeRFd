@@ -1006,6 +1006,41 @@ class TestQAHardening(unittest.TestCase):
         self.assertIn("2.47e-324", rb.SeedSummary.__doc__)
         self.assertIn("zero_variance_warning", rb.SeedSummary.__doc__)
 
+    def test_zero_variance_warning_distinct_from_sd_at_the_subnormal_floor(self):
+        """Regression pin (cross-task, benchmark.sample_sd floor): 29 zeros plus one smallest subnormal is NOT
+        constant, so the warning must be False, yet the SD underflows to exactly 0.0 (true SD ~ 9e-325 is below
+        half the smallest subnormal, 2.47e-324). A warning implemented as `sd == 0.0` would say True."""
+        seeds = tuple(derive_seed(5, f"z{k}") for k in range(30))
+        odd = seeds[-1]
+        c = rb.seed_sensitivity_probe(lambda s: 5e-324 if s == odd else 0.0, seeds, CFG)
+        self.assertEqual(c.summary.sd, 0.0)                         # the floor is real here
+        self.assertFalse(c.details["zero_variance_warning"])        # ...and the warning does not consult the SD
+        self.assertEqual(c.details["n_distinct_values"], 2)
+        const = rb.seed_sensitivity_probe(lambda s: 5e-324, seeds, CFG)
+        self.assertEqual(const.summary.sd, 0.0)
+        self.assertTrue(const.details["zero_variance_warning"])
+
+    def test_negative_outcomes_keep_their_sign(self):
+        s = rb.SeedSummary.from_values([-1, -2.5, -3])
+        self.assertEqual(s.values, (-1.0, -2.5, -3.0))
+        self.assertEqual((s.minimum, s.maximum), (-3.0, -1.0))
+        self.assertLess(s.mean, 0.0)
+        c = rb.seed_sensitivity_probe(lambda sd: -1.0 - (sd % 7), SEEDS, CFG)
+        self.assertTrue(all(m.value < 0 for m in c.per_seed))
+        self.assertEqual(c.summary.values, tuple(-1.0 - (sd % 7) for sd in SEEDS))
+        self.assertLess(c.summary.maximum, 0.0)
+        self.assertLess(c.summary.mean, 0.0)
+        mixed = rb.summarize_seeds([MetricValue.measured(v) for v in (-2.0, 1.0, -0.5, 3.0)], 3)
+        self.assertEqual((mixed.minimum, mixed.maximum), (-2.0, 3.0))
+
+    def test_wrapped_errors_do_not_chain_a_context(self):
+        for bad in ([10 ** 400] * 3, [None, 1.0, 2.0]):
+            try:
+                rb.SeedSummary.from_values(bad)
+            except ValueError as e:
+                self.assertIsNone(e.__cause__)
+                self.assertTrue(e.__suppress_context__)   # `from None`: original traceback hidden
+
     def test_documented_corner_extreme_summary_is_accepted(self):
         s = rb.SeedSummary.from_values([1.7e308] * 3)      # documented, unguarded: see SeedSummary docstring
         self.assertEqual(s.n, 3)

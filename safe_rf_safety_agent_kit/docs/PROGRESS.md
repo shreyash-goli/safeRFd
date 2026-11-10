@@ -3295,3 +3295,66 @@ It does correctly fail when the cast is **removed**, which was the main objectiv
 **text** tripwire presented as a semantic one, and the orchestrator endorsed it on the builder's
 description without probing it. Routed: tighten it to inspect live code, or correct the docstring to
 say what it actually is.
+
+---
+
+## SR-09 → r9 and SR-11 residuals: both closed, each with a self-caught error
+
+**Date:** 2026-11-10. Suite **OK (2 skipped)**.
+
+### SR-09 r9 — three defects fixed, and the owner applied its own rule against the orchestrator's data
+- **Two separate pins, as required.** The bracket reference now states **two claims with two pins**:
+  the configuration statement as it stands at **`3620de2`**, the bracket discussion and figures as
+  they stand at **`0507399`** — and it states explicitly that the `3620de2` entry **lacks** the
+  bracket figures, so citing it for them would point at a commit that does not contain them. The
+  owner also recorded honestly that it confirmed `0507399` contains the bracket *text* but **did not
+  examine the figures**, and said so in the document.
+- **The r8 under-reporting is corrected without rewriting the committed row.** The r9 changelog row
+  carries a **"Correction to the r8 row"** itemising what r8 omitted: the item-1 expansion from two
+  placeholders to five, the removal of "11(b) in particular, and 12", the trailer rewrite, the second
+  revision note, and the header change. The committed r8 row is left as it was — the right call for
+  an append-only log.
+- **The breach note now names all five parts** rewritten in place by `577099d`: `reason`,
+  `changed_item`, `known_residual`, `data_seen_before` and the paragraph following the entry, with
+  r7's rewrite identified as `reason`-only. **And it disclosed a further exception the orchestrator
+  had not asked about:** the trailing paragraph's **review-status line is updated in place at every
+  revision**, including r8 and r9, so it **must not be read as append-only**. That is an honest
+  statement about a part of its own document that does not follow its own rule.
+- **The owner declined to include the reviewer's probe outcomes** — the `eta_star` values and the
+  failure reason — **because they are observed gate outcomes**, pointing to the journal instead. This
+  is the rule the owner itself taught the orchestrator two rounds earlier, now applied to data the
+  orchestrator handed it. *Orchestrator verified:* zero occurrences of those figures in the protocol;
+  "zero measured results" still present twice.
+- **11(c)** is restated as "implementable by substitution only, not as per-arm configuration", with
+  the subject a declared trained-student factory, the document stating the subject is **then not
+  `E`** and that **gate 12 is not isolated** by this case, and an UNKNOWN for whether a substituted
+  subject is an adequate stand-in.
+- **§10's absolute claim deliberately left alone**, with reasoning the orchestrator accepts: it sits
+  inside the **Level B region whose byte-identity reviewers rely on**, so touching it would break a
+  check others depend on. A safer wording is recorded in the changelog for a future revision instead.
+- **Residual the owner reported unprompted:** it re-read in three passes but did **not** re-read
+  §§6–8.2 and §8a–12 in full. The re-read found and fixed two further things: a garbled sentence in
+  the bracket paragraph, and the trailing-paragraph point above.
+
+### SR-11 residuals — both pinned, and the builder caught two errors in its own method
+`test_robustness.py` at **90 tests** (was 87); `robustness.py` unchanged this round.
+- **R8b, the cross-task claim, is now pinned by the distinction rather than the implementation.** The
+  fixture is 29 zeros plus one `5e-324` (seeds via `derive_seed`); the test asserts
+  `summary.sd == 0.0` **and** `zero_variance_warning` is **False**, while a constant `5e-324` gives
+  SD 0.0 with the warning **True**. Switching the warning to `sample_sd(vals) == 0.0` now fails it,
+  and fails **only** it.
+- **R12** is pinned across negative `from_values` input (ints and floats), a probe whose per-seed
+  outcomes are all negative, and a mixed-sign `summarize_seeds` call. `abs(float(v))` fails it, as
+  does `abs(v)` inside `_to_metric`.
+- **Two self-caught method errors, both worth recording:**
+  1. **A false kill in its own mutation testing.** Its first `sd` mutation was too crude — it crashed
+     on cards with fewer than 2 values and "killed" **19 tests for the wrong reason**. It re-ran the
+     mutant guarded with `len(vals) > 1 and`, which is the result reported.
+  2. **An incorrect assertion, corrected.** Its first chained-context test asserted
+     `__context__ is None`, which is **wrong**: `from None` still sets `__context__`. It now asserts
+     `__cause__ is None` and `__suppress_context__`. *Orchestrator verified independently:* with
+     `raise … from None`, `__cause__` is `None`, `__context__` **is** set, and
+     `__suppress_context__` is `True` — so the original assertion would have been false and the
+     correction is right.
+- A third test pins the absence of a chained context on the overflow wrap, closing the one argued
+  equivalent the reviewer had flagged as "not strictly" equivalent.
