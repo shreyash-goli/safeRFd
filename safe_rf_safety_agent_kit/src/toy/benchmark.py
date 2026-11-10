@@ -78,8 +78,11 @@ Known limits stated plainly:
   THE FLAG ALONE: after relabelling a record to trained/unknown, deleting `loss_check_exempt`, setting it to 0.0,
   or making it unmeasured is accepted (as is deleting both fields). Also accepted: flag 0.0 with an
   out-of-range code, forging the code to 'fixture' (2.0) with the flag at 1.0 or deleted, and code deleted with
-  flag 0.0. Only a relabel that leaves the flag at 1.0 is caught. The stored code and flag are producer-asserted,
-  not authenticated. All of (a)-(f) are post-hoc tampering or declaration abuse, not routes through
+  flag 0.0. EXACT RULE (full grid of 7 codes {deleted, unmeasured, 0, 1, 2, 7, -1} x 6 flags {deleted,
+  unmeasured, 0, 1, 0.5, 2}: 22 accepted, 20 rejected): a record is accepted iff the flag is deleted,
+  unmeasured or 0.0 (any code), or the flag is 1.0 and the decoded code is 'fixture' (2.0). A relabel is caught
+  only when the flag is 1.0 with a code other than 2.0, or when the flag is malformed (measured but not 0.0
+  or 1.0, e.g. 0.5 or 2.0). The stored code and flag are producer-asserted, not authenticated. All of (a)-(f) are post-hoc tampering or declaration abuse, not routes through
   the public pipeline, which always self-labels. None is reachable by accident.
 * DEFAULT PARAMETERS ARE MARGINAL FOR THE ORACLE'S OWN GATES: on base seeds 23 and 5 (30 seeds, n_boot 2000) the
   oracle fixture is JOINT_INCONCLUSIVE because gate 11(b) (F above eps_fit=0.05) and/or gate 12 (worst-seed
@@ -237,6 +240,10 @@ def _mean(v: Sequence[float]) -> float:
 
 
 def _sum_sq(v: Sequence[float], m: float) -> float:
+    """Sum of squared deviations via math.fsum. EQUIVALENCE CLAIM, stated precisely: substituting built-in sum is
+    overflow-equivalent through sample_sd (an inf result is refused with ValueError either way, confirmed on a real
+    n=2e8 input) and was value-identical in 220k random trials on Python 3.12.4 ONLY; it is not proven
+    value-equivalent, and below Python 3.12 the built-in sum is uncompensated."""
     return math.fsum((x - m) ** 2 for x in v)
 
 
@@ -320,6 +327,8 @@ def percentile_interval(stats: Sequence[float], level: float) -> tuple[float, fl
 def bootstrap_means(values: Sequence[float], n_boot: int, rng) -> list[float]:
     """n_boot resample means; each resample draws len(values) items with replacement."""
     values = _as_list(values, "bootstrap")
+    if not callable(getattr(rng, "choices", None)):
+        raise ValueError("rng must provide .choices (e.g. a random.Random from make_rng)")
     if len(values) < 1 or isinstance(n_boot, bool) or not isinstance(n_boot, int) or n_boot < 1:
         raise ValueError("need a nonempty sample and n_boot >= 1")
     n = len(values)
@@ -406,6 +415,7 @@ def t_interval(values: Sequence[float], level: float) -> tuple[float, float]:
     """Two-sided t-interval for the mean, df = n-1 (needs n >= 2)."""
     _check_level(level)
     values = _as_list(values, "t-interval")
+    _check_finite(values, "t-interval")      # BEFORE any arithmetic: no raw TypeError/OverflowError from _mean
     n = len(values)
     if n < 2:
         raise ValueError("t-interval needs n >= 2")

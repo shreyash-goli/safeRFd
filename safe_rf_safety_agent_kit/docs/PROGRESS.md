@@ -3358,3 +3358,44 @@ say what it actually is.
      correction is right.
 - A third test pins the absence of a chained context on the overflow wrap, closing the one argued
   equivalent the reviewer had flagged as "not strictly" equivalent.
+
+---
+
+## SR-10: both FAIL defects closed; the citation guard corrected rather than oversold
+
+**Date:** 2026-11-10. Suite **884, OK (2 skipped)**; `test_benchmark.py` at **189** tests; nine
+module-scoped mutants, all killed.
+
+- **Defect 1 closed.** `t_interval` now checks every element for finiteness and type **before any
+  arithmetic**, so the raw leaks are gone. *Orchestrator verified independently:*
+  `[1.0, None, 2.0]`, `[1.0, 'x']`, `[10**400, 1]` and `[1.0, 1j]` all raise **`ValueError`** — no
+  raw `TypeError` or `OverflowError`. `bootstrap_means` now rejects an `rng` lacking a callable
+  `.choices` with `ValueError`, so `rng=None` no longer gives `AttributeError`; verified. Removing the
+  check, **or moving it after `_mean`**, is killed — which pins the ordering that caused the defect,
+  not just the check's presence.
+- **Defect 2 closed, and the test now has a real oracle.** The class is renamed
+  `RelabelRouteFullGrid`, and a new test sweeps the full grid — codes {deleted, unmeasured, 0, 1, 2,
+  7, −1} × flags {deleted, unmeasured, 0, 1, 0.5, 2} — on **both** a fixture and a non-fixture result,
+  asserting **44 accepted / 40 rejected** (22/20 per base). Crucially it checks each cell against the
+  rule **written independently in the test**, so it is an oracle rather than a tautology that simply
+  records current behaviour. The docstring now states the exact rule: a record is accepted exactly
+  when the flag is deleted, unmeasured or `0.0`, **or** the flag is `1.0` with code `2.0`; a relabel
+  is caught only when the flag is `1.0` with a non-`2.0` code, **or** the flag is malformed
+  (measured but neither `0.0` nor `1.0`) — which corrects the earlier claim that only a `1.0` flag is
+  caught. Killed mutants: rejecting an unmeasured flag, accepting a malformed flag, accepting a `1.0`
+  flag on a non-fixture, decoding code `7` as fixture, and reverting the docstring sentence.
+- **The `sum`/`fsum` claim now states exactly what is established** and nothing more:
+  overflow-equivalent (an `inf` result is refused with `ValueError` either way, confirmed on a real
+  n=2e8 input), **value-identical in 220k random trials on Python 3.12.4 only**, **not proven
+  value-equivalent**, and **below 3.12 the built-in `sum` is uncompensated**. A text-pin covers that
+  wording so it cannot quietly broaden.
+- **The citation guard is corrected rather than oversold — the response the orchestrator's retraction
+  called for.** It now parses the function with `ast` and requires a **live `float` reference**, so
+  the comment-decoy false-green is closed. But its docstring now calls it a **tripwire, not a semantic
+  guarantee**, because two limits remain: **dead code still satisfies it**, and **moving the cast into
+  a helper still turns it red**. A second test **pins those documented limits** with four cases —
+  live use passes, `map(float, …)` passes, a comment-only decoy fails, a helper fails, dead code
+  passes. Documenting a guard's limits by test is the right pattern; it means the limits cannot be
+  forgotten and cannot silently change in either direction.
+- **One honest gap the builder reported unprompted:** the AST rewrite itself is **not covered by
+  mutation** — the decoy cases pin its behaviour, but it did not mutate the new parsing code.

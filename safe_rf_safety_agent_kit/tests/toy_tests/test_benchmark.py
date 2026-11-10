@@ -1701,14 +1701,29 @@ class SdScaleBands(unittest.TestCase):
         with self.assertRaises(ValueError):
             bm.mean([10 ** 400])
 
+    @staticmethod
+    def has_live_float_reference(source):
+        import ast, textwrap
+        return any(isinstance(n, ast.Name) and n.id == "float" and isinstance(n.ctx, ast.Load)
+                   for n in ast.walk(ast.parse(textwrap.dedent(source))))
+
     def test_the_cited_float_cast_still_exists_in_robustness(self):
-        """sample_sd's docstring says SR-11 casts to float first. Fail loudly if that cast is removed (a mere move
-        is harmless because the citation is by symbol)."""
+        """TRIPWIRE, NOT A SEMANTIC GUARANTEE. Fails if `SeedSummary.from_values` no longer references the name
+        `float` in live code (a comment cannot satisfy it). It can still be satisfied by dead code, and it turns red
+        if the cast is refactored into a helper or replaced by e.g. `map(float, ...)`-free logic, even when that is
+        harmless. When it fails, look at robustness.py and update sample_sd's docstring; do not just edit this."""
         import inspect
         from toy import robustness
-        src = inspect.getsource(robustness.SeedSummary.from_values)
-        self.assertIn("float(v)", src)
+        self.assertTrue(self.has_live_float_reference(inspect.getsource(robustness.SeedSummary.from_values)))
         self.assertNotIn("robustness.py:", " ".join(bm.sample_sd.__doc__.split()))   # no line-number citation
+
+    def test_the_tripwire_itself_behaves_as_documented(self):
+        live = "def f(v):\n    return tuple(float(x) for x in v)\n"
+        self.assertTrue(self.has_live_float_reference(live))
+        self.assertTrue(self.has_live_float_reference("def f(v):\n    return tuple(map(float, v))\n"))
+        self.assertFalse(self.has_live_float_reference("def f(v):\n    # float(v) is cast here\n    return v\n"))
+        self.assertFalse(self.has_live_float_reference("def f(v):\n    return _helper(v)\n"))        # false red (documented)
+        self.assertTrue(self.has_live_float_reference("def f(v):\n    return v\n    float(v)\n"))     # dead code satisfies it
 
     def test_empty_seed_list_fails_failure_rate_even_if_the_limit_is_one(self):
         lax = dataclasses.replace(SMALL, max_failure_rate=1.0)
@@ -1793,7 +1808,7 @@ class NonSequenceInputsAreValueErrors(unittest.TestCase):
             bm.t_interval(v, 0.95)
 
 
-class RelabelRouteEnumerationIsComplete(unittest.TestCase):
+class RelabelRouteFullGrid(unittest.TestCase):
     TS = "2025-01-02T03:04:05Z"
 
     def test_additional_accepted_routes(self):
@@ -1812,12 +1827,81 @@ class RelabelRouteEnumerationIsComplete(unittest.TestCase):
             rv = bm.verdict_from_records(recs[:-1] + [rec], SMALL)
             self.assertEqual((rv.subject_kind, rv.joint), (kind, J.JOINT_SUPPORTED), name)    # accepted: documented
 
+
+    def test_full_grid_matches_the_documented_rule(self):
+        M, U = MetricValue.measured, MetricValue.unmeasured("x")
+        codes = {"deleted": None, "unmeasured": U, "0": M(0.0), "1": M(1.0), "2": M(2.0), "7": M(7.0), "-1": M(-1.0)}
+        flags = {"deleted": None, "unmeasured": U, "0": M(0.0), "1": M(1.0), "0.5": M(0.5), "2": M(2.0)}
+        accepted = rejected = 0
+        for base_name, base in (("fixture result", oracle()),
+                                ("non-fixture result", bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ,
+                                                                       registered_digest=FZ.digest, subject="s", cfg=SMALL))):
+            recs = bm.to_experiment_records(base, study_id="f", base_seed=7, timestamp_utc=self.TS)
+            j = recs[-1]
+            clean = {k: v for k, v in j.metrics.items() if k not in ("subject_kind_code", "loss_check_exempt")}
+            for cn, cv in codes.items():
+                for fn, fv in flags.items():
+                    extra = {}
+                    if cv is not None:
+                        extra["subject_kind_code"] = cv
+                    if fv is not None:
+                        extra["loss_check_exempt"] = fv
+                    rec = dataclasses.replace(j, metrics={**clean, **extra})
+                    decoded_fixture = cn == "2"
+                    # the documented rule, written out independently of the implementation
+                    want_accept = fn in ("deleted", "unmeasured", "0") or (fn == "1" and decoded_fixture)
+                    try:
+                        bm.verdict_from_records(recs[:-1] + [rec], SMALL)
+                        got = True
+                    except ValueError:
+                        got = False
+                    self.assertEqual(got, want_accept, (base_name, "code", cn, "flag", fn))
+                    accepted += got
+                    rejected += not got
+        self.assertEqual((accepted, rejected), (44, 40))        # 22 / 20 per base result, two base results
+
+    def test_docstring_states_the_exact_rule(self):
+        doc = " ".join(bm.__doc__.split())
+        for needle in ("22 accepted, 20 rejected",
+                       "a record is accepted iff the flag is deleted, unmeasured or 0.0 (any code), or the flag is "
+                       "1.0 and the decoded code is 'fixture' (2.0)",
+                       "A relabel is caught only when the flag is 1.0 with a code other than 2.0, or when the flag is "
+                       "malformed (measured but not 0.0 or 1.0, e.g. 0.5 or 2.0)"):
+            self.assertIn(needle, doc)
+        self.assertNotIn("Only a relabel that leaves the flag at 1.0 is caught", doc)
+
     def test_docstring_claims_are_text_pinned(self):
         doc = " ".join(bm.__doc__.split())
         for needle in ("(as is deleting both fields)", "flag 0.0 with an out-of-range code",
                        "forging the code to 'fixture' (2.0) with the flag at 1.0 or deleted",
                        "code deleted with flag 0.0", "producer-asserted, not authenticated"):
             self.assertIn(needle, doc)
+
+
+class TIntervalAndBootstrapContracts(unittest.TestCase):
+    def test_sum_vs_fsum_claim_is_stated_precisely(self):
+        doc = " ".join(bm._sum_sq.__doc__.split())
+        for needle in ("overflow-equivalent", "220k random trials on Python 3.12.4 ONLY", "not proven value-equivalent",
+                       "below Python 3.12 the built-in sum is uncompensated"):
+            self.assertIn(needle, doc)
+
+    def test_t_interval_refuses_bad_elements_with_value_error(self):
+        for bad in ([1.0, None, 2.0], [1.0, "2", 3.0], [1.0, [2.0], 3.0], [1.0, 2 + 3j, 3.0], [10 ** 400, 1],
+                    [1.0, float("inf"), 2.0], [1.0, float("nan"), 2.0], [True, False], [1.0, b"x"]):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                bm.t_interval(bad, 0.95)
+
+    def test_t_interval_still_correct(self):
+        lo, hi = bm.t_interval([1, 2, 3, 4, 5], 0.95)
+        self.assertAlmostEqual(lo, 1.036757, places=5)
+
+    def test_bootstrap_rng_must_be_usable(self):
+        for bad in (None, object(), 5, "rng"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                bm.bootstrap_means([1.0, 2.0], 5, bad)
+        self.assertEqual(len(bm.bootstrap_means([1.0, 2.0], 5, make_rng(1))), 5)
+        with self.assertRaises(ValueError):
+            bm.bootstrap_ci([1.0, 2.0], 0.95, 5, None)
 
 
 class IneligibleVersusFailed(unittest.TestCase):
