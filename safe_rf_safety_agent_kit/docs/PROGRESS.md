@@ -4872,3 +4872,124 @@ Three lint evasions closed as names (`get_type_hints`, `getattr_static`, `breakp
 with the **class** behind the first — "every place a name is spelled as data rather than as code" —
 added to "Still not covered", and an explicit statement that the list "is not an enumeration of
 everything that still passes".
+
+---
+
+# Fourth attestation: SR-10 FAIL, and SR-11 REGRESSED from PASS to FAIL
+
+**Date:** 2026-11-10. The most important review of the session. 338 tests OK. **Both FAIL**, and the
+SR-11 regression is the direct consequence of a change I affirmed.
+
+## The derivation can be fooled: the same defect, a fourth time, one level up
+I replaced a hand-maintained list of **consumers** with a **static rule over spellings** — and the
+list of spellings is itself hand-maintained. Measured, 17 spellings written into the module and run
+against the rule class alone: **15 evade, 2 are caught.**
+
+```
+plain attribute / getattr(x,"value")        CAUGHT
+getattr(x, "val"+"ue") | getattr(x, _F)     EVADED
+x.__dict__["value"] | vars(x)["value"]      EVADED
+dataclasses.asdict(x)["value"]              EVADED
+operator.attrgetter / itemgetter            EVADED
+destructuring | comprehension | lambda      EVADED
+nested fn | method | functools.partial      EVADED
+x.__getattribute__("value")                 EVADED
+```
+
+**Two entries in its own anti-evasion list are dead code:** `vars()` can never take a second
+positional argument, and `__getattribute__` is spelled as an `ast.Attribute`, not a `Name`. So the
+rule's four-name guard contains two branches that cannot ever match and misses fifteen that do.
+**And no new module is needed to defeat it:** `MetricValue.to_dict()` already returns
+`{"value": ..., "reason": ...}`, so `m.to_dict()["value"]` is an evading read available from inside
+the two covered files.
+
+**12 of 27 rerouted read sites survive a reroute to a fully unchecked read with all 338 tests green,
+and all nine in `robustness.py` survive.** One escalates to a verdict inversion — `SeedScores.ok`,
+with only the primary series forged to `inf` on 3 of 40 seeds and gate inputs left honest:
+```
+HEAD (checked):   JOINT_INCONCLUSIVE | n_failed 3 | failed gates ['failure_rate'] | h1 INCONCLUSIVE
+unchecked read:   JOINT_SUPPORTED    | n_failed 0 | failed gates []               | h1 SUPPORTED
+records recompute: JOINT_SUPPORTED, reasons ()
+```
+
+**The lesson, and it is the real deliverable of this round: a static rule over syntax cannot do this
+job.** Any such rule enumerates spellings, and a spelling list is a hand-maintained list — the exact
+thing that failed in rounds 2 and 3. **The mechanism that works already exists in this repo**:
+`dashboard.py`'s **runtime recording probe**, which hooks `__getattribute__` on the object and so
+**sees the read regardless of how it is spelled.** Observing behaviour beats enumerating syntax. The
+fix is routed as a runtime probe over a real study and a real probe run, paired with behavioural
+coverage per read site, because a probe only sees what its run exercises. The module's claim that
+"a new consumer physically cannot read a stored metric … and have the suite stay green" is false and
+must go.
+
+## SR-11 regressed because of a change I affirmed
+Last round the builder extended the no-unchecked-read rule into `robustness.py` — 17 read sites, six
+`Enum.value` reads rerouted — and **flagged it as more churn than I had asked for, noting SR-11 had
+already passed.** I affirmed it on the reasoning that a rule with a module-shaped hole is the partial
+enumeration that failed three times. That reasoning was right about rules and wrong about this rule:
+the reads were never behaviourally covered, and the reroute **added a claim of coverage that is
+false.** `summarize_seeds` under an unchecked read turns `InsufficientEvidence(9 of 10)` into
+`SeedSummary(n=10)` — **directly against SR-11's "no claims based on single examples" criterion**,
+which is now guarded in that module by nothing but a rule measured not to see those reads.
+**The honest account: SR-11 was PASS twice, and my affirmation of a well-intentioned extension turned
+it into a FAIL.** The builder's instinct to flag it was better than my approval of it.
+
+## N1 — `MARGIN_MAX`, the one thing I asked to be confirmed unevadable, is evadable
+`_check_margin` tests `abs(v)` and returns `float(v)` — two independently overridable dunders —
+instead of normalising first. **No tampering primitive required:**
+```python
+class Sneaky(float):
+    __abs__   = lambda s: 1.0
+    __float__ = lambda s: -1e308
+_check_margin(Sneaky(0.0))  ->  -1e+308            # MARGIN_MAX = 1e6
+interval_verdict(pair, Sneaky(0.0), 'greater')  ->  SUPPORTED | whole interval above margin
+ComponentResult(...).verdict / HypothesisResult(...).verdict  ->  SUPPORTED
+honest control: plain float -1e308  ->  ValueError: margin magnitude ... exceeds MARGIN_MAX
+```
+The function its own docstring calls "THE ONE validity test for a margin, wherever a margin enters the
+module" returns a value seven orders outside its own bound. `run_study`/`Margins` fail closed by
+accident (`evaluate_primary` normalises first); the live exposure is the direct public verdict API.
+One line of ordering fixes it — and the sweep for **validators that inspect before normalising** is
+the actual fix, not that one site.
+
+## N2–N4, and a figure of mine in a commit message
+- **N2:** `_check_margin` raises `OverflowError`, not `ValueError`, for a large int, contradicting both
+  its own docstring and `interval_verdict`'s — while `_check_finite` already catches `OverflowError`
+  for exactly that input class. The bound's enumeration test omits a large int.
+- **N3:** the gate-12 figure in the docstring **D8 was about** still does not reproduce. Measured over
+  30 seeds: 5.14e-05, 5.18e-05, 5.28e-04, **1.78e-03**, **1.08e-03** — so the range over the two cited
+  seeds is 1.08e-3…1.78e-3 and **3.4e-3 is attained by nothing.** A valid doc-only mutant on it
+  survived.
+- **N4 — the count written to stop the count drifting introduced the fifth number.** `robustness.__doc__`
+  says four direct comparisons "and **six** paths reach them, those four plus `Scorecard`'s two
+  delegations". From the AST the reaching delegations are **four** (`_pcfg:171`,
+  `summarize_seeds:281`, `__post_init__:414`, `__post_init__:425`), so **by the docstring's own rule the
+  number is eight.** The AST test pins the 4 and *text*-pins the 6 without measuring it.
+- **My "492 cases" was never measured by anyone.** It is **2268** (108 keys × 21 values), and the test
+  only asserts `n_cases > 400`. The wrong figure is in commit `57a6f03`'s message, which I cannot
+  rewrite — so it is corrected here and routed to be pinned.
+
+## What is genuinely closed, so it is not re-litigated
+D2–D7 are all closed and killed **behaviourally**: the `nan` `ci_level` is closed *upstream at the
+reader*, which correctly makes the nan-permissive comparison dead code; forged `-inf` gate inputs no
+longer flip either gate, with the **study verdict** asserted rather than the booleans; `n_seeds` is
+closed and **the component-vs-JOINT `n` cross-check does not false-fire** (verified on balanced 40/40,
+5-missing-converged, and 8-failed shapes); the bool gate is closed; `sort_keys` is pinned **by value**
+with its own counter-proof. The three declared readers are each individually load-bearing, and
+`_enum_value`'s guard resists a `MetricValue`, a **`MetricValue` subclass** and a duck type.
+`MARGIN_MAX` does not over-refuse. `interval_verdict` raising breaks no caller. SR-11's immutability is
+fully met. The statistical fixtures were re-derived from scratch a **third** time — `_betainc` against
+three exact closed forms (45 points, max deviation 3.3e-16), df=2 and df=4 closed forms the reviewer
+derived *and verified by differentiation*, a whole `t_interval` recomputed in exact rationals, and
+`bootstrap_means` checked against an independent reimplementation of CPython's `choices` from the raw
+Mersenne-Twister stream, **bit-identical on every draw**.
+
+## The method note worth promoting above all others this session
+**The reviewer caught its own contamination and threw away the evidence.** A `nohup`-launched second
+mutant batch did not die when `pgrep -f "python3"` said it had — the real argv is
+`.../Python -I qa_r4_mut.py`, so the pattern never matched — and it ran concurrently with foreground
+mutants on the same files for minutes. It **discarded that entire log** and re-ran all ten mutants
+serially. The only disagreement between the contaminated and clean runs was one mutant flipping
+**KILLED → SURVIVED**: precisely the phantom-failure mode this journal has recorded three times.
+**Standing rule: if you background anything, verify it is dead by PID, not by pattern** — and a
+measurement taken while anything else was running is not a measurement.
