@@ -6294,3 +6294,67 @@ too: a legitimate reason that merely contains those letters loses its exemption 
 loud. The caps 8 and 4 are **policy values, not derived**; the generated test checks each declared
 cap's *boundary*, so raising a cap is caught by the hand-written tests and the docs, not by the
 generated one.
+
+## The CI path, measured on Linux at last. Four standing UNKNOWNs closed.
+
+**Date:** 2026-11-11, at `cb8812b` — i.e. **with the exemption-category registry committed minutes
+earlier**, so the registry itself is what ran. Two bare `debian_slim` containers on Modal, **no pip
+installs at all**, `Linux-4.19.0-gvisor-x86_64-with-glibc2.36`.
+
+Command — the kit's **own** runner, not a bare `unittest discover`:
+`bash scripts/run_tests.sh --expect none --twice`
+
+| | linux-runner-py3.12 | linux-runner-py3.13 |
+|---|---|---|
+| python | **3.12.10** | **3.13.3** |
+| `packages_present` (probed, not assumed) | **`[]`** | **`[]`** |
+| `case_sensitive_fs` (probed by writing one case and testing the other) | **True** | **True** |
+| ran / skipped | **1252 / 95** | **1252 / 95** |
+| `RESULT:` | **OK (ran=1252 skipped=95)** | **OK (ran=1252 skipped=95)** |
+| determinism | **`run1 == run2`, identical per-module counts and skip list** | **same** |
+| **POLICY tokens** | **NONE** | **NONE** |
+| rc | **0** | **0** |
+
+### What this closes, each of which was explicitly UNKNOWN until now
+
+1. **Both CI jobs go through `run_tests.sh`, and neither had ever been observed.** This is that path,
+   on both matrix interpreters, green. The earlier Linux run invoked `unittest`/`pytest` directly and
+   therefore attested none of the policy machinery — a limit recorded at the time and now retired.
+2. **The macOS-generated `scripts/test_baseline.txt` compared against a Linux run and PASSED.**
+   `--expect none` performs that comparison; rc=0 with **no `POLICY:BASELINE_*` token** is the result.
+   `docs/CLEAN_CLONE.md` names this comparison as what makes the figures machine-independent, and it had
+   never been witnessed. It has now.
+3. **The documented "4 on Linux" filesystem-case figure is MEASURED, and it is exactly 4:**
+   *"note: 4 skip(s) for a case-sensitive filesystem (expected on Linux); not counted toward package
+   skips."* That number has been a prediction in the docs since it was written, on a platform nobody
+   had run. The filesystem was **verified** case-sensitive by probe rather than assumed.
+4. **`--twice` determinism on Linux**, on both interpreters, with identical per-module counts *and*
+   skip lists.
+
+**The skip arithmetic reconciles exactly, which is the check that matters:** 95 Linux bare skips against
+**90** in the local macOS bare venv = **+5 = 4 filesystem-case + 1 absent optional developer tool**
+(the second note). The ruff skip does not fire locally because ruff *is* installed here. Three
+environments, three different totals, every one explained.
+
+**The exemption-category registry committed in `cb8812b` emitted no policy token on a genuinely
+case-sensitive filesystem** — including on the skip site that fix had to reword, which under the
+anchored phrase would otherwise have produced `POLICY:NONE_REASON` on both CI runners. That reword is
+now validated on the platform it was for.
+
+### Still not attested by this
+
+It is **not** an offline attestation: the container has network, and the guard line
+(*"network guard: active, python-level only"*) was captured as present, not as proof of hermeticity.
+Hermeticity remains a local property. Interpreters are **3.12.10 / 3.13.3**, not the local 3.12.4 /
+3.13.5 — five interpreters now in play, each figure carrying its own.
+
+### My reading error, recorded
+
+The job was reported to me as **failed**. It had not failed: both functions returned `rc=0`. **My
+parser** broke, because Modal interleaves an infrastructure line
+(`Runner terminated (SIGTERM), exit code: 143.`) between the marker I print and the JSON, so
+`json.loads` choked on line 1 — and the SIGTERM text made it look like a container had been killed
+mid-run. It was normal teardown after both functions returned. Had I reported the first notification I
+would have recorded a Linux failure that did not happen. **Standing rule, which is the same one this
+project keeps relearning: read the measurement, not the wrapper's exit status** — and a harness message
+is not a result.
