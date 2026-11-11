@@ -56,12 +56,13 @@
 #   the phrase carries a name, every OCCURRENCE of a phrase checked and not only the anchored one, ONE claim per
 #   reason, and a per-category cap. A row declared badly is POLICY:INTERNAL; a category claimed badly is
 #   POLICY:<TOKEN>_UNDECLARED or POLICY:EXEMPT_AMBIGUOUS -- loud in EVERY mode, never a silent exemption.
-#   EVERY RUN PRINTS THE REGISTRY IT JUDGED WITH, one `exemption registry row:` JSON line per row, rendered
-#   from the value the policy really reads. tests/toy_tests/test_scripts.py requires that listing to EQUAL the
-#   `EXEMPT_CATEGORIES` literal it parses out of this file, so a row that arrives by any other route -- a
-#   rebind, `globals()[...]`, `setattr` -- is a red suite rather than a working category with no token. The
-#   static "assigned exactly once" check cannot see those routes, and it used to claim the runtime half covered
-#   them: it does not, because the runtime half rejects a MALFORMED row and such a row can be well formed.
+#   EVERY RUN PRINTS THE REGISTRY IT JUDGED WITH, one `exemption registry row:` JSON line per row and EVERY
+#   column of it, rendered from a snapshot of the value the policy reads, taken BEFORE the listing.
+#   tests/toy_tests/test_scripts.py requires that listing to EQUAL the `EXEMPT_CATEGORIES` literal it parses out
+#   of this file, and this script re-compares the registry against the snapshot after the caps and again after
+#   the registry's last consumer. NO REACH IS CLAIMED HERE IN PROSE: the sentence that claimed one was wrong in
+#   each of the last two rounds, by a whole class and then by one line, so the boundary is enumerated by a test
+#   that drives every insertion position around the attestation instead. See the long note on it below.
 #   THE RULES THAT BOUND THEM, and no one of them is a bound by itself:
 #     (1) A REASON THAT NAMES ANY PACKAGE THIS KIT MEASURES GETS NO EXEMPTION -- OUTSIDE THE DECLARED NAME THE
 #         PHRASE ITSELF CARRIES, which is (1a) below -- as a WORD (`PKG`: torch, pyyaml)
@@ -94,7 +95,7 @@
 #         `torchfix` would be exempt, bounded by the cap (4), by the baseline, and by the test-time equality
 #         that requires a real skip site in tests/toy_tests/ for every name on the allowlist.
 #     (2) A name the phrase carries must be DECLARED, on that category's own allowlist.
-#   WHAT IS NOT TRUE, and was asserted here for a round: that rule (1) alone makes an exemption "sound ... only
+#   WHAT IS NOT TRUE, and was asserted here for a round: that rule (1) alone makes an exemption sound "only
 #   while it cannot be spent on hiding a package skip". It cannot, on its own: it is a spelling test, so EVERY
 #   reason that names no package collects the exemption, and before rule (2) existed that included `torchrun`
 #   (PyTorch's own console script), `libtorch` (its C++ distribution), `torchvision`, `torchaudio`,
@@ -564,8 +565,34 @@ def fold_note(s):
     """A note as a reader sees it: lowercase words, punctuation and case discarded. Used ONLY to decide whether
     two declared notes are distinguishable -- see the near-duplicate test in the declaration loop below."""
     return " ".join(re.sub(r"[^0-9a-z]+", " ", str(s).lower()).split())
+def one_word_apart(a, b):
+    """True when two folded word lists are within ONE word edit of each other -- one substitution, one
+    insertion or one deletion, anywhere.
+
+    THE THRESHOLD IS FORCED BY A MEASUREMENT, not chosen. It replaced a four-word-PREFIX test that refused an
+    honest second category: `"for an absent optional runtime library"` declared beside the live `"for an absent
+    optional developer tool"` was POLICY:INTERNAL in all three modes, with the run stopping before a single skip
+    was judged (round 10's F2). Those two notes differ exactly where English notes differ -- in the last two
+    words -- and this project's own naming convention (`for an absent optional ...`) makes a four-word collision
+    the LIKELY case rather than the pathological one. At a threshold of ONE edit that pair is accepted (distance
+    2) while every variant the rule exists for is still refused: the m7b note, one word longer, is caught by the
+    containment clause; the same note shouted or repunctuated folds EQUAL; and a one-word substitution
+    ("(expected on Linux)" -> "(expected on zed)") is distance 1. A threshold of 2 would re-refuse the honest
+    pair, which is how the figure is pinned rather than argued.
+    """
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(1 for x, y in zip(a, b) if x != y) <= 1
+    lo, hi = (a, b) if len(a) < len(b) else (b, a)
+    i = 0
+    while i < len(lo) and lo[i] == hi[i]:
+        i += 1
+    return lo[i:] == hi[i + 1:]
 CATS = []
-for _tok, _pat, _cap, _where, _allow, _note in EXEMPT_CATEGORIES:
+for _i, (_tok, _pat, _cap, _where, _allow, _note) in enumerate(EXEMPT_CATEGORIES):
     _why = []
     if not isinstance(_tok, str) or re.fullmatch(r"[A-Z][A-Z0-9_]*", _tok) is None:
         _why.append(f"its token {_tok!r} is not a non-blank UPPERCASE identifier, and POLICY:<TOKEN>_CAP and "
@@ -580,32 +607,73 @@ for _tok, _pat, _cap, _where, _allow, _note in EXEMPT_CATEGORIES:
     # tells a LINUX reader to expect, under a token nobody declared. The note is the ONLY thing a reader of the
     # output sees, so "distinct" has to mean distinct TO A READER, and these three are what that can be made to
     # mean mechanically: after folding to lowercase words, no note may EQUAL another, CONTAIN another (which is
-    # exactly what the one-word tail did, in both directions), or OPEN ON THE SAME FOUR WORDS. Measured on the
-    # live declaration: the two real notes fold to "for a case sensitive filesystem expected on linux" and "for
-    # an absent optional developer tool", which share one opening word, so none of the three fires.
-    # RESIDUE, measured rather than argued: a genuine paraphrase that contains nothing and shares no opening
-    # ("because this filesystem distinguishes case") is still accepted. What bounds it is that a row can now
-    # only reach the judging through the literal -- the listing printed below is compared, row for row, against
-    # the parsed `EXEMPT_CATEGORIES` literal by tests/toy_tests/test_scripts.py.
+    # exactly what the one-word tail did, in both directions), or be WITHIN ONE WORD EDIT of another.
+    # THE THIRD CLAUSE USED TO BE A FOUR-WORD PREFIX TEST, AND IT REFUSED AN HONEST DECLARATION -- round 10's
+    # F2, round 3's shape in the note rule. See `one_word_apart` above for the pair that was refused and for
+    # why the threshold is one edit and not two. Measured on the live declaration: the two real notes fold to
+    # "for a case sensitive filesystem expected on linux" and "for an absent optional developer tool", which
+    # are 8 and 6 words and share one opening word, so none of the three clauses fires.
+    # THE TWO RESIDUES OF THIS RULE, IN BOTH DIRECTIONS. The deny direction used to be disclosed NOWHERE:
+    #   * PERMIT: a genuine paraphrase that contains nothing of another note and is more than one word edit away
+    #     ("because this filesystem distinguishes case") is still accepted, and so is a two-word rewording of a
+    #     documented note ("(typical on Linux boxes)" against "(expected on Linux)"). What bounds that is that a
+    #     row can only reach the judging through the literal -- the listing printed below carries EVERY column
+    #     of every row this run judged with and is compared, row for row, against the parsed `EXEMPT_CATEGORIES`
+    #     literal by tests/toy_tests/test_scripts.py -- plus the caps and the baseline.
+    #   * DENY, AND IT IS A REAL COST TO AN HONEST AUTHOR: two notes must differ by MORE THAN ONE WORD EDIT and
+    #     neither may contain the other, so a second category cannot be distinguished from an existing one by a
+    #     single word. `"for an absent optional developer tool"` beside `"for an absent optional developer
+    #     tools"` is refused, and so is any note that is another note plus or minus one word -- which is
+    #     fail-closed on purpose (the note is all a reader sees) but means an honest author must reword rather
+    #     than refine. The run says so, names BOTH rows, and stops before judging any skip.
     _nf = fold_note(_note)
-    for _prev in [c[6] for c in CATS]:
-        _pf = fold_note(_prev)
+    for _j, (_ptok, _pnote) in enumerate([(c[0], c[6]) for c in CATS]):
+        _pf = fold_note(_pnote)
         if _nf == _pf:
-            _how = "is already declared by an earlier row"
+            _how = "are the SAME note once case and punctuation are discarded"
         elif _nf and _pf and (_nf in _pf or _pf in _nf):
-            _how = "differs from an earlier row's note only by a longer tail"
-        elif len(_nf.split()) >= 4 and _nf.split()[:4] == _pf.split()[:4]:
-            _how = "opens on the same four words as an earlier row's note"
+            _how = "differ only by a longer tail, so one is the other plus words a reader skims past"
+        elif one_word_apart(_nf.split(), _pf.split()):
+            _how = "are within ONE word edit of each other"
         else:
             _how = None
         if _how:
-            _why.append(f"its note {_note!r} {_how} ({_prev!r}): the note is the ONLY thing a reader of the "
-                        "output sees, and a note a reader cannot tell from another prints one category's "
-                        "parked skips under another category's name")
+            # NAMED AS A PAIR, AND NEITHER ROW IS BLAMED -- round 10's F2, second half. This used to be appended
+            # to the `_why` list of the row being declared, so the failure read "exemption category TOOL is not
+            # declared as the policy requires: its note ... (an earlier row's note ...)". Whenever the new row is
+            # declared FIRST -- which is what a diff that adds a row at the top of the literal does -- that
+            # blames the LIVE, CORRECT row and points the author at the wrong line. By the time this check runs
+            # both rows are in the literal and it cannot know which one is new, so it names both, with their
+            # positions, and says which one to change.
+            bad.append(f"POLICY:INTERNAL exemption rows {_j + 1} ({_ptok}) and {_i + 1} ({_tok}) declare notes "
+                       f"a reader cannot tell apart: {_pnote!r} and {_note!r} {_how}. The note is the ONLY "
+                       f"thing a reader of the output sees, and a note a reader cannot tell from another prints "
+                       f"one category's parked skips under another category's name -- which is how a declared "
+                       f"row once printed its parked skips as the figure docs/CLEAN_CLONE.md tells a Linux "
+                       f"reader to expect. REWORD THE NOTE OF WHICHEVER OF THESE TWO ROWS YOU ARE ADDING, by "
+                       f"more than one word: this check names both rows and blames neither on purpose, because "
+                       f"it cannot tell which is new")
     if not str(_note).strip():
         _why.append("its note is blank, so the run would report its skips as nothing at all")
+    # THE REASON THAT USED TO BE GIVEN FOR THIS GUARD WAS FALSE OF THIS CODE. It read "its phrase is not
+    # ANCHORED (no leading \A), so prose can carry the claim". Prose cannot: `claim()` applies the phrase with
+    # the one `.match` call on the anchored phrase, which matches at position 0 whether or not the pattern
+    # begins with `\A`, and the loose pattern in column 3 is built by STRIPPING `\A`, so the two spellings are
+    # behaviourally identical.
+    # MEASURED both ways end to end, with the `\A` removed from the TOOL phrase AND this guard deleted: the live
+    # reason is exempt, the same reason with leading prose is POLICY:NONE_REASON, and the same reason with a
+    # package tail is POLICY:NONE_REASON -- the same three verdicts as the anchored spelling, case for case.
+    # WHAT THE GUARD IS REALLY FOR is the redundancy the header above states: the anchor is written TWICE, here
+    # and at the one `.match` call site, and test_every_exemption_category_is_declared_with_the_same_guards
+    # pins the PAIR rather than either term -- if the call site ever became `.search`, the `\A` would still
+    # anchor the claim. It is also what puts the anchor in the DECLARATION as data, which is what the "begins
+    # with" sentence docs/CLEAN_CLONE.md is required to carry about every category is derived from. Sound
+    # hygiene, kept; the reason for it is not the reason that was given.
     if not _pat.startswith("\\A"):
-        _why.append("its phrase is not ANCHORED (no leading \\A), so prose can carry the claim")
+        _why.append("its phrase does not begin with \\A. `.match` at the one call site is what anchors the live "
+                    "claim; the \\A is the deliberately REDUNDANT second term, so that neither spelling alone "
+                    "is load-bearing and a call site changed to `.search` would still be anchored -- and it is "
+                    "what states the anchor as data for the 'begins with' sentence docs/CLEAN_CLONE.md carries")
     if not _pat.endswith("\\b"):
         _why.append("its phrase does not end on a WORD BOUNDARY (no trailing \\b), so a longer word can carry it")
     _c = re.compile(_pat, re.I)
@@ -734,18 +802,75 @@ def base_excl(reason):
 # case-sensitive filesystem (expected on Linux runners)" -- the figure docs/CLEAN_CLONE.md tells a Linux reader
 # to expect -- while the whole script suite stayed green, because every check in that file is built from the
 # LITERAL and none of them can see past it.
-# So the run ATTESTS its registry: one JSON line per row, rendered from `CATS`, which is the value `claim()`
-# reads two lines below. test_the_registry_the_run_really_uses_equals_the_declared_literal drives this script
-# and requires the listing to equal the parsed literal row for row and column for column, so a row that arrives
-# by ANY route -- the literal, a rebind, globals(), setattr, an import -- is a RED SUITE instead of a silent
-# category. `_REGISTRY_USED` closes the one gap this placement leaves (a rebind made BETWEEN this listing and
-# the cap loop) as POLICY:INTERNAL.
-print(f"exemption registry: {len(CATS)} row(s), as this run judged them")
-for _tok, _a, _l, _cap, _w, _al, _note in CATS:
-    print("exemption registry row: " + json.dumps({"token": _tok, "phrase": _a.pattern, "cap": _cap,
-                                                   "where": _w, "allow": sorted(_al), "note": _note},
-                                                  sort_keys=True))
-_REGISTRY_USED = list(CATS)
+# So the run ATTESTS its registry: one JSON line per row, rendered from the `CATS` value `claim()` reads.
+# test_the_registry_the_run_really_uses_equals_the_declared_literal drives this script and requires the listing
+# to equal the parsed literal row for row and column for column.
+# THE REACH OF THAT ATTESTATION IS NOT ASSERTED IN PROSE HERE, BECAUSE THE PROSE HAS BEEN WRONG TWICE AND THE
+# MECHANISM WAS REAL BOTH TIMES. Round 8 wrote that the runtime row checks covered a bad row "however it
+# arrives" -- false by a whole class, since they reject only a MALFORMED row. Round 9 wrote that "a row that
+# arrives by ANY route ... is a RED SUITE" and that `_REGISTRY_USED` closed "the one gap this placement leaves"
+# -- false by one line. The listing used to be printed from `CATS` BEFORE the snapshot was taken, so a
+# `globals()["CATS"] = CATS + [...]` line BETWEEN the two was invisible to both halves: the listing came from
+# the pre-mutation value and the snapshot from the post-mutation one, so the end-of-block compare was satisfied.
+# MEASURED on the round-9 script, one such line with an unanchored phrase, no allowlist and the filesystem-case
+# note verbatim: `exemption registry: 2 row(s)` with the listing BYTE-IDENTICAL to the declared literal, then
+# `note: 4 skip(s) for a case-sensitive filesystem (expected on Linux)`, `RESULT: OK`, rc=0, NO POLICY token, in
+# `--expect none` -- the mode both CI jobs run; the base control on the same suite is 4 x POLICY:NONE_REASON,
+# rc=1. Round 7's m7b and round 8's F1 were both fully restored by it, because a rebind bypasses the declaration
+# loop entirely and so no declaration guard applies.
+# WHAT IS DONE ABOUT IT, instead of a wider sentence:
+#   * THE SNAPSHOT IS TAKEN FIRST and the listing is RENDERED FROM THE SNAPSHOT, so there is no value the
+#     listing can come from that the end-of-block compare does not re-check;
+#   * the compare runs TWICE -- once after the caps, and once after the LAST consumer of the registry (the
+#     baseline branches, which reach it through `base_excl`), so no position in this program is after the last
+#     compare;
+#   * the listing carries EVERY column of a `CATS` row, THE LOOSE PATTERN INCLUDED. It used to omit column 3,
+#     and an attested listing could equal the literal while that column was neutered. Measured on the round-9
+#     script, column 3 replaced by a never-matching pattern: the listing stayed byte-identical while a reason
+#     carrying a SECOND category's phrase in its tail went from POLICY:EXEMPT_AMBIGUOUS to RESULT: OK and
+#     exempt, and one carrying an UNDECLARED tool name in its tail from POLICY:TOOL_UNDECLARED to RESULT: OK
+#     and exempt (a package-naming tail stayed denied: PKG_EXEMPT reads the whole reason). Two behavioural
+#     tests do kill that mutant -- but not the attestation, and the attestation is what the listing is for;
+#   * and the column COUNT is checked against the row, so a new `CATS` column cannot be added and left out of
+#     the attestation silently.
+# THE POSITIONS ARE NOT DESCRIBED HERE AS A CLASS. test_every_insertion_position_around_the_registry_
+# attestation_is_driven inserts a working, well-formed row at each position around this block -- before the
+# snapshot, between the snapshot and the listing, inside the listing loop, after the listing, after the cap
+# loop, after the first compare and after the last consumer -- and asserts the outcome at each; the
+# enumeration is the claim.
+_REGISTRY_COLS = ("token", "phrase", "loose", "cap", "where", "allow", "note")
+def registry_rows(cats):
+    """The attestation lines for a registry value, or None if a row is not shaped like a `CATS` row.
+
+    EVERY column, because the listing is what a test compares against the declaration and a column it omits is
+    a column a mutant may neuter while the listing stays identical (that was column 3, the loose pattern).
+    """
+    out = []
+    for _r in cats:
+        if not isinstance(_r, tuple) or len(_r) != len(_REGISTRY_COLS):
+            return None
+        _tok, _a, _l, _cap, _w, _al, _note = _r
+        try:
+            out.append(json.dumps({"token": _tok, "phrase": _a.pattern, "loose": _l.pattern, "cap": _cap,
+                                   "where": _w, "allow": sorted(_al), "note": _note}, sort_keys=True))
+        except (AttributeError, TypeError):
+            return None
+    return out
+_REGISTRY_USED = list(CATS)            # THE SNAPSHOT IS FIRST; the listing below is rendered FROM it
+_LISTED = registry_rows(_REGISTRY_USED)
+if _LISTED is None:
+    print(f"FAIL: POLICY:INTERNAL a CATS row is not the {len(_REGISTRY_COLS)}-column tuple "
+          f"{_REGISTRY_COLS} the registry attestation renders, so this run cannot attest the registry it would "
+          f"judge with; add the new column to registry_rows deliberately")
+    print("the exemption registry is not usable, so NO skip was judged in this run: fix the declaration above")
+    sys.exit(1)
+print(f"exemption registry: {len(_LISTED)} row(s), as this run judged them")
+for _row in _LISTED:
+    print("exemption registry row: " + _row)
+def registry_drifted():
+    """True when `CATS` is no longer the value the listing above was rendered from -- by identity OR by content,
+    so a rebuilt-but-equal registry and a rebound one are both caught."""
+    return list(CATS) != _REGISTRY_USED or registry_rows(CATS) != _LISTED
 claimed = {}
 for e in skips:
     _tok, _fails = claim(e["reason"])
@@ -760,7 +885,7 @@ for _tok, _a, _l, _cap, _w, _al, _note in CATS:
                    f"are expected -- a growing count means tests are being parked in an environment category")
     if _got:
         print(f"note: {len(_got)} skip(s) {_note}; not counted toward package skips")
-if list(CATS) != _REGISTRY_USED:
+if registry_drifted():
     bad.append("POLICY:INTERNAL the exemption registry changed between the listing printed above and the "
                "judging of this run's skips, so the listing a test compares against the declaration is not "
                "the registry these skips were judged by")
@@ -839,6 +964,15 @@ elif base != "none":
 with open(os.environ["CANON"], "w", encoding="utf-8") as f:
     for k in sorted(ran_mod): f.write(f"ran {k} {ran_mod[k]}\n")
     for e in sorted(skips, key=lambda e: (e["id"], e["reason"])): f.write(f"skip {e['id']} :: {e['reason']}\n")
+# THE SECOND COMPARE, and it is here rather than only after the caps so that NO POSITION in this program sits
+# after the last one. The baseline branches above are the registry's last consumers -- they reach it through
+# `base_excl` -> `exempt_category` -> `claim` -- so a rebind made after the cap compare and before them still
+# changes what this run did, and the cap compare has already run by then.
+if registry_drifted():
+    bad.append("POLICY:INTERNAL the exemption registry changed after the listing printed above and while this "
+               "run was still consulting it (the per-module baseline's skip column is computed from it through "
+               "base_excl), so the listing a test compares against the declaration is not the registry this "
+               "run used throughout")
 for b in bad: print("FAIL:", b)
 print(f"{ran_log} {len(skips)}", file=open(os.environ["CANON"] + ".counts", "w"))
 sys.exit(1 if bad else 0)

@@ -5,12 +5,15 @@
 # setup-python fetches a Python build unless the runner image already carries that version. This comment used
 # to open "Nothing in this workflow reaches a remote host except the pip-install step of the optional-deps
 # job", and that was FALSE for core-no-deps as well -- independently of hermeticity, and it is the same claim
-# README.md retracted in SR-15's eighth round. The true statement is narrower and is about the SUITE rather
-# than the workflow: NO STEP THAT RUNS scripts/lint.sh, scripts/run_tests.sh OR scripts/demo.py reaches a
-# remote host, and the only step that installs from a package index is the pip-install step of the
-# optional-deps job (PyPI plus download.pytorch.org). Even that is a claim about the addresses these steps ASK
-# FOR, which the suite tests; no job has ever run network-denied, so hermeticity is UNATTESTED here exactly as
-# it is in docs/CLEAN_CLONE.md.
+# README.md retracted in SR-15's eighth round. The true statement is narrower in two ways at once -- it is
+# about the SUITE rather than the workflow, and about the ADDRESS A STEP ASKS FOR rather than about arrival:
+# NO STEP THAT RUNS scripts/lint.sh, scripts/run_tests.sh OR scripts/demo.py ASKS FOR A NON-LOOPBACK ADDRESS,
+# and the only step that asks a package index for anything is the pip-install step of the optional-deps job
+# (PyPI plus download.pytorch.org). README.md retracted the wording "reaches a remote host", and the clause
+# above used to be worded with it, rescued only by the sentence that followed: a reader who stopped at the
+# colon got exactly the claim README.md withdrew, and until SR-15's tenth round no needle covered that
+# rephrasing. What the suite tests is the address asked for; no job has ever run network-denied,
+# so hermeticity is UNATTESTED here exactly as it is in docs/CLEAN_CLONE.md.
 # Every test step runs the suite through scripts/run_tests.sh, whose socket guard makes the
 # patched socket entry points raise (the patched and deliberately-unpatched names are tuples in that script).
 # But the suite does attempt connections, and this comment used to deny it: the guard's own negative controls

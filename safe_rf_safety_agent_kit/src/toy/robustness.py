@@ -468,8 +468,30 @@ def summarize_seeds(per_seed: Sequence[MetricValue], min_seeds: int = DEFAULT_MI
     # SeedSummary(n=3) with a configured minimum of 10. See `ProbeConfig.__post_init__`.
     min_seeds = ProbeConfig(min_seeds).min_seeds
     per_seed = tuple(per_seed)
-    if not all(isinstance(m, MetricValue) for m in per_seed):
-        raise ValueError("per_seed must be MetricValues (absence must be explicit, never a number)")
+    # `type(m) is not MetricValue`, NOT `isinstance`: round 6 closed exactly this inconsistency in
+    # `Scorecard.__post_init__` (honest limit (3) of its docstring) and left this sibling consumer --
+    # which the parameter boundary's own `_WHY_CARRIER_SEQ` claims ALSO refuses anything that is not
+    # exactly a `MetricValue` -- on `isinstance`. The round-11 reason-coverage probe, which exercises a
+    # declared reason on EVERY parameter it covers instead of on a sample of them, falsified that claim
+    # here. MEASURED on 3.12.4 and 3.13.5, through this public function and `require_summary`, with no
+    # `object.__setattr__` and no forged field: a `MetricValue` SUBCLASS whose `__getattribute__` answers
+    # `value` with 1.0, constructed as `Sub(None, None)` --
+    #     honest `MetricValue.unmeasured(...)` x12 -> InsufficientEvidence(0 measured of 12; minimum 10)
+    #     the subclass            x12 -> SeedSummary(n=12, mean=1.0, sd=0.0), and `require_summary`
+    #                                    hands out that scalar
+    # STATED AT ITS REAL WEIGHT, because the first wording of this comment overstated it and the
+    # measurement is what corrected it: this is a REASON CORRECTION and a sibling-consistency fix, NOT a
+    # status flip. `__post_init__` reads the lying `value` and then stores it, so after construction the
+    # object honestly holds 1.0 -- a caller who can build `Sub(None, None)` can write
+    # `MetricValue.measured(1.0)` and get the identical object, so the subclass grants them nothing they
+    # lack. The two-faced variant that WOULD matter (a subclass whose `to_dict` serialises `unmeasured`
+    # while `_metric_read` answers 1.0) was measured too: it produces such a summary, and
+    # `build_scorecard` refuses it one level down, so no card can publish the disagreement. What was
+    # actually wrong is that three sibling checks in one module disagreed about the same rule while a
+    # declared reason asserted they did not.
+    if not all(type(m) is MetricValue for m in per_seed):
+        raise ValueError("per_seed must be MetricValues (absence must be explicit, never a number); "
+                         "subclasses are refused, as on a Scorecard")
     measured = [v for v in (_metric_read(m) for m in per_seed) if v is not None]
     if len(measured) < min_seeds:
         return InsufficientEvidence(
@@ -712,7 +734,12 @@ class Scorecard:
         measured = tuple(v for v in (_metric_read(m) for m in per_seed) if v is not None)
         if self.summary is not None:
             _recheck_summary(self.summary)
-            if self.status is ProbeStatus.INSUFFICIENT_EVIDENCE:
+            # `==` rather than `is` on all three status comparisons in this module, even though the
+            # `isinstance` gate 35 lines up already makes `self.status` a real member here: the identity
+            # spelling is the shape that made `ShiftSpec.kind` a finding, and an operator rule that holds
+            # everywhere can be pinned by a test, while "correct at this site because the field was
+            # gated" has to be re-argued per site and was wrong twice. See `ShiftSpec.__post_init__`.
+            if self.status == ProbeStatus.INSUFFICIENT_EVIDENCE:
                 raise ValueError("a summarized scorecard cannot have INSUFFICIENT_EVIDENCE status")
             if self.summary.values != measured:
                 raise ValueError("summary does not match the measured per-seed values")
@@ -720,7 +747,7 @@ class Scorecard:
                 raise ValueError("summary present with fewer measured seeds than min_seeds")
         else:
             _recheck_insufficient(self.insufficient)
-            if self.status is not ProbeStatus.INSUFFICIENT_EVIDENCE:
+            if self.status != ProbeStatus.INSUFFICIENT_EVIDENCE:    # `!=`, not `is not`: see above
                 raise ValueError("an insufficient scorecard must have INSUFFICIENT_EVIDENCE status")
             if self.insufficient.n_measured != len(measured) or self.insufficient.n_required != self.min_seeds:
                 raise ValueError("insufficient-evidence counts do not match per-seed values / min_seeds")
@@ -785,6 +812,16 @@ def build_scorecard(*, probe_id: str, probe_kind: str, seeds: Sequence[int], per
     survive in a module whose own threat model includes reaching through read-only wrappers."""
     if details_if_summarized is None:
         details_if_summarized = {}
+    # A BARE STRING IS A SEQUENCE OF CHARACTERS, and `tuple(non_claims)` would shred it. MEASURED:
+    # `non_claims="magnitude"` produced a card carrying nine single-character non-claims
+    # ('m', 'a', ...), each of which passes `Scorecard.__post_init__`'s nonblank-string check, so the
+    # card's `does_not_establish` read 15 entries of which 9 said nothing. Unreachable for realistic
+    # text -- any sentence contains a blank, and a blank "non-claim" is already refused -- so this is a
+    # legibility defect rather than a route to a forged verdict; it is closed rather than declared
+    # because the refusal is one line and the shredded card is serialised to a reader.
+    if isinstance(non_claims, (str, bytes)):
+        raise ValueError("non_claims must be a sequence of strings, not a single string "
+                         "(a bare string would be shredded into one non-claim per character)")
     seeds = _check_seeds(seeds)
     per_seed = tuple(per_seed)
     result = summarize_seeds(per_seed, cfg.min_seeds)
@@ -1027,9 +1064,26 @@ def abs_bias_fsum(pred, target, mask) -> float:
 
 
 def exact_masked_mse(pred, target, mask) -> Fraction:
-    """Ground truth: exact rational MSE of the given float inputs (no rounding at all)."""
+    """Ground truth: exact rational MSE of the given float inputs (no rounding at all).
+
+    THE MASK IS VALIDATED LIKE EVERY SIBLING MEASURE'S, and the round-11 reason-coverage probe is why.
+    `_WHY_MASK` -- the reason declared for this parameter in `_PARAMETER_NO_SCALAR`, shared with the five
+    other measures -- says a non-bool element is "refused loudly by `toy.stability.check_mask`", and the
+    test policing those reasons exercised 3 of the 6 measures it covers, none of them this one. MEASURED
+    before the fix: an `int` mask was ACCEPTED here where every sibling raises `MaskTypeError`, and a
+    SHORT mask silently measured 2 of 16 rows (`zip` stops at the shortest). The module's own probe
+    already said so -- `probe_missing_inputs(exact_masked_mse)` -> SILENT_DEFAULT_DEFECT,
+    `n_silent_value_total = 48`, `mask_truthy_not_bool` silent 12/12.
+    WHAT IS DELIBERATELY STILL NOT VALIDATED: the matrices. This is the exact oracle the float measures
+    are compared against, so it must accept a `Fraction` / `Decimal` element that
+    `stability.check_finite_matrix` refuses (pinned by
+    `test_a_rational_where_a_float_is_annotated_is_refused_and_the_exact_helpers_are_not`), and it
+    therefore still answers some malformed-matrix cases with a value: after this fix
+    `probe_missing_inputs(exact_masked_mse)` remains SILENT_DEFAULT_DEFECT on the matrix cases, which is
+    the honest report for a helper that validates its mask and not its data."""
+    M = stability.check_mask(mask, expected_len=len(pred))
     num, cnt = Fraction(0), 0
-    for pr, tr, use in zip(pred, target, mask):
+    for pr, tr, use in zip(pred, target, M):
         if use:
             for a, b in zip(pr, tr):
                 d = Fraction(a) - Fraction(b)
@@ -1098,6 +1152,32 @@ class ShiftSpec:
 
     def __post_init__(self) -> None:
         _normalise_fields(self)
+        # THE GATE `Scorecard.__post_init__` ALREADY GIVES `status`, and the round-11 finding that it was
+        # missing here. `kind` is not data: it SELECTS THE TIER probe_shift judges against (exact /
+        # tolerance / bounded) and it is serialised into the card as `details["declared_kind"]`. The two
+        # comparisons that read it used `is`, and `ShiftKind` is a `str` subclass by construction, so a
+        # PLAIN STRING of the right spelling -- which no isinstance and no normaliser refused, because it
+        # stores exactly what it says -- was never equal by identity to the member and silently took the
+        # TOLERANCE branch. MEASURED on 3.12.4 and 3.13.5 through this factory's public caller
+        # `shift_reorder_rows("INVARIANCE_EXACT", 1e9)`, with the module's own permutation-violating
+        # measure over 12 seeds (and identically via `standard_shifts("INVARIANCE_EXACT", 1e9)[0]`):
+        #     kind=ShiftKind.INVARIANCE_EXACT -> INVARIANCE_DEFECT, n_violations=12, max_abs_dev=1.4679e-02
+        #     kind="INVARIANCE_EXACT"         -> INVARIANCE_HOLDS,  n_violations=0,  max_abs_dev=1.4679e-02
+        # i.e. the SAME measured deviations, `max_abs_dev` serialised beside `n_violations = 0`, and
+        # `json.dumps(details["declared_kind"])` BYTE-IDENTICAL between the two cards, so neither a reader
+        # nor a downstream `==` could tell the verdict had been taken on another tier.
+        # WHY A GATE AND NOT ONLY `==` (both were available, and the comparisons below are now `==` too):
+        # a gate refuses early, inside the `(ValueError, TypeError, ArithmeticError)` family every probe
+        # declares, and it is the only one of the two that keeps a card from CARRYING an unvalidated
+        # spelling -- under `==` alone a near-miss (`"INVARIANCE_EXCT"`) is still accepted, matches
+        # neither tier, is judged against `bound` and is then serialised as the declared kind. `==` is
+        # kept as the independent second line so that neither this gate nor that operator is alone
+        # load-bearing; the operator rule is pinned module-wide by
+        # `test_robustness.NoIdentityComparisonDecidesAStatusOrATier`.
+        if not isinstance(self.kind, ShiftKind):
+            raise ValueError(f"kind must be a ShiftKind, got {type(self.kind).__name__} "
+                             "(a plain string of the right spelling is refused: it selects the tier "
+                             "this spec is judged against and is serialised as declared_kind)")
 
 
 def _masked_stats(fx: MeasureFixture) -> tuple:
@@ -1267,7 +1347,10 @@ def probe_shift(measure: Measure, spec: ShiftSpec, seeds: Sequence[int], cfg: Op
     `cfg=None` means a freshly constructed `ProbeConfig()`; see `_pcfg`."""
     cfg = _pcfg(cfg)
     seeds = _check_seeds(seeds)
-    exact_kind = spec.kind is ShiftKind.INVARIANCE_EXACT
+    # `==`, NOT `is`: see `ShiftSpec.__post_init__` for the measurement. `ShiftKind` is a `str` subclass,
+    # so identity here answered False for a plain string that this module could not distinguish from the
+    # member by value, and the exact tier silently became the tolerance tier.
+    exact_kind = spec.kind == ShiftKind.INVARIANCE_EXACT
     rows = []   # (seed, dev, expected, bound) for measured seeds
     per_seed = []
     for s in seeds:
@@ -1307,7 +1390,7 @@ def probe_shift(measure: Measure, spec: ShiftSpec, seeds: Sequence[int], cfg: Op
         except (ValueError, TypeError, ArithmeticError) as e:
             per_seed.append(MetricValue.unmeasured(f"{type(e).__name__}: {e}"))
     viol = [r for r in rows if r[1] > r[3]]
-    bounded = spec.kind is ShiftKind.SENSITIVITY_BOUNDED
+    bounded = spec.kind == ShiftKind.SENSITIVITY_BOUNDED   # `==`, not `is`: see `ShiftSpec.__post_init__`
     ok_status = ProbeStatus.SENSITIVITY_WITHIN_BOUND if bounded else ProbeStatus.INVARIANCE_HOLDS
     bad_status = ProbeStatus.SENSITIVITY_EXCEEDS_BOUND if bounded else ProbeStatus.INVARIANCE_DEFECT
     ratios = [r[1] / r[3] for r in rows if r[3] > 0]
@@ -1410,6 +1493,24 @@ def missing_input_cases(fx: MeasureFixture) -> dict:
 
 
 def _run_cases(measure: Measure, fx: MeasureFixture) -> dict:
+    # REFUSE A MEASURE THAT CANNOT BE CALLED, before any case runs. Every case below treats an exception
+    # as the GOOD outcome ("the measure rejected an input it must reject"), so for this probe -- alone
+    # among the five -- a `measure` that is not callable at all makes every case pass: the `TypeError`
+    # from `measure(*args)` is caught by the same handler. MEASURED round 11:
+    #     probe_missing_inputs(42, SEEDS, CFG) -> MISSING_INPUT_HANDLED, labels [NOT_VALIDATED,
+    #         TOY_RESULT], summary n=12 mean=0.0, n_silent_value_total=0, 15 of 15 cases "RAISED
+    #         TypeError" -- the same headline as an honest run of `mse_fsum`, distinguished only by the
+    #         `case_table`'s exception types; and `assert_no_silent_default(42)` returned without a
+    #         complaint, i.e. CERTIFIED a measure it never called.
+    # A measured 0.0 for a measure that was never invoked is a claim this kit refuses everywhere else,
+    # and the sibling probes already fail closed on the same input (`probe_shift`, `probe_precision` and
+    # `seed_sensitivity_probe` all return INSUFFICIENT_EVIDENCE with every seed unmeasured; `guarded`
+    # returns `MetricValue.unmeasured`), so this is the one that was out of step. `TypeError` is inside
+    # the `(ValueError, TypeError, ArithmeticError)` family both public callers declare.
+    if not callable(measure):
+        raise TypeError(f"measure must be callable, got {type(measure).__name__}: every case here counts "
+                        "a raised exception as correct handling, so an uncallable measure would be "
+                        "reported as handling every missing input")
     out = {}
     for name, args in missing_input_cases(fx).items():
         try:
@@ -1451,7 +1552,7 @@ def probe_missing_inputs(measure: Measure, seeds: Sequence[int], cfg: Optional[P
                 row["types"].append(detail)
     empty = seed_sensitivity_probe(lambda s: 1.0, (), cfg)
     arm = arm_difference({"C0": MetricValue.measured(0.0)}, "E", "C0")
-    structural = {"empty_seed_list_gives_insufficient": empty.status is ProbeStatus.INSUFFICIENT_EVIDENCE
+    structural = {"empty_seed_list_gives_insufficient": empty.status == ProbeStatus.INSUFFICIENT_EVIDENCE
                   and empty.summary is None,
                   "absent_arm_gives_unmeasured": (not _metric_ok(arm)) and arm != MetricValue.measured(0.0)}
     silent_total = sum(r["silent_value"] for r in table.values())
@@ -1623,14 +1724,28 @@ _WHY_CALLABLE_NUMBER = (
     "a callable: a function object stores no scalar for `_plain_value` to collapse, and what it RETURNS "
     "is normalised where it is CONSUMED -- `_to_metric` (an outcome), `_plain_measure` (a measure, an "
     "expectation, a bound) or `_metric_read` -- each with its own consequence test in "
-    "`test_robustness.AMeasureCannotDecideItsOwnProbe` / `EveryMetricReadSiteIsPinnedByItsConsequence`")
+    "`test_robustness.AMeasureCannotDecideItsOwnProbe` / `EveryMetricReadSiteIsPinnedByItsConsequence`. "
+    "EXERCISED ON ALL SEVEN PARAMETERS it covers since round 11, in two limbs -- a callable whose return "
+    "no normaliser can read, and a value that is not callable at all -- and the second limb found "
+    "`probe_missing_inputs`, the one probe for which a raised exception is the GOOD outcome: it reported "
+    "MISSING_INPUT_HANDLED with a measured mean of 0.0 for `measure=42`, having invoked 0 of 15 cases, "
+    "and `assert_no_silent_default(42)` certified the same measure. Both refuse an uncallable measure "
+    "now, in `_run_cases`, where the measurement is written out")
 _WHY_CALLABLE_FIXTURE = (
     "a callable whose return is a fixture; stores no scalar to collapse. STATED AS WHAT IT IS, because "
     "the obvious reason is the wrong one: `probe_shift` does NOT type-check this return, so "
     "`MeasureFixture.__post_init__` is not what protects it -- a duck-typed `SimpleNamespace` reaches "
     "`measure` and `_masked_stats` unchallenged. The protection is consumption-side: `_plain_measure` on "
     "the measure's return and on `spec.bound`'s return. See `ShiftSpec._NORMALISE_EXEMPT['transform']` "
-    "for the measurement")
+    "for the measurement. THE OTHER CONSEQUENCE OF NOT TYPE-CHECKING THE RETURN, measured by round 11's "
+    "reason-coverage probe and NOT closed: a factory returning something with no `pred` attribute at all "
+    "raises `AttributeError` out of `probe_shift`, OUTSIDE the "
+    "`(ValueError, TypeError, ArithmeticError)` family the probe declares. It is left open, unlike the "
+    "`rows=Lo(2)` escape of `test_F4_the_second_consequence...`, because that one came from the MODULE's "
+    "own code and this one cannot be closed by a check at all: the factory is the caller's callable and "
+    "may raise any exception before it returns anything, so a return-type gate would move the escape "
+    "rather than remove it. What it is NOT is a status flip -- every seed is unmeasured or the call "
+    "propagates, so no card is produced")
 _WHY_CARRIER = (
     "a carrier object (a dataclass instance, or None): a real one normalises its OWN fields at its own "
     "boundary (`_normalise_fields` in its `__post_init__`), and `_plain_value` does not reach across a "
@@ -1643,24 +1758,54 @@ _WHY_CARRIER = (
     "`Scorecard.__post_init__` on every field a real card carries. WHAT THAT LEAVES, measured: "
     "`scorecard_to_record` type-checks nothing either, so a hand-built namespace whose `min_seeds` has a "
     "lying `__float__` yields a record reading `min_seeds_required = 1.0` beside an `input_hashes` entry "
-    "for a card that says 10. A note, not a finding, on the `transform` reasoning: a caller who can "
-    "hand-build that namespace can write any `ExperimentRecord` directly, so it grants them nothing "
-    "they lack")
+    "for a card that says 10. THE CONSEQUENCE IS SHARPER THAN THAT SENTENCE RECORDED, and round 11 "
+    "measured it rather than leaving the weaker number as the note: the same namespace, carrying 12 "
+    "measured seeds and a summary while its `content_hash` is bound to a REAL "
+    "`INSUFFICIENT_EVIDENCE` card, yields a record whose `evidence_class` is TOY_RESULT (not UNKNOWN) "
+    "with `mean = 0.0` and `n_seeds = 12.0`, while `provenance.input_hashes[\"scorecard\"]` IS the hash "
+    "of the card whose own honest record reads `3 measured of 3 seeds; minimum is 10` and carries every "
+    "statistic as unmeasured -- a summary where the honest run has no measurement at all, the sharpest "
+    "shape this kit names, not merely a disagreeing minimum. Still a note and not a closure, for the "
+    "unchanged `transform` reasoning: a caller who can hand-build that namespace can write any "
+    "`ExperimentRecord` directly, so it grants them nothing they lack")
 _WHY_CARRIER_SEQ = (
     "a sequence of `MetricValue` carriers, each of which normalises its own fields in its own "
     "`__post_init__` (`_normalise_fields`, in `toy.schema`); both consumers "
     "(`summarize_seeds`, `Scorecard.__post_init__`) refuse anything that is not EXACTLY a `MetricValue`, "
-    "so there is no scalar here for `_plain_value` to reach")
+    "so there is no scalar here for `_plain_value` to reach. THE WORD \"BOTH\" WAS FALSE UNTIL ROUND 11: "
+    "`Scorecard.__post_init__` was made exact-type by round 6 (honest limit (3) of its docstring) and "
+    "`summarize_seeds` was left on `isinstance`, so a `MetricValue` SUBCLASS reached it. Measured "
+    "consequence, written out in that function's own comment and stated at its real weight: a subclass "
+    "answering `value` with 1.0 turns `Sub(None, None)` x12 into `SeedSummary(n=12, mean=1.0)` where the "
+    "honest spelling gives `InsufficientEvidence(0 of 12)` -- but `__post_init__` then STORES that 1.0, "
+    "so the object is one `MetricValue.measured(1.0)` would have been, and the subclass grants a caller "
+    "nothing they lack. A reason correction and three sibling checks made to agree, not a status flip")
 _WHY_ENUM = (
     "an `Enum` member: `_plain_value` passes an Enum through by a TYPE rule, because `ProbeStatus` / "
     "`ShiftKind` / `EvidenceClass` are `str` subclasses BY CONSTRUCTION and collapsing one would destroy "
-    "the `isinstance` checks that refuse a forged spelling. A non-enum spelling offered here is either "
-    "refused by that `isinstance` (`Scorecard.__post_init__`) or collapsed by the field boundary of the "
-    "dataclass it is stored in (`ShiftSpec.kind`)")
+    "the `isinstance` checks that refuse a forged spelling. A non-enum spelling offered at ANY of the "
+    "three parameters this covers is refused by one of those two `isinstance` gates -- "
+    "`Scorecard.__post_init__` for `build_scorecard.status_if_summarized`, `ShiftSpec.__post_init__` for "
+    "`shift_reorder_rows.kind` and the `standard_shifts.reorder_kind` that forwards to it. "
+    "THE SECOND HALF OF THIS SENTENCE USED TO NAME A MECHANISM THAT DOES NOT EXIST: it said such a "
+    "spelling is \"either refused by that `isinstance` or COLLAPSED BY THE FIELD BOUNDARY of the "
+    "dataclass it is stored in (`ShiftSpec.kind`)\", and the field boundary collapses NOTHING here -- a "
+    "plain `str` already stores exactly itself, so `_plain_value` returns it unchanged and both disjuncts "
+    "were false for 2 of the 3 parameters. What that cost is measured in `ShiftSpec.__post_init__`, "
+    "which now carries the gate: an honest INVARIANCE_DEFECT on 12 of 12 seeds became INVARIANCE_HOLDS "
+    "with n_violations=0 at an IDENTICAL max_abs_dev. The general lesson, and the reason the test that "
+    "polices these reasons is now a derived generator: a disjunction is the wrong invariant when one of "
+    "its disjuncts is satisfied by an HONEST value -- a plain string collapses to itself, and the defect "
+    "was that the comparison reading it used `is`")
 _WHY_MASK = (
     "a mask is a sequence of STRICT bools, and `bool` cannot be subclassed, so no element here can lie; "
     "a non-bool element is refused loudly by `toy.stability.check_mask` (\"must be a strict bool ... "
-    "truthiness is not accepted\"), inside the documented ValueError family")
+    "truthiness is not accepted\"), inside the documented ValueError family. TRUE OF ALL SIX MEASURES "
+    "THIS COVERS, and it was not when the test policing it exercised 3 of them: `exact_masked_mse` "
+    "called no validator at all, accepted an `int` mask where every sibling raises `MaskTypeError`, and "
+    "silently measured 2 of 16 rows from a SHORT mask. It calls `check_mask` now; what it still does not "
+    "validate (its matrices, deliberately, because it is the exact oracle and must accept a `Fraction`) "
+    "is stated in its own docstring with the probe number that shows it")
 
 # PER (function, parameter): the parameters for which the boundary's `_plain_value` call cannot collapse
 # anything, and WHAT PROTECTS THEM INSTEAD. Two things this map is NOT, because the word "exempt" has

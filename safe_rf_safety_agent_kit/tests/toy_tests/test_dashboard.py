@@ -13,6 +13,7 @@ import sys
 import tempfile
 import tokenize
 import unittest
+from collections.abc import Mapping
 from unittest import mock
 from pathlib import Path
 
@@ -5320,17 +5321,25 @@ def word_holders(p):
     `test_every_string_field_of_a_rendered_class_is_declared` can enumerate against the same classes."""
     j = p["joint"]
     comps = all_components(j)
+    recs = [r for _w, r in payload_records(p)]
     return {"IntervalPair": [c.pair for c in comps], "ComponentResult": comps,
             "Margins": [j.margins], "JointResult": [j],
             "HypothesisResult": [j.h1, j.h2, j.h3], "GateResult": list(j.gates),
-            "ExperimentRecord": [r for _w, r in payload_records(p)],
+            "ExperimentRecord": recs,
+            # THE NINTH RENDERED DATACLASS (round 11). `_record_idents` and the records panel read
+            # `rec.provenance.run_id`, `.code_version` and `.timestamp_utc` through `getattr`, so the
+            # NAME `RunProvenance` appears ZERO times in `dashboard.py` and the eight-class list was
+            # wrong structurally rather than by anyone's reading. It is in the sweep because being
+            # rendered is what puts a class in it, not being mentioned.
+            "RunProvenance": [r.provenance for r in recs],
             "MetricValue": [c.pair.mean for c in comps]}
 
 
 WORD_CLASSES = {"IntervalPair": bm.IntervalPair, "ComponentResult": bm.ComponentResult,
                 "Margins": bm.Margins, "JointResult": bm.JointResult,
                 "HypothesisResult": bm.HypothesisResult, "GateResult": bm.GateResult,
-                "ExperimentRecord": ExperimentRecord, "MetricValue": MetricValue}
+                "ExperimentRecord": ExperimentRecord, "RunProvenance": RunProvenance,
+                "MetricValue": MetricValue}
 STRING_ANNOTATION = re.compile(r"^(?:str|Optional\[str\])$")
 
 
@@ -5345,7 +5354,16 @@ def string_fields_of(cls, obj):
     The annotation is matched WHOLE (`^str$` / `^Optional[str]$`), not searched: `Mapping[str,
     MetricValue]` mentions `str` and is not a string field, and admitting it by substring would put a
     mappingproxy in the sweep and make every forgery of it a refused no-op -- a vacuous site, which is
-    the failure `test_the_decisive_word_pin_is_not_vacuous` (b) exists to refuse."""
+    the failure `test_the_decisive_word_pin_is_not_vacuous` (b) exists to refuse.
+
+    THAT REASONING IS ABOUT FORGING THE MAPPING OBJECT, AND ROUND 11 FOUND WHAT IT LEFT UNSWEPT: the
+    mapping's KEYS. CLAUDE.md rules that an input avoided because it "would make a test pass for the
+    wrong reason" is itself a finding, and the avoidance recorded in the paragraph above is exactly that
+    note -- correct about the mappingproxy, silent about the two string things inside it. A key is not
+    the mapping: `set(metrics) | set(expected)` and `metrics.get(n)` ran on the KEY's `__hash__`/`__eq__`
+    and a key storing "zzz" that compares as "initial_loss" swallowed a `TRAIN_EXPECTED` member whole.
+    The keys are swept by `caller_mapping_sites()` and the mapping object is still not in THIS
+    enumeration, which is the division the fix keeps: sweep the keys, not the mapping."""
     out = set()
     for f in dataclasses.fields(cls):
         ann = f.type if isinstance(f.type, str) else getattr(f.type, "__name__", repr(f.type))
@@ -5499,7 +5517,8 @@ lookup this module does not own and a lie must fail closed, "bare" if it is a de
         self.assertEqual(set(db.STORED_WORDS), set(WORD_CLASSES))
         lanes = [lane for f in db.STORED_WORDS.values() for lane in f.values()]
         self.assertTrue(set(lanes) <= set(db.WORD_LANES), sorted(set(lanes)))
-        self.assertEqual(len(lanes), 20, len(lanes))          # counted, not asserted in prose
+        self.assertEqual(len(lanes), 24, len(lanes))          # counted, not asserted in prose
+        self.assertEqual(len(db.STORED_WORDS), 9, sorted(db.STORED_WORDS))   # nine rendered classes
         self.assertEqual(sorted(lanes).count("bare"), 2)
         self.assertEqual({k for cls in db.STORED_WORDS.values() for k, v in cls.items() if v == "bare"},
                          {"reason"})
@@ -5570,6 +5589,28 @@ ITERATED (see `_render_snapshot`) or admit it (`_word`), and add a behavioural p
                       inspect.getsource(db._untrusted))
 
 
+# THE `"key"` LANE'S FIGURES, MOVED OUT OF A COMMENT IN `dashboard.py` AND ASSERTED (round 11).
+#
+# That comment stated three: "round 9 measures 54 of 54 forgeries withholding the joint verdict" for
+# `ComponentResult.metric`, "27 of 27" for `HypothesisResult.verdict`, and "54 of 54" for
+# `GateResult.name`. NONE of the three reproduced. Measured by the loop below -- the loop those figures
+# describe -- it is 48, 4 and 42, each out of itself. The substance was right: every forgery that moved
+# the page FAILED CLOSED, and not one left a decisive joint verdict standing. The arithmetic had rotted
+# and nothing went red, because a figure in a comment is a figure no test can see -- the
+# per-sentence-pinning gap CLAUDE.md names, in its mildest and most durable form.
+#
+# (forgeries that MOVED the page, forgeries that then FAILED CLOSED) per "key" site, asserted exactly, so
+# a change in the lie vocabulary, the dunder list, the payload or the scorer moves this table or turns the
+# suite red. `standing` is asserted to be 0 on its own line, because that is the lane's actual promise and
+# the only part of this a reader should trust without re-deriving it; and the total forgery count is
+# asserted too, because a site that silently stopped forging would otherwise lower every figure at once.
+KEY_LANE_FIGURES = {
+    "ComponentResult.metric": (48, 48),
+    "GateResult.name": (42, 42),
+    "HypothesisResult.verdict": (4, 4),
+}
+
+
 class EveryDecisiveWordRendersTheAdmittedText(FailsClosedAssertions, unittest.TestCase):
     """SR-13 ROUND 9, AND IT IS THE DELIVERABLE OF THE ROUND. The round-8 pin, one lane further out.
 
@@ -5580,8 +5621,15 @@ class EveryDecisiveWordRendersTheAdmittedText(FailsClosedAssertions, unittest.Te
     performed on the CALLER'S OBJECT rather than on the characters it stores.
 
     MEASURED ON THE PRE-FIX TREE (3.13.5, and 3.12.4 identical), 20 declared sites x 5 dunders x 28 lie
-    texts = 2,800 forgeries, of which 8 sites moved the page with a decisive verdict standing and no
-    alarm:
+    texts = 2,800 forgeries. NINE SITES moved the page with a decisive verdict standing and no alarm, in
+    TEN (site, dunder) combinations -- the two figures below are counted from the list that follows, and
+    both were stated wrongly before. This docstring said "8 sites"; round 9's commit message said
+    "99 of 600 findings across 10 sites", and 10 is the count of (site, dunder) entries, or of sites with
+    `ComponentResult.metric` counted in. IT CONTRIBUTES ZERO FINDINGS: its lies fail closed and the
+    `"key"` lane's exemption absorbs them, which is exactly what `KEY_LANE_FIGURES` now records (48 of 48
+    moved, 48 of 48 failed closed). The commit message cannot be corrected in place; the figure is
+    corrected here, and the two numbers this file states are now derived in the assertions at the end of
+    the pin (`len(list(word_sites()))` and `pairs`) rather than written down. The nine:
         JointResult.subject_kind     [eq]  BYTE-IDENTICAL TO THE HONEST FIXTURE RENDER on a result whose
             gates carry the exemption and whose label stores "trained": SCORER-VALIDATION FIXTURE,
             JOINT_SUPPORTED, H1/H2/H3 SUPPORTED, no CONTRACT PROBLEM, no relabel paragraph. The honest
@@ -5598,8 +5646,11 @@ class EveryDecisiveWordRendersTheAdmittedText(FailsClosedAssertions, unittest.Te
             "greater"; [eq] passed `_declared`'s agreement check and changed the scorer's own branch.
         JointResult.subject / ExperimentRecord.name / GateResult.name  [len]  a 400-character value
             rendered 300 characters with NO "[... truncated]" marker.
-    -- and 0 after the fixes. The 12 other sites were already honest, which is the other half of the
-    measurement: `_untrusted`'s slice, `_e`, `_visible` and every `str` Enum member read the real buffer.
+    -- and 0 after the fixes. The OTHER ELEVEN of the twenty then declared were already honest, which is
+    the other half of the measurement: `_untrusted`'s slice, `_e`, `_visible` and every `str` Enum member
+    read the real buffer. (Twenty-two are declared now: `RunProvenance`'s four strings joined in round 11,
+    and all four are honest too -- `9 - 8 = 1` and `20 - 9 = 11` are the two corrections, and the reason
+    both figures are now `assertEqual`s below rather than sentences up here.)
 
     WHY ONE DUNDER AND THE HONEST TEXT, which is `conversion_liar`'s argument in the string lane: then
     the honest render is the ONLY correct output and this test needs no model of what should have been
@@ -5623,6 +5674,7 @@ class EveryDecisiveWordRendersTheAdmittedText(FailsClosedAssertions, unittest.Te
                               subject="synthetic", cfg=SMALL, subject_kind="fixture",
                               fixture_name="oracle")))      # the words this pin is about are renderable
         findings, pairs = [], 0
+        key_lane = {label: [0, 0, 0] for label, lane, _f in word_sites() if lane == "key"}
         for label, lane, forge in word_sites():
             p0 = render_payload()
             texts = {str.__str__(getattr(o, label.split(".")[1]))
@@ -5649,8 +5701,12 @@ class EveryDecisiveWordRendersTheAdmittedText(FailsClosedAssertions, unittest.Te
                             continue
                         if card == honest_card and page == honest_page:
                             continue
-                        if lane == "key" and "vd-supported" not in joint_cell(card):
-                            continue                         # moved, and FAILED CLOSED: its lane's promise
+                        if lane == "key":
+                            closed = "vd-supported" not in joint_cell(card)
+                            key_lane[label][0] += 1
+                            key_lane[label][1 if closed else 2] += 1
+                            if closed:
+                                continue                     # moved, and FAILED CLOSED: its lane's promise
                         findings.append(
                             f"{label} ({lane}) [{d}] -> {shown[:14]!r}: "
                             f"{'scorecard' if card != honest_card else ''}"
@@ -5669,6 +5725,18 @@ test: admit once (`_word`) and compare, look up and render the text you were giv
 be byte-identical; a "key" site may alarm but may not leave a decisive joint verdict standing; a raise is
 the same defect either way, because this module's contract is to refuse a malformed result, never to take
 the page down.""")
+        # THE `"key"` LANE'S FIGURES, ASSERTED HERE BECAUSE THIS IS THE LOOP THAT PRODUCES THEM.
+        self.assertEqual({k: (v[0], v[1]) for k, v in key_lane.items()}, KEY_LANE_FIGURES, f"""
+the "key" lane's per-site figures moved: {key_lane} as (moved, failed closed, STANDING).
+They used to live in a comment in `dashboard.py` reading 54/54, 27/27 and 54/54, and all three were
+wrong. If the sweep legitimately changed, re-measure and move KEY_LANE_FIGURES -- but do not write the
+number anywhere a test cannot read it.""")
+        self.assertEqual({k: v[2] for k, v in key_lane.items()}, {k: 0 for k in KEY_LANE_FIGURES},
+                         "a `key`-lane forgery left a DECISIVE JOINT VERDICT standing: that is the one "
+                         "thing the lane promises, and it would now be false")
+        # COUNTED, not described in prose: the size of the matrix this class reports on.
+        self.assertEqual(len(list(word_sites())), 22, len(list(word_sites())))
+        self.assertEqual(pairs, 670, pairs)
 
     def test_the_decisive_word_pin_is_not_vacuous(self):
         """FIVE WAYS IT COULD BE GREEN FOR NOTHING, each refused by measurement rather than by reading.
@@ -5824,6 +5892,509 @@ class EveryPrintedCountIsWhatWasIterated(FailsClosedAssertions, unittest.TestCas
                 findings.append(f"{label} [__len__ -> {n}]: page moved with a decisive verdict standing")
         self.assertGreater(sites, 5, sites)
         self.assertEqual(findings, [], "\n  ".join([""] + findings))
+
+
+# ---------------------------------------------------------------------------------------------------------
+# SR-13 ROUND 11: THE THIRD CATEGORY -- THE CALLER'S SNAPSHOT `Mapping`, ITS LISTS' ELEMENTS, AND ITS KEYS.
+#
+# ROUND 9 CLOSED THE DECLARED STRINGS AND THE CONTAINER SIZES, and the gap it left is the shape of its own
+# derivations rather than any site one of them reached:
+#   * `word_sites()` is `db.STORED_WORDS` x the rendered DATACLASSES, so a string the caller hands in
+#     loose -- a value of the snapshot mapping, an element of one of its lists -- belongs to no class and
+#     is in no lane;
+#   * the round-8 render-boundary pin forges a snapshot value only `if is_a_stored_number(v)`;
+#   * `container_sites()` forges a list's `__len__` and NEVER ITS ELEMENTS.
+# Three derivations, and between them a `str` the public `render_dashboard(data)` API accepts directly was
+# swept by none. MEASURED on the round-9 tree through that API with NO `object.__setattr__` -- a `str`
+# subclass storing the honest text and lying only on `__str__`:
+#     snapshot["merge_base"]      the merge base printed is not the one the snapshot stores -- the
+#                                 upstream ancestor CLAUDE.md names as a source of truth
+#     snapshot["fork_commits"][*] BOTH honest fork-only commit hashes absent from the page entirely
+#     snapshot["evidence_url"]    the attacker's host rendered under the caption "scheme omitted, not a
+#                                 link" (only `__str__` moved it: `lower`/`__getitem__` into `_defang`
+#                                 did not)
+# 4 of 18 snapshot string sites moved, 0 extra `warn` spans, 0 extra UNKNOWN, panel still badged
+# SOURCE_OBSERVED -- in the Source-diff inventory, which is SR-13's FIRST NAMED DELIVERABLE.
+#
+# AND THE THING NO LANE HAD A SHAPE FOR AT ALL: the mapping's KEYS. A value is read by `m.get("merge_base")`
+# and `"evidence_url" in m`, which are `__hash__` + `__eq__` ON THE STORED KEY, so a key that stores one
+# word and answers as another serves its own value under a name the mapping does not file it under. It was
+# live at every caller `Mapping` the renderers touch -- the payload itself, the snapshot, each
+# `changed_files` entry, and `ExperimentRecord.metrics`, where it SWALLOWS a `TRAIN_EXPECTED` member and
+# breaks the positive half of this page's oldest criterion. Figures in the two classes below.
+#
+# THE REFERENCE RENDER FOR A KEY LIE IS NOT THE HONEST FIXTURE, and getting that wrong is the one way this
+# sweep could have been written as a test that cannot pass: a forged mapping really is a different mapping,
+# and the page SHOULD change. The reference is the SAME mapping with that one key PLAINIFIED --
+# `str.__str__` of the characters it stores -- which is `word_liar`'s "store the honest content and lie on
+# one dunder" rule applied to a key. Then the honest reading of the input is the only correct output, and
+# this file needs no model of what should have been alarmed.
+# ---------------------------------------------------------------------------------------------------------
+def key_liar(stored, answers_as):
+    """A `str` SUBCLASS instance that STORES `stored` and answers a dict or `in` lookup as `answers_as`.
+
+    `word_liar`'s "eq" body hoisted to a key, and one attack rather than three for the same reason: a
+    dict lookup is `__hash__` THEN `__eq__`, so a liar with an honest `__hash__` lands in a different
+    bucket and is never compared. CPython abandons `lookdict_unicode` for the general lookup as soon as
+    one key is not an exact `str`, and the general lookup calls the STORED key's `__eq__` first -- which
+    is why this needs nothing but a plain `dict` built from caller-supplied JSON."""
+    return type("KeyLiesOnEq", (str,), {
+        "__hash__": lambda self: hash(answers_as),
+        "__eq__": lambda self, o: answers_as == o if isinstance(o, str) else NotImplemented,
+        "__ne__": lambda self, o: not (answers_as == o) if isinstance(o, str) else NotImplemented,
+    })(stored)
+
+
+def plain_key(stored, _answers_as=None):
+    """THE REFERENCE for `key_liar`: the same characters, telling the truth about them."""
+    return str.__str__(stored)
+
+
+def walk_payload(obj, path=()):
+    """("map", path) for every `Mapping`, and ("str", path) for every string VALUE or string list/tuple
+    ELEMENT, reachable in the caller's payload through mappings, lists and tuples.
+
+    A WALK AND NOT A LIST OF NAMES, which is the whole point: a new caller-supplied string, or a new keyed
+    mapping in the payload, inherits both pins below with no edit here -- exactly as `container_sites()`
+    inherits a new list. The walk stops at a dataclass: `train`, `joint` and each record are objects, not
+    containers, and their strings are declared in `db.STORED_WORDS` and swept by `word_sites()`."""
+    if isinstance(obj, Mapping):
+        yield ("map", path)
+        for k, v in obj.items():
+            yield from walk_payload(v, path + (k,))
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            yield from walk_payload(v, path + (i,))
+    elif isinstance(obj, str):
+        yield ("str", path)
+
+
+def shape_of(path):
+    """A path with its list indices collapsed: two `changed_files` entries have the same SHAPE and
+    exercise the same lookups in the same lines."""
+    return tuple("*" if isinstance(s, int) else s for s in path)
+
+
+def payload_walk_sorted(kind=None, per_shape=2):
+    """The walk, sorted, with at most `per_shape` sites of any one structural shape.
+
+    THE CAP IS `words_against`'s, for its reason and with the same obligation: this sweep is diagnostic
+    and not exhaustive, so the EXHAUSTIVE figure is recorded in the docstring of the class that uses it
+    (18 string sites and 13 mappings in this payload, against 12 and 6 swept), and a defect that the cap
+    could hide would have to hide itself from the first two entries of its own shape and from all five
+    dunders. The eight `changed_files` entries are one dict literal rendered eight times; the second is
+    swept to catch a site that is position-dependent, and the other six buy nothing but seconds."""
+    out, seen = [], {}
+    for k, path in sorted(walk_payload(render_payload()), key=lambda t: (t[0], str(t[1]))):
+        if kind is not None and k != kind:
+            continue
+        sh = (k, shape_of(path))
+        seen[sh] = seen.get(sh, 0) + 1
+        if seen[sh] <= per_shape:
+            out.append((k, path))
+    return out
+
+
+def payload_walk_all(kind):
+    return [(k, path) for k, path in sorted(walk_payload(render_payload()), key=lambda t: (t[0], str(t[1])))
+            if k == kind]
+
+
+def dig(p, path):
+    """The container that owns `path[-1]` in payload `p`, with every mapping and sequence on the way down
+    replaced by a mutable COPY.
+
+    The copy is not tidiness. `render_payload()` gives each call its own snapshot `dict`, but the nested
+    `changed_files` list and its entry mappings are `SNAP`'s OWN objects, and a forgery written into those
+    would leak into every other test in this file in whatever order they run -- the hazard
+    `render_payload`'s docstring was written for, one level deeper than it reaches."""
+    cur = p
+    for step, nxt in zip(path, path[1:]):
+        child = cur[step]
+        cur[step] = dict(child) if isinstance(child, Mapping) else list(child)
+        cur = cur[step]
+    return cur
+
+
+def path_label(path):
+    return "payload" + "".join(f"[{s!r}]" for s in path)
+
+
+def payload_string_sites():
+    """(label, honest text, forge(payload, shown, dunder) -> instances forged) for every CALLER-SUPPLIED
+    STRING either renderer receives through the payload `Mapping` itself: a mapping VALUE or a list/tuple
+    ELEMENT, at any depth. Derived by `walk_payload`, so nothing is named here."""
+    p0 = render_payload()
+    for _kind, path in payload_walk_sorted("str"):
+        text = str.__str__(dig(p0, path)[path[-1]])
+
+        def forge(p, shown, d, path=path):
+            owner = dig(p, path)
+            owner[path[-1]] = word_liar(str.__str__(owner[path[-1]]), shown, d)
+            return 1
+        yield path_label(path), text, forge
+
+
+def _read_root(p):
+    return dict(p)
+
+
+def _write_root(p, m):
+    p.clear()
+    p.update(m)
+
+
+def caller_mapping_sites():
+    """(label, read(payload) -> dict, write(payload, mapping)) for every caller-supplied `Mapping` either
+    renderer looks a word up in.
+
+    TWO HALVES, and the second is not reachable by the first. `walk_payload` finds the payload itself, the
+    snapshot and each `changed_files` entry. `ExperimentRecord.metrics` is a caller-supplied mapping that
+    lives INSIDE a dataclass, so no walk of the payload reaches it -- and it is the one whose keys carried
+    a finding. `payload_records` is reused for it for the reason `render_sites()` gives: both panels render
+    records, and `_metric_table` serves both."""
+    for _kind, path in payload_walk_sorted("map"):
+        if not path:
+            yield "payload", _read_root, _write_root
+            continue
+
+        def read(p, path=path):
+            return dict(dig(p, path)[path[-1]])
+
+        def write(p, m, path=path):
+            dig(p, path)[path[-1]] = m
+        yield path_label(path), read, write
+
+    for where, _r in payload_records(render_payload()):
+        def read(p, where=where):
+            return dict(dict(payload_records(p))[where].metrics)
+
+        def write(p, m, where=where):
+            object.__setattr__(dict(payload_records(p))[where], "metrics", m)
+        yield f"record {where}.metrics", read, write
+
+
+def displace(m, target, donor, make_key):
+    """`target`'s entry is GONE and `donor`'s key answers as `target` while keeping its OWN value, so the
+    page is asked to print one name's value under another name. `make_key` is `key_liar` for the forgery
+    and `plain_key` for the reference render."""
+    out = {}
+    for k, v in m.items():
+        if k == target:
+            continue
+        out[make_key(donor, target) if k == donor else k] = v
+    return out
+
+
+def rename(m, target, word, make_key):
+    """`target`'s key keeps its stored text and answers as `word`, which this mapping does not store: the
+    looked-up name goes MISSING while the mapping still files a value under it. Plainifying the key
+    changes nothing, so the reference is the honest mapping -- which is the stronger assertion of the two:
+    byte-identical, not merely consistent."""
+    return {(make_key(target, word) if k == target else k): v for k, v in m.items()}
+
+
+class EveryCallerSuppliedStringRendersTheAdmittedText(FailsClosedAssertions, unittest.TestCase):
+    """SR-13 ROUND 11, FIRST HALF: the strings the caller hands in LOOSE, which belong to no rendered
+    class and so were in no lane.
+
+    MEASURED ON THE PRE-FIX TREE, 3.12.4 and 3.13.5 BYTE-IDENTICALLY -- this sweep exactly as it stands,
+    8 of its 120 forgeries moving the page, and 0 of 120 after the fix. All 8 are the [str] dunder at 4
+    sites: `snapshot["merge_base"]`, BOTH `snapshot["fork_commits"]` elements, and
+    `snapshot["evidence_url"]` -- the last printing an attacker-chosen host under a caption that says what
+    the text IS. 0 of 120 on [eq], [len], [format] and [getitem], and the other 8 sites were already
+    honest, because they reach the page through `_untrusted`, which admits. Exhaustively over all 18
+    string sites the walk finds rather than the 12 this sweep caps to: the same 4 sites and no others.
+
+    The sites and the lie texts are both DERIVED, so these figures are a record of one tree and not the
+    definition of the sweep. What the test asserts is zero."""
+
+    def test_no_caller_supplied_string_in_the_payload_moves_the_page(self):
+        honest_card = db.render_scorecard(render_payload()["joint"])
+        honest_page = db.render_dashboard(render_payload())
+        findings, sites, forgeries = [], 0, 0
+        for label, text, forge in payload_string_sites():
+            sites += 1
+            for shown in words_against(text):
+                for d in WORD_DUNDERS:
+                    p = render_payload()
+                    self.assertEqual(forge(p, shown, d), 1, label)
+                    forgeries += 1
+                    try:
+                        page = db.render_dashboard(p)
+                    except BaseException as ex:          # noqa: BLE001 - a raise IS the finding
+                        findings.append(f"{label} [{d}] -> {shown[:14]!r}: RAISED {type(ex).__name__}")
+                        continue
+                    if page != honest_page:
+                        findings.append(f"{label} [{d}] -> {shown[:14]!r}: dashboard BYTES DIFFER")
+            # THE SCORECARD IS CHECKED ONCE PER SITE AND NOT ONCE PER FORGERY, deliberately: it is handed
+            # `p["joint"]` and nothing else, so a payload-mapping string cannot reach it except by
+            # leaking out of the payload -- which is what this one render per site refuses.
+            p = render_payload()
+            forge(p, "zzz", "str")
+            self.assertEqual(db.render_scorecard(p["joint"]), honest_card, label)
+        self.assertGreater(sites, 9, sites)
+        self.assertGreater(forgeries, 50, forgeries)
+        self.assertEqual(findings, [], f"""
+{len(findings)} of {forgeries} (caller string x lie x dunder) forgeries moved the page, with the stored
+TEXT honest and only one string dunder lying:
+
+  """ + "\n  ".join(findings) + """
+
+A string the caller hands in through the payload mapping is an input exactly like a declared field, and
+the page must render the characters it STORES: admit once (`_word` / `_word_text`) and render the admitted
+text. No bare `str()` and no bare `_e()`, of a mapping value or of a list element.""")
+
+    def test_the_caller_string_sweep_is_not_vacuous(self):
+        """FOUR WAYS IT COULD BE GREEN FOR NOTHING.
+        (a) the sites must be DERIVED from the payload, and must include the three that carried findings
+            plus at least one list ELEMENT (the thing `container_sites()` structurally cannot reach);
+        (b) every forge must really replace a string with a lying subclass, in the payload the renderer
+            is then handed -- and must NOT leak into `SNAP`, which every other test in this file reads;
+        (c) the lie must be visible through the operation each dunder stands for (`word_liar`'s own
+            non-vacuity, re-checked here on a payload string rather than on a dataclass field);
+        (d) the sweep must be able to FAIL: with the admission removed from `_defang`, it reports."""
+        labels = {label for label, _t, _f in payload_string_sites()}
+        self.assertIn("payload['snapshot']['merge_base']", labels)
+        self.assertIn("payload['snapshot']['evidence_url']", labels)
+        self.assertIn("payload['snapshot']['fork_commits'][0]", labels)
+        self.assertIn("payload['snapshot']['changed_files'][0]['filename']", labels)
+        self.assertTrue(any(isinstance(path[-1], int) for _k, path in payload_walk_sorted("str")),
+                        "no list ELEMENT in the sweep")
+        # the cap is a cap and not a filter: every shape the walk finds is represented
+        self.assertEqual({shape_of(path) for _k, path in payload_walk_sorted("str")},
+                         {shape_of(path) for _k, path in payload_walk_all("str")})
+        self.assertEqual(len(payload_walk_all("str")), 18, len(payload_walk_all("str")))
+        self.assertEqual(len(payload_walk_all("map")), 10, len(payload_walk_all("map")))
+        # (b) the forgery lands in the payload and NOT in SNAP
+        before = dict(SNAP)
+        snap_cf0 = dict(SNAP["changed_files"][0])
+        p = render_payload()
+        for label, _t, forge in payload_string_sites():
+            forge(p, "zzz", "str")
+        self.assertEqual(dict(SNAP), before, "a forgery leaked into the module-level SNAP")
+        self.assertEqual(dict(SNAP["changed_files"][0]), snap_cf0, "a forgery leaked into SNAP's entries")
+        lying = [v for _k, path in payload_walk_sorted("str")
+                 for v in [dig(p, path)[path[-1]]] if is_a_lying_string(v)]
+        self.assertEqual(len(lying), len(payload_walk_sorted("str")))
+        # (c)
+        for d in WORD_DUNDERS:
+            v = word_liar("abc", "xyz", d)
+            self.assertTrue(is_a_lying_string(v), d)
+            self.assertEqual(str.__str__(v), "abc", d)
+            self.assertEqual(db._word(v), "abc", d)
+        # (d) with the admission taken out of `_defang`, the sweep reports -- so it is not green by luck
+        honest_page = db.render_dashboard(render_payload())
+        with mock.patch.object(db, "_word", lambda x: str(x) if isinstance(x, str) else None):
+            q = render_payload()
+            q["snapshot"] = dict(q["snapshot"],
+                                 evidence_url=word_liar(SNAP["evidence_url"], "https://h.invalid", "str"))
+            self.assertNotEqual(db.render_dashboard(q), honest_page,
+                                "with `_word` reading the caller's `__str__`, `_defang` must move")
+        self.assertEqual(db.render_dashboard(render_payload()), honest_page)   # and the patch is undone
+
+
+class NoMappingKeyServesAValueUnderAnotherName(FailsClosedAssertions, unittest.TestCase):
+    """SR-13 ROUND 11, SECOND HALF: the `Mapping` KEYS, which is the thing `string_fields_of`'s own
+    avoidance note left unswept.
+
+    That note excluded `Mapping[str, MetricValue]` because forging THE MAPPING would be "a refused
+    no-op -- a vacuous site". True of the mapping object and silent about the two string things inside
+    it, and CLAUDE.md rules that an input avoided for that reason IS a finding. `metrics.get(n)` and
+    `set(metrics) | set(expected)` ran on the KEY.
+
+    MEASURED ON THE PRE-FIX TREE, 3.12.4 and 3.13.5 BYTE-IDENTICALLY -- this sweep exactly as it stands,
+    77 of its 81 forgeries differing from the plainified reference, and 0 of 81 after the fix:
+        payload (its own 4 keys)            12 of 12   a `train` result served to the scorecard, a
+                                                       `records` list served as the snapshot
+        snapshot (13 keys)                  35 of 39
+        changed_files[0] / [1] (3 keys)      9 of 9 each
+        train.record.metrics (4 keys)       12 of 12
+        records[0].metrics (1 key)          skipped: a one-key mapping has no sibling to displace
+    The 4 that already agreed are `snapshot` renames of keys this panel reads nowhere. EXHAUSTIVELY, over
+    every ORDERED PAIR rather than the one donor per target this sweep rotates through: 154 of 156 for the
+    snapshot, 6 of 6 for a `changed_files` entry, 12 of 12 for the payload and 12 of 12 for the metrics --
+    recorded here for the reason `words_against` records its own exhaustive matrix, because the cheap
+    sweep is the pin and the exhaustive one is the evidence that the cap hides nothing.
+
+    The metrics half is FINDING B: a key storing "zzz" that hashes and compares as "initial_loss"
+    SWALLOWED `initial_loss` -- 5 rows became 4, extra `warn` spans 0, and the name appeared NOWHERE on
+    the page, neither as an UNKNOWN row nor as a 0. That is the POSITIVE half of this page's oldest
+    criterion, read for eight rounds only in its negative direction ("never 0", which holds): "missing
+    results render as UNKNOWN". A swallowed name is not missing-and-shown, it is gone. With two entries
+    the same route printed a measured figure under the WRONG NAME.
+
+    THE PUBLIC ROUTE IS CLOSED and that was verified, not assumed: `schema._plain_value` collapses a
+    `str` subclass key, so `ExperimentRecord(metrics={liar: mv})` stores a plain `"zzz"`. The route here
+    is `object.__setattr__` on `metrics` -- the same tier as every round-9 finding -- while the snapshot
+    and payload halves need no such thing at all: that mapping IS the public API's argument."""
+
+    def shapes(self, keys, target):
+        """(shape name, target, second argument) for every key forgery this class makes at one key.
+        The "rename" word is drawn from the module's own vocabularies and from the sibling keys, so it
+        is a word the page could plausibly read, and never one this mapping already stores."""
+        donor = keys[(keys.index(target) + 1) % len(keys)]
+        outside = next(w for v in module_vocabularies() for w in v if w not in keys)
+        return [("displace", target, donor), ("rename", target, outside),
+                ("rename", target, "zzz_not_a_name")]
+
+    def test_no_key_lie_changes_the_page_relative_to_the_same_mapping_plainified(self):
+        """THE PIN. The reference for each forgery is the SAME mapping with that key told truthfully, so
+        a page that moves is a page reading a word the mapping does not store."""
+        findings, sites, forgeries = [], 0, 0
+        shape_fns = {"displace": displace, "rename": rename}
+        for label, read, write in caller_mapping_sites():
+            keys = sorted(k for k in read(render_payload()) if isinstance(k, str))
+            if len(keys) < 2:
+                continue
+            sites += 1
+            for shape, target, arg in [s for k in keys for s in self.shapes(keys, k)]:
+                fn = shape_fns[shape]
+                ref = render_payload()
+                write(ref, fn(read(ref), target, arg, plain_key))
+                lie = render_payload()
+                write(lie, fn(read(lie), target, arg, key_liar))
+                forgeries += 1
+                try:
+                    want = db.render_dashboard(ref)
+                except BaseException as ex:              # noqa: BLE001
+                    findings.append(f"{label} {shape} {target!r}/{arg!r}: the PLAINIFIED reference "
+                                    f"RAISED {type(ex).__name__}")
+                    continue
+                try:
+                    got = db.render_dashboard(lie)
+                except BaseException as ex:              # noqa: BLE001 - a raise IS the finding
+                    findings.append(f"{label} {shape} {target!r}/{arg!r}: RAISED {type(ex).__name__}")
+                    continue
+                if got != want:
+                    findings.append(f"{label} {shape} target={target!r} other={arg!r}: BYTES DIFFER "
+                                    f"from the same mapping with that key plainified")
+        self.assertGreater(sites, 3, sites)
+        self.assertGreater(forgeries, 60, forgeries)
+        self.assertEqual(findings, [], f"""
+{len(findings)} of {forgeries} (caller mapping x key x shape) key forgeries made the page differ from the
+render of THE SAME MAPPING with that one key plainified:
+
+  """ + "\n  ".join(findings[:40]) + """
+
+`m.get(name)` and `name in m` are `__hash__` + `__eq__` on the STORED key, so a key is an admitted input
+like any other string: admit the keys ONCE (`_word_keyed`, or per entry as `_metric_table` does) and read
+the mapping by the words its keys STORE. A value may only be printed under a name the mapping files it
+under, and a name the mapping does not store must read as ABSENT.""")
+
+    def test_a_swallowed_expected_metric_still_renders_UNKNOWN(self):
+        """FINDING B AS ITS OWN ASSERTION, because the criterion it breaks is older than this sweep and
+        should go red on its own line: EVERY `db.TRAIN_EXPECTED` name has a row, whatever a key claims.
+
+        Pre-fix this test's first loop body loses the row entirely (measured: 5 rows -> 4, 0 extra warn,
+        the name absent from the whole page)."""
+        honest = db.render_dashboard(render_payload())
+        for name in db.TRAIN_EXPECTED:
+            self.assertIn(f'<span class="untrusted">{name}</span>', honest, name)
+        for target in db.TRAIN_EXPECTED:
+            for stored in ("zzz", "final_loss"):
+                p = render_payload()
+                r = dict(payload_records(p))["train.record"]
+                m = dict(r.metrics)
+                if target not in m:
+                    continue
+                donor = next(k for k in m if k != target)
+                forged = {k: v for k, v in m.items() if k != target}
+                forged = {(key_liar(stored, target) if k == donor else k): v for k, v in forged.items()}
+                object.__setattr__(r, "metrics", forged)
+                page = db.render_dashboard(p)
+                self.assertIn(f'<span class="untrusted">{target}</span>', page,
+                              f"{target} lost its row to a key storing {stored!r}: "
+                              f"a missing result must render as UNKNOWN, never vanish")
+                self.assertIn('<span class="unknown">UNKNOWN</span> <span class="caveat">not recorded',
+                              page, target)
+                # ... and the swallowing key's own row is captioned with the text it STORES
+                self.assertIn(f'<span class="untrusted">{stored}</span>', page, (target, stored))
+
+    def test_two_keys_storing_one_word_are_two_rows_and_neither_vanishes(self):
+        """WHY `_metric_table` ADMITS PER ENTRY INSTEAD OF CALLING `_word_keyed`. The collapse that is
+        right for a mapping the page looks words UP in would delete two real rows here to punish an
+        ambiguity whose data is perfectly displayable, and "a metric row vanished" is the defect this
+        class exists about. Measured: both rows render, with their own values."""
+        p = render_payload()
+        r = dict(payload_records(p))["records[0]"]
+        m = dict(r.metrics)
+        object.__setattr__(r, "metrics", {**m, key_liar("a", "b"): MetricValue.measured(7.5)})
+        page = db.render_dashboard(p)
+        self.assertEqual(page.count('<span class="untrusted">a</span>'), 2, "a row vanished")
+        self.assertIn('<span class="measured">7.5</span>', page)
+        self.assertIn('<span class="measured">0.5</span>', page)
+        # and `_word_keyed`, which IS the right admission for a looked-up mapping, fails CLOSED on it
+        self.assertEqual(db._word_keyed({key_liar("a", "b"): 1, "a": 2}), {})
+        self.assertEqual(db._word_keyed({"a": 1, "b": 2}), {"a": 1, "b": 2})
+        self.assertEqual(db._word_keyed({word_liar("a", "b", "eq"): 1}), {"a": 1})
+        self.assertIs(type(next(iter(db._word_keyed({word_liar("a", "b", "eq"): 1})))), str)
+        self.assertEqual(db._word_keyed({1: "x", None: "y"}), {})      # non-string keys name nothing
+        self.assertEqual(db._word_keyed(object()), {})                 # not a mapping: refused, not raised
+
+    def test_the_key_sweep_is_not_vacuous(self):
+        """(a) `key_liar` must really store one word and answer as another, through a real `dict`;
+        (b) the reference must really differ from the forgery as an INPUT (otherwise the pin compares a
+            page with itself);
+        (c) the sites must be derived and must include the payload, the snapshot, a `changed_files`
+            entry and a record's `metrics`;
+        (d) the pin must be able to FAIL: with the key admission removed, it reports."""
+        k = key_liar("zzz", "initial_loss")
+        self.assertEqual(str.__str__(k), "zzz")
+        self.assertTrue(is_a_lying_string(k))
+        self.assertEqual({k: 1}.get("initial_loss"), 1)
+        self.assertIsNone({k: 1}.get("zzz"))
+        self.assertIn("initial_loss", {k: 1})
+        self.assertNotIn("zzz", {k: 1})
+        self.assertEqual(plain_key(k), "zzz")
+        self.assertIs(type(plain_key(k)), str)
+        # (b)
+        m = {"a": 1, "b": 2}
+        self.assertEqual(sorted(map(str.__str__, displace(m, "a", "b", key_liar))), ["b"])
+        self.assertEqual(displace(m, "a", "b", plain_key), {"b": 2})    # "a" absent, "b" under its name
+        self.assertEqual(displace(m, "a", "b", key_liar).get("a"), 2)   # the lie serves b's value as a
+        self.assertIsNone(displace(m, "a", "b", key_liar).get("b"))     # ... and b's own name is gone
+        # (c)
+        labels = {label for label, _r, _w in caller_mapping_sites()}
+        self.assertIn("payload", labels)
+        self.assertIn("payload['snapshot']", labels)
+        self.assertIn("payload['snapshot']['changed_files'][0]", labels)
+        self.assertIn("record train.record.metrics", labels)
+        self.assertIn("record records[0].metrics", labels)
+        # (d) remove the admission and the pin reports, at the snapshot and at the metrics table alike
+        with mock.patch.object(db, "_word_keyed", lambda m: dict(m) if isinstance(m, Mapping) else {}):
+            ref, lie = render_payload(), render_payload()
+            ref["snapshot"] = displace(dict(ref["snapshot"]), "merge_base", "snapshot_note", plain_key)
+            lie["snapshot"] = displace(dict(lie["snapshot"]), "merge_base", "snapshot_note", key_liar)
+            self.assertNotEqual(db.render_dashboard(lie), db.render_dashboard(ref),
+                                "without `_word_keyed` the snapshot must serve the wrong value")
+        with mock.patch.object(db, "_word", lambda x: x if isinstance(x, str) else None):
+            p = render_payload()
+            r = dict(payload_records(p))["train.record"]
+            m = dict(r.metrics)
+            donor = next(k for k in m if k != "initial_loss")
+            object.__setattr__(r, "metrics", displace(m, "initial_loss", donor, key_liar))
+            self.assertNotIn('<span class="untrusted">initial_loss</span>', db.render_dashboard(p),
+                             "without an admitted key, `initial_loss` must lose its row")
+
+    def test_the_other_caller_mapping_inside_a_dataclass_is_rendered_by_nothing(self):
+        """`RunProvenance.input_hashes` is the OTHER caller-supplied `Mapping` that lives inside a
+        rendered dataclass, and it is a declared residual WITH A MEASUREMENT rather than an omission:
+        neither panel renders it, so a lying key and a lying value move zero bytes. It is empty in
+        `rec()`, so this test builds a record that carries one -- the sweep above cannot forge a site
+        with nothing in it, and "the fixture happened to be empty" is not a reason to say nothing."""
+        h = "a" * 64
+        pr = RunProvenance(run_id="r1", timestamp_utc=TS, seed=1, code_version="c1",
+                           python_version="3.12.0", toy_only=True, input_hashes={"config": h})
+        r = ExperimentRecord(name="n", provenance=pr, metrics={"a": MetricValue.measured(0.5)},
+                             evidence_class=EC.TOY_RESULT)
+        honest = db.render_dashboard({"records": [r]})
+        self.assertNotIn(h, honest, "input_hashes is rendered after all: give it a lane and sweep it")
+        self.assertNotIn("config", honest)
+        for forged in ({key_liar("other", "config"): h}, {"config": word_liar(h, "b" * 64, "str")}):
+            object.__setattr__(pr, "input_hashes", forged)
+            self.assertEqual(db.render_dashboard({"records": [r]}), honest,
+                             "a lie in input_hashes moved the page: it is rendered, so sweep it")
 
 
 class TheSubjectKindValueTable(unittest.TestCase):

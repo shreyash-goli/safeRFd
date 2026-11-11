@@ -14,6 +14,13 @@
 # contains many more ways to execute code or open a socket than any list will name. Do not read a passing run as
 # proof that src/ cannot execute code or reach the network.
 #
+# THIS HEADER IS NORMATIVE PROSE, AND IT IS INSIDE THE WITHDRAWN-GUARANTEE DISCIPLINE. It was outside it until
+# SR-15's tenth round, which is how an unmarked sentence restating a guarantee this project had retracted was
+# measured GREEN here; the scope of test_no_withdrawn_guarantee_is_restated_in_a_comment is now DERIVED from
+# `git ls-files` rather than enumerated, so this file and every other tracked file is in it. A withdrawn claim
+# may appear in the comments below only where a marker ("used to", "no longer", "retracted", ...) stands before
+# it IN THE SAME SENTENCE. See docs/CLEAN_CLONE.md.
+#
 # KNOWN GAPS (this is hygiene, not a sandbox):
 #   * runtime-name tricks: getattr(os, "sys" + "tem"), a module aliased through importlib's internals, `exec` of a
 #     string built at runtime;

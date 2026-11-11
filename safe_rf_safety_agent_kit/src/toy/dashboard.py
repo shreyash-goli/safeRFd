@@ -389,6 +389,36 @@ def _panel(title: str, ec: EvidenceClass, body: str, problem: Optional[str] = No
 #      of 10 -- round 7's "0 of 107" in the string lane, and the same blind spot in the same shape two
 #      lanes apart. A sweep that generates only plain values proves nothing about subclasses.
 #
+#   9. ROUND 11: EVERY ADMISSION SO FAR WAS FOR A FIELD OF AN OBJECT, AND THE CALLER DOES NOT ONLY HAND
+#      IN OBJECTS. `render_dashboard(data)` takes a `Mapping`, and the one it is given on every real run
+#      is `docs/SOURCE_SNAPSHOT.json`. Three derivations guarded the page and the THIRD CATEGORY fell
+#      between them: `word_sites()` is `STORED_WORDS` x the rendered dataclasses, so a loose string
+#      belongs to no class and gets no lane; the round-8 render pin forges a snapshot value only
+#      `if is_a_stored_number(v)`; `container_sites()` forges a list's `__len__` and never its elements.
+#      Nothing swept a string the public API accepts directly, and nothing had a shape for a mapping KEY
+#      at all. THREE THINGS, all measured through the public API with no `object.__setattr__`:
+#        * STRING VALUES. `str(mb)` in `_render_snapshot` printed a merge base that is not the one the
+#          snapshot stores -- the upstream ancestor CLAUDE.md names as a source of truth -- and
+#          `_defang`'s `str(url)` printed an attacker's host under the caption "scheme omitted, not a
+#          link". 0 extra `warn` spans, 0 extra UNKNOWN, panel still badged SOURCE_OBSERVED.
+#        * LIST ELEMENTS. `str(c)` over `fork_commits` put BOTH honest fork-only commit hashes off the
+#          page entirely (measured `[False, False]`), in the panel that is SR-13's first deliverable.
+#        * MAPPING KEYS, which is the new lane. `m.get(name)` and `name in m` are `__hash__` + `__eq__`
+#          ON THE STORED KEY, so a key storing one word and answering as another served its own value
+#          under a name the mapping does not file it under: 77 of 81 forgeries at four mapping levels,
+#          including `ExperimentRecord.metrics`, where a key storing "zzz" that compares as
+#          "initial_loss" SWALLOWED a `TRAIN_EXPECTED` member -- no UNKNOWN row and no 0, just gone.
+#          That broke the POSITIVE half of this page's oldest criterion, which eight rounds had read
+#          only as "never 0". `string_fields_of`'s own docstring had recorded the avoidance that hid it:
+#          `Mapping[str, MetricValue]` was excluded because forging the MAPPING would be a vacuous
+#          no-op -- true of the mapping, and silent about its keys, which is the CLAUDE.md rule about an
+#          avoided input being a finding, collected one round later.
+#      THE FIX IS ITEM 6'S SHAPE ONE LANE FURTHER OUT AGAIN: `_word_keyed` is the single admission for
+#      the keys of a mapping this page looks words up in, `_word_text` renders a loose string, and
+#      `_metric_table` admits per ENTRY (because two keys storing one word are two rows and neither may
+#      vanish). The sweep is DERIVED BY WALKING THE PAYLOAD, like `container_sites()` and unlike
+#      `word_sites()`, so a new caller-supplied string or a new keyed mapping inherits the pin.
+#
 # WHAT IS DELIBERATELY NOT IN THE SCHEME is argued at `_valid_history` and `_protocol_params`.
 def _num(x: float) -> str:
     """Render a number one of the four kind functions has ALREADY admitted.
@@ -588,6 +618,50 @@ def _word_text(x: Any, why: str) -> str:
     return _e(_visible(w)) if w is not None else _unknown(why)
 
 
+def _word_keyed(m: Any) -> dict:
+    """THE ONE ADMISSION for the KEYS of a caller-supplied `Mapping` this page looks words up in. A plain
+    `dict` keyed by the characters each key STORES. Fails closed: a key whose stored word is ambiguous
+    (two keys store the same word) or which is not a string at all names nothing this page reads, so the
+    name reads as ABSENT -- UNKNOWN, never a value served under a name the mapping does not store.
+
+    `_word` for a VALUE established which characters it holds; this is the same argument one level out,
+    for the thing a value is FILED UNDER. `m.get("merge_base")` and `"evidence_url" in m` are
+    `__hash__` + `__eq__` ON THE STORED KEY (a `str` SUBCLASS key makes CPython abandon
+    `lookdict_unicode` for the general lookup, which calls the stored key's `__eq__` first), so a key
+    STORING one word while answering as another re-points every lookup in this module -- and the keys of
+    the payload, of the snapshot, and of each `changed_files` entry are all caller-supplied.
+
+    MEASURED at the previous HEAD, through the PUBLIC `render_dashboard(data)` API with no
+    `object.__setattr__` (the snapshot is caller-supplied JSON and the payload is the API's own
+    argument), each forgery being one key removed and one sibling key answering as it while keeping its
+    own value -- so the page prints a value stored under one name UNDER ANOTHER NAME, with the mapping
+    itself the only record of which:
+        snapshot keys          154 of 156 ordered pairs moved the Source-diff inventory
+        changed_files[0] keys    6 of 6
+        the payload's own keys  12 of 12 (a `train` served as `joint`, a `records` list as `snapshot`)
+    every one of them with the page's alarm state unchanged. The reference is NOT the honest fixture: the
+    mapping really is different. It is the SAME mapping with that key plainified -- which renders the
+    looked-up name as UNKNOWN and the donor's value under the donor's own name -- and that is what this
+    function makes the page do. `_metric_table` needs the stored word WITHOUT this collapse, because two
+    metrics whose keys store the same word are two rows and neither may vanish; it admits per entry."""
+    out: dict = {}
+    seen_twice = set()
+    try:
+        items = list(m.items())
+    except Exception:       # noqa: BLE001 - a hostile Mapping may not be iterable; refuse, never raise
+        return {}
+    for k, v in items:
+        w = _word(k)
+        if w is None:
+            continue        # not a string: it names nothing this page looks up
+        if w in out:
+            seen_twice.add(w)
+        out[w] = v
+    for w in seen_twice:
+        del out[w]          # ambiguous: this page reads the name as absent
+    return out
+
+
 # EVERY caller-supplied STRING this renderer turns into a LABEL, a DECISIVE WORD or a lookup key, by the
 # class that holds it, with its LANE. The non-numeric twin of `STORED_NUMBERS`, keyed by class NAME for
 # the same reason, and -- like it -- a DECLARATION, not a proof: what makes it load-bearing is that
@@ -608,13 +682,19 @@ def _word_text(x: Any, why: str) -> str:
 #            CLOSED -- the joint verdict cell must lose its decisive styling. Three entries, each with
 #            the lookup it cannot be normalised in front of:
 #              ComponentResult.metric  -> `_declared` / `_series_of` / `bm.PRIMARY`: re-pointing it makes
-#                  the row a different metric, which MUST alarm rather than render quietly. (Round 8
-#                  measured 32 component x target pairs, every one alarmed or still JOINT_UNSUPPORTED;
-#                  round 9 measures 54 of 54 forgeries withholding the joint verdict.)
-#              HypothesisResult.verdict -> 27 of 27 `__eq__` forgeries render JOINT_INCONCLUSIVE.
+#                  the row a different metric, which MUST alarm rather than render quietly.
+#              HypothesisResult.verdict -> an `__eq__` forgery renders JOINT_INCONCLUSIVE.
 #              GateResult.name -> `benchmark.GATE_SCOPES[self.name]`, read by `GateResult.scope`, which
 #                  is a PROPERTY of another owner's class: this module cannot admit the text in front of
-#                  it. `_gate_set_ok` catches the forgery instead; 54 of 54 withhold the verdict.
+#                  it. `_gate_set_ok` catches the forgery instead.
+#            THE PER-SITE FIGURES ARE DELIBERATELY NOT WRITTEN HERE (round 11). Three stood in this
+#            comment -- "54 of 54", "27 of 27", "54 of 54" -- and NONE of them reproduced: measured, the
+#            same sweep gives 48 of 48, 4 of 4 and 42 of 42, every one of which failed closed. The
+#            substance was right and the arithmetic had rotted, because a figure in a comment is a figure
+#            nothing goes red about -- the per-sentence-pinning gap CLAUDE.md names. They now live in
+#            `KEY_LANE_FIGURES` in `test_dashboard.py`, next to the loop that produces them and
+#            ASSERTED by `test_the_key_lane_figures_are_asserted_not_narrated`, which also asserts the
+#            only part a reader should trust without re-deriving: 0 decisive joint verdicts standing.
 #   "bare"   a DECLARED RESIDUAL: rendered bare, through the caller's `__str__`, and deliberately NOT
 #            pinned. Two entries, both refused by an earlier round on the record and neither re-opened
 #            here: `GateResult.reason` (round 5) and `MetricValue.reason` outside `_untrusted`, which is
@@ -629,6 +709,19 @@ STORED_WORDS = {
     "HypothesisResult": {"hid": "shown", "label": "shown", "verdict": "key"},
     "GateResult": {"name": "key", "reason": "bare"},
     "ExperimentRecord": {"name": "shown", "notes": "shown", "evidence_class": "shown"},
+    # THE NINTH RENDERED DATACLASS, declared in round 11. `RunProvenance` is reached only as
+    # `rec.provenance` and `getattr(p, ...)`, so its NAME appears nowhere in this module and the
+    # eight-class list was not wrong by anyone's reading -- it was wrong structurally, and the gap was
+    # found by walking the payload rather than by reading this file. There is NO CURRENT CONSEQUENCE:
+    # all four of its string fields reach the page through `_untrusted` -> `_word` and a lying `__str__`
+    # on each moves nothing (measured, pre- and post-fix). `python_version` is rendered by neither
+    # panel, which is the "shown" lane's trivial case and is why it is in that lane and not in an
+    # exemption list: the day it gains a cell it inherits the assertion with no edit here. What the
+    # declaration buys is that a NEW `RunProvenance` string rendered through a bare `_e` turns something
+    # red. `input_hashes` is a `Mapping[str, str]`, not a string field, and is rendered by neither
+    # panel: see `test_the_other_caller_mapping_inside_a_dataclass_is_rendered_by_nothing`.
+    "RunProvenance": {"run_id": "shown", "timestamp_utc": "shown", "code_version": "shown",
+                      "python_version": "shown"},
     "MetricValue": {"reason": "bare"},
 }
 WORD_LANES = ("shown", "key", "bare")
@@ -770,10 +863,53 @@ def _metric_cell(mv: Any) -> str:
 
 
 def _metric_table(metrics: Optional[Mapping], expected: Iterable[str] = ()) -> str:
+    """One row per metric the mapping STORES, plus one UNKNOWN row per `expected` name no stored key
+    claims. The rows are built by WALKING `items()` once; no row is fetched by key.
+
+    IT IS KEYED BY THE WORD EACH KEY STORES, NOT BY THE KEY (round 11). The label was `_word`-admitted
+    from round 9 and that was the whole of the fix, so `set(metrics) | set(expected)` and
+    `metrics.get(n)` still ran on the KEY's `__hash__`/`__eq__`. MEASURED at the previous HEAD by
+    `object.__setattr__` on `metrics` (the public route is closed -- `schema._plain_value` collapses a
+    `str` subclass key, verified -- and this is the same tier as every round-9 finding): a key STORING
+    "zzz" that hashes and compares as "initial_loss" SWALLOWED `initial_loss`, a `TRAIN_EXPECTED` member
+    that exists so an unmeasured expected metric gets an UNKNOWN row. The row count fell from 5 to 4,
+    extra `warn` spans 0, and the name appeared NOWHERE on the page -- no UNKNOWN row and no 0. With two
+    entries the same route printed a measured figure under the WRONG NAME (two rows both captioned
+    `final_loss`, none captioned `initial_loss`).
+
+    THAT IS THE POSITIVE HALF OF THIS PAGE'S OLDEST CRITERION. For eight rounds "a missing result is
+    never 0" was read only in its negative direction, which held and still holds; "missing results
+    render as UNKNOWN" is the half a key lie breaks, because a swallowed name is not missing-and-shown,
+    it is gone.
+
+    WHY NOT `_word_keyed`, which is the same admission for a mapping this page looks words UP in: that
+    collapse drops a word two keys both store, and here that would delete two real rows to punish an
+    ambiguity whose data is still displayable. One admission per ENTRY instead -- the row is labelled
+    with `_untrusted`'s admitted text and valued from the entry's own `MetricValue`, so a lying key can
+    change neither which rows exist nor what is in them, and the `expected` set is answered against the
+    words the keys STORE. Sorting is by that stored word; equal words keep mapping order, so the output
+    is deterministic. A non-string key still gets its row (nothing is hidden) and is ordered by `repr`,
+    which is what `_untrusted` shows for it."""
     metrics = metrics if isinstance(metrics, Mapping) else {}
-    names = sorted(set(metrics) | set(expected), key=str)
-    rows = "".join(f"<tr><td>{_untrusted(n, 'metric name')}</td><td>{_metric_cell(metrics.get(n))}</td></tr>"
-                   for n in names)
+    try:
+        items = list(metrics.items())
+    except Exception:       # noqa: BLE001 - a hostile Mapping is refused, never allowed to raise here
+        items = []
+    rows_by_word = []
+    stored = set()
+    for k, v in items:
+        w = _word(k)
+        if w is not None:
+            stored.add(w)
+        rows_by_word.append((w if w is not None else repr(k), k, v))
+    for n in expected:
+        w = _word(n)
+        if w is None or w in stored:
+            continue        # already stored under this word: it has its own row above
+        rows_by_word.append((w, n, None))
+    rows_by_word.sort(key=lambda r: r[0])
+    rows = "".join(f"<tr><td>{_untrusted(k, 'metric name')}</td><td>{_metric_cell(v)}</td></tr>"
+                   for _w, k, v in rows_by_word)
     return f"<table><tr><th>metric</th><th>value</th></tr>{rows}</table>" if rows else ""
 
 
@@ -794,8 +930,22 @@ def _int_cell(snap: Mapping, key: str) -> str:
     return _kind_cell(snap.get(key), f"{key} not present", "count")
 
 
-def _defang(url: Any) -> str:
-    s = str(url)
+def _defang(url: Any) -> Optional[str]:
+    """Strip the scheme from a caller-supplied URL. None means "not a string", which the one call site
+    renders as UNKNOWN -- never as a bare host.
+
+    `_word(url)`, NOT `str(url)` (round 11). The scheme test was already honest: `s.lower()` and the
+    slice read the real buffer whatever a subclass overrides, and `lower`/`__getitem__` forgeries moved
+    nothing (measured). `str(url)` was the whole of the defect. MEASURED at the previous HEAD through
+    the PUBLIC `render_dashboard(data)` API -- no `object.__setattr__`, because the snapshot mapping is
+    caller-supplied JSON -- with a `str` subclass storing the honest
+    `https://api.github.com/repos/...` and lying only on `__str__`: the page rendered the ATTACKER'S
+    HOST under the caption "Evidence URL (scheme omitted, not a link)", the honest host absent from the
+    page, 0 extra `warn` spans, 0 extra UNKNOWN, and the panel still badged SOURCE_OBSERVED. The caption
+    makes a claim about what the text IS, and the text was not the one the snapshot stores."""
+    s = _word(url)
+    if s is None:
+        return None
     for scheme in ("https://", "http://"):
         if s.lower().startswith(scheme):
             s = s[len(scheme):]
@@ -806,6 +956,11 @@ def _render_snapshot(snap: Any) -> str:
     if not isinstance(snap, Mapping):
         return _panel("Source-diff inventory", EvidenceClass.UNKNOWN,
                       "<p>" + _unknown("no source snapshot supplied") + "</p>")
+    # `_word_keyed` ONCE, then every lookup below is on a plain `dict` with plain `str` keys (round 11).
+    # The snapshot is caller-supplied JSON and the Source-diff inventory is SR-13's first named
+    # deliverable, so its KEYS are an input like any other: see `_word_keyed` for the 154-of-156
+    # measurement of what one of them answering as another did to this panel.
+    snap = _word_keyed(snap)
     files = snap.get("changed_files")
     rows = ""
     if isinstance(files, (list, tuple)):
@@ -830,6 +985,7 @@ def _render_snapshot(snap: Any) -> str:
                 rows += f"<tr><td colspan=3>{_unknown('malformed entry')}</td></tr>"
                 ok_totals = False
                 continue
+            f = _word_keyed(f)          # its three keys are caller-supplied too (6 of 6 pairs moved)
             a, d = _count(f.get("additions")), _count(f.get("deletions"))
             if a is not None and d is not None:
                 tot_a, tot_d = tot_a + a, tot_d + d
@@ -844,12 +1000,28 @@ def _render_snapshot(snap: Any) -> str:
         files_html = f"<table><tr><th>file</th><th>additions</th><th>deletions</th></tr>{rows}{total}</table>"
     else:
         files_html = "<p>" + _unknown("changed_files not present") + "</p>"
+    # `_word_text`, NOT `_e(_visible(str(...)))` (round 11). THE LIST'S STRING ELEMENTS AND THE SNAPSHOT'S
+    # STRING VALUES: the only two bare `str()` of a caller-supplied string left in this module after
+    # round 9, both in the panel CLAUDE.md names as a source of truth, and no sweep reached them --
+    # `word_sites()` is `STORED_WORDS` x the rendered dataclasses, the round-8 pin forges a snapshot
+    # value only `if is_a_stored_number(v)`, and `container_sites()` forges a list's `__len__` and never
+    # its elements. MEASURED at the previous HEAD through the PUBLIC API with a `str` subclass storing the
+    # honest text and lying only on `__str__`: BOTH honest fork-only commit hashes absent from the page
+    # entirely (measured `[False, False]`) and the merge base printed not the one the snapshot stores --
+    # the upstream ancestor this kit's rules name as a source of truth -- with 0 extra `warn` spans, 0
+    # extra UNKNOWN and the panel still badged SOURCE_OBSERVED. A commit entry that is not a string now
+    # reads UNKNOWN rather than its `repr`: it names no commit, and this list is a list of hashes.
     commits = snap.get("fork_commits")
-    commits_html = ("<ul>" + "".join(f"<li><code>{_e(_visible(str(c)))}</code></li>" for c in commits) + "</ul>"
+    commits_html = ("<ul>" + "".join(f"<li><code>{_word_text(c, 'malformed commit entry')}</code></li>"
+                                     for c in commits) + "</ul>"
                     if isinstance(commits, (list, tuple)) else "<p>" + _unknown("fork_commits not present") + "</p>")
     mb = snap.get("merge_base")
-    mb_html = f"<code>{_e(_visible(str(mb)))}</code>" if isinstance(mb, str) else _unknown("merge_base not present")
+    mb_html = f"<code>{_word_text(mb, 'merge_base not present')}</code>" if isinstance(mb, str) \
+        else _unknown("merge_base not present")
     note = snap.get("behind_by_field_note")
+    ev = _defang(snap["evidence_url"]) if "evidence_url" in snap else _MISSING
+    ev_html = (_unknown("not present") if ev is _MISSING else
+               _untrusted(ev) if ev is not None else _unknown("evidence_url is not a string"))
     body = (
         f"<p>Fork: {_untrusted(snap.get('fork', 'UNKNOWN'))} Upstream: {_untrusted(snap.get('upstream', 'UNKNOWN'))}"
         f" Audit date: {_untrusted(snap.get('audit_date', 'UNKNOWN'))}</p>"
@@ -863,7 +1035,7 @@ def _render_snapshot(snap: Any) -> str:
         "<p><b>These are two different comparisons and must not be conflated.</b></p>"
         f"<p>Source note: {_untrusted(note) if note is not None else _unknown('behind_by_field_note not present')}</p>"
         f"<p class=\"caveat\">Evidence URL (scheme omitted, not a link): "
-        f"{_untrusted(_defang(snap['evidence_url'])) if 'evidence_url' in snap else _unknown('not present')}</p>"
+        f"{ev_html}</p>"
         "<p class=\"caveat\">Source metadata only; not a model-performance or safety result.</p>")
     return _panel("Source-diff inventory", EvidenceClass.SOURCE_OBSERVED, body)
 
@@ -2256,8 +2428,15 @@ _LEGEND = "".join(f'<li><span class="badge {c}">{_e(l)}</span> {_e(v)}</li>' for
 
 
 def render_dashboard(data: Optional[Mapping] = None) -> str:
-    """Pure, deterministic. Missing keys render as UNKNOWN panels."""
-    data = data if isinstance(data, Mapping) else {}
+    """Pure, deterministic. Missing keys render as UNKNOWN panels.
+
+    THE PAYLOAD'S OWN KEYS ARE AN INPUT (round 11). This function's five lookups are `__hash__` +
+    `__eq__` on the caller's keys, so one key answering as another served the wrong panel its data:
+    MEASURED at the previous HEAD, 12 of 12 ordered pairs moved the page -- a `train` result rendered as
+    the scorecard, a `records` list rendered as the snapshot -- with no `object.__setattr__` anywhere,
+    because this mapping IS the public API's argument. `_word_keyed` collapses it to the words its keys
+    store, so a panel is fed what the payload FILES under that panel's name or nothing at all."""
+    data = _word_keyed(data) if isinstance(data, Mapping) else {}
     panels = [
         _render_snapshot(data.get("snapshot")),
         _render_train(data.get("train")),

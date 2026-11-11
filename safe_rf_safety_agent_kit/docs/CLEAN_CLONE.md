@@ -381,40 +381,57 @@ same exclusions. Three things about it are load-bearing:
   because deleting the record is how the sentence comes back. **This document was added to that scope in round
   8, and it is where the next two instances were found:** the normative skip-policy section that a clean clone
   is sent to stated the withdrawn filesystem-case rule (*reason contains "case-sensitive"*) and the withdrawn
-  package rule (*as a word and as a prefix*) as if both were current. Its window is half as wide for those two
-  needles than for the three older ones. **The figure this bullet recorded was wrong, and the correction is
-  itself a measurement:** the wider window laundered the package-rule sentence because a correct history note
-  about a *different* rule sat **two** lines above it, not six — measured on the pre-fix document, the false
-  sentence at line 258 and the note at line 256 — so ±1 is tight by **one** line rather than five. And only
-  *one* of the two round-6 needles ever needed the narrower window at all: the filesystem-case one failed at
-  every half-width from 0 to 7 before the sentence it names was rewritten. The widths stay per needle for a
-  different and also measured reason, and the measurement was taken **twice in one round**: when round 8 began
-  the third of the three older needles failed at half-widths 0–4 and passed from 5, so ±1 for all five was red;
-  rewriting this bullet moved that marker onto the needle's own line, so the same occurrence passes at 0 now,
-  and the occurrence that binds on the current tree is a comment in `tests/toy_tests/test_scripts.py` with a
-  minimum of 2 — ±1 for all five is **still** red, for a third reason. That is the argument for per-needle
-  widths: a marker's distance is a property of **prose** and moves whenever a paragraph is rewritten, so a
-  width is headroom for a hard-wrapped history paragraph, not a fact about a needle. A needle that has to be
-  *adjudicated* rather than given room is what the sentence scope below is for.
+  package rule (*as a word and as a prefix*) as if both were current.
   **A line window cannot adjudicate a claim whose own line carries an unrelated retraction marker**, which is
   what round 8 found in `scripts/run_tests.sh`: the canary comment used to say *"'connection refused' from the
   local stack and nothing leaves the host"* in the same sentence as *"It used to be 192.0.2.1:9"*, a correct
   history note about a different fact, so a line window of **any** half-width from 0 to 7 reads the second
-  marker as this claim's. A needle like that now declares the scope `sentence` instead of a width: the marker
-  must stand before the claim **inside its own sentence**, in the comment block joined across the hard wrap.
-  **`.github/workflows/ci.yml` was added to this test in the same round** — its 24-line normative header was
-  outside the discipline entirely, while asserting that nothing in the workflow touched a remote host except
-  one pip-install step, which is false for both jobs (each fetches `actions/checkout@v4`,
-  `actions/setup-python@v5` and this repository from github.com, independently of hermeticity). Everything
-  scanned in that file is held to the sentence rule, because its header is itself dense with correct history
-  notes: measured, an unmarked needle added there passes at ±6 and fails under the sentence rule. The test's
-  name still says "in a comment" because `docs/PROGRESS.md` cites it by name; its scope is the four files
-  listed inside it.
-  The same sweep found `scripts/run_tests.sh` defining a sound exemption as one that "cannot be
-  spent on hiding a package skip" (false — see the bound above) and the filesystem-case exclusion claiming it
-  "cannot ... hide a torch test" — **withdrawn** in the same way, since an exemption can hide one and the bound
-  is `FS_CAP` plus the baseline. Both are corrected in place. (The marker is on that line on purpose: this
-  needle's own window was five lines wide and shrank to nothing when the bullet above it grew.)
+  marker as this claim's.
+  **THE PER-NEEDLE LINE WINDOWS ARE NOW GONE, AND SO IS THE ENUMERATED FILE LIST — round 10's F3.** Both were
+  short in the same way, and the widths went first because they were never a fact about a needle: a marker's
+  distance is a property of **prose** and moves whenever a paragraph is rewritten, measured three times in one
+  round (a needle that failed at half-widths 0–4 and passed from 5; a needle whose minimum width was **2**
+  where this bullet had claimed 6; a needle whose binding occurrence moved to another file twice). Every needle
+  is adjudicated by the **sentence rule** that the `ci.yml` ceiling already applied to one whole file: the
+  marker must stand **before** the claim and **inside its own sentence**, in the prose block joined across the
+  hard wrap. Four live sentences in this kit had to be reworded to satisfy it — in `scripts/run_tests.sh`, in
+  `.github/workflows/ci.yml` and twice in this document — and that is the cost, paid once instead of
+  re-measured per paragraph.
+  **And the file list is DERIVED instead of enumerated.** It had gone short three times — widened to this
+  document in round 7, to `.github/workflows/ci.yml` in round 9, and found short again in round 10 by
+  `scripts/lint.sh`'s 43-line normative header **and by `README.md`, the file that retracted "nothing leaves
+  the host" in the first place**, where unmarked prose asserting *"…cannot launder a missing package, and
+  nothing leaves the host"* was measured **green** in both. The scope is now every file in `git ls-files`
+  except the one this project's own `CLAUDE.md` designates as the durable journal, with the per-file reading
+  rule taken from the suffix (full-line comments in `.py`/`.sh`/`.yml`, the whole prose of a document). A new
+  file carrying normative prose about what the kit does and does not guarantee therefore lands in the scope
+  **without an edit to the test**, and the test additionally asserts that nothing tracked is outside the scope
+  but the journal, so the derivation cannot quietly shrink either.
+  **Why the journal is out, measured rather than assumed:** at the time of this round's measurement
+  `docs/PROGRESS.md` held **15** needle occurrences, **12** of them failing the sentence rule, every one a *quotation* of a
+  finding inside a dated entry — the journal records claims, it does not make them — so adjudicating it with a
+  prose rule would be a category error. The exclusion is read out of `CLAUDE.md`'s own sentence rather than
+  typed into the test, so renaming the journal moves the exclusion with it and deleting that sentence turns the
+  suite red instead of silently widening the scope.
+  **One scope boundary is declared rather than closed, and the measurement is what fixes it there.** A `.py`
+  file is read for **full-line** comments only, and that is no longer an accident: widening it to docstrings
+  and trailing comments immediately flags `src/toy/robustness.py:62` (*"`dataclasses.replace` cannot launder a
+  summary that was tampered with"*) and `tests/toy_tests/test_benchmark.py:498` (*"# cannot launder a primary
+  id either"*) — two innocent uses of the same two words in a different domain, in files this discipline does
+  not own. Closing the boundary needs needles specific to the skip policy, and the withdrawn-claim needle `cannot launder` is not one of those.
+  The test's name still says "in a comment" because `docs/PROGRESS.md` cites it by name.
+  The same sweep found two definitions that were **withdrawn**: `scripts/run_tests.sh` defined a sound exemption
+  as one that "cannot be spent on hiding a package skip", and the filesystem-case exclusion claimed it "cannot
+  hide a torch test" — both false in the same way, since an exemption can hide one and the bound is the
+  category's cap plus the baseline. Both are corrected in place.
+  **`.github/workflows/ci.yml` was brought into this discipline in round 8** — its normative header was outside
+  it entirely, while asserting that nothing in the workflow touched a remote host except one pip-install step,
+  which is false for both jobs (each fetches `actions/checkout@v4`, `actions/setup-python@v5` and this
+  repository from github.com, independently of hermeticity). **Its replacement was reworded again in round 10,
+  and a needle now covers the rephrasing.** That header used to read *"NO STEP THAT RUNS … reaches a remote
+  host"* — arrival, which is the property `README.md` retracted, rather than the address a step asks for — and
+  it was rescued only by the sentence after it, so a reader who stopped at the colon got the withdrawn claim.
+  It states the address now, and the retracted wording `reaches a remote host` is a needle in its own right.
 - The baseline exclusion applies to **generation**, not only comparison. `scripts/test_baseline.txt` records a
   bare-skip column per module; without the generation-side exclusion a machine without `ruff` would record one
   more skip for `toy_tests.test_scripts` than a machine with it, and the committed file would depend on whose
@@ -429,8 +446,8 @@ skipped test is for, and declaring the gap is the point of the category.
 
 ### An exemption that could be laundered, and the wording rule that did not stop it
 
-The two sentences above that promised the category **cannot launder** a missing package were **false for one
-round**, and the test named in them passed throughout, because it tried only the two laundered reasons that
+The two sentences above were **false for one round** when they promised the category **cannot launder** a
+missing package, and the test named in them passed throughout, because it tried only the two laundered reasons that
 happened to contain one of the three spellings torch mode denies (`not installed`, `missing`, `numpy`).
 Everything else worked. Measured, by driving the live script on synthetic suites:
 
@@ -608,8 +625,33 @@ What it claimed was that a category "cannot arrive with fewer guards or no tests
   **exact-string**, so the same variant worded one word longer — *"(expected on Linux runners)"* against
   *"(expected on Linux)"* — was accepted and printed its parked skips as the Linux figure this document tells a
   reader to expect. Notes are now compared **folded** (lowercase words, punctuation discarded) and a note may
-  not equal another, contain another, or open on another's first four words; each of the three was measured
-  accepted before and `POLICY:INTERNAL` after, with an unrelated note as the control. (ii) The static
+  not equal another, contain another, or be **within one word edit** of another; each of the three was measured
+  accepted before and `POLICY:INTERNAL` after, with an unrelated note as the control.
+  **The third clause used to be a four-word PREFIX test, and it refused an honest declaration — round 10's F2,
+  which is round 3's shape in the note rule.** A row noted *"for an absent optional runtime library"* declared
+  beside the live *"for an absent optional developer tool"* was `POLICY:INTERNAL` in all three modes with the
+  run stopping before a single skip was judged, **and the message blamed the live, correct row**, because the
+  inserted row is scanned first and the complaint was attached to the row being declared. No reader confuses
+  "runtime library" with "developer tool"; the notes differ exactly where English notes differ, in the last two
+  words, and this project's own naming convention (`for an absent optional …`) makes a four-word collision the
+  **likely** case rather than the pathological one. The threshold of **one** word edit is forced by measurement
+  rather than chosen: at one edit that pair is accepted (it is two edits apart) while every variant the rule
+  exists for is still refused — the m7b note, one word longer, by the containment clause; the same note shouted
+  or repunctuated, by folding to equality; and a single-word substitution (*"(expected on Linux)"* →
+  *"(expected on Zedland)"*), by this clause. A threshold of two would re-refuse the honest pair. The message
+  now names **both** rows with their positions in the literal and blames neither, because by the time the check
+  runs both are in the literal and it cannot know which one is new; it says to reword whichever row is being
+  added, by more than one word.
+  **The deny cost, which this document used to disclose only in the permit direction.** Two declared notes must
+  differ by more than one word edit and neither may contain the other, so a second category **cannot** be
+  distinguished from an existing one by refining a single word: *"for an absent optional developer tools"*
+  beside *"for an absent optional developer tool"* is refused, and so is any note that is another plus or minus
+  one word. That is fail-closed on purpose — the note is the only thing a reader of the output sees — but it is
+  a real cost to an honest author, and the run states it, names both rows and stops before judging any skip.
+  The permit residue is unchanged and still open: a paraphrase two or more edits away
+  (*"because this filesystem distinguishes case"*, or *"(typical on Linux boxes)"* against
+  *"(expected on Linux)"*) is accepted, and what bounds it is the registry attestation plus the caps and the
+  baseline, not this rule. (ii) The static
   "bound exactly once" check conceded that a binding made through `globals()[…]` or `setattr` is invisible to
   it and then claimed the runtime half covered such a row **however it arrived**. That was false: the runtime
   half rejects a **malformed** row, and the measured mutant is well-formed. One line after the literal,
@@ -618,8 +660,38 @@ What it claimed was that a category "cannot arrive with fewer guards or no tests
   151 OK. So **every run now prints the registry it judged with** — one `exemption registry row:` JSON line per
   row, rendered from the value the policy reads — and
   `test_the_registry_the_run_really_uses_equals_the_declared_literal` requires that listing to equal the parsed
-  literal, row for row and column for column. A row that arrives by any other route is a red suite; a rebind
-  made between the listing and the caps is `POLICY:INTERNAL` in the script itself.
+  literal, row for row and column for column.
+  **Round 9's version of that fix carried a sentence about its own reach, and the sentence was wrong by exactly
+  one line — round 10's F1.** It said a row arriving by *any* route was a red suite and that the end-of-block
+  snapshot closed *"the one gap this placement leaves"*. The placement left **two**: the listing was printed
+  from the live registry **before** the snapshot was taken, so a `globals()["CATS"] = CATS + […]` line inserted
+  **between the listing and the snapshot** was invisible to both halves — the listing came from the pre-mutation
+  value, the snapshot from the post-mutation one, and the compare at the end of the block therefore passed.
+  Measured on the round-9 script in `--expect none`, the mode both CI jobs run: `exemption registry: 2 row(s)`
+  with the listing **byte-identical** to the declared literal, then *"note: 4 skip(s) for a case-sensitive
+  filesystem (expected on Linux)"*, `RESULT: OK`, rc=0, **no `POLICY:` token**, against a base control of four
+  `POLICY:NONE_REASON` and rc=1 — round 7's m7b and round 8's F1 both fully restored, because a rebind bypasses
+  the declaration loop entirely so no declaration guard applies.
+  **Three things changed, and no sentence about reach replaced them.** The snapshot is taken **first** and the
+  listing is rendered **from the snapshot**, so there is no value the listing can come from that the compare
+  does not re-check. The compare runs **twice** — after the caps and again after the registry's last consumer,
+  the baseline branches that reach it through `base_excl` — so no position in the policy program sits after the
+  last compare. And the listing carries **every** column of a row, the **loose pattern** included: it used to
+  omit column 3, and measured on the round-9 script, replacing that column with a never-matching pattern left
+  the listing byte-identical while a reason carrying a second category's phrase in its tail went from
+  `POLICY:EXEMPT_AMBIGUOUS` to `RESULT: OK` **and exempt**, and one carrying an undeclared tool name in its tail
+  from `POLICY:TOOL_UNDECLARED` to `RESULT: OK` **and exempt** (a package-naming tail stayed denied, because
+  `PKG_EXEMPT` reads the whole reason). Two behavioural tests do kill that mutant — but not the attestation,
+  which is the thing that claims to cover routes. The column count is checked against the row too, so a new
+  `CATS` column cannot be added and left out of the attestation silently.
+  **What replaces the reach claim is an enumeration, not a wider sentence.**
+  `test_every_insertion_position_around_the_registry_attestation_is_driven` inserts one working, well-formed row
+  at **each** position around the attestation — before the snapshot, between the snapshot and the listing,
+  inside the listing loop, after the listing, after the cap loop, after the first compare, and after the last
+  consumer — and asserts the outcome at each: the first position leaves the run green and is killed by the
+  listing/literal comparison, every later one is `POLICY:INTERNAL` with the listing still equal to the
+  declaration, which is what makes the script-side compare the load-bearing half rather than the listing. The
+  enumeration is the claim; the prose above states where the boundary is and nothing about what lies beyond it.
 
 **What is true now, stated as what the tests do rather than as what they aspire to, with the count measured
 instead of hedged.** A category declared in the one literal is covered the moment it is declared, and a
@@ -637,9 +709,18 @@ allowlist does not match the suite's own gating sites, is a red suite.
 **The residue, since a residue is what the last four rounds were made of.** A binding made through
 `globals()[…]` or `setattr` is still not an assignment the static parse can see — what is new is that it no
 longer has to be: the run's own registry listing is compared against the declaration, so the route stops
-mattering. What remains unreachable by any of this: a row that is **well-formed, declared in the literal and
-dishonest** is bounded by the caps and the baseline, never by the declaration; and two notes that a reader
-would confuse but that share no opening and contain nothing of each other (a paraphrase) are still accepted.
+mattering. What remains unreachable by any of this, **restated in round 10 because its own author understated
+it in the project's favour**: a row that is **well-formed, declared in the literal and dishonest** is not
+bounded by the declaration, but the declaration is **not the free column the earlier wording described**. Such
+a row is refused by **three** derivations at once — the carrier-equality check (`every name on a category
+allowlist is really exemptable`, and `every declared category is claimed properly by the sites that use it`,
+which requires a real skip site in `tests/` carrying the row's phrase), the per-row cap-and-boundary test, and
+the normative-section test that requires this document to state the row's phrase. So a declared dishonest row
+costs its author **a committed skip site in the suite and a committed sentence in this document** as well as
+the row. The residue stands — the *behaviour* of such a row is bounded by the caps and the baseline and by
+nothing in the declaration — but it is not cost-free, which is what the earlier sentence implied. And two
+notes that a reader would confuse but that contain nothing of each other and are more than one word edit apart
+(a paraphrase) are still accepted.
 
 **A real site was wrong, and the loose scan found it.** `tests/toy_tests/test_scripts.py` skipped with
 `"filesystem is case-sensitive; case-varied path does not alias the repo"` — the phrase **mid-sentence**,

@@ -2982,7 +2982,14 @@ class EveryPublicParameterIsNormalisedOrExplicitlyExempt(unittest.TestCase):
 
     def test_every_declared_reason_names_a_mechanism_and_the_six_reasons_are_shared(self):
         """Thirty declarations, six reasons: a reason written per site is a reason nobody re-reads. Each
-        names the mechanism that protects the parameter instead of this boundary."""
+        names the mechanism that protects the parameter instead of this boundary.
+        WHAT THIS TEST IS NOT, SINCE ROUND 11, and the correction is the point: it used to be the only
+        thing policing those reasons, and it SAMPLED them -- the three lines below exercised the mask
+        reason on 3 of the 6 measures it covers, and nothing exercised `_WHY_ENUM` on any of its three
+        parameters while two thirds of that reason's sentence was false (Finding D). The sample is kept
+        as the cheap spot-check it always was; the per-parameter exercise is derived from the
+        reason -> parameter mapping in `ADeclaredReasonIsExercisedOnEveryParameterItCovers`, and the two
+        are tied together here so a reader cannot mistake this one for coverage."""
         reasons = {why for ps in rb._PARAMETER_NO_SCALAR.values() for why in ps.values()}
         self.assertEqual(len(reasons), 6, sorted(reasons))
         for why in reasons:
@@ -2996,6 +3003,11 @@ class EveryPublicParameterIsNormalisedOrExplicitlyExempt(unittest.TestCase):
                 m(fx.pred, fx.target, tuple(1 if b else 0 for b in fx.mask))
             self.assertIn("strict bool", str(cm.exception))
         self.assertIn("truthiness is not accepted", rb._WHY_MASK)
+        # and the derived generator covers every parameter of every one of these six reasons, which is
+        # what this test does not do: three measures here, all six (and the other 24 declarations) there
+        self.assertEqual(reasons, set(_reason_parameters()))
+        self.assertEqual(set(_reason_parameters()), set(_REASON_EXERCISERS))
+        self.assertEqual(_reason_coverage_complaints(), [])
 
     def test_the_carrier_reason_states_the_duck_typed_route_it_does_not_close(self):
         """A reason is only worth having if it is true, and writing this one honestly found a NOTE the
@@ -3778,6 +3790,741 @@ class AClosureVariableOfAFactoryIsItsParameter(unittest.TestCase):
         self.assertEqual(rb._PARAMETER_NO_SCALAR["probe_shift"]["fixture_factory"],
                          rb._WHY_CALLABLE_FIXTURE)
         self.assertIn("does NOT type-check this return", rb._WHY_CALLABLE_FIXTURE)
+
+
+# ------------------------- machine-derived REASON-coverage probe (the round-11 fix)
+# WHY THIS EXISTS, in one sentence: a sampled reason-check is what let Finding D through. The test that
+# policed `_PARAMETER_NO_SCALAR`'s six reasons asserted that each NAMES a mechanism, and then exercised
+# that mechanism on 3 of the 6 parameters `_WHY_MASK` covers and on none of the 3 `_WHY_ENUM` covers --
+# while `_WHY_ENUM`'s own sentence was false for 2 of those 3. The rule, stated so the generator is
+# derived from it: A DECLARED REASON MUST BE EXERCISED ON EVERY PARAMETER IT COVERS, from the
+# reason->parameter mapping inverted out of the declaration map, never on a sample of them.
+_DECLARED_FAMILY = (ValueError, TypeError, ArithmeticError, rb.SilentDefaultError)
+# The statuses that assert a clean measurement, and the ones that report a defect, PARTITIONED rather
+# than listed: `test_every_probe_status_is_classified` asserts the two sets cover `ProbeStatus` exactly,
+# so a new member fails there instead of being silently treated as a defect.
+_CLEAN_STATUSES = frozenset({PS.MEASURED, PS.INVARIANCE_HOLDS, PS.SENSITIVITY_WITHIN_BOUND,
+                            PS.MISSING_INPUT_HANDLED, PS.PRECISION_OK})
+_DEFECT_STATUSES = frozenset({PS.INVARIANCE_DEFECT, PS.SENSITIVITY_EXCEEDS_BOUND,
+                              PS.SILENT_DEFAULT_DEFECT, PS.PRECISION_LOSS})
+_NO_CLAIM_STATUSES = frozenset({PS.INSUFFICIENT_EVIDENCE})
+
+
+class _SubMetric(MetricValue):
+    """A `MetricValue` SUBCLASS that lies about nothing, for the two `per_seed` parameters: what
+    `_WHY_CARRIER_SEQ` claims is a refusal BY EXACT TYPE, so the probe does not need a lie to test it.
+    The consequence of accepting one is pinned separately by
+    `ASummaryCannotBeBuiltFromAMetricValueSubclass`."""
+
+
+def _reason_parameters(mapping=None):
+    """{reason: sorted [(function, parameter)]} -- the reason -> parameter mapping, INVERTED out of
+    `rb._PARAMETER_NO_SCALAR` rather than written here.
+
+    This is the whole point of the class below: the list of parameters a reason has to be exercised on is
+    computed from the declarations, so a declaration ADDED to a reason is exercised without anyone
+    remembering to extend a test, and a reason that no longer covers a parameter stops being exercised on
+    it. Keyed by the reason TEXT (the six are module-level constants shared by identity; two of them
+    would have to be written character-identical to collide, and then they would be one reason)."""
+    mapping = rb._PARAMETER_NO_SCALAR if mapping is None else mapping
+    out = {}
+    for fn, params in mapping.items():
+        for p, why in params.items():
+            out.setdefault(why, []).append((fn, p))
+    return {why: sorted(ps) for why, ps in out.items()}
+
+
+def _call_public(fn, calls, **over):
+    return getattr(rb, fn)(**dict(calls[fn], **over))
+
+
+def _resolve(result):
+    """A public callable that RETURNS a callable (`guarded`, `benchmark_outcome`) makes its claim only
+    when that callable runs, so the probe runs it. The argument shape is read from the returned object's
+    OWN signature (3 parameters = a measure over pred/target/mask, 1 = an outcome over a seed) rather
+    than from the name of the function that produced it."""
+    if not callable(result) or isinstance(result, (rb.Scorecard, rb.SeedSummary, MetricValue)):
+        return result
+    fx = rb.make_measure_fixture(1)
+    n = len([p for p in inspect.signature(result).parameters])
+    try:
+        return result(fx.pred, fx.target, fx.mask) if n == 3 else result(1)
+    except _DECLARED_FAMILY:
+        return _RAISED
+
+
+_RAISED = object()
+
+
+def _claims_a_measurement(x):
+    """True if `x` is a CLEAN measured claim: a summary, a measured metric, a card carrying a summary
+    under a non-defect status, or -- the case that matters for `assert_no_silent_default` -- a public
+    assertion that returned without complaint, which IS a certification. INSUFFICIENT_EVIDENCE and the
+    four defect statuses are not claims about a measured value, which is the fail-closed outcome every
+    probe in this module declares."""
+    if x is _RAISED:
+        return False
+    if x is None:
+        return True
+    if isinstance(x, rb.Scorecard):
+        return x.summary is not None and x.status in _CLEAN_STATUSES
+    if isinstance(x, MetricValue):
+        return bm._metric_ok(x)
+    if isinstance(x, (rb.SeedSummary, float, int)):
+        return True
+    if isinstance(x, (tuple, list)):
+        return any(_claims_a_measurement(v) for v in x)
+    return False
+
+
+def _exercise_enum(fn, p, calls):
+    """`_WHY_ENUM`: a non-enum spelling is refused by an `isinstance` gate. Offered the PLAIN STRING the
+    member stores -- the spelling that `_plain_value` cannot collapse (it already stores itself) and that
+    `==` cannot tell from the member."""
+    v = calls[fn][p]
+    if not isinstance(v, Enum):
+        return [f"{fn}.{p}: declared with the Enum reason, but its canonical value is a "
+                f"{type(v).__name__}; the reason does not apply to this parameter"]
+    plain = str(rb._enum_value(v))
+    if isinstance(plain, Enum) or type(plain) is not str:
+        return [f"{fn}.{p}: the probe could not build a plain-str spelling of {v!r}"]
+    try:
+        _call_public(fn, calls, **{p: plain})
+    except _DECLARED_FAMILY:
+        return []
+    except Exception as e:                                           # noqa: BLE001
+        return [f"{fn}.{p}: the plain str spelling raised {type(e).__name__}, OUTSIDE the declared family"]
+    return [f"{fn}.{p}: the plain str spelling {plain!r} of {v!r} was ACCEPTED -- the reason claims an "
+            "isinstance refusal or a collapse at the field boundary, and a plain string stores itself, "
+            "so NEITHER disjunct holds"]
+
+
+def _exercise_mask(fn, p, calls):
+    """`_WHY_MASK`: a non-bool element is refused loudly by `toy.stability.check_mask`, by its own
+    message, on EVERY measure the reason covers -- and a SHORT mask is refused too, because `zip` would
+    otherwise measure the rows the mask happens to reach."""
+    v = calls[fn][p]
+    out = []
+    by_check_mask = (stability.MaskTypeError, stability.MaskLengthError, stability.EmptyMaskError)
+    for label, bad in (("a truthy int mask", tuple(1 if b else 0 for b in v)),
+                       ("a mask shorter than the data", v[:2])):
+        try:
+            r = _call_public(fn, calls, **{p: bad})
+        except _DECLARED_FAMILY as e:
+            if not isinstance(e, by_check_mask):
+                out.append(f"{fn}.{p}: {label} was refused, but not by check_mask: "
+                           f"{type(e).__name__}: {e}")
+        except Exception as e:                                       # noqa: BLE001
+            out.append(f"{fn}.{p}: {label} raised {type(e).__name__}, OUTSIDE the declared family")
+        else:
+            out.append(f"{fn}.{p}: {label} was ACCEPTED -> {r!r}; the reason claims check_mask refuses it")
+    return out
+
+
+def _exercise_carrier_seq(fn, p, calls):
+    """`_WHY_CARRIER_SEQ`: BOTH consumers refuse anything that is not EXACTLY a `MetricValue`."""
+    v = calls[fn][p]
+    out = []
+    for label, bad in (("a duck-typed carrier", tuple(SimpleNamespace(value=0.0, reason=None) for _ in v)),
+                       ("a MetricValue SUBCLASS", tuple(_SubMetric(0.0, None) for _ in v))):
+        try:
+            _call_public(fn, calls, **{p: bad})
+        except _DECLARED_FAMILY:
+            continue
+        except Exception as e:                                       # noqa: BLE001
+            out.append(f"{fn}.{p}: {label} raised {type(e).__name__}, OUTSIDE the declared family")
+        else:
+            out.append(f"{fn}.{p}: {label} was ACCEPTED; the reason claims both consumers refuse "
+                       "anything that is not EXACTLY a MetricValue")
+    return out
+
+
+def _exercise_carrier(fn, p, calls):
+    """`_WHY_CARRIER`: a real carrier normalises its OWN fields at its own boundary, so the boundary
+    composes instead of re-walking. Exercised by REBUILDING the carrier through its own constructor from
+    subclassed fields and asserting (a) nothing impure survives it and (b) the public result is
+    unchanged. For the one parameter whose canonical value is `None` the reason's own disjunct ("or
+    None") is what is checked: there is no field to carry anything."""
+    v = calls[fn][p]
+    if v is None:
+        return ([] if ts._impure(v, f"{fn}.{p}") == [] else
+                [f"{fn}.{p}: the canonical None is not inert"])
+    if not dataclasses.is_dataclass(v):
+        return [f"{fn}.{p}: declared with the carrier reason but its canonical value is a "
+                f"{type(v).__name__}, which has no boundary of its own"]
+    rebuilt = ts._subclassed(v)
+    lies = ts._impure(rebuilt, f"{fn}.{p}")
+    if lies:
+        return [f"{fn}.{p}: the carrier did NOT normalise its own fields: {lies}"]
+    before, after = _call_public(fn, calls), _call_public(fn, calls, **{p: rebuilt})
+    if _digest(before) != _digest(after):
+        return [f"{fn}.{p}: a subclassed carrier moved the result: {_digest(before)} != {_digest(after)}"]
+    return []
+
+
+def _exercise_callable_number(fn, p, calls):
+    """`_WHY_CALLABLE_NUMBER`: a function stores no scalar, and WHAT IT RETURNS is normalised where it is
+    consumed, fail-closed. Two limbs, because the round-11 sweep showed one is not enough: a callable
+    whose return no normaliser can read, and a value that is not callable at all. Neither may yield a
+    clean measured claim; both may raise, which is this module's declared outcome."""
+    out = []
+    for label, bad in (("a callable whose return no normaliser can read", lambda *a, **k: object()),
+                       ("a value that is not callable at all", 42)):
+        try:
+            r = _resolve(_call_public(fn, calls, **{p: bad}))
+        except _DECLARED_FAMILY:
+            continue
+        except Exception as e:                                       # noqa: BLE001
+            out.append(f"{fn}.{p}: {label} raised {type(e).__name__}, OUTSIDE the declared family, so it "
+                       "escapes a probe's own fail-closed handler")
+            continue
+        if _claims_a_measurement(r):
+            out.append(f"{fn}.{p}: {label} produced a CLEAN measured claim ({_digest(r)}), from a "
+                       "callable that was never usable; the reason claims the return is normalised "
+                       "where it is consumed and an unusable one is recorded as unmeasured")
+    return out
+
+
+def _exercise_callable_fixture(fn, p, calls):
+    """`_WHY_CALLABLE_FIXTURE`: the return is NOT type-checked (the reason says so), and the protection
+    is consumption-side -- `_plain_measure` on the measure's return and on `spec.bound`'s. Exercised on
+    the claim as stated: a factory returning a REAL fixture whose elements are subclasses produces a
+    byte-identical card, and a factory returning something that is not a fixture at all produces no
+    claim -- loudly, with the `AttributeError` the reason records as the route it does not close."""
+    out = []
+    honest = _digest(_call_public(fn, calls))
+    lying = lambda s: ts._subclassed(rb.make_measure_fixture(s))      # noqa: E731
+    if _digest(_call_public(fn, calls, **{p: lying})) != honest:
+        out.append(f"{fn}.{p}: a factory returning a subclassed fixture moved the card")
+    try:
+        r = _resolve(_call_public(fn, calls, **{p: lambda s: object()}))
+    except (AttributeError,) + _DECLARED_FAMILY:
+        return out
+    except Exception as e:                                           # noqa: BLE001
+        out.append(f"{fn}.{p}: a non-fixture return raised {type(e).__name__}, which the reason does not "
+                   "name")
+        return out
+    if _claims_a_measurement(r):
+        out.append(f"{fn}.{p}: a factory returning a non-fixture produced a clean claim ({_digest(r)})")
+    return out
+
+
+_REASON_EXERCISERS = {
+    rb._WHY_ENUM: _exercise_enum,
+    rb._WHY_MASK: _exercise_mask,
+    rb._WHY_CARRIER_SEQ: _exercise_carrier_seq,
+    rb._WHY_CARRIER: _exercise_carrier,
+    rb._WHY_CALLABLE_NUMBER: _exercise_callable_number,
+    rb._WHY_CALLABLE_FIXTURE: _exercise_callable_fixture,
+}
+
+
+def _digest(x):
+    """A comparable fingerprint of whatever a public callable returned. `content_hash()` where there is
+    one, so two cards are compared by their bytes and not by a field this probe happened to look at."""
+    if x is _RAISED:
+        return "<raised>"
+    if hasattr(x, "content_hash") and not isinstance(x, type):
+        return x.content_hash()
+    if isinstance(x, (rb.SeedSummary, rb.InsufficientEvidence)):
+        return repr(x.to_dict())
+    if isinstance(x, rb.ShiftSpec):
+        return repr((x.name, rb._enum_value(x.kind), x.rationale))
+    if isinstance(x, Mapping):
+        return repr(sorted((repr(k), _digest(v)) for k, v in x.items()))
+    if isinstance(x, (tuple, list)):
+        return repr([_digest(v) for v in x])
+    if callable(x):
+        return "<callable>"
+    return repr(x)
+
+
+def _reason_coverage_complaints(mapping=None, exercisers=None, calls=None):
+    """Every reason a DECLARED reason is not exercised on a parameter it covers, as a list of strings.
+
+    A function returning complaints rather than a body of assertions, for the reason
+    `_parameter_coverage_complaints` gives: its own fail-closure is then testable, and
+    `test_a_declaration_added_to_a_reason_is_exercised_not_sampled` injects three defects and asserts the
+    matching complaint appears."""
+    mapping = rb._PARAMETER_NO_SCALAR if mapping is None else mapping
+    exercisers = _REASON_EXERCISERS if exercisers is None else exercisers
+    calls = _canonical_calls() if calls is None else calls
+    out = []
+    for why, pairs in sorted(_reason_parameters(mapping).items()):
+        ex = exercisers.get(why)
+        if ex is None:
+            out.append(f"a declared reason covering {pairs} has no exerciser: state how it is tested on "
+                       "every parameter it covers, or split it")
+            continue
+        for fn, p in pairs:
+            if fn not in calls or p not in calls[fn]:
+                out.append(f"{fn}.{p}: declared, but there is no canonical value to exercise it with")
+                continue
+            out += ex(fn, p, calls)
+    return out
+
+
+class ADeclaredReasonIsExercisedOnEveryParameterItCovers(unittest.TestCase):
+    """THE ROUND-11 FIX, and the lesson it is the third instance of: the generator must be DERIVED, not
+    sampled. The field list came from `dataclasses.fields()` (round 6), the parameter list from
+    `inspect.signature` (round 7), the duck-typed spelling from the invariant rather than from thirteen
+    names (round 8) -- and the REASONS those boundaries record were still policed by a test that
+    exercised three of the six measures `_WHY_MASK` covers and none of the three parameters `_WHY_ENUM`
+    covers. Finding D is what that sample missed: `_WHY_ENUM` claimed a non-enum spelling is "either
+    refused by that `isinstance` or collapsed by the field boundary", which is MEASURED FALSE for
+    `shift_reorder_rows.kind` and `standard_shifts.reorder_kind` -- a plain `str` collapses to itself and
+    was never `is` the member, so the exact tier silently became the tolerance tier.
+    What this class asserts: that the reason -> parameter mapping is inverted out of
+    `rb._PARAMETER_NO_SCALAR`; that every reason in it has an exerciser (a NEW reason fails closed); and
+    that the exerciser runs on EVERY pair it covers (a NEW declaration fails closed). It does not assert
+    that the reasons are the right reasons -- nothing can -- only that each is tested wherever it is
+    claimed."""
+
+    def test_every_declared_reason_is_exercised_on_every_parameter_it_covers(self):
+        self.assertEqual(_reason_coverage_complaints(), [])
+
+    def test_the_census_is_derived_from_the_mapping_not_remembered(self):
+        """How many parameters each reason now exercises, computed from the declarations. These numbers
+        are the deliverable of this round, so they are asserted rather than described -- and the reason
+        for pinning them rather than only pinning `complaints == []` is that a declaration DELETED from
+        the map would leave a parameter unexercised and the complaint list empty."""
+        census = {why: len(ps) for why, ps in _reason_parameters().items()}
+        by_name = {n: census[getattr(rb, n)] for n in
+                   ("_WHY_ENUM", "_WHY_MASK", "_WHY_CARRIER_SEQ", "_WHY_CARRIER",
+                    "_WHY_CALLABLE_NUMBER", "_WHY_CALLABLE_FIXTURE")}
+        self.assertEqual(by_name, {"_WHY_ENUM": 3, "_WHY_MASK": 6, "_WHY_CARRIER_SEQ": 2,
+                                   "_WHY_CARRIER": 11, "_WHY_CALLABLE_NUMBER": 7,
+                                   "_WHY_CALLABLE_FIXTURE": 1})
+        self.assertEqual(sum(by_name.values()),
+                         sum(len(v) for v in rb._PARAMETER_NO_SCALAR.values()))
+        self.assertEqual(sum(by_name.values()), 30)
+        self.assertEqual(set(_reason_parameters()), set(_REASON_EXERCISERS))
+        # and the three parameters of the reason this round falsified, by name
+        self.assertEqual(_reason_parameters()[rb._WHY_ENUM],
+                         [("build_scorecard", "status_if_summarized"), ("shift_reorder_rows", "kind"),
+                          ("standard_shifts", "reorder_kind")])
+
+    def test_every_probe_status_is_classified_as_a_claim_a_defect_or_neither(self):
+        """`_claims_a_measurement` decides what counts as a clean claim, and a status nobody classified
+        would silently count as "not a claim" -- the fail-open direction. The three sets partition
+        `ProbeStatus`, so a new member fails here."""
+        self.assertEqual(_CLEAN_STATUSES | _DEFECT_STATUSES | _NO_CLAIM_STATUSES, set(PS))
+        self.assertEqual(len(_CLEAN_STATUSES) + len(_DEFECT_STATUSES) + len(_NO_CLAIM_STATUSES), len(PS))
+
+    def test_a_declaration_added_to_a_reason_is_exercised_not_sampled(self):
+        """THE EVIDENCE THAT THIS IS NOT A RUBBER STAMP, in the three shapes that can go wrong.
+        (1) a parameter added to an existing reason is exercised, and fails if the reason is false of it;
+        (2) a reason with no exerciser is a complaint, not a pass;
+        (3) a SAMPLED exerciser -- the shape the old test had -- passes the same injection, which is the
+            measurement that justifies replacing it."""
+        # (1) a seventh measure declared with _WHY_MASK, which accepts a truthy mask
+        def mse_lenient(pred, target, mask):
+            return rb.mse_fsum(pred, target, tuple(bool(x) for x in mask))
+        mse_lenient.__module__ = "toy.robustness"
+        fx = rb.make_measure_fixture(1)
+        calls = dict(_canonical_calls(),
+                     mse_lenient={"pred": fx.pred, "target": fx.target, "mask": fx.mask})
+        mapping = dict(rb._PARAMETER_NO_SCALAR, mse_lenient={"mask": rb._WHY_MASK})
+        with mock.patch.object(rb, "mse_lenient", rb._plain_arguments(mse_lenient), create=True):
+            complaints = _reason_coverage_complaints(mapping=mapping, calls=calls)
+            self.assertEqual(len([c for c in complaints if "mse_lenient" in c]), 1, complaints)
+            got = next(c for c in complaints if "mse_lenient" in c)
+            self.assertTrue(got.startswith("mse_lenient.mask: a truthy int mask was ACCEPTED -> "), got)
+            self.assertTrue(got.endswith("the reason claims check_mask refuses it"), got)
+            self.assertEqual(len(_reason_parameters(mapping)[rb._WHY_MASK]), 7)
+            # (3) and the sampled form of the same check does NOT see it
+            sampled = [m for m in (rb.mse_naive, rb.mse_fsum, rb.abs_bias_fsum)]
+            for m in sampled:
+                with self.assertRaises(_DECLARED_FAMILY):
+                    m(fx.pred, fx.target, tuple(1 if b else 0 for b in fx.mask))
+            self.assertNotIn(rb.mse_lenient, sampled)
+        # (2) a reason nothing exercises
+        forged = dict(rb._PARAMETER_NO_SCALAR)
+        forged["shift_jitter"] = {"eps": "a reason that reads plausibly and names no mechanism"}
+        self.assertEqual([c for c in _reason_coverage_complaints(mapping=forged) if "shift_jitter" in c],
+                         ["a declared reason covering [('shift_jitter', 'eps')] has no exerciser: state "
+                          "how it is tested on every parameter it covers, or split it"])
+        # and a declaration whose parameter has no canonical value
+        stale = dict(rb._PARAMETER_NO_SCALAR, probe_shift=dict(rb._PARAMETER_NO_SCALAR["probe_shift"],
+                                                               no_such_parameter=rb._WHY_CARRIER))
+        self.assertIn("probe_shift.no_such_parameter: declared, but there is no canonical value",
+                      " ".join(_reason_coverage_complaints(mapping=stale)))
+        self.assertEqual(_reason_coverage_complaints(), [])           # and the real module is clean
+
+    def test_the_reason_each_exerciser_tests_is_the_one_the_module_states(self):
+        """An exerciser is only honest if it tests the mechanism the reason NAMES, so each reason's
+        load-bearing phrase is pinned to the exerciser that acts on it. A reason reworded to claim
+        something else fails here rather than being quietly re-interpreted."""
+        for why, phrase in ((rb._WHY_ENUM, "refused by one of those two `isinstance` gates"),
+                            (rb._WHY_MASK, "truthiness is not accepted"),
+                            (rb._WHY_CARRIER_SEQ, "EXACTLY a `MetricValue`"),
+                            (rb._WHY_CARRIER, "normalises its OWN fields at its own boundary"),
+                            (rb._WHY_CALLABLE_NUMBER, "normalised where it is CONSUMED"),
+                            (rb._WHY_CALLABLE_FIXTURE, "does NOT type-check this return")):
+            self.assertIn(phrase, why)
+            self.assertIn(why, _REASON_EXERCISERS)
+        # the three reasons this round had to correct say what was wrong with them
+        self.assertIn("THE SECOND HALF OF THIS SENTENCE USED TO NAME A MECHANISM THAT DOES NOT EXIST",
+                      rb._WHY_ENUM)
+        self.assertIn("it was not when the test policing it exercised 3 of them", rb._WHY_MASK)
+        self.assertIn('THE WORD "BOTH" WAS FALSE UNTIL ROUND 11', rb._WHY_CARRIER_SEQ)
+
+
+class NoIdentityComparisonDecidesAStatusOrATier(unittest.TestCase):
+    """THE OPERATOR SWEEP Finding D earns, made a guarantee instead of a grep. `ProbeStatus`,
+    `ShiftKind` and `EvidenceClass` are `str` subclasses BY CONSTRUCTION (`toy.schema._plain_value`
+    depends on it), so `x is SomeEnum.MEMBER` is False for a value that `==` cannot distinguish from the
+    member -- and Python's own `SyntaxWarning: "is" with 'str' literal` names the shape. Two sites decided
+    a tier with it; three more decided a status behind an `isinstance` gate, where the identity was
+    correct but the spelling was the one that had already been wrong twice. All five are `==` now, and
+    what is pinned is the MODULE-WIDE rule, because "correct at this site because the field was gated"
+    has to be re-argued for every new site and a rule does not."""
+
+    @staticmethod
+    def _identity_sites(source):
+        """Every `is` / `is not` comparison in `source` with a member of a str- or int-backed Enum on
+        either side, from the AST, in BOTH spellings a module can write one: `ShiftKind.MEMBER`, and a
+        module-level NAME bound to such a member (which is how the rule would be evaded without anyone
+        meaning to). The Enum classes are READ FROM THE MODULE (every `Enum` subclass visible in
+        `toy.robustness` that is also a `str` or `int` subclass), so a new one is swept without being
+        listed, and the member name is checked against `__members__` so that an unrelated attribute of
+        the same shape is not reported.
+        WHAT IT CANNOT SEE, stated because a sweep whose limit is unstated reads as larger than it is: an
+        identity comparison against a LOCAL variable holding a member, which no static rule can resolve.
+        That is the fail-open direction, and it is why the two comparisons this exists for are also
+        covered by a consequence test (`ADeclaredShiftKindIsValidatedNotJustSerialised`) and by the gate
+        in `ShiftSpec.__post_init__`, rather than by this sweep alone."""
+        enums = {n: c for n, c in vars(rb).items()
+                 if isinstance(c, type) and issubclass(c, Enum) and issubclass(c, (str, int))}
+        aliases = {n: v for n, v in vars(rb).items()
+                   if isinstance(v, Enum) and isinstance(v, (str, int))}
+
+        def member_of(side):
+            if (isinstance(side, ast.Attribute) and isinstance(side.value, ast.Name)
+                    and side.value.id in enums and side.attr in enums[side.value.id].__members__):
+                return f"{side.value.id}.{side.attr}"
+            if isinstance(side, ast.Name) and side.id in aliases:
+                return f"{side.id} (a module-level alias of {aliases[side.id]!r})"
+            return None
+
+        found = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Compare):
+                continue
+            for op, right in zip(node.ops, node.comparators):
+                if not isinstance(op, (ast.Is, ast.IsNot)):
+                    continue
+                for side in (node.left, right):
+                    name = member_of(side)
+                    if name is not None:
+                        found.append((side.lineno, name, ast.unparse(node)))
+        return sorted(found), sorted(enums)
+
+    def test_no_identity_comparison_against_an_enum_member_remains(self):
+        sites, enums = self._identity_sites(Path(rb.__file__).read_text())
+        self.assertEqual(enums, ["EvidenceClass", "ProbeStatus", "ShiftKind"])
+        self.assertEqual(sites, [], "an `is` comparison against a str/int-backed Enum member came back: "
+                                    "use `==`, or state at the site why both operands are guaranteed to "
+                                    "be the same interned object")
+        for cls in (rb.ProbeStatus, rb.ShiftKind, EvidenceClass):      # the premise of the whole rule
+            self.assertTrue(issubclass(cls, str), cls)
+
+    def test_the_sweep_sees_the_shape_it_exists_for(self):
+        """NOT VACUOUS: the five pre-fix lines, fed back in as source, are all reported -- including the
+        two that decided the tier and the three behind the `isinstance` gate."""
+        pre_fix = ("def f(self, spec, empty):\n"
+                   "    a = spec.kind is ShiftKind.INVARIANCE_EXACT\n"
+                   "    b = spec.kind is ShiftKind.SENSITIVITY_BOUNDED\n"
+                   "    if self.status is ProbeStatus.INSUFFICIENT_EVIDENCE:\n"
+                   "        pass\n"
+                   "    if self.status is not ProbeStatus.INSUFFICIENT_EVIDENCE:\n"
+                   "        pass\n"
+                   "    c = {'k': empty.status is ProbeStatus.INSUFFICIENT_EVIDENCE}\n"
+                   "    d = EvidenceClass.TOY_RESULT is not spec.label\n"      # and on the left
+                   "    e = spec.kind == ShiftKind.INVARIANCE_EXACT\n"         # the fixed spelling
+                   "    g = spec.kind is ShiftKind.NOT_A_MEMBER\n")            # not a member: not swept
+        sites, _ = self._identity_sites(pre_fix)
+        self.assertEqual([(ln, m) for ln, m, _ in sites],
+                         [(2, "ShiftKind.INVARIANCE_EXACT"), (3, "ShiftKind.SENSITIVITY_BOUNDED"),
+                          (4, "ProbeStatus.INSUFFICIENT_EVIDENCE"),
+                          (6, "ProbeStatus.INSUFFICIENT_EVIDENCE"),
+                          (8, "ProbeStatus.INSUFFICIENT_EVIDENCE"),
+                          (9, "EvidenceClass.TOY_RESULT")])
+        # and the spelling that would evade a sweep written only for `Enum.MEMBER`: a module-level name
+        # bound to a member. There is none in the module today, so one is injected to prove the branch.
+        with mock.patch.object(rb, "_EXACT", SK.INVARIANCE_EXACT, create=True):
+            aliased, _ = self._identity_sites("x = spec.kind is _EXACT\n")
+            self.assertEqual([(ln, m) for ln, m, _ in aliased],
+                             [(1, "_EXACT (a module-level alias of <ShiftKind.INVARIANCE_EXACT: "
+                                  "'INVARIANCE_EXACT'>)")])
+        self.assertEqual(self._identity_sites("x = spec.kind is _EXACT\n")[0], [])   # gone with it
+
+    def test_the_mechanism_the_rule_rests_on(self):
+        """The three facts that make identity the wrong operator here, measured rather than asserted from
+        memory -- and the asymmetry that made Finding D invisible: the plain string is EQUAL to the
+        member and `isinstance` refuses it, so a reader comparing with `==` and a gate written with
+        `isinstance` disagree about whether it is the member."""
+        plain = "INVARIANCE_EXACT"          # a variable, so this file does not itself earn the warning
+        self.assertTrue(issubclass(rb.ShiftKind, str))
+        self.assertEqual(rb.ShiftKind.INVARIANCE_EXACT, plain)
+        self.assertFalse(any(k is plain for k in rb.ShiftKind))
+        self.assertFalse(isinstance(plain, rb.ShiftKind))
+        self.assertEqual(rb._enum_value(rb.ShiftKind.INVARIANCE_EXACT), "INVARIANCE_EXACT")
+
+
+class ADeclaredShiftKindIsValidatedNotJustSerialised(unittest.TestCase):
+    """FINDING D, pinned by the card pair it produced. The route is the public factory with no
+    `object.__setattr__`, no subclass and no duck: `shift_reorder_rows("INVARIANCE_EXACT", 1e9)`. The
+    value is HONEST -- a plain string that stores exactly what it says, which is why the round-8
+    disjunction ("collapsed, or refused") was satisfied by it and still wrong: the defect was in the
+    comparison that read it, not in the value. Confirmed from the other side in
+    `test_a_duck_typed_kind_was_already_refused`: a duck `kind` never reached those comparisons at all,
+    so the duck half of that invariant could not have found this."""
+
+    @staticmethod
+    def _card(kind, rel_tol=1e9, seeds=tuple(range(12))):
+        return rb.probe_shift(row_weighted_mse, rb.shift_reorder_rows(kind, rel_tol), seeds, CFG)
+
+    def test_a_plain_string_kind_is_refused_at_the_spec_and_through_both_public_factories(self):
+        for call in (lambda: rb.shift_reorder_rows("INVARIANCE_EXACT", 1e9),
+                     lambda: rb.standard_shifts("INVARIANCE_EXACT", 1e9),
+                     lambda: rb.ShiftSpec("x", "INVARIANCE_EXACT", lambda fx, rng: fx),
+                     lambda: dataclasses.replace(rb.shift_reorder_rows(), kind="SENSITIVITY_BOUNDED")):
+            with self.assertRaises(ValueError) as cm:
+                call()
+            self.assertIn("kind must be a ShiftKind", str(cm.exception))
+        # the honest spellings still build, including the two other tiers
+        for k in rb.ShiftKind:
+            self.assertEqual(rb.shift_reorder_rows(k, 0.0).kind, k)
+
+    def test_the_card_pair_the_gate_prevents(self):
+        """WHAT WAS FORGEABLE, stated as the two cards side by side. PRE-FIX, measured on 3.12.4 and
+        3.13.5 over 12 seeds of the module's own permutation-violating measure:
+            kind=ShiftKind.INVARIANCE_EXACT -> INVARIANCE_DEFECT, n_violations=12, max_abs_dev=1.4679e-02
+            kind="INVARIANCE_EXACT"         -> INVARIANCE_HOLDS,  n_violations=0,  max_abs_dev=1.4679e-02
+        The deviations are IDENTICAL -- the probe measured the same twelve violations and then judged
+        them against `rel_tol * abs(e)` instead of against zero -- and `details["declared_kind"]`
+        serialises BYTE-IDENTICALLY in both, so nothing a reader or a `==` can see distinguishes them.
+        POST-FIX the forged card does not exist, so what is pinned is the honest card together with the
+        two properties that made its twin invisible."""
+        honest = self._card(SK.INVARIANCE_EXACT)
+        self.assertEqual(honest.status, PS.INVARIANCE_DEFECT)
+        self.assertEqual(honest.details["n_violations"], 12)
+        self.assertAlmostEqual(honest.details["max_abs_dev"], 1.467948e-02, places=8)
+        self.assertEqual(honest.details["declared_kind"], "INVARIANCE_EXACT")
+        self.assertEqual(json.dumps(honest.details["declared_kind"]), '"INVARIANCE_EXACT"')
+        # the tolerance tier, declared HONESTLY, is what the forged card was silently reporting: same
+        # deviations, 0 violations -- so the only thing that ever distinguished them was the declaration
+        tol = self._card(SK.INVARIANCE_TOLERANCE)
+        self.assertEqual(tol.status, PS.INVARIANCE_HOLDS)
+        self.assertEqual(tol.details["n_violations"], 0)
+        self.assertEqual(tol.details["max_abs_dev"], honest.details["max_abs_dev"])
+        self.assertEqual(json.dumps(tol.details["declared_kind"]), '"INVARIANCE_TOLERANCE"')
+        self.assertNotEqual(tol.content_hash(), honest.content_hash())
+        # and the honest-data control the finding needs: at the default rel_tol the tier cannot hide a
+        # violation at all, which is why this needed the public `rel_tol` to be nonzero
+        self.assertEqual(self._card(SK.INVARIANCE_TOLERANCE, 0.0).status, PS.INVARIANCE_DEFECT)
+
+    def test_the_comparison_is_equality_so_the_gate_is_not_the_only_line(self):
+        """TWO LINES, NEITHER ALONE LOAD-BEARING, and the contract each one carries. The gate refuses a
+        non-member inside the declared family; the `==` means that even a value the gate did not see is
+        JUDGED ON THE TIER IT NAMES rather than on the tolerance tier by default. The second is asserted
+        here against the unwrapped constructor -- `ShiftSpec.__post_init__` is the gate, so the only way
+        to reach `probe_shift` with a plain string is to install the field after construction, which is
+        this module's honest limit (1) and is used here as a BEFORE/AFTER control, not as a route."""
+        spec = rb.shift_reorder_rows(SK.INVARIANCE_EXACT, 1e9)
+        object.__setattr__(spec, "kind", "INVARIANCE_EXACT")          # the gate bypassed deliberately
+        self.assertNotIsInstance(spec.kind, rb.ShiftKind)
+        card = rb.probe_shift(row_weighted_mse, spec, tuple(range(12)), CFG)
+        self.assertEqual(card.status, PS.INVARIANCE_DEFECT)           # `==` still reads the exact tier
+        self.assertEqual(card.details["n_violations"], 12)
+        self.assertIn("exact_kind = spec.kind == ShiftKind.INVARIANCE_EXACT", inspect.getsource(rb))
+        self.assertIn("bounded = spec.kind == ShiftKind.SENSITIVITY_BOUNDED", inspect.getsource(rb))
+
+    def test_a_duck_typed_kind_was_already_refused(self):
+        """THE OTHER SIDE OF THE INVARIANT, which is why this finding is a different class from rounds
+        8-9: the duck half could not have caught it. A `kind` that merely answers the operators is
+        refused by `deep_freeze` before any comparison runs -- so "collapse or refuse" was satisfied by
+        the duck AND by the plain string, and the status still flipped. For these two parameters the
+        disjunction is the WRONG INVARIANT, not an incomplete one."""
+        duck = SimpleNamespace(value="INVARIANCE_EXACT")
+        with self.assertRaises(ValueError) as cm:                     # refused at the spec, now
+            rb.shift_reorder_rows(duck, 1e9)
+        self.assertIn("kind must be a ShiftKind", str(cm.exception))
+        # and PRE-FIX it got no further than `deep_freeze`, which is the point: the duck never reached
+        # the comparison that the plain string flipped
+        spec = rb.shift_reorder_rows(SK.INVARIANCE_EXACT, 1e9)
+        object.__setattr__(spec, "kind", duck)                        # honest limit (1), as a control
+        with self.assertRaises(ValueError) as cm:
+            rb.probe_shift(row_weighted_mse, spec, tuple(range(12)), CFG)
+        self.assertIn("cannot freeze SimpleNamespace", str(cm.exception))
+
+
+class ASummaryIsBuiltOnlyFromExactMetricValues(unittest.TestCase):
+    """THE REASON CORRECTION the derived reason-coverage probe found on its first run, STATED AT THE
+    WEIGHT THE MEASUREMENT SUPPORTS. `_WHY_CARRIER_SEQ` claims BOTH consumers of a `per_seed` sequence
+    refuse anything that is not EXACTLY a `MetricValue`; `summarize_seeds` was on `isinstance` -- the
+    very inconsistency round 6 closed in `Scorecard.__post_init__` and recorded as honest limit (3) of
+    its docstring, left standing one function away, with a declared reason asserting it was not. The
+    sampled reason-check exercised neither of the two parameters the reason covers.
+    WHAT IT IS NOT, because the first draft of this class said it was: a status flip, or a route to a
+    summary with nothing behind it. `MetricValue.__post_init__` reads the lying `value` and then STORES
+    it, so the constructed object is the one `MetricValue.measured(1.0)` would have been -- the subclass
+    grants a caller nothing they lack, the `transform` / `scorecard_to_record` reasoning. The two-faced
+    variant that would matter (a `to_dict` serialising `unmeasured` beside a `_metric_read` of 1.0) is
+    measured below and is refused by `build_scorecard`, so no card can publish the disagreement."""
+
+    class Lying(MetricValue):
+        """No `object.__setattr__`, no forged field: a SUBCLASS answering the read. `Sub(None, None)` is
+        the spelling the schema refuses for a real `MetricValue` (unmeasured requires a reason), and it
+        is accepted here because `__getattribute__` makes `__post_init__` see a measured 1.0."""
+
+        def __getattribute__(self, name):
+            if name == "value":
+                return 1.0
+            return object.__getattribute__(self, name)
+
+    class TwoFaced(MetricValue):
+        """The variant whose consequence WOULD be a disagreement a reader could see: it reports a
+        measured 1.0 to `_metric_read` and serialises itself as unmeasured."""
+
+        def to_dict(self):
+            return {"value": None, "reason": "unmeasured"}
+
+    def test_the_subclass_is_refused_by_both_consumers(self):
+        lying = tuple(self.Lying(None, None) for _ in range(12))
+        self.assertEqual(bm._metric_read(lying[0]), 1.0)              # it really does read as measured
+        with self.assertRaises(ValueError):                 # while its honest spelling is refused
+            MetricValue(None, None)
+        for per_seed in (lying, tuple(self.TwoFaced(1.0, None) for _ in range(12)),
+                         tuple(_SubMetric(0.0, None) for _ in range(12))):
+            for call in (lambda ps=per_seed: rb.summarize_seeds(ps, 10),
+                         lambda ps=per_seed: rb.build_scorecard(
+                             probe_id="p", probe_kind="seed_sensitivity", seeds=SEEDS, per_seed=ps,
+                             cfg=CFG, status_if_summarized=PS.MEASURED,
+                             details_always={"measure": "m"})):
+                with self.assertRaises(ValueError) as cm:
+                    call()
+                self.assertIn("MetricValue", str(cm.exception))
+        # the rule is the TYPE and not the lie: a subclass that lies about nothing is refused too, which
+        # is what makes this consistent with `_recheck_summary` / `_recheck_insufficient` / a card
+        self.assertEqual(rb.summarize_seeds(tuple(MetricValue.measured(1.0) for _ in range(12)), 10).mean,
+                         1.0)
+
+    def test_what_the_subclass_produced_before_the_fix(self):
+        """THE BEFORE/AFTER, measured through the public pair with the exact-type check put back to
+        `isinstance` (`__wrapped__` is not a control here -- the check is in the body -- so the body is
+        recompiled, which is this file's declared before/after device):
+            honest `MetricValue.unmeasured(...)` x12 -> InsufficientEvidence(0 measured of 12, min 10)
+            the subclass                        x12 -> SeedSummary(n=12, mean=1.0), handed out by
+                                                       `require_summary` as a scalar
+        and, for the two-faced variant, a summary of 1.0 beside twelve `per_seed` objects that serialise
+        themselves as unmeasured -- which `build_scorecard` refuses, which is why this is a reason
+        correction and not a finding."""
+        lying = tuple(self.Lying(None, None) for _ in range(12))
+        honest = tuple(MetricValue.unmeasured("no measurement at all") for _ in range(12))
+        self.assertIsInstance(rb.summarize_seeds(honest, 10), rb.InsufficientEvidence)
+        src = inspect.getsource(rb.summarize_seeds.__wrapped__).replace(
+            "type(m) is MetricValue", "isinstance(m, MetricValue)")   # the pre-fix predicate, restored
+        self.assertIn("isinstance(m, MetricValue)", src)
+        ns = dict(vars(rb))
+        exec(compile(src.replace("def summarize_seeds", "def pre_fix_summarize_seeds"),       # noqa: S102
+                     "<pre-fix summarize_seeds>", "exec"), ns)
+        pre_fix = ns["pre_fix_summarize_seeds"]
+        self.assertIsInstance(pre_fix(honest, 10), rb.InsufficientEvidence)   # honest data: unchanged
+        result = pre_fix(lying, 10)
+        self.assertIsInstance(result, rb.SeedSummary)
+        self.assertEqual((result.n, result.mean, result.sd), (12, 1.0, 0.0))
+        self.assertEqual(rb.require_summary(result).mean, 1.0)
+        two_faced = tuple(self.TwoFaced(1.0, None) for _ in range(12))
+        self.assertEqual(pre_fix(two_faced, 10).mean, 1.0)
+        self.assertEqual(two_faced[0].to_dict(), {"value": None, "reason": "unmeasured"})
+        # and the object the simple lie builds is the one a plain `measured(1.0)` builds: hence a note
+        self.assertEqual(lying[0].to_dict(), MetricValue.measured(1.0).to_dict())
+        self.assertIn('THE WORD "BOTH" WAS FALSE UNTIL ROUND 11', rb._WHY_CARRIER_SEQ)
+        self.assertIn("grants a caller nothing they lack", rb._WHY_CARRIER_SEQ)
+
+
+class AProbeCannotCertifyAMeasureItNeverCalled(unittest.TestCase):
+    """THE NOTES THIS ROUND CLOSED, each with the measurement that justified closing it rather than
+    declaring it. All three are the same shape as the findings above: a clean-looking claim produced by a
+    path that measured nothing."""
+
+    def test_the_missing_input_probe_refuses_a_measure_that_is_not_callable(self):
+        """PRE-FIX, measured: `probe_missing_inputs(42, SEEDS, CFG)` -> MISSING_INPUT_HANDLED, labels
+        [NOT_VALIDATED, TOY_RESULT], `summary n=12 mean=0.0`, `n_silent_value_total=0` -- the same
+        headline as an honest `mse_fsum` run, with 0 of 15 cases ever invoking a measure, distinguished
+        only by the `case_table`'s exception types. `assert_no_silent_default(42)` returned without a
+        complaint, i.e. certified it. This probe is the only one of the five for which a raised exception
+        is the GOOD outcome, which is why it alone was out of step: its siblings all fail closed."""
+        for call in (lambda: rb.probe_missing_inputs(42, SEEDS, CFG),
+                     lambda: rb.assert_no_silent_default(42),
+                     lambda: rb.probe_missing_inputs("mse_fsum", SEEDS, CFG)):
+            with self.assertRaises(TypeError) as cm:
+                call()
+            self.assertIn("measure must be callable", str(cm.exception))
+        # the honest card is unchanged, and the siblings already fail closed on the same input
+        honest = rb.probe_missing_inputs(rb.mse_fsum, SEEDS, CFG)
+        self.assertEqual(honest.status, PS.MISSING_INPUT_HANDLED)
+        self.assertEqual(honest.summary.mean, 0.0)
+        for card in (rb.probe_shift(42, rb.shift_reorder_rows(), SEEDS, CFG),
+                     rb.probe_precision("magnitude", 1.0, SEEDS, CFG, measure=42),
+                     rb.seed_sensitivity_probe(42, SEEDS, CFG)):
+            self.assertEqual(card.status, PS.INSUFFICIENT_EVIDENCE)
+            self.assertEqual(card.insufficient.n_measured, 0)
+        self.assertFalse(bm._metric_ok(rb.guarded(42)(*[getattr(rb.make_measure_fixture(1), f)
+                                                        for f in ("pred", "target", "mask")])))
+
+    def test_the_exact_oracle_validates_its_mask_like_its_five_siblings(self):
+        """NOTE 1, closed rather than re-worded: `exact_masked_mse` called no validator, so an `int` mask
+        was accepted where every sibling raises `MaskTypeError`, and a SHORT mask silently measured 2 of
+        16 rows. What is deliberately still unvalidated is its matrices -- it is the exact oracle and
+        must accept a `Fraction` -- so its missing-input probe still reports a defect, on the matrix
+        cases only, and that number is asserted here rather than described."""
+        from fractions import Fraction
+        fx = rb.make_measure_fixture(1)
+        with self.assertRaises(stability.MaskTypeError) as cm:
+            rb.exact_masked_mse(fx.pred, fx.target, tuple(1 if b else 0 for b in fx.mask))
+        self.assertIn("truthiness is not accepted", str(cm.exception))
+        with self.assertRaises(stability.MaskLengthError):
+            rb.exact_masked_mse(fx.pred, fx.target, fx.mask[:2])
+        with self.assertRaises(stability.EmptyMaskError):
+            rb.exact_masked_mse(fx.pred, fx.target, (False,) * len(fx.mask))
+        # unchanged where it is the oracle: exact rationals, and a Fraction matrix
+        self.assertEqual(rb.exact_masked_mse(((1.0,), (3.0,)), ((0.0,), (0.0,)), (True, True)),
+                         Fraction(5))
+        self.assertEqual(rb.exact_masked_mse(((Fraction(1),), (Fraction(3),)),
+                                             ((Fraction(0),), (Fraction(0),)), (True, True)), Fraction(5))
+        card = rb.probe_missing_inputs(rb.exact_masked_mse, SEEDS, CFG)
+        self.assertEqual(card.status, PS.SILENT_DEFAULT_DEFECT)       # the matrices, still
+        self.assertEqual(card.details["case_table"]["mask_truthy_not_bool"],
+                         {"raised": 12, "silent_value": 0, "types": ("MaskTypeError",)})
+        silent = sorted(c for c, r in card.details["case_table"].items() if r["silent_value"])
+        self.assertEqual(silent, ["inf_in_masked_out_row", "nan_in_masked_out_row", "ragged_columns"],
+                         "the exact oracle's remaining silent cases are matrix cases, not mask cases")
+        self.assertEqual(card.details["n_silent_value_total"], 36)    # was 48: the four mask cases gone
+        for case in ("all_false_mask", "empty_mask", "mask_is_none", "mask_truthy_not_bool"):
+            self.assertEqual(card.details["case_table"][case]["silent_value"], 0, case)
+
+    def test_a_bare_string_is_not_a_sequence_of_non_claims(self):
+        """NOTE 3, closed because the refusal is one line and a shredded card is serialised to a reader:
+        `non_claims="magnitude"` produced a card whose `does_not_establish` held nine single-character
+        entries, each passing the nonblank-string check. Realistic text was already refused (it contains
+        a blank), which is why this was never a route to a forged verdict."""
+        kw = dict(probe_id="p", probe_kind="seed_sensitivity", seeds=SEEDS,
+                  per_seed=tuple(MetricValue.measured(float(i)) for i in range(12)), cfg=CFG,
+                  status_if_summarized=PS.MEASURED, details_always={"measure": "m"})
+        with self.assertRaises(ValueError) as cm:
+            rb.build_scorecard(non_claims="magnitude", **kw)
+        self.assertIn("not a single string", str(cm.exception))
+        card = rb.build_scorecard(non_claims=("one stated non-claim.",), **kw)
+        self.assertEqual(card.does_not_establish[len(rb.STANDARD_NON_CLAIMS):], ("one stated non-claim.",))
+        # the siblings that take a sequence of numbers already fail closed, which is why only this one
+        # needed the line: each element crosses the parameter boundary again one call down
+        self.assertEqual([c.status for c in rb.precision_sweep("magnitude", "12", SEEDS, CFG)],
+                         [PS.INSUFFICIENT_EVIDENCE] * 2)
+        self.assertEqual(rb.probe_shift(rb.mse_fsum, rb.shift_column_offsets("abc"), SEEDS, CFG).status,
+                         PS.INSUFFICIENT_EVIDENCE)
 
 
 def _impure_rb(v, path):
