@@ -1,12 +1,18 @@
 # Clean-clone verification (offline, stdlib only)
 
 **The kit downloads nothing and requires no credentials.** It needs only Python 3.12 or newer (the standard library
-is enough). No package manager, no API key, no model weights, no dataset, and **nothing the suite does leaves this
-host.** That is deliberately narrower than "the suite opens no socket", because it does: the runner's guard canary
-and the negative-control tests that drive the runner with `--no-network-guard` (which is what makes them controls)
-really attempt connections, and every target is **loopback** — a closed port on `127.0.0.1`, a loopback bind, or an
-AF_UNIX socket. See "Connection attempts the suite itself makes" below; this used to say "no network access at test
-time" while four of those attempts went to a routable address on every run.
+is enough). No package manager, no API key, no model weights, no dataset, and **every connection the suite makes is
+to loopback.** That is deliberately narrower than "the suite opens no socket", because it does: the runner's guard
+canary and the negative-control tests that drive the runner with `--no-network-guard` (which is what makes them
+controls) really attempt connections, and every target is **loopback** — a closed port on `127.0.0.1`, a loopback
+bind, or an AF_UNIX socket. The loopback property is asserted by
+`test_no_executed_connection_target_in_the_suite_is_non_loopback`; see "Connection attempts the suite itself
+makes" below. This used to say "no network access at test
+time" while four of those attempts went to a routable
+address on every run, and it then said **"nothing the suite does leaves this host"**, which is one claim too
+strong for what has been measured: **no run of this kit has ever been observed in a network-denied environment**,
+so hermeticity is asserted by construction and not attested. See "Hermeticity is unattested" under "Known limits
+of this documentation", which defines the measurement that would attest it.
 `mse_naive` order-invariance in the robustness tests depends on CPython >= 3.12 compensated `sum()`; do not use
 an older interpreter (some assertions would go red; pre-3.12 is unsupported).
 "The standard library is enough" is a claim about whether the suite **passes**, and it was false for one round:
@@ -96,11 +102,26 @@ total is normal and is never a failure. A *smaller* per-module count is what the
 | torch + numpy + pytest + PyYAML (macOS, MPS available) | 914 run, 2 skipped (identical in two full runs) | 912 passed, 2 skipped | `torch` | pre-SR-15 |
 | Case-sensitive APFS stand-in, bare | 914 run, 90 skipped (**1** filesystem-case — an artefact; see below) | not run | `none` | pre-SR-15 |
 | Case-sensitive APFS stand-in, torch | 914 run, 3 skipped (**1** filesystem-case — same artefact) | 911 passed, 3 skipped | `torch` | pre-SR-15 |
-| Real Linux | **never observed** | | | |
+| **Bare Linux container, CPython 3.12.10** | 1252 run, 95 skipped, 0 failed; deterministic across `--twice` | not run (not installed) | `none` | `81d450a` — **the first real-Linux measurement** |
+| **Bare Linux container, CPython 3.13.3** | 1252 run, 95 skipped, 0 failed; deterministic across `--twice` | not run (not installed) | `none` | `81d450a` — same container image |
 
 All rows were repeated with `--twice` and were identical. The bare skips are overwhelmingly torch/numpy skips,
 plus the optional-PyYAML workflow-parse test and the script tests that need pytest. Earlier independent reviews
 measured 739 run / 86 skipped bare, and 656 run / 85 skipped bare at the base commit.
+
+**Linux is no longer unobserved, and this row used to read `| Real Linux | never observed |`.** At `81d450a`,
+`bash scripts/run_tests.sh --expect none --twice` was run in two bare Linux containers (nothing installed, no
+venv): **1252 ran / 95 skipped / 0 failed on both CPython 3.12.10 and 3.13.3**, `RESULT: OK`, `run1 == run2`
+with identical per-module counts and identical skip lists, **POLICY tokens: none**, the filesystem probed
+**case-sensitive**, and `packages_present == []`. Two things that had only ever been predicted here are now
+measured: the **4** filesystem-case skips (see the next section — exactly 4, not the stand-in's 1) and the
+**1** absent-optional-developer-tool skip. Those five are the whole difference between **95** skips on Linux and
+**90** locally, because `ruff` is installed on the local machine and so does not skip there. The
+**macOS-generated `scripts/test_baseline.txt` was compared against the Linux run and passed**, which is the
+first evidence that the committed per-module floor is not macOS-specific.
+**What this does NOT establish: hermeticity.** The container **had network**. The socket guard was observed
+*present* on that run, not *load-bearing*; see "Hermeticity is unattested" under "Known limits of this
+documentation" for the measurement that would attest it.
 
 ### SR-15 re-measurement (what was actually run, and on what)
 
@@ -144,7 +165,9 @@ the fix it did not add a skip at all, it failed the run.
 
 ### Filesystem-case skips: **4** on Linux, and the earlier "1" was a measurement artefact
 
-Expect **4** filesystem-case skips on Linux. Three are the `need_ci()` tests of `IdentityAndCaseGuards` in
+**Measured on Linux at `81d450a`: exactly 4**, in two bare containers, printed as
+`note: 4 skip(s) for a case-sensitive filesystem (expected on Linux)` — this section used to say only "expect
+4", from the stand-in plus reasoning. Expect **4** filesystem-case skips on Linux. Three are the `need_ci()` tests of `IdentityAndCaseGuards` in
 `tests/toy_tests/test_dashboard.py`; one is `test_case_varied_tmpdir_into_repo_is_refused_before_anything_is_written`
 in `tests/toy_tests/test_scripts.py`.
 
@@ -235,11 +258,20 @@ process rather than scraped from output):
 - `--expect torch`: each reason must name CUDA, MPS or "torch present" and must not say "not installed", "missing"
   or mention numpy; at most 12 skips. (PyYAML **and pytest** must therefore be installed in this mode: without them the script tests skip as "PyYAML/pytest not installed", which torch mode denies. `requirements-dev.txt` installs both.)
 
-- **Filesystem-case skips** (reason contains "case-sensitive"): allowed in both modes, at most 8, and not counted
-  toward the package-skip floor, the torch cap or the baseline. **Four** tests skip this way on a case-sensitive
-  filesystem (three `need_ci` tests in `test_dashboard`, one in `test_scripts`), whose reasons name no package.
-  Four is the figure to expect on Linux; see "Filesystem-case skips: **4** on Linux" above for why the
-  case-sensitive-APFS stand-in rows show 1.
+- **Filesystem-case skips** (reason **begins with** the declared phrase `\Acase[- ]sensitive filesystem\b`, i.e.
+  `case-sensitive filesystem` or `case sensitive filesystem` at position 0, ending on a word boundary): allowed
+  in both modes, at most 8, and not counted toward the package-skip floor, the torch cap or the baseline.
+  **Four** tests skip this way on a case-sensitive filesystem (three `need_ci` tests in `test_dashboard`, one in
+  `test_scripts`), whose reasons name no package. Four is the figure Linux really shows (measured at `81d450a`;
+  see "Filesystem-case skips: **4** on Linux" above for why the case-sensitive-APFS stand-in rows show 1).
+  **This bullet used to say `reason contains "case-sensitive"`, and that rule was DELETED in round 6** — it was
+  an unanchored `re.search`, and `case-sensitive filesystem: variants differ; libtorch is gone` was exempt in all
+  three modes under it. Measured against the live policy, a reason worded as the withdrawn rule described is
+  **rejected**: `filesystem is case-sensitive; case variants are different directories here` and
+  `case-sensitive: this test is disabled for now` are both `POLICY:NONE_REASON`, `RESULT: FAIL`, in
+  `--expect none`. The phrase above is not prose here — it is parsed out of `EXEMPT_CATEGORIES` in
+  `scripts/run_tests.sh` and required to appear in this section by
+  `test_the_normative_skip_policy_section_states_the_rules_the_script_really_applies`.
 - **Optional-developer-tool skips** (reason **begins with** ``optional developer tool `<name>` is not on PATH``,
   and `<name>` is on the `TOOLS` allowlist): the second category that legitimately names no package, treated
   exactly like the first — allowed in every mode, at most 4 (`POLICY:TOOL_CAP`), and excluded from the
@@ -255,11 +287,26 @@ process rather than scraped from output):
      `scripts/run_tests.sh`, from which the none-mode reason check, **both** package patterns and the baseline's
      PyYAML exclusion are now all built — the exclusion used to be an independently typed `\b(?:py)?yaml\b`
      beside a comment claiming it came from `PKGS`. The tests derive their cases from the tuple too. The rule
-     matches a package name **as a word and as a prefix**: `\btorch\b` does not match `torchrun`, which is
-     PyTorch's own console script, so the word form alone let a tail like `; torchrun is gone` through.
+     that denies an exemption (`PKG_EXEMPT`) is a **containment** test — `"|".join(PKGS)`, case-insensitive — so
+     any affix on either side is caught: `torchrun`, `torch2`, `libtorch`, `_torch`, `mytorch`, `yamllint`.
+     **This paragraph used to read "as a word and as a prefix", with `\btorch\b` does not match `torchrun` as
+     the example, and that was the rule round 6 REPLACED**: a prefix test has a word boundary of its own on the
+     left, so it caught `torchrun` and could never catch `libtorch`, PyTorch's own C++ distribution. The
+     normative summary therefore contradicted this document's own history sections, which say "containment" three
+     times further down. The *accept* rules stay word tests (`PKG`, and the baseline's PyYAML exclusion) for the
+     reasons given under "What is still exempt, stated plainly".
   2. **The tool name must be DECLARED** in the `TOOLS` allowlist, which is a closed set (currently just `ruff`)
      **derived from the suite's own skip sites** — not a judgement about which names look like packages. See
-     "A spelling rule with evadable word boundaries" below.
+     "A spelling rule with evadable word boundaries" below. Since round 8, declaring a name also *works*: the
+     span of a declared name is blanked out of the reason before the containment test runs, so a declared name
+     that happens to contain a package substring is exempt. Before that the allowlist was **inert** for every
+     such name — measured with `TOOLS = ("ruff", "yamllint", "shellcheck")`, ``optional developer tool
+     `yamllint` is not on PATH`` was `POLICY:NONE_REASON` / `RESULT: FAIL` in `--expect none` (the mode both CI
+     jobs run) both before and after declaring it, while the control `shellcheck` was exempt. The rail: an
+     allowlist entry that **is** a measured package (`torch`, `numpy`, `yaml`, `pyyaml`, `pytest`) is
+     `POLICY:INTERNAL` and the run stops before judging any skip, so round 4's defect cannot be declared into
+     existence. The cost, stated plainly: a declared `torchfix` would be exempt, bounded by `TOOL_CAP` (4), the
+     baseline, and the test-time requirement that a real skip site exist for every declared name.
 - **Neither rule makes an exemption "sound"**, and this document and the script both said so for a round. An
   exemption *can* hide a skip — that is what an exemption is. What limits the damage is arithmetic: at most
   `TOOL_CAP` (4, one in use) + `FS_CAP` (8) skips can be exempt at all, and **re-parking an existing skip into
@@ -329,9 +376,17 @@ same exclusions. Three things about it are load-bearing:
   package"*) in `tests/toy_tests/test_scripts.py` for two further rounds — the third time in this project that a
   withdrawn guarantee outlived its withdrawal in a comment. A docstring assertion cannot reach a comment and
   neither can a doc grep, so there is now a source-text test over the comment lines of the script and that file
-  (`test_no_withdrawn_guarantee_is_restated_in_a_comment`): each withdrawn claim may appear only inside a window
-  that marks it as history, and must still appear *somewhere*, because deleting the record is how the sentence
-  comes back. The same sweep found `scripts/run_tests.sh` defining a sound exemption as one that "cannot be
+  **and over the whole of this document** (`test_no_withdrawn_guarantee_is_restated_in_a_comment`): each
+  withdrawn claim may appear only inside a window that marks it as history, and must still appear *somewhere*,
+  because deleting the record is how the sentence comes back. **This document was added to that scope in round
+  8, and it is where the next two instances were found:** the normative skip-policy section that a clean clone
+  is sent to stated the withdrawn filesystem-case rule (*reason contains "case-sensitive"*) and the withdrawn
+  package rule (*as a word and as a prefix*) as if both were current. Its window is half as wide for those two
+  needles than for the three older ones, and that is a measurement: with the wider window the package-rule
+  sentence passed while it was false, because a correct history note about a *different* rule sat six lines
+  above it. The test's name still says "in a comment" because `docs/PROGRESS.md` cites it by name; its scope is
+  the three files listed inside it.
+  The same sweep found `scripts/run_tests.sh` defining a sound exemption as one that "cannot be
   spent on hiding a package skip" (false — see the bound above) and the filesystem-case exclusion claiming it
   "cannot ... hide a torch test" (false in the same way). Both are corrected in place.
 - The baseline exclusion applies to **generation**, not only comparison. `scripts/test_baseline.txt` records a
@@ -501,9 +556,38 @@ run reports it. A row that is wrong is `POLICY:INTERNAL` **before any skip is ju
 declarations, including round 4's open set in one line (a name class with no allowlist) — and
 `tests/toy_tests/test_scripts.py` **parses the tuple** and generates from it: the structural contract, a
 laundering table per category in all three modes, the cap boundary for each cap, the cross-category case over
-ordered pairs, the equality between a category's allowlist and the skip sites that claim it, and the `POLICY:`
-tokens a category must have a test for. A new category is therefore covered the moment it is declared and must
-be named deliberately in two places; it cannot arrive with fewer guards or no tests.
+ordered pairs, the per-row equality between a category's allowlist and the names the suite's own skip sites gate
+on, the opposite direction (a site carrying a phrase must claim the category), and the `POLICY:` tokens a
+category must have a test for.
+
+**Two of those sentences were measured FALSE in round 7 and the paragraph above used to overstate the rest.**
+What it claimed was that a category "cannot arrive with fewer guards or no tests". Both halves had a hole:
+
+- the allowlist equality was bound to the `TOOLS` **tuple**, not to the registry **row** the policy reads. A
+  one-token change at the row — `…, 4, "TOOLS", TOOLS,` → `…, 4, "TOOLS", ("ruff", "shellcheck"),` — left
+  `TOOLS = ("ruff",)` literally true and that equality green, while `shellcheck` was exempt in all three modes
+  with no `POLICY:` token (control on the unmodified copy: `POLICY:TOOL_UNDECLARED` in all three). The equality
+  is now asserted **per row**, for every category whose phrase carries a name, by
+  `test_every_named_categorys_allowlist_is_exactly_the_names_this_suite_gates_on`.
+- the contract was asserted on **source text** and the loop reads a **value**. One line after the literal's
+  `)` — `EXEMPT_CATEGORIES = EXEMPT_CATEGORIES + (("ZED", r"\Aonly on zed\b", 2, "", (), "for zed"),)` — gave a
+  fully functional category with a working cap (`n=2` → OK, `n=3` → `POLICY:ZED_CAP`), no token, in all three
+  modes, invisible to every generated check because none of them can see past the literal. A variant whose
+  `note` column copied the filesystem-case note verbatim printed its parked skips as
+  *"note: N skip(s) for a case-sensitive filesystem (expected on Linux)"*. The registry is now required to be
+  bound **exactly once**, by a module-level assignment whose value is a literal tuple of literal tuples, parsed
+  as a program rather than grepped (`test_the_category_registry_is_assigned_exactly_once_and_never_rebound`),
+  and the loop rejects a duplicate or blank token **and a duplicate or blank note** as `POLICY:INTERNAL`.
+
+**What is true now, stated as what the tests do rather than as what they aspire to.** A category declared in
+the one literal is covered the moment it is declared; a declared *untested* category is refused by **at least
+six** independent checks (six were enumerated by an independent attester before this round's two were added, and
+the count has not been re-enumerated since); a bad row is `POLICY:INTERNAL` and **the run stops before judging
+any skip**; and a second
+binding of the name, or a row whose allowlist does not match the suite's own gating sites, is a red suite. The
+residue, since a residue is what the last three rounds were made of: a binding made through `globals()[…]` or
+`setattr` is not an assignment this parse can see, and a row that is *well-formed but dishonest* is bounded by
+the caps and the baseline, never by the declaration.
 
 **A real site was wrong, and the loose scan found it.** `tests/toy_tests/test_scripts.py` skipped with
 `"filesystem is case-sensitive; case-varied path does not alias the repo"` — the phrase **mid-sentence**,
@@ -655,7 +739,8 @@ the host):
   `test_every_family_member_is_either_patched_or_disclosed` would have failed with
   `unaccounted == ['sendmsg_afalg']`. On macOS the family has exactly 10 socket-method members and the test's
   anti-vacuity floor is `>= 10`, so nothing here could see it. **This was reasoned from the source, not run: no
-  Linux was available** (see "Real Linux behaviour ... has never been observed"), and the floor is now also
+  Linux was available at the time** (the Linux runs recorded at `81d450a` were `--expect none` suite runs and
+  did not re-check this enumeration; see "Real Linux behaviour ... is now OBSERVED"), and the floor is now also
   backed by the four member names it used to pin only by count.
   It is **disclosed rather than patched** because it is not an egress path: it is valid only on a socket in the
   `AF_ALG` family — the Linux kernel *crypto* socket family, whose addresses are algorithm names such as
@@ -819,7 +904,31 @@ This is hygiene, not a sandbox; the runtime socket guard is a second, partial la
   identical skip list, and each is deterministic across `--twice`.** So the interpreter version is no longer a
   source of doubt about that job. **What this does NOT establish:** anything about Linux, which is a separate
   variable and still unobserved (next bullet).
-- **Real Linux behaviour of `run_tests.sh` and the tests has never been observed.** Everything ran on macOS; a case-sensitive-APFS stand-in found one failure (above) and may hide others.
+- **Real Linux behaviour of `run_tests.sh` and the tests is now OBSERVED, in one configuration.** This bullet
+  used to read *"has never been observed. Everything ran on macOS; a case-sensitive-APFS stand-in found one
+  failure (above) and may hide others."* At `81d450a`, `bash scripts/run_tests.sh --expect none --twice` was run
+  in two bare Linux containers: **1252 ran / 95 skipped / 0 failed on both CPython 3.12.10 and 3.13.3**,
+  `RESULT: OK`, `run1 == run2` with identical per-module counts and skip lists, no `POLICY:` tokens, filesystem
+  probed case-sensitive, `packages_present == []`, and the macOS-generated `scripts/test_baseline.txt` passed
+  against it. The predicted **4** filesystem-case skips are measured at exactly 4 (the stand-in's 1 was the
+  artefact described above) and the predicted **1** absent-developer-tool skip is measured at 1. **What one
+  configuration does not establish:** `optional-deps` on Linux, any non-`ubuntu` distribution, a hosted GitHub
+  runner (see the first bullet — the workflow itself still has never been executed), the pinned
+  torch/numpy combination, or hermeticity (next bullet).
+- **Hermeticity is unattested: a network-denied environment has never been observed.** Every statement in this
+  document about nothing leaving the host rests on (a) the loopback-only targets of the connections the suite
+  really makes, asserted by `test_no_executed_connection_target_in_the_suite_is_non_loopback`, and (b) the
+  runtime socket guard, which is a tripwire on names and not a sandbox. The Linux containers above **had
+  network**, so the guard was observed *present*, not *load-bearing*: a guard observed running is not a guard
+  observed working. **The measurement that would attest it, defined here and NOT run:** take the same bare
+  container, remove egress (no default route, or a deny-all egress policy, or an empty network namespace with
+  only `lo` up), and record three things in one session — (1) `./scripts/run_tests.sh --expect none --twice`
+  ends `RESULT: OK` with the same 1252/95/0 and the same skip list as the networked run, so no test is silently
+  passing *because* a connection failed; (2) a positive control in that same environment shows egress really is
+  denied (an outbound TCP connect to a routable address fails with `ENETUNREACH`/`EHOSTUNREACH` rather than
+  `ECONNREFUSED`); (3) `python3 scripts/demo.py` and `./scripts/lint.sh` also pass there. Until all three are
+  recorded, "offline" in the title of this document is a statement about what the kit *asks for*, not an
+  attested property of a run.
 - **The torch/numpy pin is untested as a combination.** `constraints.txt` pins torch 2.7.1 + numpy 1.26.4 on Python
   3.12. Locally the suite passes on torch 2.7.1 + numpy 2.4.6 (framework Python 3.12) and torch 2.11.0 + numpy 2.4.4
   (miniconda Python 3.13), so local runs do not test the pinned combination. The pin is kept for reproducibility.
@@ -839,9 +948,11 @@ This is hygiene, not a sandbox; the runtime socket guard is a second, partial la
   differing total implies a differing `ran`/`skip` line). Only the canon comparison and the `$BAD`-with-`$UT_RC`
   pair are pinned individually. This is defensible redundancy rather than a set of masked tests, but it is four
   terms, not the one the record previously named.
-- **The case-sensitive-filesystem counts come from the stand-in**, not from Linux. The 1/3/4 table under
-  "Filesystem-case skips" is from a real case-sensitive APFS disk image, which is still a stand-in: it shows
-  which *variable* drives each skip, not that Linux behaves identically in other respects.
+- **The 1/3/4 variable-by-variable table comes from the stand-in; the Linux TOTAL does not, any more.** The
+  table under "Filesystem-case skips" is from a real case-sensitive APFS disk image, which is still a stand-in:
+  it shows which *variable* drives each skip. The **4** it predicts for the Linux configuration is now measured
+  on Linux (`81d450a`, two bare containers, `note: 4 skip(s) for a case-sensitive filesystem (expected on
+  Linux)`); what the stand-in still cannot show is that Linux behaves identically in any other respect.
 - **Step (b), `--expect any` on a machine that has the packages, has not been run against the full suite here.**
   It is correct by construction rather than by measurement: in `scripts/run_tests.sh` every policy that the
   host-interpreter run tripped (`NONE_REASON`, `TORCH_PRESENT`, `MIN_NONE_SKIPS`, `NO_NUMPY_REASON`, and the

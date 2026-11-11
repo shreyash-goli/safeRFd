@@ -2539,11 +2539,93 @@ def liar(stored, shown=None):
     return Liar(stored)
 
 
+def exemption_forgeries(honest):
+    """The values an exempted (not-rendered) field is forged to: ILL-TYPED, AND LEGAL FOR ITS OWN TYPE.
+
+    THE ILL-TYPED HALF IS THE SUITE'S ORIGINAL FIVE AND IT IS NOT THE WHOLE JOB. Counted, not argued:
+    `-1`, `nan`, `None`, `object()` and `liar(1e9, 0.0)` are each either inadmissible to every kind
+    function or answer every comparison False, so NOT ONE of them is a legal value of the field's own
+    type. They do catch an exempt field that gains a DISPLAY CELL (the cell reads UNKNOWN where the
+    honest page read a figure, and the bytes differ). What they cannot catch is an exempt field that
+    gains a CROSS-CHECK: an honest page is already quiet, a value no kind admits leaves the new check
+    quiet too, and only a LEGAL value of the right type can make it speak. That is the shape of every
+    round-5-to-7 defect in this item, so the table carries it.
+
+    The legal half is chosen by the honest value's own type, because "legal" is a property of the field:
+    a `MetricValue` field's legal values are `MetricValue`s (a bare `1e9` there is ill-typed, which is
+    how the original five read as five), an `int` field's are `int`s. Each type also gets one
+    conversion-only liar, which is round 8's shape and is legal by construction."""
+    ill_typed = (-1, float("nan"), None, object(), liar(1e9, 0.0))
+    if isinstance(honest, MetricValue):
+        return ill_typed + (MetricValue.measured(0.0), MetricValue.measured(1e9),
+                            MetricValue.measured(-1e9), MetricValue.unmeasured("forged unmeasured"),
+                            forge_mv(MetricValue.measured(1.0), conversion_liar(1.0, 2.0, "__float__")))
+    if isinstance(honest, int) and not isinstance(honest, bool):
+        return ill_typed + (0, 1, 10 ** 6, -10 ** 6, conversion_liar(honest, honest + 1, "__str__"))
+    return ill_typed + (0.0, 0.5, 1e9, -1e9, conversion_liar(honest, honest + 1.0, "__float__"))
+
+
 def is_a_subclass_instance(v):
     """The shape round 7 exists for: an `int`/`float` subclass instance, not an `int`/`float`. This is
     the exact predicate the round-6 count used (`type(v) not in (int, float)` over values that are
     `isinstance` of one), so the figure in the section comment above is reproducible from this file."""
     return isinstance(v, (int, float)) and not isinstance(v, bool) and type(v) not in (int, float)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# SR-13 ROUND 8: THE RENDER BOUNDARY. `liar` above overrides EIGHTEEN dunders at once, which is the right
+# shape for the verdict-and-alarm sweeps (one object, every cross-check attacked) and the WRONG shape for
+# asking "does this cell print the number the kind admitted?": a liar that also lies to `==` and `<` can
+# trip a cross-check, and an alarmed page is a page whose bytes differ for a reason that has nothing to do
+# with rendering. `conversion_liar` overrides EXACTLY ONE dunder and stores the HONEST number, so every
+# comparison, every arithmetic and every predicate in this module and in `benchmark` underneath it sees
+# the truth. The honest render is then the ONLY correct output, and any byte that moves is a renderer that
+# converted the caller's object instead of the number its kind admitted. That is Finding 1 exactly, and
+# round 7's pin could not see it: `test_every_admitted_field_is_normalised_by_its_kind` asserts the TYPE a
+# kind function RETURNS and never looks at a rendered cell, one level below the gap it was written to close.
+# ---------------------------------------------------------------------------------------------------------
+CONVERSION_DUNDERS = ("__float__", "__int__", "__index__", "__str__", "__repr__", "__format__", "RAISE")
+
+
+def conversion_liar(honest, shown, dunder):
+    """An `int`/`float` subclass storing `honest` that lies ONLY on `dunder` (showing `shown`), or --
+    for the pseudo-dunder "RAISE" -- refuses every conversion.
+
+    Every conversion a renderer in this module can perform on a stored number is covered: `_num` is
+    `repr(float(x))` (`__float__`, and `__repr__` if the spelling ever drops the `float()`), a count cell
+    is `_e(v)` (`__str__`), an f-string interpolation is `__format__`, and `__int__`/`__index__` are the
+    two remaining integer conversions. ONE AT A TIME, deliberately: a combined subclass cannot say WHICH
+    conversion a cell performed, and the failure message is the whole value of this test.
+
+    "RAISE" is the other half of the same defect and is not a theoretical one: a `__float__` that raises
+    took BOTH renderers down with ZeroDivisionError at the previous HEAD, through the same `_num(mv.value)`
+    -- a page taken down rather than a result refused, outside this module's stated error contract."""
+    base = float if isinstance(honest, float) else int
+    if dunder == "RAISE":
+        def boom(self, *a):
+            raise ZeroDivisionError("this object refuses every conversion")
+        return type("RefusesEveryConversion", (base,),
+                    {"__float__": boom, "__int__": boom, "__index__": boom, "__str__": boom,
+                     "__format__": boom, "__hash__": base.__hash__})(honest)
+    bodies = {"__float__": lambda self: float(shown),
+              "__int__": lambda self: int(shown),
+              "__index__": lambda self: int(shown),
+              "__str__": lambda self: str(shown),
+              "__repr__": lambda self: repr(shown),
+              "__format__": lambda self, spec: format(shown, spec)}
+    cls = type("LiesOn" + dunder.strip("_"), (base,), {dunder: bodies[dunder], "__hash__": base.__hash__})
+    return cls(honest)
+
+
+def a_lie_for(honest):
+    """A shown value that is never equal to the honest one, and never renders as the same string.
+
+    Derived from the honest number rather than written down: a first draft used the constant 0.5, which
+    silently collided with `rec()`'s own metric value of 0.5 and made that whole site vacuous -- the site
+    reported no finding on a tree where the defect was live."""
+    shown = honest + 1 if isinstance(honest, int) else honest + 1.0
+    assert shown != honest and str(shown) != str(honest), honest
+    return shown
 
 
 # Hostile values per KIND: everything an honest producer of a field of this kind cannot emit BECAUSE OF
@@ -2795,8 +2877,48 @@ def recording_subclass(base, bucket):
 
 def is_a_stored_number(v):
     """What counts as a stored number: a `MetricValue`, or a real `int`/`float`. `bool` is excluded
-    because no field of these classes holds one (`complete_gate_coverage` is a derived flag, not a datum)."""
+    because no field of these classes holds one (`complete_gate_coverage` is a derived flag, not a datum).
+
+    THIS PREDICATE IS EVALUATED ON A VALUE, which is a blind spot wherever the value comes from the
+    honest fixture instance; see `numeric_fields_of`, which is what the two field-enumerating mechanisms
+    now filter with."""
     return isinstance(v, MetricValue) or (isinstance(v, (int, float)) and not isinstance(v, bool))
+
+
+NUMERIC_ANNOTATION = re.compile(r"\b(?:int|float|MetricValue)\b")
+
+
+def numeric_fields_of(cls, obj):
+    """The numeric fields of a scorer dataclass: numeric BY DECLARATION, union numeric BY HONEST VALUE.
+
+    THE SECOND HALF ALONE WAS A BLIND SPOT SHARED BY BOTH FIELD-ENUMERATING MECHANISMS, and it is the
+    kind that hides a whole field rather than a whole route. `test_every_numeric_field_of_a_verdict_
+    bearing_class_is_declared_or_exempt` and `StoredNumbersAreEnumeratedNotAsserted.probe` both filtered
+    with `is_a_stored_number(getattr(obj, f.name, None))` EVALUATED ON THE HONEST FIXTURE INSTANCE, so a
+    numeric field whose honest value is not an `int`/`float`/`MetricValue` at fixture-build time was
+    invisible to BOTH -- not merely undeclared, but unseeable. MEASURED in a `git archive HEAD` copy, on
+    3.13.5: adding `IntervalPair.extra_count: Optional[int] = None` to `benchmark.py` PLUS a read of it
+    on the normal verdict path left the targeted suite at `506 tests, OK` -- an undeclared, unadmitted
+    consumer of a stored number, UNKILLED by `test_dashboard`, which is SR-13's own defect class.
+    No live field has that shape today, which is exactly why neither mechanism's author could see it.
+
+    The annotation half closes it: `dataclasses.fields()` carries the DECLARATION, which exists before
+    any value does. `Optional[int] = None` is numeric by declaration, so such a field must be declared in
+    `db.STORED_NUMBERS` or exempted in `FIELDS_NOT_RENDERED` the moment it exists. Measured on this tree:
+    the two halves pick out the SAME 15 names today (7 + 3 + 3 + 2), so the annotation half costs nothing
+    and the union is kept because the value half still catches a numeric field whose annotation is `Any`,
+    a bare `object`, or a type alias this regex cannot read.
+
+    IT IS NOT A TYPE CHECKER AND MAKES NO CLAIM TO BE. The annotation is matched as TEXT (these modules
+    store annotations as strings), so `dict[str, float]` and `Callable[[int], None]` both read as numeric
+    and would have to be exempted with a reason. That direction is the safe one."""
+    annotated = set()
+    for f in dataclasses.fields(cls):
+        ann = f.type if isinstance(f.type, str) else getattr(f.type, "__name__", repr(f.type))
+        if NUMERIC_ANNOTATION.search(ann):
+            annotated.add(f.name)
+    return annotated | {f.name for f in dataclasses.fields(cls)
+                        if is_a_stored_number(getattr(obj, f.name, None))}
 
 
 def module_code_by_line(module):
@@ -2883,7 +3005,13 @@ class StoredNumbersAreEnumeratedNotAsserted(unittest.TestCase):
         self.assertNotIn("REFUSED", page, cls_name)                  # not a degraded render
         self.assertNotIn("NOT shown", page, cls_name)                # and not an alarmed one
         honest = instances_of(joint(), cls_name)[0]
-        return {a for a in bucket if is_a_stored_number(getattr(honest, a, None))}
+        numeric = numeric_fields_of(SCORER_CLASSES[cls_name], honest)
+        # BY DECLARATION OR BY VALUE: the value half alone could not see a read of a numeric field whose
+        # honest value is None at fixture-build time, which is the blind spot `numeric_fields_of`
+        # documents and measures. The non-field half of the union stays: a numeric PROPERTY read off the
+        # object is not a `dataclasses.field` at all.
+        return {a for a in bucket
+                if a in numeric or is_a_stored_number(getattr(honest, a, None))}
 
     def test_the_enumeration_is_performed_by_probe_not_asserted(self):
         for cls_name in SCORER_CLASSES:
@@ -4094,9 +4222,13 @@ class TheIntervalHasASecondSourceInTheSameResult(FailsClosedAssertions, unittest
 
         (1) "there are exactly four predicates in this module that admit a stored number -- one per
             kind". Counted, not asserted.
-        (2) "`_admitted` ... so each field is admitted exactly once" was FALSE; the replacement claim is
-            that all admissions of `pair.n` go through the SAME kind function, so they cannot disagree.
-            Performed with a recording wrapper around `_count`, which observes the real render.
+        (2) "`_admitted` ... so each field is admitted exactly once" was FALSE. Its round-5 replacement,
+            "all three admissions go through the same kind function, `_count`, SO THEY CANNOT DISAGREE",
+            WAS ALSO FALSE as an absolute, and is withdrawn in round 8: a kind function normalises the
+            VALUE it is handed, and nothing makes the HOLDER hand it the same value twice. BOTH HALVES OF
+            THE REPLACEMENT ARE MEASURED HERE -- that every admission of `pair.n` in a real render does go
+            through `_count` (recording wrapper, real render), and that an alternating HOLDER of plain
+            `int`s launders the fixture anyway.
         (3) "the two second sources, read ONCE for the whole card". Performed by call count.
         (4) the claims softened (the probe is not a completeness proof; the "cannot add an unchecked
             consumer" sentence) are disclaimed in the text itself, which is asserted below so the
@@ -4127,6 +4259,39 @@ class TheIntervalHasASecondSourceInTheSameResult(FailsClosedAssertions, unittest
                                           f"comment at STORED_NUMBERS item 2 rather than this number")
         self.assertIn("pair.n", inspect.getsource(bm.interval_verdict))   # the fourth, unadmitted read
         self.assertNotIn("_count", inspect.getsource(bm._verdict_from_bounds))
+        #     ... AND THE OTHER HALF: THE ADMISSIONS CANNOT DISAGREE ABOUT A VALUE, BUT NOTHING PREVENTS
+        #     THE HOLDER FROM SUPPLYING TWO. A `__getattribute__` serving `n` from cycle([29, 30]) --
+        #     every returned value a PLAIN `int`, so `_count` normalises nothing away and admits each one
+        #     -- launders the 29-seed fixture into a decisive JOINT_SUPPORTED. This is the residual the
+        #     scheme has declared since round 4 (the `vars()`/`__dict__` mutants are blind to the probe
+        #     for the same reason), so it is pinned as a KNOWN FAIL-OPEN rather than fixed: the test
+        #     asserts the laundering, and goes red if the mechanism is ever closed, which is the only
+        #     honest way to record a residual that cannot be closed from this module.
+        honest_laundered = db.render_scorecard(laundered_below_minimum())
+        self.assertIn("JOINT_INCONCLUSIVE", joint_cell(honest_laundered))     # the honest fixture: caught
+        k = laundered_below_minimum()
+
+        class Alternating(bm.IntervalPair):
+            def __getattribute__(self, name):
+                if name == "n":
+                    return next(object.__getattribute__(self, "_cycle"))
+                return bm.IntervalPair.__getattribute__(self, name)
+
+        for c in all_components(k):
+            object.__setattr__(c.pair, "_cycle", itertools.cycle([29, 30]))
+            object.__setattr__(c.pair, "__class__", Alternating)
+        p0 = k.h1.components[0].pair
+        self.assertIsInstance(p0, bm.IntervalPair)                    # the render takes its real path
+        self.assertEqual({type(p0.n) for _ in range(10)}, {int},
+                         "the holder must serve PLAIN ints: a kind function has nothing to normalise")
+        hl = db.render_scorecard(k)
+        self.assertIn("JOINT_SUPPORTED", joint_cell(hl),
+                      "the alternating-holder residual has been CLOSED; delete this pin and the "
+                      "withdrawal passage at STORED_NUMBERS item 2, and say so")
+        self.assertEqual(set(hyp_cells(hl).values()), {"SUPPORTED"})
+        self.assertIn("<td>29</td>", hl)                              # ... beside a sample size of 29
+        self.assertIn("29 measured seeds vs minimum 30", hl)
+        self.assertIn("is withheld", hl)                              # on a page that says it withheld it
         # (3) read once per card: one `_seed_series` call per protocol metric, not per component
         metrics = {m for table in (*bm.PRIMARY.values(), bm.CONVERGED) for m, _d, _a in table}
         calls = []
@@ -4150,10 +4315,39 @@ class TheIntervalHasASecondSourceInTheSameResult(FailsClosedAssertions, unittest
                 ("A future reader cannot add an unchecked consumer without turning",
                  "THIS COMMENT USED TO END"),
                 ("`_admitted` is the only reader and it returns the admitted", "THE SENTENCE THIS"),
-                ("STRICT in three of them", "The sentence this replaces said")):
+                ("STRICT in three of them", "The sentence this replaces said"),
+                # ROUND 8's two withdrawals, same rule -- and then a stronger one below
+                ("same kind function, `_count`, SO THEY CANNOT DISAGREE", "THE SENTENCE THIS REPLACES SAID"),
+                ("test lives in `_finite_float`, shared with every other", "THIS REPLACES SAID")):
             self.assertEqual(src.count(claim), 1, claim)
             i = src.index(claim)
             self.assertIn(marker, src[max(0, i - 700):i], claim)
+        # ROUND 8 FOUND THE LOOP ABOVE WEAKER THAN IT READS, and the weakness is recorded with its
+        # measurement rather than quietly patched. The marker only has to appear SOMEWHERE in the 700
+        # characters before the claim, and this file's comments quote withdrawn sentences one after
+        # another -- so a NEIGHBOURING passage's identical marker satisfies the check. MEASURED, in a
+        # verified copy on 3.13.5: a mutant that restored the `:208` absolute IN PLACE (deleting its own
+        # "THE SENTENCE THIS REPLACES SAID" and the withdrawal around it, leaving the bare claim) passed
+        # the whole of `test_dashboard`, because the round-5 withdrawal's identical marker sits ~630
+        # characters above it once the mutant has shortened the passage by a line. That is the
+        # silent-withdrawal failure this test exists to prevent, surviving this test.
+        # So each round-8 claim must be (a) quoted exactly once, (b) introduced by a withdrawal phrase
+        # UNIQUE TO ITS OWN PASSAGE, and (c) FOLLOWED, inside that passage, by the replacement claim --
+        # which is also required to be unique, so deleting the replacement and keeping the quotation
+        # cannot pass either. Both mutants die on (b); deleting only the replacement dies on (c).
+        for claim, intro, replacement in (
+                ("same kind function, `_count`, SO THEY CANNOT DISAGREE",
+                 "the sentence that stood here stated it as an",
+                 "NOTHING PREVENTS THE HOLDER FROM SUPPLYING TWO"),
+                ("test lives in `_finite_float`, shared with every other",
+                 "THE SENTENCE\n    THIS REPLACES SAID",
+                 "it derived this cell's safety FROM THE WRONG PROPERTY")):
+            self.assertEqual(src.count(claim), 1, claim)
+            self.assertEqual(src.count(intro), 1, intro)
+            self.assertEqual(src.count(replacement), 1, replacement)
+            i = src.index(claim)
+            self.assertIn(intro, src[max(0, i - 400):i], claim)
+            self.assertIn(replacement, src[i:i + 2500], claim)
         # the round-6 withdrawals, same rule. (Not checked over THIS file: the assertion would have to
         # count its own literals. The classification dicts are checked by the partition test, and each
         # surviving `NO_SECOND_SOURCE` reason by its own test, which is the stronger guard anyway.)
@@ -4322,10 +4516,34 @@ class RoundThreeSurvivorsPinned(unittest.TestCase):
 # reads it yet (the probe sees only what its single render exercises, and
 # `test_the_probe_itself_is_not_vacuous` asserts that `n_boot` is NOT in its bucket).
 #
-# EACH REASON IS CHECKED, NOT WRITTEN: `test_every_numeric_field_...` forges each exempted field to five
-# hostile values on every instance and requires BOTH renders to stay byte-identical, which is what "not
-# read" means operationally. Round 6's ruling was that nothing in a test suite can check that a reason
-# written in a table is true; where the reason is "this is not read", it can.
+# THE TWO MECHANISMS ARE COMPLEMENTARY, NOT NESTED, and round 6 recorded the relation the wrong way round
+# -- as the fields test strictly dominating the probe. Each catches something the other cannot, and the
+# directions are worth naming because a mechanism believed to be redundant is a mechanism that gets
+# deleted:
+#   * FIELDS TEST ONLY: a numeric field that exists and is read by nothing yet. The probe observes one
+#     render and cannot see a field before a consumer does.
+#   * PROBE ONLY (1): an EXEMPTED field that starts being read. Its set comparison fails naming the
+#     attribute, while the fields test's `numeric == declared | exempt` still holds, because the field is
+#     accounted for -- as not rendered, which has just stopped being true. (The behavioural half of the
+#     exemption check below catches it too IF the read moves a byte; a read that feeds a verdict which
+#     does not flip moves none.)
+#   * PROBE ONLY (2): "declared but not read" rot. A declared entry whose consumer was deleted passes the
+#     fields test (the field is still numeric and still declared) and fails the probe.
+# AND THEY SHARED A BLIND SPOT, which was the stronger reason not to call either redundant: both filtered
+# candidate fields with `is_a_stored_number` evaluated on the HONEST FIXTURE INSTANCE. `numeric_fields_of`
+# closes it and records the unkilled mutant that measures it.
+#
+# EACH REASON IS CHECKED, NOT WRITTEN: `test_every_numeric_field_...` forges each exempted field on every
+# instance and requires BOTH renders to stay byte-identical, which is what "not read" means
+# operationally. Round 6's ruling was that nothing in a test suite can check that a reason written in a
+# table is true; where the reason is "this is not read", it can.
+#
+# ROUND 8 WIDENED THE VALUES, because the five it used were all of one kind. See `exemption_forgeries`:
+# `-1`, `nan`, `None`, `object()` and `liar(1e9, 0.0)` are either inadmissible to any kind or answer
+# every comparison False, so not one of them is a LEGAL value of the field's own type -- and an honest
+# page is already quiet, so a newly added cross-check that consumed an exempt field would stay quiet
+# under all five and fire only under a legal one. The attester had to establish this by hand, with 84
+# byte-identity comparisons over legal values; it is a standing check now.
 FIELDS_NOT_RENDERED = {
     ("IntervalPair", "n_boot"): "the bootstrap resample count. Nothing renders it and no recomputation "
                                 "can use it: see NO_SECOND_SOURCE[boot_lo] -- it is one of the two "
@@ -4403,8 +4621,7 @@ class DundersAreNotPartOfTheTypeEither(FailsClosedAssertions, unittest.TestCase)
         probe cannot do."""
         for cls_name in db.VERDICT_BEARING:
             obj = instances_of(joint(), cls_name)[0]
-            numeric = {f.name for f in dataclasses.fields(SCORER_CLASSES[cls_name])
-                       if is_a_stored_number(getattr(obj, f.name, None))}
+            numeric = numeric_fields_of(SCORER_CLASSES[cls_name], obj)
             declared = set(db.STORED_NUMBERS[cls_name])
             exempt = {a for c, a in FIELDS_NOT_RENDERED if c == cls_name}
             self.assertEqual(numeric, declared | exempt, f"""
@@ -4419,7 +4636,15 @@ with the reason it is not rendered -- the exemption is then CHECKED behaviourall
         honest_card, honest_page = db.render_scorecard(joint()), db.render_dashboard({"joint": joint()})
         for (cls_name, attr), reason in FIELDS_NOT_RENDERED.items():
             self.assertGreater(len(reason), 40, (cls_name, attr))       # a reason, not a shrug
-            for bad in (-1, float("nan"), None, object(), liar(1e9, 0.0)):
+            honest_value = getattr(instances_of(joint(), cls_name)[0], attr)
+            forgeries = exemption_forgeries(honest_value)
+            self.assertGreaterEqual(len(forgeries), 10, (cls_name, attr))
+            # NOT VACUOUS: at least one forgery is a value this field could honestly HOLD, so "not read"
+            # is tested against something a consumer would admit rather than only against rubbish a kind
+            # function refuses on sight.
+            self.assertTrue(any(db._mv_intact(b) is not None or db._finite_number(b) is not None
+                                for b in forgeries), (cls_name, attr))
+            for bad in forgeries:
                 j = joint()
                 for obj in instances_of(j, cls_name):
                     object.__setattr__(obj, attr, bad)
@@ -4695,6 +4920,241 @@ with the reason it is not rendered -- the exemption is then CHECKED behaviourall
                 self.assertNotIn("vd-supported", joint_cell(h), (key, repr(bad)))
                 self.assertIn("NOT shown", h, (key, repr(bad)))
                 self.assertNotIn("REFUSED", db.render_dashboard({"joint": j}), (key, repr(bad)))
+
+
+# ---------------------------------------------------------------------------------------------------------
+# SR-13 ROUND 8: THE PIN AT THE RENDER BOUNDARY.
+# ---------------------------------------------------------------------------------------------------------
+def render_payload():
+    """A full dashboard payload, rebuilt from scratch on every call.
+
+    Its own COPY of the snapshot mapping, because `SNAP` is a module-level dict every other test in this
+    file reads: a forgery written into it would leak into unrelated tests in whatever order they run."""
+    return {"snapshot": dict(SNAP), "train": train(3, steps=10, timestamp_utc=TS),
+            "joint": joint(), "records": [rec()]}
+
+
+def payload_records(p):
+    """(label, ExperimentRecord) for every record either panel renders. Both panels, because
+    `_metric_cell`'s second call site (`_metric_table`) serves BOTH and Finding 1 was at both."""
+    out = [(f"records[{i}]", r) for i, r in enumerate(p.get("records") or ())
+           if isinstance(r, ExperimentRecord)]
+    t = p.get("train")
+    if isinstance(getattr(t, "record", None), ExperimentRecord):
+        out.append(("train.record", t.record))
+    return out
+
+
+def render_sites():
+    """(label, forge(payload, dunder) -> instances forged) for every number this page turns into a figure.
+
+    DERIVED, in four halves, and not one of them is a list of field names written in this file:
+      (1) `db.STORED_NUMBERS` x every live instance of its class in the payload's `JointResult`. A NEW
+          declared number therefore inherits this pin with no edit here -- which is the property round 7
+          put into `test_every_admitted_field_is_normalised_by_its_kind` one level too low.
+      (2) every measured `MetricValue` of every `ExperimentRecord` either panel renders. This half is NOT
+          derivable from `STORED_NUMBERS`, and it is not optional: Finding 1 struck at BOTH of
+          `_metric_cell`'s call sites, and a sweep built from the declaration table alone would have
+          pinned the scorecard mean cells and left every record and training metric cell open.
+      (3) the three positions of every training-history row -- the one member of the kind scheme that is
+          not a declared attribute of a scorer object (`_valid_history`).
+      (4) every numeric value of the caller-supplied snapshot mapping (`_int_cell`).
+    Each forge returns how many instances it touched, and `test_the_render_boundary_pin_is_not_vacuous`
+    requires that to be non-zero for every site: a site that forges nothing reports no finding on a tree
+    where the defect is live, which is how the first draft of this sweep missed the records panel."""
+    for cls_name, fields in db.STORED_NUMBERS.items():
+        for attr, kind in fields.items():
+            def forge(p, d, cls_name=cls_name, attr=attr, kind=kind):
+                n = 0
+                for obj in instances_of(p["joint"], cls_name):
+                    if kind == "mv":
+                        mv = getattr(obj, attr)
+                        if mv.value is None:            # honestly unmeasured: nothing to forge
+                            continue
+                        forge_mv(mv, conversion_liar(mv.value, a_lie_for(mv.value), d))
+                    else:
+                        h = getattr(obj, attr)
+                        object.__setattr__(obj, attr, conversion_liar(h, a_lie_for(h), d))
+                    n += 1
+                return n
+            yield f"declared {cls_name}.{attr} ({kind})", forge
+    for where, r in payload_records(render_payload()):
+        for name, mv in sorted(r.metrics.items()):
+            if mv.value is None:
+                continue
+            def forge(p, d, where=where, name=name):
+                n = 0
+                for w, r_ in payload_records(p):
+                    if w != where:
+                        continue
+                    mv_ = r_.metrics[name]
+                    forge_mv(mv_, conversion_liar(mv_.value, a_lie_for(mv_.value), d))
+                    n += 1
+                return n
+            yield f"metric {where}.metrics[{name}]", forge
+    for pos, what in enumerate(("step", "loss", "grad_norm")):
+        def forge(p, d, pos=pos):
+            rows = []
+            for row in p["train"].history:
+                r_ = list(row)
+                r_[pos] = conversion_liar(r_[pos], a_lie_for(r_[pos]), d)
+                rows.append(tuple(r_))
+            object.__setattr__(p["train"], "history", rows)
+            return len(rows)
+        yield f"history train.history[*][{what}]", forge
+    for key, v in sorted(SNAP.items()):
+        if is_a_stored_number(v) and not isinstance(v, MetricValue):
+            def forge(p, d, key=key):
+                h = p["snapshot"][key]
+                p["snapshot"][key] = conversion_liar(h, a_lie_for(h), d)
+                return 1
+            yield f"snapshot snapshot[{key}]", forge
+
+
+class EveryDeclaredNumberRendersTheAdmittedValue(unittest.TestCase):
+    """SR-13 ROUND 8, AND IT IS THE DELIVERABLE OF THE ROUND -- more than the one-liner it kills.
+
+    FOUR ROUNDS (2, 3, 4 and 7) ENDED THE SAME WAY: the guard was fixed, and the one consumer that
+    re-reads its field AFTER the guard was missed. Round 7 normalised at the point of admission, and
+    `_metric_cell` -- which admits through `_mv_float` and then renders `_num(mv.value)`, the raw object --
+    was missed for the fifth consecutive round. The pin round 7 wrote,
+    `test_every_admitted_field_is_normalised_by_its_kind`, asserts what a KIND FUNCTION RETURNS and never
+    looks at a rendered cell, so it is structurally incapable of seeing a consumer one level up. This
+    class is that test moved to the boundary where it could have fired:
+
+        for EVERY number the page turns into a figure, render it through the REAL renderers with a
+        subclass that stores the HONEST double and lies ONLY on conversion, and require the rendered
+        BYTES to equal the honest render's.
+
+    WHY ONE DUNDER AND AN HONEST STORED VALUE. Because then the honest render is the ONLY correct output,
+    and the test needs no model of what should have been alarmed. Every comparison, every arithmetic and
+    every predicate -- in this module, and in `benchmark` underneath it -- sees the true number, so no
+    cross-check may fire and no figure may move. A byte that moves is a renderer that converted the
+    CALLER'S OBJECT instead of the number its kind admitted, wherever that happens and however it is
+    spelled. It is the one shape that is diagnostic of the re-read defect and of nothing else.
+
+    MEASURED ON THE PRE-FIX TREE (3.13.5, and 3.12.4 identical), 26 sites x 7 conversions: exactly 14
+    findings, all of them Finding 1, at both of `_metric_cell`'s call sites and nowhere else --
+        IntervalPair.mean  __float__  scorecard BYTES DIFFER   (6 of 6 mean cells printed the lie)
+        IntervalPair.mean  __float__  dashboard BYTES DIFFER
+        IntervalPair.mean  RAISE      both renderers RAISED ZeroDivisionError
+        the 5 record/training metrics, the same two findings each, via `_metric_table`
+    -- and 0 findings after the one-line fix. The 24 other sites were already honest, which is the other
+    half of the measurement: `_interval`, `_kind_cell`, `_kind_text`, `_valid_history` and `_int_cell` all
+    render the ADMITTED value, so `boot_lo`/`boot_hi`/`t_lo`/`t_hi` forged identically move not one byte.
+
+    WHAT IT IS NOT. It is not a completeness proof, and the one claim this class makes about its own reach
+    is that it does not depend on WHERE the re-read is. It sweeps the numbers that are DECLARED or
+    reachable in ONE payload, so an undeclared field read only on a branch this payload does not take is
+    outside it -- the same residual item 3 of the scheme note has declared since round 4, and the reason
+    the recording probe and the fields test are kept beside this."""
+
+    def honest(self):
+        return db.render_scorecard(render_payload()["joint"]), db.render_dashboard(render_payload())
+
+    def test_every_rendered_number_is_rendered_from_the_admitted_value(self):
+        """THE PIN. Reports the WHOLE matrix rather than the first failure: "which cells re-read" is the
+        question a reader of a red run is asking, and five rounds of this item were lost to answering it
+        one site at a time."""
+        honest_card, honest_page = self.honest()
+        self.assertIn('class="measured"', honest_card)        # the honest renders are not empty pages
+        self.assertIn('class="measured"', honest_page)
+        findings, sites = [], 0
+        for label, forge in render_sites():
+            sites += 1
+            for d in CONVERSION_DUNDERS:
+                p = render_payload()
+                if not forge(p, d):
+                    continue
+                try:
+                    card = db.render_scorecard(p["joint"])
+                except BaseException as ex:                   # noqa: BLE001 - a raise IS the finding
+                    findings.append(f"{label} [{d}]: render_scorecard RAISED {type(ex).__name__}")
+                    card = honest_card
+                try:
+                    page = db.render_dashboard(p)
+                except BaseException as ex:                   # noqa: BLE001
+                    findings.append(f"{label} [{d}]: render_dashboard RAISED {type(ex).__name__}")
+                    page = honest_page
+                if card != honest_card:
+                    findings.append(f"{label} [{d}]: scorecard BYTES DIFFER from the honest render")
+                if page != honest_page:
+                    findings.append(f"{label} [{d}]: dashboard BYTES DIFFER from the honest render")
+        self.assertEqual(findings, [], f"""
+{len(findings)} of {sites * len(CONVERSION_DUNDERS)} (site x conversion) pairs moved the page or took it
+down, with the stored number HONEST and only a conversion dunder lying:
+
+  """ + "\n  ".join(findings) + """
+
+Each one is a consumer that RE-READS its field after admission and converts the caller's object instead
+of rendering the value its kind handed back -- SR-13's defect class, five rounds running. Fix the cell,
+not this test: admit once (`_mv_float` / `_NUM_KINDS[kind]`) and render the value you were given. A raise
+is the same defect: this module's contract is to refuse a malformed result, never to take the page down.""")
+
+    def test_the_render_boundary_pin_is_not_vacuous(self):
+        """FOUR WAYS IT COULD BE GREEN FOR NOTHING, each refused by measurement rather than by reading.
+
+        (a) the lie must be VISIBLE to the conversions the renderers actually perform;
+        (b) every site must really forge something (the first draft's constant lie of 0.5 collided with
+            `rec()`'s own metric and made that site silently vacuous);
+        (c) the subclass must really be a subclass, really store the honest number, and really pass the
+            kind that admits its field -- a value the kind REFUSED would render UNKNOWN on both pages and
+            the byte comparison would be comparing two honest renders;
+        (d) the sites must cover every declared number AND both of `_metric_cell`'s call sites."""
+        # (a) the module's only `float()`, and the count cells' `_e`, both read the lie
+        self.assertEqual(db._num(conversion_liar(1.0, 2.0, "__float__")), "2.0")
+        self.assertEqual(db._e(conversion_liar(3, 4, "__str__")), "4")
+        self.assertEqual(f"{conversion_liar(3, 4, '__format__')}", "4")
+        with self.assertRaises(ZeroDivisionError):
+            db._num(conversion_liar(1.0, 0.0, "RAISE"))
+        # (c) and it is admitted: a liar the kind refuses would make both pages honest for a WRONG reason
+        for kind, honest in (("float", 0.5), ("num", 0.5), ("num", 3), ("count", 3)):
+            for d in CONVERSION_DUNDERS:
+                v = conversion_liar(honest, a_lie_for(honest), d)
+                self.assertTrue(is_a_subclass_instance(v), (kind, d))
+                self.assertEqual(float.__float__(v) if isinstance(v, float) else int.__int__(v), honest)
+                got = db._NUM_KINDS[kind](v)
+                self.assertIsNotNone(got, f"{kind} refused a legal stored value via {d}")
+                self.assertIs(type(got), float if isinstance(honest, float) else int, (kind, d))
+        # (b) every site forges at least one instance, for every conversion
+        sites = list(render_sites())
+        self.assertGreater(len(sites), 20, len(sites))
+        for label, forge in sites:
+            for d in CONVERSION_DUNDERS:
+                self.assertGreater(forge(render_payload(), d), 0, f"{label} [{d}] forged nothing")
+        # (d) coverage: every declared number, and both `_metric_cell` call sites
+        labels = [label for label, _ in sites]
+        for cls_name, fields in db.STORED_NUMBERS.items():
+            for attr in fields:
+                self.assertIn(f"declared {cls_name}.{attr} ({fields[attr]})", labels)
+        self.assertTrue(any(l.startswith("metric records[0]") for l in labels), labels)
+        self.assertTrue(any(l.startswith("metric train.record") for l in labels), labels)
+        self.assertTrue(any(l.startswith("history ") for l in labels), labels)
+        self.assertTrue(any(l.startswith("snapshot ") for l in labels), labels)
+        # ... and the two call sites really are the two panels this covers
+        src = inspect.getsource(db)
+        self.assertEqual(src.count("_metric_cell("), 3)       # def + the scorecard row + `_metric_table`
+        self.assertEqual(src.count("_metric_table("), 3)      # def + the training panel + the records panel
+
+    def test_the_payload_this_sweep_renders_is_the_whole_page(self):
+        """A sweep is only as wide as its payload. Asserted, because a payload that quietly lost its
+        records list would make five of the 26 sites disappear and the pin would stay green."""
+        p = render_payload()
+        self.assertEqual(set(p), {"snapshot", "train", "joint", "records"})
+        page = db.render_dashboard(p)
+        self.assertEqual(page.count('data-evidence="'), 5)    # every panel rendered, none refused
+        self.assertNotIn("REFUSED", page)
+        self.assertNotIn("not iterable", page)
+        self.assertEqual(len(payload_records(p)), 2)          # the records panel AND the training panel
+        self.assertGreater(len(p["train"].history), 1)
+        self.assertGreater(len(instances_of(p["joint"], "IntervalPair")), 1)
+        # and `SNAP` is not corrupted by a sweep that forges into the payload's snapshot copy
+        before = dict(SNAP)
+        for label, forge in render_sites():
+            forge(render_payload(), "__float__")
+        self.assertEqual(SNAP, before)
+        self.assertTrue(all(type(v) in (int, float, str, bool, type(None), list, dict)
+                            for v in SNAP.values()))
 
 
 if __name__ == "__main__":

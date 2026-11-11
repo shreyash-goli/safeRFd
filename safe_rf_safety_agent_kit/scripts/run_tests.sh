@@ -57,7 +57,8 @@
 #   reason, and a per-category cap. A row declared badly is POLICY:INTERNAL; a category claimed badly is
 #   POLICY:<TOKEN>_UNDECLARED or POLICY:EXEMPT_AMBIGUOUS -- loud in EVERY mode, never a silent exemption.
 #   THE RULES THAT BOUND THEM, and no one of them is a bound by itself:
-#     (1) A REASON THAT NAMES ANY PACKAGE THIS KIT MEASURES GETS NO EXEMPTION, as a WORD (`PKG`: torch, pyyaml)
+#     (1) A REASON THAT NAMES ANY PACKAGE THIS KIT MEASURES GETS NO EXEMPTION -- OUTSIDE THE DECLARED NAME THE
+#         PHRASE ITSELF CARRIES, which is (1a) below -- as a WORD (`PKG`: torch, pyyaml)
 #         or ANYWHERE INSIDE a longer name (`PKG_EXEMPT`, a containment test: torchrun, numpy2, libtorch,
 #         _torch) -- it is judged as a package skip in the mode that is running (`--expect any` applies no
 #         reason check at all, so there it is judged by nothing; see the note on that mode above). The package
@@ -66,6 +67,26 @@
 #         three disagreed: measured, before the rule existed, `optional developer tool `torch` is not on PATH`
 #         passed `--expect torch` and spent one of the 50 skips `--expect none` requires; so did
 #         `case-sensitive filesystem; torch unavailable`.
+#     (1a) THE ONE EXCEPTION TO (1), and it closes round 7's F3, a LEGITIMATE DENY: the containment test was
+#         applied to the WHOLE reason, AFTER the allowlist, and returned unconditionally -- so a declared name
+#         that merely CONTAINS a package name could never be exempted and DECLARING IT CHANGED NOTHING. Measured
+#         with `TOOLS = ("ruff", "yamllint", "shellcheck")` and nothing else changed, reason ``optional developer
+#         tool `yamllint` is not on PATH`` (`yamllint` contains `yaml`): `--expect none` -> POLICY:NONE_REASON,
+#         RESULT: FAIL -- the IDENTICAL red before and after declaring it, in the mode BOTH CI jobs run;
+#         `--expect torch` -> POLICY:TORCH_MODE_UNEXPLAINED; `--expect any` -> OK but NOT exempt; control in the
+#         same run, declared `shellcheck` -> exempt, note printed. The failure message says "declare the tool
+#         there, with a test", which was advice that could not be followed: round 3's defect shape, latent only
+#         because the one gated tool happens to be `ruff`. Plausible real names: `yamllint`/`yamlfmt` (for
+#         ci.yml), `numpydoc`, `pytest-cov`, `torchfix`.
+#         SO: the SPAN of a name the category's OWN CLOSED ALLOWLIST carries is blanked out of the reason before
+#         the containment test runs; every other character of the reason is still tested, so every prose tail in
+#         the laundering table is denied exactly as before. The open-set argument that motivated containment
+#         does not apply to a closed set. The rail that keeps the exception narrow is a DECLARATION-TIME one: an
+#         allowlist entry that IS a measured package spelling (`PKG.fullmatch`: torch, numpy, yaml, pyyaml,
+#         pytest) is POLICY:INTERNAL, so round 4's actual defect (``optional developer tool `torch` is not on
+#         PATH``) cannot be declared into existence. THE COST, as a measurement and not a hope: a DECLARED
+#         `torchfix` would be exempt, bounded by the cap (4), by the baseline, and by the test-time equality
+#         that requires a real skip site in tests/toy_tests/ for every name on the allowlist.
 #     (2) A name the phrase carries must be DECLARED, on that category's own allowlist.
 #   WHAT IS NOT TRUE, and was asserted here for a round: that rule (1) alone makes an exemption "sound ... only
 #   while it cannot be spent on hiding a package skip". It cannot, on its own: it is a spelling test, so EVERY
@@ -359,7 +380,9 @@ for e in skips:
 #   (2) \b-TERMINATED: the pattern must end on `\b`, also POLICY:INTERNAL -- it is what rejects
 #       `...is not on PATHological systems`.
 #   (3) THE PACKAGE RULE (`PKG_EXEMPT`, shared): a reason that CONTAINS a measured package name gets no
-#       exemption at all.
+#       exemption at all -- OUTSIDE the span of a name the category's own closed allowlist carries, which
+#       `claim()` blanks before applying the pattern. That exception is round 7's F3; it is stated in full at
+#       (1a) in the header, with the measurement and the POLICY:INTERNAL rail that bounds it.
 #   (4) A CLOSED ALLOWLIST where the phrase carries a NAME, and none where it does not: the mismatch is
 #       POLICY:INTERNAL, so a new category cannot ship with the OPEN SET the tool category had in round 4.
 #   (5) EVERY OCCURRENCE of a declared phrase in the reason, not only the anchored one, is checked against that
@@ -399,7 +422,11 @@ PKG = re.compile(r"\b(?:py)?(?:" + "|".join(PKGS) + r")\b", re.I)
 # `pytestx` were denied, while `libtorch` (its C++ distribution), `_torch` and `mytorch` have no `\b` before
 # `torch` and so were EXEMPT as a tail on either category (measured, in `--expect none`, `--expect torch` and
 # `--expect any`). There is no boundary left to evade: a reason CONTAINING a measured package name, in any case,
-# with any affix, gets no exemption. The two patterns are deliberately NOT merged:
+# with any affix, gets no exemption -- OUTSIDE the span of a DECLARED name, which `claim()` blanks before
+# applying this pattern (round 7's F3; see (1a) in the header). That clause is new: the sentence above used to
+# end at "gets no exemption", with no exception at all, and it was TRUE of the code and FALSE as a policy,
+# because it made the `TOOLS` allowlist INERT for every name containing a package substring -- `yamllint`
+# contains `yaml`, and declaring it changed no verdict in any mode. The two patterns are deliberately NOT merged:
 #   * NONE_OK (what counts as an honest "a package is missing" reason in bare mode) must stay the WORD test.
 #     With this one, `optional developer tool `torchrun` is not on PATH; it is missing` would be ACCEPTED as an
 #     honest package skip and would count toward the 50 -- the wrong direction.
@@ -413,7 +440,8 @@ PKG = re.compile(r"\b(?:py)?(?:" + "|".join(PKGS) + r")\b", re.I)
 PKG_EXEMPT = re.compile("|".join(PKGS), re.I)
 # GUARD (3), THE PACKAGE RULE (the others are listed above; no one of them is sufficient alone, and the real
 # bound on what an exemption buys is the caps plus the baseline -- see the header):
-# a reason that CONTAINS a measured package name gets no exemption. Stated as what it measures, because the
+# a reason that CONTAINS a measured package name, outside the span of a name its own allowlist declares, gets no
+# exemption. Stated as what it measures, because the
 # sentence that stood here -- "whatever else it says and HOWEVER IT SPELLS IT" -- was FALSE while this was a
 # prefix test: `libtorch is gone` and `_torch is gone` were exempt tails on both categories, measured in all
 # three modes, and `libtorch` is PyTorch's own C++ distribution. It is now a CONTAINMENT test over the `PKGS`
@@ -453,22 +481,88 @@ PKG_EXEMPT = re.compile("|".join(PKGS), re.I)
 TOOLS = ("ruff",)
 # ONE ROW PER CATEGORY. Adding a row is all it takes to get every guard, every exclusion and (via the tests that
 # parse this tuple) every driven case; getting a row wrong is POLICY:INTERNAL rather than a quiet hole.
-#   token      the stable POLICY-token prefix (<token>_CAP, <token>_UNDECLARED)
+#   token      the stable POLICY-token prefix (<token>_CAP, <token>_UNDECLARED); UPPERCASE, non-blank and UNIQUE
 #   phrase     the reason's phrase: MUST start with \A and end with \b; at most ONE capture group, which is the
-#              name the reason carries and which must then be on the allowlist
-#   cap        at most this many skips may claim the category in one run
+#              name the reason carries and which must then be on the allowlist. A capture group must be
+#              MANDATORY -- top-level, unquantified, no alternation anywhere in the phrase -- because the
+#              allowlist check reads group(1) and an OPTIONAL group makes that None (round 7's N2: AttributeError
+#              before `bad` was printed, RESULT: FAIL with NO POLICY token).
+#   cap        at most this many skips may claim the category in one run; a positive int
 #   declared   where the allowlist lives in this file, for the failure message; "" when the phrase names nothing
-#   allowlist  the closed set of names the phrase may carry; () when it carries none
-#   note       how the run reports the category, printed and used in its failure messages
+#   allowlist  the closed set of names the phrase may carry; () when it carries none. No entry may BE a package
+#              the kit measures (`PKG.fullmatch`), which is the rail on (1a) in the header.
+#   note       how the run reports the category, printed and used in its failure messages; UNIQUE, because it is
+#              the ONLY thing a reader of the output sees -- round 7's F2 variant m7b declared a category whose
+#              note was the filesystem-case note verbatim and printed its parked skips as "4 skip(s) for a
+#              case-sensitive filesystem (expected on Linux)", the figure docs/CLEAN_CLONE.md tells readers to
+#              expect on Linux.
+# A ROW THAT IS WRONG IS POLICY:INTERNAL **AND THE RUN STOPS THERE**, before a single skip is judged: the loop
+# below prints `bad` and exits if any INTERNAL is in it. That is round 7's N1/N2 -- a non-int cap and an optional
+# capture group each computed POLICY:INTERNAL into `bad` and then died (TypeError at `len(_got) > _cap`,
+# AttributeError at `m.group(1).lower()`) BEFORE `bad` was printed, so the run was RESULT: FAIL, rc=1, with NO
+# POLICY token at all. A registry that fails its own contract cannot be used to judge skips, so it is not.
 EXEMPT_CATEGORIES = (
     ("FS", r"\Acase[- ]sensitive filesystem\b", 8, "", (),
      "for a case-sensitive filesystem (expected on Linux)"),
     ("TOOL", r"\Aoptional developer tool `([\w.+-]+)` is not on PATH\b", 4, "TOOLS", TOOLS,
      "for an absent optional developer tool"),
 )
+def mandatory_group(pat):
+    """True when every match of `pat` MUST have entered its one capturing group, so group(1) is never None.
+
+    ROUND 7's N2: a phrase with an OPTIONAL capture group (`\\Aonly on( `[\\w]+`)? zed\\b`) passed all seven
+    declaration guards and then died at `m.group(1).lower()` with AttributeError -- RESULT: FAIL, rc=1, NO POLICY
+    token. The condition asserted here is deliberately syntactic and narrow: the capturing group must sit at the
+    TOP LEVEL of the pattern, carry no `?`/`*`/`{` quantifier, and the pattern must hold no alternation. Under
+    those three, a successful match always enters the group. A phrase that needs more than that is refused not
+    because it is wrong but because this check cannot prove it right, which is the fail-closed direction for a
+    declaration -- and the runtime treats a None group as an UNDECLARED name rather than as a crash anyway.
+    """
+    i, n, depth, opened, closed = 0, len(pat), 0, -1, -1
+    while i < n:
+        ch = pat[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "[":                                  # a character class: `|` and `(` inside it are literals
+            i += 1
+            if i < n and pat[i] == "^": i += 1
+            if i < n and pat[i] == "]": i += 1
+            while i < n and pat[i] != "]":
+                i += 2 if pat[i] == "\\" else 1
+            i += 1
+            continue
+        if ch == "|":
+            return False                               # a branch that skips the group may match
+        if ch == "(":
+            if pat[i + 1:i + 2] != "?":                # a CAPTURING group
+                if depth or opened != -1:
+                    return False                       # nested in another group, or a second capturing group
+                opened = i
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if opened != -1 and closed == -1 and depth == 0:
+                closed = i
+        i += 1
+    if opened == -1 or closed == -1:
+        return False
+    return pat[closed + 1:closed + 2] not in ("?", "*", "{")
 CATS = []
 for _tok, _pat, _cap, _where, _allow, _note in EXEMPT_CATEGORIES:
     _why = []
+    if not isinstance(_tok, str) or re.fullmatch(r"[A-Z][A-Z0-9_]*", _tok) is None:
+        _why.append(f"its token {_tok!r} is not a non-blank UPPERCASE identifier, and POLICY:<TOKEN>_CAP and "
+                    "POLICY:<TOKEN>_UNDECLARED are built from it")
+    elif _tok in {c[0] for c in CATS}:
+        _why.append(f"its token {_tok!r} is already declared by an earlier row, so two categories share one cap "
+                    "token and one failure message")
+    if _note in {c[6] for c in CATS}:
+        _why.append(f"its note {_note!r} is already declared by an earlier row: the note is the ONLY thing a "
+                    "reader of the output sees, and a duplicate prints one category's parked skips under "
+                    "another category's name")
+    if not str(_note).strip():
+        _why.append("its note is blank, so the run would report its skips as nothing at all")
     if not _pat.startswith("\\A"):
         _why.append("its phrase is not ANCHORED (no leading \\A), so prose can carry the claim")
     if not _pat.endswith("\\b"):
@@ -480,6 +574,15 @@ for _tok, _pat, _cap, _where, _allow, _note in EXEMPT_CATEGORIES:
         _why.append("a phrase that captures a NAME must declare a non-empty allowlist AND where it lives, and a "
                     "phrase that captures none must declare neither -- a name class with no allowlist is the "
                     "OPEN SET of round 4")
+    if _c.groups and not mandatory_group(_pat):
+        _why.append("its name group is OPTIONAL, quantified, nested or behind an alternation, so the phrase can "
+                    "match with NO name captured and the allowlist check has nothing to read")
+    for _a in _allow:
+        if PKG.fullmatch(str(_a)):
+            _why.append(f"its allowlist entry {_a!r} IS a package this kit MEASURES, and a declared name is "
+                        "exempted from the package rule (header (1a)); round 4's defect was exactly "
+                        "``optional developer tool `torch` is not on PATH`` and it may not be declared into "
+                        "existence")
     if not isinstance(_cap, int) or _cap < 1:
         _why.append(f"its cap {_cap!r} is not a positive integer")
     if _why:
@@ -490,6 +593,16 @@ for _tok, _pat, _cap, _where, _allow, _note in EXEMPT_CATEGORIES:
 if not CATS:
     bad.append("POLICY:INTERNAL EXEMPT_CATEGORIES is empty, so every exclusion built on it below is dead code; "
                "remove the machinery deliberately or declare a category")
+# FAIL-CLOSED, AND IT MUST BE HERE RATHER THAN AT THE END: a registry that fails its own contract cannot be used
+# to judge skips, and trying anyway is how round 7's N1 and N2 produced a TOKENLESS red run -- a non-int cap died
+# at `len(_got) > _cap` (TypeError) and an optional capture group at `m.group(1).lower()` (AttributeError), both
+# BEFORE the `for b in bad: print("FAIL:", b)` loop at the bottom of this block ever ran. rc=1 and RESULT: FAIL
+# either way, so nothing was ever silently exempt; what was lost was the stable token that says WHICH defect it
+# was, which is the whole point of a POLICY token.
+if any(b.startswith("POLICY:INTERNAL") for b in bad):
+    for b in bad: print("FAIL:", b)
+    print("the exemption registry is not usable, so NO skip was judged in this run: fix the declaration above")
+    sys.exit(1)
 def claim(reason):
     """(the category token this reason CLAIMS, [(POLICY token, message), ...]); (None, []) means no claim.
 
@@ -503,8 +616,11 @@ def claim(reason):
         if anchored.match(r) is None:
             continue                          # guards (1) and (2): anchored, and \b-terminated
         fails = []
+        declared_spans = []                   # (1a): the spans the package rule below does NOT get to see
         for tok2, _a2, loose2, _c2, where2, allow2, note2 in CATS:
             for m in loose2.finditer(r):      # guard (5): EVERY occurrence, not only the anchored one
+                if tok2 == tok and loose2.groups and (m.group(1) or "").lower() in allow2:
+                    declared_spans.append((m.start(1), m.end(1)))
                 if tok2 != tok:               # guard (6): one claim per reason
                     fails.append(("POLICY:EXEMPT_AMBIGUOUS",
                                   f"skip claims the {tok} environment exemption and carries the {tok2} phrase "
@@ -512,7 +628,7 @@ def claim(reason):
                                   f"per-category cap bounds that category only while a reason cannot be counted "
                                   f"in another's bucket; word the reason for the ONE category the test is "
                                   f"really gated on"))
-                elif loose2.groups and m.group(1).lower() not in allow2:
+                elif loose2.groups and (m.group(1) or "").lower() not in allow2:
                     fails.append((f"POLICY:{tok2}_UNDECLARED",
                                   f"skip claims an exemption {note2} but {m.group(1)} is not in the {where2} "
                                   f"allowlist in scripts/run_tests.sh (declare the tool there, with a test; do "
@@ -523,7 +639,17 @@ def claim(reason):
         # POLICY:TOOL_UNDECLARED for every undeclared name that happens to contain a package name -- `torchrun`,
         # the exact reason round 5 pinned -- which in `--expect any` (no reason check at all) left the run GREEN.
         # Measured: that is what the first draft of this registry did, and three subtests caught it.
-        if PKG_EXEMPT.search(r):
+        # (1a), round 7's F3: the package rule is applied to the reason with the span of every DECLARED name
+        # blanked out, so declaring a name on the closed allowlist is no longer INERT for a name that happens to
+        # contain a package substring (`yamllint` contains `yaml`; `torchfix` contains `torch`). Blanking rather
+        # than deleting keeps every other offset and every other character intact, so a prose tail is judged
+        # exactly as before -- ``optional developer tool `ruff` is not on PATH; libtorch is gone`` is still
+        # denied, and an UNDECLARED name is not blanked at all, so ``... `torchrun` ...`` is still denied AND
+        # reported as POLICY:TOOL_UNDECLARED.
+        probe = r
+        for _s, _e in declared_spans:
+            probe = probe[:_s] + " " * (_e - _s) + probe[_e:]
+        if PKG_EXEMPT.search(probe):
             return None, fails
         return (None if fails else tok), fails
     return None, []

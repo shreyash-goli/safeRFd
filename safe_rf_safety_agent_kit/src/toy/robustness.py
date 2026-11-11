@@ -83,11 +83,35 @@ Structural rule against single-example claims (checked at construction, not mere
   `Scorecard`, `MeasureFixture`, `ShiftSpec`), and it walks `dataclasses.fields()` -- so a NEW FIELD IS
   COVERED BY DEFAULT and an exemption must be declared in the class's `_NORMALISE_EXEMPT` with a reason.
   `test_robustness.EveryDataclassFieldIsNormalisedOrExplicitlyExempt` enumerates the fields and the
-  classes from the module itself and fails closed on either a new field or a new dataclass. What the
-  boundary does NOT reach, stated plainly: a function PARAMETER or a closure variable is not a field, so
-  `arm_difference`'s names, `shift_reorder_rows`'s `rel_tol`, `probe_precision`'s `tol` / `param` and
-  `probe_shift`'s three callable returns are still normalised where they are bound or consumed, each with
-  a consequence test.
+  classes from the module itself and fails closed on either a new field or a new dataclass.
+* AND THE SAME ARGUMENT, MADE ONCE MORE, FOR PARAMETERS -- because the field boundary's own stated gap
+  ("a function PARAMETER or a closure variable is not a field, so `arm_difference`'s names,
+  `shift_reorder_rows`'s `rel_tol` and `probe_precision`'s `tol` / `param` are normalised where they are
+  bound") was a list of remembered sites wearing a boundary's clothes, and round 7 found FOUR more live
+  routes in it, none of them on the list: `probe_precision`'s `kind` (the sibling of `tol` and `param`
+  IN THE SAME SIGNATURE: a `str` subclass storing "magnitude" and comparing as "cancellation" ran the
+  cancellation construction under a card reading `precision:magnitude:200.0`, INSUFFICIENT_EVIDENCE ->
+  PRECISION_OK, `UNKNOWN` -> `TOY_RESULT`, and a 12-seed summary where the honest run has NONE);
+  `shift_jitter`'s `eps` and `shift_scale`'s `factor` (CLOSURE VARIABLES of a factory, which are exactly
+  the factory's own parameters -- SENSITIVITY_EXCEEDS_BOUND -> SENSITIVITY_WITHIN_BOUND with
+  `max_abs_dev` IDENTICAL in both runs, and INVARIANCE_DEFECT -> INVARIANCE_HOLDS certifying a
+  degree-1 measure as satisfying a declared degree-2 invariance); and `make_measure_fixture`'s `rows`,
+  whose `rows < 4` gate is `type(rows).__lt__` and which therefore MEASURED 12 seeds on fixtures the
+  module refuses to build. So normalisation is now applied AT THE PARAMETER BOUNDARY as well:
+  `_install_parameter_boundary(globals())` wraps EVERY public callable of this module, derived from the
+  module namespace and not from a list, and `_plain_value` is applied to every bound argument -- so a NEW
+  PUBLIC FUNCTION and a NEW PARAMETER are covered by default, and the boundary itself consults no
+  exemption list that anyone could widen. `_PARAMETER_NO_SCALAR` records, per (function, parameter), the
+  ones where that call CANNOT collapse anything (a callable, an `Enum`, a dataclass carrier, a strict-bool
+  mask) together with the mechanism that does protect them;
+  `test_robustness.EveryPublicParameterIsNormalisedOrExplicitlyExempt` derives both lists from the module,
+  requires every other parameter to be PROVEN to arrive plain AT THE CALLEE (it asserts the ARGUMENT, not
+  the name of the function called), and refuses an entry in `_PARAMETER_NO_SCALAR` whose own probe value
+  turns out to be collapsible after all.
+  What NEITHER boundary reaches, stated plainly: what a caller-supplied CALLABLE returns (normalised
+  where it is consumed -- `_to_metric`, `_plain_measure`, `MeasureFixture.__post_init__` -- each with a
+  consequence test), a closure variable of a PRIVATE helper that is not a parameter of anything public,
+  and `object.__setattr__`.
 Honest limits: Python cannot make this impossible. `object.__setattr__`, `object.__new__`, and
 SUBCLASSING `SeedSummary` / `InsufficientEvidence` with a `__post_init__` that skips the checks all build
 unvalidated nested objects (a `Scorecard` still refuses such an object, via the exact-type check, but a
@@ -119,7 +143,9 @@ it; passes are "not refuted on these n synthetic fixtures". Scorecards never say
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
+import inspect
 import math
 import sys
 from enum import Enum
@@ -851,7 +877,27 @@ class MeasureFixture:
 def make_measure_fixture(seed: int, rows: int = 16, width: int = 3, noise: float = 0.1,
                          magnitude_spread: int = 0) -> MeasureFixture:
     """Synthetic fixture. target ~ U(-1,1); pred = target + U(-noise,noise); row r is multiplied by
-    10**k_r with k_r in [0, magnitude_spread] (spread=0 => all 1). Mask has >= 2 True and >= 1 False."""
+    10**k_r with k_r in [0, magnitude_spread] (spread=0 => all 1). Mask has >= 2 True and >= 1 False.
+
+    `rows` DEFEATED THE GATE ON THE NEXT LINE, and it is this module's sharpest example of why
+    normalisation belongs at the parameter boundary rather than at remembered sites: `rows < 4` is
+    `type(rows).__lt__`, so an `int` SUBCLASS storing 3 whose `__lt__` / `__gt__` return False passed it
+    and the module built the 3-row fixtures it refuses to build. This is `probe_shift`'s default
+    `fixture_factory` and is called directly by `probe_missing_inputs` and `probe_precision`. MEASURED,
+    through the public parameter with no `object.__setattr__`, on `probe_shift(mse_fsum,
+    shift_reorder_rows(), SEEDS, ProbeConfig(10), fixture_factory=lambda s: make_measure_fixture(s,
+    rows=Lo(3)))` over 12 seeds: INSUFFICIENT_EVIDENCE -> INVARIANCE_HOLDS, evidence labels
+    (NOT_VALIDATED, UNKNOWN) -> (NOT_VALIDATED, TOY_RESULT), and a 12-seed summary (n=12, mean 0.0,
+    n_bitwise_equal 12) where the honest run has none -- a result measured on fixtures the module refuses
+    to build. SECOND, SEPARATE CONSEQUENCE, of the class the `OverflowError` escape in
+    `toy.benchmark._check_margin` had to close: `rows=2` raises the documented `ValueError` below, but
+    `rows=Lo(2)` reached `rng.sample(range(2), 2)`, forced BOTH indices True, and then
+    `rng.choice([])` raised `IndexError: Cannot choose from an empty sequence` -- OUTSIDE the
+    `(ValueError, TypeError, ArithmeticError)` family every probe declares, so it escaped `probe_shift`'s
+    own fail-closed handler and propagated out of a public probe. Both are closed by the gate now seeing
+    the value the object STORES (`_plain_arguments`): `rows=Lo(2)` raises the documented `ValueError`,
+    which the probe records as an unmeasured seed. Pinned by
+    `test_robustness.TheParameterBoundaryClosesFourLiveRoutes`."""
     if rows < 4 or width < 1:
         raise ValueError("need rows >= 4 and width >= 1")
     rng = make_rng(derive_seed(seed, "robustness:fixture"))
@@ -991,8 +1037,23 @@ class ShiftSpec:
     rationale: str = ""
 
     _NORMALISE_EXEMPT = MappingProxyType({
-        "transform": "a callable stores no scalar to collapse; what it RETURNS is a fixture, which "
-                     "normalises its own fields in MeasureFixture.__post_init__",
+        "transform": "a callable stores no scalar to collapse; what it RETURNS is normalised where it is "
+                     "CONSUMED, by probe_shift's `_plain_measure(measure(fx2...), 'shifted measure')` "
+                     "and `_plain_measure(spec.bound(...), 'deviation bound')`. THIS REASON USED TO NAME "
+                     "THE WRONG MECHANISM -- it said the return \"is a fixture, which normalises its own "
+                     "fields in MeasureFixture.__post_init__\" -- and an attester falsified it: "
+                     "probe_shift NEVER type-checks this return, so that `__post_init__` is not what "
+                     "protects anything here. MEASURED on shift_translate(1000.0) over 12 seeds, through "
+                     "`dataclasses.replace(spec, transform=...)`: a duck-typed SimpleNamespace carrying a "
+                     "`float` subclass whose `__abs__` answers 1e36 reached `measure` and `_masked_stats` "
+                     "unchallenged and moved `max_dev_over_bound` from 4.034e-02 to 4.042e-35 (a factor "
+                     "of ~1e33), while the SAME lying element inside a real MeasureFixture was collapsed "
+                     "by that `__post_init__` and reproduced 4.034e-02 exactly. It is recorded as a NOTE "
+                     "and not as a finding: no status flip was constructible (the honest probe has 0 "
+                     "violations, and the movement is in the direction of a LOOSER bound), and a caller "
+                     "who supplies `transform` supplies `bound` too, so it grants them nothing they "
+                     "lack. `probe_shift`'s `fixture_factory` parameter is the same shape and carries "
+                     "the same corrected reason in `_PARAMETER_NO_SCALAR`",
         "expected": "a callable; its RETURN is normalised where it is consumed, by probe_shift's "
                     "`_plain_measure(spec.expected(base), 'expected value')`",
         "bound": "a callable; its RETURN is normalised where it is consumed, by probe_shift's "
@@ -1035,7 +1096,14 @@ def shift_reorder_rows(kind: ShiftKind = ShiftKind.INVARIANCE_EXACT, rel_tol: fl
     Round 5 fixed `tol` and wrote the lesson in `probe_precision`'s comment; this sibling never received
     it, which is the failure mode of a hand-maintained list of normalisation sites. `_plain_parameter`
     rather than `_plain_number`, for `probe_precision`'s stated reason: it preserves int-vs-float and
-    adds no refusal, so an unusable `rel_tol` still fails per seed and is recorded as unmeasured."""
+    adds no refusal, so an unusable `rel_tol` still fails per seed and is recorded as unmeasured.
+    ROUND 7 FOUND THE SIBLINGS THIS LINE DID NOT COVER EITHER -- `shift_jitter`'s `eps` and
+    `shift_scale`'s `factor`, one factory down each -- which is the same sentence this docstring already
+    wrote about `tol`, one round later. The line below is now ALSO covered by the parameter boundary
+    (`_plain_arguments`); it is kept for the reason `_plain_text` records, and MEASURED: a mutant
+    deleting it is unkilled by `test_robustness` + `test_schema` + `test_benchmark` BECAUSE the boundary
+    covers it, not because it never did anything, and it would carry the guarantee alone again if the
+    boundary regressed."""
     rel_tol = _plain_parameter(rel_tol)
 
     def tf(fx, rng):
@@ -1062,7 +1130,20 @@ def shift_masked_out_rows() -> ShiftSpec:
 
 def shift_scale(factor: float, degree: int = 2) -> ShiftSpec:
     """Scale prediction and target by `factor`: MSE scales by factor**degree (degree 2; 1 for |bias|). Power-of-two factors are exact in
-    binary floating point (no overflow/underflow), so they are declared EXACT; others BOUNDED."""
+    binary floating point (no overflow/underflow), so they are declared EXACT; others BOUNDED.
+
+    `factor` IS A CLOSURE VARIABLE OF THE `expected` LAMBDA, and `factor ** degree` there is
+    `type(factor).__pow__` -- the number the `dev > bound` test is measured against. `math.frexp(factor)`
+    on the line below reads the double the object STORES and stays honest, so the card still reads
+    INVARIANCE_EXACT and `scale_4.0`. MEASURED through this public factory with no `object.__setattr__`,
+    on `abs_bias_fsum` (a genuinely degree-1 measure) with `shift_scale(f, 2)` over 12 seeds, `f` a
+    `float` subclass storing 4.0 whose `__pow__` returns 4.0: INVARIANCE_DEFECT (12 violations,
+    max_abs_dev 1.225e-01) -> INVARIANCE_HOLDS with `n_bitwise_equal = 12`, i.e. a degree-1 measure
+    certified as satisfying a DECLARED degree-2 invariance. A closure variable is not a field, which is
+    why the field boundary could not reach it; it IS this factory's own parameter, which is why the
+    parameter boundary does. Pinned by
+    `test_robustness.TheParameterBoundaryClosesFourLiveRoutes` and
+    `AClosureVariableOfAFactoryIsItsParameter`."""
     pow2 = math.frexp(factor)[0] == 0.5
     tf = lambda fx, rng: _rebuild(fx, [[x * factor for x in r] for r in fx.pred],
                                   [[x * factor for x in r] for r in fx.target])
@@ -1093,7 +1174,23 @@ def shift_column_offsets(offsets: Sequence[float]) -> ShiftSpec:
 def shift_jitter(eps: float) -> ShiftSpec:
     """Add U(-eps, eps) to the PREDICTION only (a real perturbation, not meaning-preserving in the exact
     sense). By the triangle inequality in the RMS norm, |rms' - rms| <= rms(jitter) <= eps, hence
-    |mse' - mse| <= 2*rms*eps + eps^2 (plus float slack)."""
+    |mse' - mse| <= 2*rms*eps + eps^2 (plus float slack).
+
+    `eps` IS THE UN-SWEPT SIBLING of `shift_reorder_rows`'s `rel_tol`, one factory down, and the lie
+    happens INSIDE the `bound` closure: `2 * math.sqrt(b) * eps` consults `type(eps).__rmul__` (the right
+    operand is a subclass, so the reflected operator decides) and `eps * eps` its `__mul__`. Note what it
+    is NOT: the already-closed `spec.bound`-RETURN route. `_plain_measure` collapses that return
+    correctly, and it collapses a perfectly plain float, because the arithmetic that produced it has
+    already happened. MEASURED through this public factory with no `object.__setattr__`, on
+    `abs_bias_fsum` over 12 seeds with a near-zero-bias fixture family (`noise=1e-9`) and `eps` a `float`
+    subclass storing 1e-6 whose `__mul__` / `__rmul__` return 1e9: SENSITIVITY_EXCEEDS_BOUND (12
+    violations, max_dev_over_bound 2.924e+04) -> SENSITIVITY_WITHIN_BOUND (0 violations,
+    max_dev_over_bound 1.287e-16), with `max_abs_dev` IDENTICAL in both runs (2.573404667950953e-07) --
+    which is the proof that the applied jitter was unchanged and only the BOUND moved. The card then
+    serialises that `max_abs_dev` beside `n_violations = 0`, the exact self-contradiction
+    `shift_reorder_rows`'s docstring records. Pinned by
+    `test_robustness.TheParameterBoundaryClosesFourLiveRoutes` and
+    `AClosureVariableOfAFactoryIsItsParameter`."""
     def tf(fx, rng):
         return _rebuild(fx, [[x + rng.uniform(-eps, eps) for x in r] for r in fx.pred])
     return ShiftSpec(f"jitter_{eps!r}", ShiftKind.SENSITIVITY_BOUNDED, tf,
@@ -1397,6 +1494,20 @@ def probe_precision(kind: str, param: float, seeds: Sequence[int], cfg: Optional
     # PRESERVING int-vs-float and leaving a non-number untouched, so this adds no refusal that did not
     # already happen (an unusable `param` still fails per seed, recorded as unmeasured) and `probe_id`
     # text is unchanged for an int `param`.
+    # AND THEIR SIBLING IN THE SAME SIGNATURE, which these two lines did not cover and which round 7
+    # found: `kind`. The membership gate above and the construction dispatch in `_precision_outcome`
+    # (`kind == "magnitude"`, then `== "cancellation"`, then `== "accumulation"`) are
+    # `type(kind).__eq__`, and `refs[kind]` below is `__hash__` plus `__eq__`, while `details["kind"]`
+    # and `probe_id` serialise the characters the object STORES. MEASURED through this public parameter
+    # with no `object.__setattr__`: a `str` subclass storing "magnitude" that compares and hashes as
+    # "cancellation" (`isinstance`, `str.__str__` and `repr` all honest) ran the CANCELLATION
+    # construction under a card reading `probe_id='precision:magnitude:200.0'` and
+    # `details["kind"]='magnitude'` -- INSUFFICIENT_EVIDENCE -> PRECISION_OK, evidence labels
+    # (NOT_VALIDATED, UNKNOWN) -> (NOT_VALIDATED, TOY_RESULT), summary None -> n=12, mean=3.799e-17,
+    # sd=2.928e-17: a MEASUREMENT appearing where the honest run has NONE. It is covered now by
+    # `_plain_arguments`, not by a third line here -- that is the whole point of the parameter boundary
+    # -- and these two lines are kept for the reason `_plain_text` records (their removal is
+    # unobservable because something STRONGER covers them, not because they never did anything).
     tol = _plain_parameter(tol)
     param = _plain_parameter(param)
     seeds = _check_seeds(seeds)
@@ -1437,3 +1548,195 @@ def precision_sweep(kind: str, params: Sequence[float], seeds: Sequence[int], cf
                     *, tol: float = 1e-12) -> tuple:
     """`cfg=None` means a freshly constructed `ProbeConfig()`; see `_pcfg`."""
     return tuple(probe_precision(kind, p, seeds, _pcfg(cfg), tol=tol) for p in params)
+
+
+# ============================================ normalisation AT THE PARAMETER BOUNDARY
+# The field boundary (`toy.schema._normalise_fields`, driven by `dataclasses.fields()`) ended the
+# hand-maintained list of normalisation sites FOR FIELDS, and its own docstring stated the gap it left:
+# "a function PARAMETER or a closure variable is not a field, so `arm_difference`'s names,
+# `shift_reorder_rows`'s `rel_tol`, `probe_precision`'s `tol` / `param` ... are normalised where they are
+# bound". THAT SENTENCE WAS A LIST, and a list of remembered sites is the defect, not the fix: round 7
+# found four live routes in it, all in this module and none of them named -- `probe_precision`'s `kind`
+# (the sibling of `tol` and `param` in the SAME signature), `shift_jitter`'s `eps` and `shift_scale`'s
+# `factor` (closure variables of a factory, i.e. the factory's own parameters), and
+# `make_measure_fixture`'s `rows`, which DEFEATS ITS OWN `rows < 4` GATE because that gate is
+# `type(rows).__lt__`. Each was one line at the bind site; three previous rounds ended by writing exactly
+# that line at the sites the round happened to find. So the parameter list is computed, like the field
+# list: see `_install_parameter_boundary`.
+
+_WHY_CALLABLE_NUMBER = (
+    "a callable: a function object stores no scalar for `_plain_value` to collapse, and what it RETURNS "
+    "is normalised where it is CONSUMED -- `_to_metric` (an outcome), `_plain_measure` (a measure, an "
+    "expectation, a bound) or `_metric_read` -- each with its own consequence test in "
+    "`test_robustness.AMeasureCannotDecideItsOwnProbe` / `EveryMetricReadSiteIsPinnedByItsConsequence`")
+_WHY_CALLABLE_FIXTURE = (
+    "a callable whose return is a fixture; stores no scalar to collapse. STATED AS WHAT IT IS, because "
+    "the obvious reason is the wrong one: `probe_shift` does NOT type-check this return, so "
+    "`MeasureFixture.__post_init__` is not what protects it -- a duck-typed `SimpleNamespace` reaches "
+    "`measure` and `_masked_stats` unchallenged. The protection is consumption-side: `_plain_measure` on "
+    "the measure's return and on `spec.bound`'s return. See `ShiftSpec._NORMALISE_EXEMPT['transform']` "
+    "for the measurement")
+_WHY_CARRIER = (
+    "a carrier object (a dataclass instance, or None): a real one normalises its OWN fields at its own "
+    "boundary (`_normalise_fields` in its `__post_init__`), and `_plain_value` does not reach across a "
+    "dataclass by design, so the boundary composes instead of re-walking. STATED AS WHAT IT IS, because "
+    "the sibling claim about `ShiftSpec.transform` was falsified in exactly this way: apart from "
+    "`require_summary`, which type-checks, a DUCK-TYPED object carrying the right attributes is NOT "
+    "refused here. What protects the values it carries is that each is re-validated where it is read -- "
+    "`ProbeConfig(cfg.min_seeds)` on both paths that read a config's minimum (`summarize_seeds` and "
+    "`Scorecard.__post_init__`), `_plain_measure` on a spec's callable returns, and "
+    "`Scorecard.__post_init__` on every field a real card carries. WHAT THAT LEAVES, measured: "
+    "`scorecard_to_record` type-checks nothing either, so a hand-built namespace whose `min_seeds` has a "
+    "lying `__float__` yields a record reading `min_seeds_required = 1.0` beside an `input_hashes` entry "
+    "for a card that says 10. A note, not a finding, on the `transform` reasoning: a caller who can "
+    "hand-build that namespace can write any `ExperimentRecord` directly, so it grants them nothing "
+    "they lack")
+_WHY_CARRIER_SEQ = (
+    "a sequence of `MetricValue` carriers, each of which normalises its own fields in its own "
+    "`__post_init__` (`_normalise_fields`, in `toy.schema`); both consumers "
+    "(`summarize_seeds`, `Scorecard.__post_init__`) refuse anything that is not EXACTLY a `MetricValue`, "
+    "so there is no scalar here for `_plain_value` to reach")
+_WHY_ENUM = (
+    "an `Enum` member: `_plain_value` passes an Enum through by a TYPE rule, because `ProbeStatus` / "
+    "`ShiftKind` / `EvidenceClass` are `str` subclasses BY CONSTRUCTION and collapsing one would destroy "
+    "the `isinstance` checks that refuse a forged spelling. A non-enum spelling offered here is either "
+    "refused by that `isinstance` (`Scorecard.__post_init__`) or collapsed by the field boundary of the "
+    "dataclass it is stored in (`ShiftSpec.kind`)")
+_WHY_MASK = (
+    "a mask is a sequence of STRICT bools, and `bool` cannot be subclassed, so no element here can lie; "
+    "a non-bool element is refused loudly by `toy.stability.check_mask` (\"must be a strict bool ... "
+    "truthiness is not accepted\"), inside the documented ValueError family")
+
+# PER (function, parameter): the parameters for which the boundary's `_plain_value` call cannot collapse
+# anything, and WHAT PROTECTS THEM INSTEAD. Two things this map is NOT, because the word "exempt" has
+# meant something stronger elsewhere in this kit:
+#   * it is not consulted by the boundary. `_install_parameter_boundary` skips nothing, so no entry here
+#     can create a hole, and a wrong entry cannot stop a parameter being normalised. (Contrast
+#     `_NORMALISE_EXEMPT` on a dataclass, which really does skip the field.)
+#   * it is not a reviewer's assertion. `test_robustness.EveryPublicParameterIsNormalisedOrExplicitlyExempt`
+#     polices it in BOTH directions: a parameter absent from this map must be PROVEN to arrive plain at
+#     the callee when a subclass is passed, and a parameter present in it must be PROVEN unable to carry
+#     a collapsible scalar in the first place. An entry written for a parameter that can carry one FAILS.
+_PARAMETER_NO_SCALAR = MappingProxyType({
+    "summarize_seeds": MappingProxyType({"per_seed": _WHY_CARRIER_SEQ}),
+    "require_summary": MappingProxyType({"result": _WHY_CARRIER}),
+    "build_scorecard": MappingProxyType({"per_seed": _WHY_CARRIER_SEQ, "cfg": _WHY_CARRIER,
+                                         "status_if_summarized": _WHY_ENUM}),
+    "scorecard_to_record": MappingProxyType({"sc": _WHY_CARRIER}),
+    "seed_sensitivity_probe": MappingProxyType({"outcome": _WHY_CALLABLE_NUMBER, "cfg": _WHY_CARRIER}),
+    "benchmark_outcome": MappingProxyType({"factory": _WHY_CALLABLE_NUMBER, "cfg": _WHY_CARRIER}),
+    "mse_naive": MappingProxyType({"mask": _WHY_MASK}),
+    "mse_fsum": MappingProxyType({"mask": _WHY_MASK}),
+    "abs_bias_naive": MappingProxyType({"mask": _WHY_MASK}),
+    "abs_bias_fsum": MappingProxyType({"mask": _WHY_MASK}),
+    "abs_bias_plain": MappingProxyType({"mask": _WHY_MASK}),
+    "exact_masked_mse": MappingProxyType({"mask": _WHY_MASK}),
+    "shift_reorder_rows": MappingProxyType({"kind": _WHY_ENUM}),
+    "standard_shifts": MappingProxyType({"reorder_kind": _WHY_ENUM}),
+    "probe_shift": MappingProxyType({"measure": _WHY_CALLABLE_NUMBER, "spec": _WHY_CARRIER,
+                                     "cfg": _WHY_CARRIER, "fixture_factory": _WHY_CALLABLE_FIXTURE}),
+    "guarded": MappingProxyType({"measure": _WHY_CALLABLE_NUMBER}),
+    "missing_input_cases": MappingProxyType({"fx": _WHY_CARRIER}),
+    "assert_no_silent_default": MappingProxyType({"measure": _WHY_CALLABLE_NUMBER}),
+    "probe_missing_inputs": MappingProxyType({"measure": _WHY_CALLABLE_NUMBER, "cfg": _WHY_CARRIER}),
+    "probe_precision": MappingProxyType({"cfg": _WHY_CARRIER, "measure": _WHY_CALLABLE_NUMBER}),
+    "precision_sweep": MappingProxyType({"cfg": _WHY_CARRIER}),
+})
+
+
+def _plain_arguments(fn):
+    """Wrap `fn` so that EVERY argument it is called with is the plain value the caller's object STORES.
+
+    `inspect.signature(fn)` is read ONCE, at wrap time; each call binds the actual arguments to it and
+    passes every bound argument through `toy.schema._plain_value`. Nothing is skipped and no name is
+    written down here, which is the whole point: a parameter ADDED to any public function of this module
+    is normalised without anyone remembering to do it, exactly as a new dataclass FIELD is.
+
+    `_plain_value`, not `_plain_parameter`: on a scalar the two agree (both preserve int-vs-float, both
+    return a `bool` and an `Enum` member unchanged, both read what the object stores rather than
+    consulting a `__float__` / `__int__` / `__str__` override), and `_plain_value` additionally walks
+    CONTAINERS and mapping keys -- which a parameter needs and a field's normaliser already does, because
+    `seeds`, `offsets`, `params`, `values`, `arms` and `details_always` are containers whose ELEMENTS and
+    KEYS are what the guards downstream compare, hash and serialise.
+
+    ORDER, and why binding happens before anything else: this is the "normalise, THEN compare" rule of
+    `toy.benchmark._plain_number` applied one level out. A gate inside the function body -- `rows < 4`,
+    `kind == "magnitude"`, `worst > tol` -- is an operator on the caller's object, so any call placed
+    inside the body is placed after some gate, and round 6's lesson ("a call after a gate normalises
+    nothing the gate used") has a sibling found by round 7's measurements: a call passed the WRONG object
+    normalises nothing at all. The argument itself is what must arrive plain, and that is what
+    `test_robustness.EveryPublicParameterIsNormalisedOrExplicitlyExempt` asserts -- at the callee, from a
+    spy that records what it received.
+
+    A call `fn` would refuse for arity or name reasons is forwarded UNTOUCHED, so the `TypeError` a caller
+    sees is `fn`'s own and not `Signature.bind`'s paraphrase of it.
+    ONE LIMIT INHERITED FROM `_plain_value`, stated rather than left to be discovered: it walks `list`,
+    `tuple` and `Mapping`, so a container of ANOTHER type (a `range`, a generator, a custom `Sequence`)
+    is returned unchanged and its ELEMENTS are not collapsed here. The places where such elements decide
+    anything re-normalise them: `_check_seeds` (`int.__int__` on every seed), `Scorecard.__post_init__`
+    (`_plain_text` on every non-claim), `precision_sweep` (each `param` crosses this boundary again, one
+    call down) and `deep_freeze`, which refuses to freeze a container it does not recognise at all.
+    THIS IS NOT A TAMPER BOUNDARY, for the reason `_normalise_fields` states: `object.__setattr__` and a
+    caller-supplied CALLABLE's return value are both outside it (the latter is normalised where it is
+    consumed), and so is `fn.__wrapped__`, which `functools.wraps` leaves reachable and which this
+    module's tests use deliberately as the before/after control. Those are bypasses of the type's own
+    protocol, not spellings a caller writes by accident. It is the guarantee that the value a gate
+    INSPECTED is the value the caller's object stores."""
+    sig = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def at_parameter_boundary(*args, **kwargs):
+        try:
+            bound = sig.bind(*args, **kwargs)
+        except TypeError:
+            return fn(*args, **kwargs)      # let `fn` raise its own diagnostic, unchanged
+        for name in list(bound.arguments):
+            given = bound.arguments[name]
+            plain = _plain_value(given)
+            if plain is not given:
+                bound.arguments[name] = plain
+        return fn(*bound.args, **bound.kwargs)
+
+    at_parameter_boundary._AT_PARAMETER_BOUNDARY = True
+    return at_parameter_boundary
+
+
+def _install_parameter_boundary(namespace: dict) -> tuple:
+    """Put every PUBLIC callable of this module behind `_plain_arguments`, and return their names.
+
+    The list of callables is READ FROM THE MODULE NAMESPACE (a plain function, a public name, defined here
+    -- so the helpers imported from `toy.benchmark` / `toy.schema`, which have their own boundaries and
+    their own owners, are not touched). `inspect.isfunction`, not `isinstance(obj, types.FunctionType)`:
+    `scripts/lint.sh` bans `from types import FunctionType` in `src/` by name, as a dynamic-code
+    construction, and the two spellings test exactly the same thing. That is what makes a NEW PUBLIC
+    FUNCTION covered by default rather than
+    covered if someone remembers a decorator; `test_robustness` derives the same list the same way and
+    fails closed when it moves. Classes are deliberately not touched: a dataclass's arguments ARE its
+    fields, and `_normalise_fields` already covers them from `dataclasses.fields()`.
+
+    THE DEFAULTS ARE RE-POINTED, which is not housekeeping: `probe_shift`'s `fixture_factory` default and
+    `probe_precision`'s `measure` default were evaluated at `def` time, i.e. BEFORE this installer ran, so
+    they referred to the un-wrapped `make_measure_fixture` / `mse_naive`. Left alone, the default path of
+    a public probe would be the one path not behind the boundary -- the "it only holds for the default
+    parameter" smell this kit's own verification rules name as a finding. The callee is re-pointed, not
+    the signature object captured in the wrapper, and no default is APPLIED during binding: an argument a
+    caller did not pass is not in `bound.arguments` at all, and `fn` fills it itself."""
+    public = {name: obj for name, obj in list(namespace.items())
+              if inspect.isfunction(obj) and not name.startswith("_")
+              and getattr(obj, "__module__", None) == __name__}
+    wrapped = {name: _plain_arguments(obj) for name, obj in public.items()}
+    namespace.update(wrapped)
+    behind = {id(obj): wrapped[name] for name, obj in public.items()}
+    for obj in public.values():
+        if obj.__defaults__:
+            obj.__defaults__ = tuple(behind.get(id(d), d) for d in obj.__defaults__)
+        if obj.__kwdefaults__:
+            obj.__kwdefaults__ = {k: behind.get(id(d), d) for k, d in obj.__kwdefaults__.items()}
+    unknown = sorted(f"{f}.{p}" for f, ps in _PARAMETER_NO_SCALAR.items() for p in ps
+                     if f not in public or p not in inspect.signature(public[f]).parameters)
+    if unknown:    # fail at IMPORT, not at review time: a stale entry is a stale reason
+        raise ValueError(f"_PARAMETER_NO_SCALAR names parameters that do not exist: {unknown}")
+    return tuple(sorted(wrapped))
+
+
+_PARAMETER_BOUNDARY = _install_parameter_boundary(globals())

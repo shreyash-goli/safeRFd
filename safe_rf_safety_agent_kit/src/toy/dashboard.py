@@ -205,11 +205,32 @@ def _panel(title: str, ec: EvidenceClass, body: str, problem: Optional[str] = No
 #      (`_kind_text(pair.n, 'n', 'count')`), and `_n_sources_disagree`'s own `_count(getattr(pair, "n"))`
 #      -- three admissions -- plus a FOURTH read straight off the object by `bm.interval_verdict`, which
 #      applies protocol 6.1's `n < min_n` with no kind function at all. THE PROPERTY THAT MATTERS IS NOT
-#      THE COUNT: all three admissions go through the same kind function, `_count`, SO THEY CANNOT
-#      DISAGREE, and that -- not "exactly once" -- is what rounds 2 and 3 lacked (a display cell and a
-#      verdict path with two different predicates). `_n_sources_disagree`'s duplicate admission is
-#      argued where it lives; the fourth, raw read is the reason `_pair_numbers_ok` must gate
-#      `interval_verdict` rather than trust it.
+#      THE COUNT but what the admissions AGREE ABOUT -- and the sentence that stood here stated it as an
+#      absolute, which is false. THE SENTENCE THIS REPLACES SAID "all three admissions go through the
+#      same kind function, `_count`, SO THEY CANNOT DISAGREE". A kind function normalises the VALUE IT
+#      IS HANDED; nothing in this module makes the HOLDER hand it the same value twice. The true claim
+#      is the weaker one, and it is the one this scheme rests on: THE THREE ADMISSIONS CANNOT DISAGREE
+#      ABOUT A VALUE, BUT NOTHING PREVENTS THE HOLDER FROM SUPPLYING TWO.
+#      MEASURED (round 8, 3.13.5 and 3.12.4 identical): an `IntervalPair` whose `__getattribute__`
+#      serves `n` from `itertools.cycle([29, 30])` -- EVERY RETURNED VALUE A PLAIN `int`, so every kind
+#      function admits it unchanged and `_count` normalises nothing away -- renders JOINT_SUPPORTED with
+#      all three hypothesis cells SUPPORTED on the suite's own 29-seed `laundered_below_minimum`
+#      fixture, where the honest fixture renders JOINT_INCONCLUSIVE with its verdicts withheld. The
+#      sample-size cells print `29` and the page's own paragraph says that every verdict derived from a
+#      contradicted interval is withheld; the verdict cell shows the decisive verdict anyway. The page
+#      contradicts itself and FAILS OPEN on the cell that matters.
+#      THE MECHANISM IS NOT CLOSED, AND IS NOT CLAIMED TO BE. A `__class__` swap or a
+#      `__getattribute__` override is the residual this scheme has declared since round 4 -- it is why
+#      item 3's `vars(c.pair)["n_boot"]` and `c.pair.__dict__["n_boot"]` mutants are blind to the
+#      recording probe, for the same reason -- so an alternating holder is that SAME residual and not a
+#      new defect class. What is withdrawn is the absolute, not the design. The replacement claim is
+#      checkable and is CHECKED rather than restated: `test_the_corrected_comment_claims_are_performed_
+#      not_asserted` item (2) measures both halves, that every admission of `pair.n` in a real render
+#      goes through `_count`, and that an alternating holder of plain `int`s still launders the fixture.
+#      That much -- not "exactly once" -- is what rounds 2 and 3 lacked (a display cell and a verdict
+#      path with two different predicates). `_n_sources_disagree`'s duplicate admission is argued where
+#      it lives; the fourth, raw read is the reason `_pair_numbers_ok` must gate `interval_verdict`
+#      rather than trust it.
 #   3. THE ENUMERATION IS PERFORMED, NOT ASSERTED. Two tests do the work a reviewer kept doing by eye:
 #      `test_the_enumeration_is_performed_by_probe_not_asserted` swaps each scorer class for a
 #      recording subclass, renders a whole dashboard, and compares the attributes ACTUALLY READ (by
@@ -279,6 +300,28 @@ def _panel(title: str, ec: EvidenceClass, body: str, problem: Optional[str] = No
 #      the fields from `dataclasses.fields()` of the verdict-bearing classes and asserts of each that
 #      its kind hands back a value of EXACTLY the plain type, so a NEW field inherits the check.
 #
+#   7. ROUND 8: NORMALISING AT ADMISSION IS NOT ENOUGH IF A CONSUMER RE-READS THE FIELD AFTERWARDS.
+#      Item 6 made the three numeric kinds hand back the number they had inspected, and the ONE consumer
+#      that re-reads its field AFTER admission was missed. `_metric_cell` admitted through `_mv_float`,
+#      discarded the admitted number, and rendered `_num(mv.value)` -- the raw object -- so the single
+#      `float()` in this module consulted the caller's `__float__` after all, at the two call sites that
+#      between them cover EVERY scorecard mean cell and EVERY record/training metric cell. `schema.py`
+#      names the rule that was broken: "no consumer may read `.value` for itself". The measurements are
+#      in `_metric_cell`'s own docstring; `_interval`, `_kind_cell` and `_kind_text` render the ADMITTED
+#      value and were never wrong.
+#      WHAT IS NEW HERE IS NOT THE ONE-LINER. Rounds 2, 3, 4 and 7 each ended "the guard was fixed and
+#      the one consumer that re-reads was missed", and round 7's own pin
+#      (`test_every_admitted_field_is_normalised_by_its_kind`) checks a kind function's RETURN TYPE and
+#      never a RENDERED CELL -- one level below the gap it was written to close. The pin is therefore now
+#      AT THE RENDER BOUNDARY: `EveryDeclaredNumberRendersTheAdmittedValue` forges every declared number,
+#      and every `MetricValue` either renderer reaches, to a subclass that stores the HONEST double and
+#      lies only on CONVERSION, then requires both FULL RENDERS to be BYTE-IDENTICAL to the honest ones.
+#      A test of that shape does not care which function re-reads, how the read is spelled, or where the
+#      next one appears; the pre-fix spelling of this cell is the only thing in either render that fails
+#      it. It is NOT a completeness proof either: it sweeps the numbers that are DECLARED or reachable in
+#      one payload, so an undeclared field reached only on an unexercised branch is outside it, as item 3
+#      has said since round 4.
+#
 # WHAT IS DELIBERATELY NOT IN THE SCHEME is argued at `_valid_history` and `_protocol_params`.
 def _num(x: float) -> str:
     """Render a number one of the four kind functions has ALREADY admitted.
@@ -292,7 +335,16 @@ def _num(x: float) -> str:
     laundering step: measured, a `float` subclass storing an honest `pair.level` of 0.9875 whose
     `__float__` returned 0.5 printed `0.5` in every level cell of the same render that verified
     `t_lo`/`t_hi` against 0.9875. The kinds collapse a subclass to the number they inspected, so there
-    is no override left for this call to consult."""
+    is no override left for this call to consult.
+
+    THAT SENTENCE WAS FALSE FOR ONE CALLER FOR A WHOLE ROUND, which is recorded here because it is the
+    sentence a reader of this module trusts. `_kind_cell`, `_kind_text` and `_interval` pass the ADMITTED
+    value; `_metric_cell` admitted through `_mv_float` and then passed `mv.value`, so for every scorecard
+    mean cell and every record/training metric cell this `float()` did consult the caller's `__float__`
+    (round 8; scheme note item 7). It is now true of all four callers, and it is no longer load-bearing
+    prose: `EveryDeclaredNumberRendersTheAdmittedValue` renders every declared number through both real
+    renderers with a conversion-only liar and compares BYTES, so a fifth caller that re-reads its field
+    fails the suite rather than this paragraph."""
     return repr(float(x))
 
 
@@ -521,11 +573,49 @@ def _float_cell(x: Any, why: str) -> str:
 def _metric_cell(mv: Any) -> str:
     """Measured -> repr (0.0 stays 0.0). Unmeasured or absent or malformed -> UNKNOWN (+reason). Never 0.
 
-    The float-and-finite test lives in `_finite_float`, shared with every other consumer of a stored
-    number, so one value can never read UNKNOWN here and measured in the next cell."""
+    IT RENDERS THE ADMITTED NUMBER, NOT `mv.value`, which is round 8 (scheme note item 7). THE SENTENCE
+    THIS REPLACES SAID "the float-and-finite test lives in `_finite_float`, shared with every other
+    consumer of a stored number, so one value can never read UNKNOWN here and measured in the next
+    cell", and it derived this cell's safety FROM THE WRONG PROPERTY. The premise is true and is kept
+    below; the conclusion does not follow from it, because what this cell shared with the other
+    consumers was the TEST and not the SOURCE. It called `_mv_float`, threw the admitted number away,
+    and handed the RAW `MetricValue` object's `.value` to `_num` -- so `schema.py`'s rule, "which is why
+    `toy.benchmark._metric_read` exists and why no consumer may read `.value` for itself", was broken by
+    the one consumer that re-read the field after admission, and the module's single `float()` consulted
+    the caller's `__float__`.
+
+    MEASURED at the previous HEAD, 3.13.5 and 3.12.4 byte-identical, each forgery by `object.__setattr__`
+    (benchmark's declared route (b); the public route is closed by `MetricValue.__post_init__`'s
+    redundant `float.__float__` store, which re-plainifies a `_NORMALISE_EXEMPT` subclass):
+        pair.mean = a `float` subclass storing the HONEST 0.9995918337735029 whose `__float__` returns
+            0.5  ->  6 of 6 scorecard mean cells printed `0.5`, 0 warning paragraphs, alarm state
+            byte-identical to the honest page, JOINT_SUPPORTED displayed. UNALARMED BY CONSTRUCTION, and
+            that is the part worth reading twice: `_mv_float(forged)` returns the HONEST number, so
+            `_interval_problem` and every round-6 cross-check see the truth and STRUCTURALLY CANNOT
+            FIRE. The same subclass with `__float__` returning 0.0 printed `0.0`.
+        an `ExperimentRecord` metric storing 0.9 with `__float__` returning 0.0  ->  the records panel
+            printed `0.0`, via `_metric_table`: the second call site, every record and training metric.
+        a `__float__` that RAISES  ->  `render_scorecard` AND `render_dashboard` both died with
+            ZeroDivisionError. A page taken down, outside this module's stated error contract -- the
+            same ruling `_finite_number` already made for `10**400`.
+    `_interval` renders the admitted bounds and never had this defect: the identical forgery on
+    `boot_lo`, `boot_hi`, `t_lo` and `t_hi` moves NOT ONE BYTE of either render (measured).
+
+    THE PIN IS NOT THIS DOCSTRING, and not a fifth review of a one-liner. The gap is structural: round
+    7's pin checks what a kind function RETURNS, so it cannot see a consumer that re-reads the field one
+    level up. `EveryDeclaredNumberRendersTheAdmittedValue` forges every declared number -- and every
+    `MetricValue` either renderer reaches -- to a subclass storing the honest double that lies only on
+    CONVERSION, and requires both full renders to be byte-identical to the honest ones. It fails on this
+    cell as it was spelled before the fix, and it does not care where the next re-read appears.
+
+    The float-and-finite test does live in `_finite_float`, shared with every other consumer of a stored
+    number, so one value cannot read UNKNOWN here and measured in the next cell. That is a claim about
+    the TEST, and it is all the shared test buys. What makes this cell HONEST is that `_mv_float` is its
+    only reader of `.value` and the number `_mv_float` returns is the number rendered."""
     if isinstance(mv, MetricValue):
-        if _mv_float(mv) is not None:
-            return f'<span class="measured">{_e(_num(mv.value))}</span>'
+        v = _mv_float(mv)
+        if v is not None:
+            return f'<span class="measured">{_e(_num(v))}</span>'
         reason = mv.reason if mv.value is None else "malformed measured value"
         return f'<span class="unknown">UNKNOWN</span> <span class="caveat">{_e(_visible(str(reason))[:MAX_TEXT])}</span>'
     return '<span class="unknown">UNKNOWN</span> <span class="caveat">not recorded</span>'

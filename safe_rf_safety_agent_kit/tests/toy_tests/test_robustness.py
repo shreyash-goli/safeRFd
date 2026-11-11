@@ -6,13 +6,17 @@ machinery on a synthetic fixture. A probe that cannot fail is worthless, so each
 with a deliberately broken measure and asserted to fire."""
 import ast
 import dataclasses
+import functools
+import inspect
 import json
 import math
 import random
 import struct
 import sys
+import types
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -2426,9 +2430,13 @@ class EveryDataclassFieldIsNormalisedOrExplicitlyExempt(unittest.TestCase):
     reason. The field list comes from `dataclasses.fields()` and the class list from the module, so
     adding a field DEFAULTS TO COVERED rather than defaulting to forgotten.
     NOT COVERED BY IT, stated so the coverage is not read as larger than it is: a function parameter and
-    a closure variable are not fields. `arm_difference`'s arm names, `shift_reorder_rows`'s `rel_tol`,
-    `probe_precision`'s `tol` / `param` and `probe_shift`'s three callable returns are normalised where
-    they are bound or consumed, and each has its own consequence test in this file."""
+    a closure variable are not fields. That sentence used to continue "`arm_difference`'s arm names,
+    `shift_reorder_rows`'s `rel_tol`, `probe_precision`'s `tol` / `param` ... are normalised where they
+    are bound", i.e. it answered a boundary's gap with a LIST -- and round 7 found four live routes in
+    that list, none of them on it. Parameters are now covered by their own computed boundary:
+    `EveryPublicParameterIsNormalisedOrExplicitlyExempt` below. What remains outside BOTH boundaries is
+    what a caller-supplied CALLABLE returns, normalised where it is consumed, with its own consequence
+    test in this file."""
 
     def fixtures(self):
         return {
@@ -2444,16 +2452,24 @@ class EveryDataclassFieldIsNormalisedOrExplicitlyExempt(unittest.TestCase):
         ts.assert_fields_are_covered_or_exempt(self, rb, self.fixtures(), expected_counts=(35, 3))
 
     def test_the_three_exemptions_are_the_three_callables_and_say_why(self):
-        """An exemption list is only worth having if each entry carries a reason a reader can check. All
-        three are `ShiftSpec`'s callables: a callable stores no scalar to collapse, and what it RETURNS
-        is normalised where it is consumed."""
+        """An exemption list is only worth having if each entry carries a reason a reader can check, and
+        the reason has to name the mechanism that ACTUALLY protects the field. All three are `ShiftSpec`'s
+        callables: a callable stores no scalar to collapse, and what it RETURNS is normalised where it is
+        consumed. `transform`'s reason had the first half right and the SECOND HALF WRONG, which an
+        attester earned and `test_the_transform_reason_names_the_mechanism_that_really_protects_it` below
+        measures: it claimed protection because the return "is a fixture, which normalises its own fields
+        in MeasureFixture.__post_init__", and `probe_shift` never type-checks that return."""
         ex = dict(rb.ShiftSpec._NORMALISE_EXEMPT)
         self.assertEqual(sorted(ex), ["bound", "expected", "transform"])
         for name, why in ex.items():
             self.assertIn("callable", why, name)
-        self.assertIn("MeasureFixture.__post_init__", ex["transform"])
-        self.assertIn("_plain_measure", ex["expected"])
-        self.assertIn("_plain_measure", ex["bound"])
+            self.assertIn("_plain_measure", why, name)     # the mechanism, named in every reason
+        # `MeasureFixture.__post_init__` may appear in `transform`'s reason ONLY as the mechanism being
+        # DENIED, never as the protection -- the convention this file uses for a falsified claim.
+        self.assertIn("THIS REASON USED TO NAME THE WRONG MECHANISM", ex["transform"])
+        self.assertIn("probe_shift NEVER type-checks this return", ex["transform"])
+        self.assertIn("is not what protects anything here", ex["transform"])
+        self.assertNotIn("what it RETURNS is a fixture", ex["transform"])
         # and no OTHER class in the module exempts anything
         for cls in self.fixtures():
             if cls is not rb.ShiftSpec:
@@ -2496,6 +2512,665 @@ class EveryDataclassFieldIsNormalisedOrExplicitlyExempt(unittest.TestCase):
             dataclasses.replace(sc_simple(), probe_id="   ")
         with self.assertRaises(ValueError):
             dataclasses.replace(sc_simple(), status="MEASURED")  # a bare str is not a ProbeStatus
+
+
+# ------------------------------- machine-derived PARAMETER-coverage probe (the round-7 fix)
+def _public_callables(namespace=None):
+    """Every public callable `toy.robustness` DEFINES, read from the module namespace, not from a list.
+
+    The three clauses are `_install_parameter_boundary`'s, written out again here on purpose: a test that
+    asks the code under test for the list of things to check cannot fail when that list is wrong. The two
+    lists are cross-checked for equality in
+    `test_every_public_callable_is_behind_the_parameter_boundary`, which is where a disagreement surfaces."""
+    ns = vars(rb) if namespace is None else namespace
+    return {n: f for n, f in ns.items()
+            if isinstance(f, types.FunctionType) and not n.startswith("_")
+            and getattr(f, "__module__", None) == "toy.robustness"}
+
+
+def _canonical_calls():
+    """One HONEST call per public callable, naming EVERY parameter of it.
+
+    A new parameter has no entry here, and `_parameter_coverage_complaints` requires the registry to name
+    every parameter of every public callable -- so a new parameter fails closed twice over (here, and in
+    the counts). The values are the ordinary ones a caller would pass; the probe lies about them itself."""
+    fx = rb.make_measure_fixture(1)
+    matrices = {"pred": fx.pred, "target": fx.target, "mask": fx.mask}
+    per_seed = tuple(MetricValue.measured(float(i)) for i in range(12))
+    return {
+        "summarize_seeds": {"per_seed": per_seed, "min_seeds": 10},
+        "require_summary": {"result": rb.SeedSummary.from_values([1.0, 2.0, 3.0])},
+        "deep_freeze": {"x": {"a": 1.0, "b": [2, "c"]}},
+        "thaw": {"x": {"a": (1.0, "b")}},
+        "build_scorecard": {"probe_id": "p", "probe_kind": "seed_sensitivity", "seeds": SEEDS,
+                            "per_seed": per_seed, "cfg": CFG, "status_if_summarized": PS.MEASURED,
+                            "details_always": {"measure": "m"}, "details_if_summarized": {"n_seen": 1},
+                            "non_claims": ("a stated non-claim",)},
+        "scorecard_to_record": {"sc": sc_simple(), "run_id": "r1", "timestamp_utc": TS,
+                                "code_version": rb.CODE_VERSION},
+        "seed_sensitivity_probe": {"outcome": lambda s: float(s % 1000), "seeds": SEEDS, "cfg": CFG,
+                                   "probe_id": "demo"},
+        "benchmark_outcome": {"factory": fixture_oracle_gated, "metric": "S", "cfg": None},
+        "make_measure_fixture": {"seed": 1, "rows": 16, "width": 3, "noise": 0.1, "magnitude_spread": 0},
+        "make_order_sensitive_fixture": {"seed": 1, "big": 1e8},
+        "mse_naive": dict(matrices),
+        "mse_fsum": dict(matrices),
+        "abs_bias_naive": dict(matrices),
+        "abs_bias_fsum": dict(matrices),
+        "abs_bias_plain": dict(matrices),
+        "exact_masked_mse": dict(matrices),
+        "shift_reorder_rows": {"kind": SK.INVARIANCE_EXACT, "rel_tol": 0.0},
+        "shift_masked_out_rows": {},
+        "shift_scale": {"factor": 4.0, "degree": 2},
+        "shift_translate": {"c": 1000.0},
+        "shift_column_offsets": {"offsets": (3.0, -7.0, 0.5)},
+        "shift_jitter": {"eps": 1e-6},
+        "standard_shifts": {"reorder_kind": SK.INVARIANCE_EXACT, "reorder_rel_tol": 0.0},
+        "probe_shift": {"measure": rb.mse_fsum, "spec": rb.shift_reorder_rows(), "seeds": SEEDS,
+                        "cfg": CFG, "fixture_factory": rb.make_measure_fixture, "probe_id": "p"},
+        "arm_difference": {"arms": {"C0": MetricValue.measured(0.0)}, "treatment": "E", "control": "C0"},
+        "guarded": {"measure": rb.mse_fsum},
+        "missing_input_cases": {"fx": fx},
+        "assert_no_silent_default": {"measure": rb.mse_fsum, "seeds": (0, 1, 2)},
+        "probe_missing_inputs": {"measure": rb.mse_fsum, "seeds": SEEDS, "cfg": CFG, "probe_id": "p"},
+        "plain_loop_mean": {"values": [1.0, 2.0, 3.0]},
+        "probe_precision": {"kind": "magnitude", "param": 1.0, "seeds": SEEDS, "cfg": CFG, "tol": 1e-12,
+                            "measure": rb.mse_naive},
+        "precision_sweep": {"kind": "magnitude", "params": (1.0, 2.0), "seeds": SEEDS, "cfg": CFG,
+                            "tol": 1e-12},
+    }
+
+
+def _spy_behind_the_boundary(name):
+    """(callable, dict): a stand-in for `rb.<name>` with the SAME signature, behind the SAME boundary,
+    whose body RECORDS WHAT IT RECEIVED and does nothing else.
+
+    THE PART ROUND 7 SAID TO GET RIGHT, and the reason this probe is a spy and not an AST rule. The field
+    boundary's AST assertion checks the NAME of the function called as the first statement of
+    `__post_init__` and never inspects its ARGUMENT, so `_normalise_fields(InsufficientEvidence(1, 2,
+    "inert"))` satisfies it -- mutants M5a/M5b, both unkilled, saved only because hand-placed guards
+    still covered those fields. Round 6's lesson "a call after a gate normalises nothing the gate used"
+    has that sibling: a call passed the WRONG OBJECT normalises nothing at all. So the assertion here is
+    made on the argument as the CALLEE receives it, which no call with the wrong argument can satisfy;
+    `test_the_assertion_is_on_the_ARGUMENT_not_on_the_called_name` exhibits the mutant that proves it."""
+    original = getattr(rb, name).__wrapped__
+    sig = inspect.signature(original)
+    seen = {}
+
+    def body(*args, **kwargs):
+        seen.update(sig.bind(*args, **kwargs).arguments)
+        return None
+
+    body.__name__ = name
+    body.__signature__ = sig
+    return rb._plain_arguments(body), seen
+
+
+def _parameter_coverage_complaints(calls=None, boundary=_spy_behind_the_boundary):
+    """Every reason the parameter boundary's coverage is incomplete, as a list of strings; [] = covered.
+
+    A function returning complaints rather than a body of assertions, so that its OWN fail-closure is
+    testable: `test_a_new_public_function_fails_closed`, `test_a_new_parameter_fails_closed`,
+    `test_a_declaration_for_a_parameter_that_can_carry_a_scalar_is_refused` and
+    `test_the_assertion_is_on_the_ARGUMENT_not_on_the_called_name` each inject one defect and assert the
+    matching complaint appears -- which is the only way to know this probe is not vacuous."""
+    calls = _canonical_calls() if calls is None else calls
+    public = _public_callables()
+    out = []
+    for name in sorted(set(public) | set(calls)):
+        if name not in public:
+            out.append(f"{name}: in the canonical-call registry but not a public callable of the module")
+            continue
+        fn = public[name]
+        if not getattr(fn, "_AT_PARAMETER_BOUNDARY", False):
+            out.append(f"{name}: not behind the parameter boundary")
+            continue
+        if name not in calls:
+            out.append(f"{name}: a public callable with no canonical call; add one naming every parameter")
+            continue
+        params = list(inspect.signature(fn).parameters)
+        given = calls[name]
+        if set(params) != set(given):
+            out.append(f"{name}: the canonical call names {sorted(given)} but the parameters are "
+                       f"{sorted(params)}: a new parameter needs a value here and a decision about it")
+            continue
+        declared = dict(rb._PARAMETER_NO_SCALAR.get(name, {}))
+        probe, seen = boundary(name)
+        probe(**{p: ts._subclassed(v) for p, v in given.items()})
+        for p in params:
+            lies = ts._impure(ts._subclassed(given[p]), f"{name}.{p}")
+            if p in declared:
+                if not str(declared[p]).strip():
+                    out.append(f"{name}.{p}: declared in _PARAMETER_NO_SCALAR with no reason recorded")
+                if lies:
+                    out.append(f"{name}.{p}: declared as carrying no collapsible scalar, but its own "
+                               f"probe value carries {lies}")
+                continue
+            if not lies:
+                out.append(f"{name}.{p}: nothing is proven here, because the probe value cannot carry a "
+                           "subclass at all; declare it in _PARAMETER_NO_SCALAR with the mechanism that "
+                           "does protect it")
+            elif p not in seen:
+                out.append(f"{name}.{p}: the callee never received it")
+            elif ts._impure(seen[p], f"{name}.{p}"):
+                out.append(f"{name}.{p}: the callee received {ts._impure(seen[p], f'{name}.{p}')}")
+    return out
+
+
+class EveryPublicParameterIsNormalisedOrExplicitlyExempt(unittest.TestCase):
+    """THE ROUND-7 FIX: the field boundary's argument, made once more for PARAMETERS, and for the same
+    reason -- four more live routes, none of them on the hand-written list of non-field exceptions.
+
+    What it asserts, derived from the module and not from this file: that every public callable
+    `toy.robustness` defines is behind `_plain_arguments` (a NEW PUBLIC FUNCTION fails closed); that the
+    canonical-call registry names every parameter of each (a NEW PARAMETER fails closed); that for every
+    parameter either the callee PROVABLY receives the plain value when handed a subclass, or the
+    parameter is declared in `_PARAMETER_NO_SCALAR` with a reason; and -- the clause that makes the
+    declarations self-policing rather than an escape hatch -- that a declared parameter PROVABLY cannot
+    carry a collapsible scalar in the first place. Asserted at the CALLEE, on the argument, never on the
+    name of a function called: see `_spy_behind_the_boundary`.
+    WHAT IT DOES NOT COVER, so the coverage is not read as larger than it is: a method of a class (a
+    dataclass's arguments are its fields, which `EveryDataclassFieldIsNormalisedOrExplicitlyExempt`
+    covers from `dataclasses.fields()`; `SeedSummary.from_values` casts with `float.__float__` itself);
+    what a caller-supplied CALLABLE returns; and `object.__setattr__`."""
+
+    def test_every_public_callable_is_behind_the_parameter_boundary(self):
+        public = _public_callables()
+        self.assertEqual(sorted(public), list(rb._PARAMETER_BOUNDARY),
+                         "the module namespace and the installer disagree about the public callables")
+        for name, fn in sorted(public.items()):
+            self.assertTrue(getattr(fn, "_AT_PARAMETER_BOUNDARY", False), name)
+            self.assertIsNot(inspect.unwrap(fn), fn, name)          # a real wrapper, not a marked def
+            self.assertEqual(fn.__name__, name)
+            self.assertEqual(fn.__doc__, inspect.unwrap(fn).__doc__, name)
+        self.assertEqual(len(public), 32, sorted(public))
+
+    def test_every_parameter_is_normalised_or_declared_with_a_reason(self):
+        self.assertEqual(_parameter_coverage_complaints(), [])
+        calls = _canonical_calls()
+        n_params = sum(len(inspect.signature(getattr(rb, n)).parameters) for n in calls)
+        n_declared = sum(len(v) for v in rb._PARAMETER_NO_SCALAR.values())
+        self.assertEqual((n_params, n_declared), (88, 30),
+                         "the parameter / declaration counts moved. This is not a rubber stamp: confirm "
+                         "the new parameter is covered (it is, by default) or declare it with the "
+                         "mechanism that protects it, then update the count -- a count that is remembered "
+                         "rather than measured is how five numbers got into circulation for SEED_FLOOR.")
+
+    def test_what_the_two_boundaries_leave_is_measured_not_described(self):
+        """"Methods are not covered" is a sentence a reader has to trust. This MEASURES the set: every
+        public method of every public class in the module that takes an argument at all, derived from
+        `vars(cls)`, is enumerated and each one's mechanism is named. Three exist, and a fourth fails
+        here rather than being noticed."""
+        found = []
+        for cname, cls in sorted(vars(rb).items()):
+            if cname.startswith("_") or not (isinstance(cls, type) and cls.__module__ == "toy.robustness"):
+                continue
+            for mname, member in sorted(vars(cls).items()):
+                fn = member.__func__ if isinstance(member, (classmethod, staticmethod)) else member
+                if mname.startswith("_") or not inspect.isfunction(fn):
+                    continue
+                if [p for p in inspect.signature(fn).parameters if p not in ("self", "cls")]:
+                    found.append(f"{cname}.{mname}")
+        self.assertEqual(found, ["SeedSummary.from_values", "ShiftSpec.bound", "ShiftSpec.expected"],
+                         "a public method taking an argument appeared or vanished: state its mechanism")
+        # 1. from_values casts every value itself and builds through __post_init__, which normalises
+        values = [ts._subclassed(1.0), ts._subclassed(2.0), 3.0]
+        self.assertNotEqual(ts._impure(values, "values"), [])
+        self.assertEqual(ts._impure(rb.SeedSummary.from_values(values), "summary"), [])
+        self.assertIn("float.__float__(v) if isinstance(v, float)",
+                      inspect.getsource(rb.SeedSummary.from_values))
+        # 2-3. the two default callables of ShiftSpec: their RETURNS are normalised at consumption, and
+        # that is what their field exemptions say
+        for field in ("expected", "bound"):
+            self.assertIn("_plain_measure", rb.ShiftSpec._NORMALISE_EXEMPT[field])
+
+    def test_a_new_public_function_fails_closed(self):
+        """A function added to this module is covered by the boundary ONLY if the installer ran over it,
+        and is PROVEN covered only if the registry names its parameters. Both are asserted by injecting
+        one, which is the evidence that the two assertions above are not vacuous."""
+        def probe_everything(threshold=1.0):
+            return threshold
+        probe_everything.__module__ = "toy.robustness"
+        with mock.patch.object(rb, "probe_everything", probe_everything, create=True):
+            self.assertIn("probe_everything", _public_callables())
+            self.assertIn("probe_everything: not behind the parameter boundary",
+                          _parameter_coverage_complaints())
+        # and once it IS behind the boundary, it still fails for having no canonical call
+        with mock.patch.object(rb, "probe_everything", rb._plain_arguments(probe_everything), create=True):
+            self.assertEqual([c for c in _parameter_coverage_complaints() if "probe_everything" in c],
+                             ["probe_everything: a public callable with no canonical call; add one "
+                              "naming every parameter"])
+        self.assertNotIn("probe_everything", _public_callables())   # the injection is gone
+
+    def test_a_new_parameter_fails_closed(self):
+        """A parameter ADDED to an existing public callable is normalised by default -- that is the point
+        of the boundary -- but it is not PROVEN so until someone states a value for it and decides
+        whether it can carry a scalar. Injected on `shift_jitter`, the factory of F2."""
+        def shift_jitter(eps, extra_tolerance=1.0):
+            return rb.shift_jitter(eps)
+        shift_jitter.__module__ = "toy.robustness"
+        with mock.patch.object(rb, "shift_jitter", rb._plain_arguments(shift_jitter)):
+            complaints = [c for c in _parameter_coverage_complaints() if "shift_jitter" in c]
+        self.assertEqual(len(complaints), 1, complaints)
+        self.assertIn("extra_tolerance", complaints[0])
+        self.assertIn("a new parameter needs a value here", complaints[0])
+        self.assertEqual(_parameter_coverage_complaints(), [])      # and the real module is still clean
+
+    def test_the_assertion_is_on_the_ARGUMENT_not_on_the_called_name(self):
+        """THE MUTANT THAT PROVES IT, and the measurement that made it necessary. The field boundary's
+        coverage test asserts that the FIRST STATEMENT of `__post_init__` is a call to
+        `_normalise_fields` -- by NAME, never looking at the argument -- so a body reading
+        `_normalise_fields(InsufficientEvidence(1, 2, "inert"))` passes it while normalising nothing
+        (M5a/M5b, both unkilled). The same mutant for this boundary calls `_plain_value` on an inert
+        object and forwards the caller's arguments untouched: it satisfies every source-level rule about
+        the call and is killed here, because what is asserted is the argument the CALLEE received."""
+        def name_only_boundary(name):
+            original = getattr(rb, name).__wrapped__
+            sig = inspect.signature(original)
+            seen = {}
+
+            def body(*args, **kwargs):
+                seen.update(sig.bind(*args, **kwargs).arguments)
+                return None
+
+            @functools.wraps(body)
+            def mutant(*args, **kwargs):
+                rb._plain_value("inert")                # the right name, the wrong object
+                return body(*args, **kwargs)
+
+            body.__name__ = name
+            body.__signature__ = sig
+            mutant.__signature__ = sig
+            return mutant, seen
+        # the mutant's own source satisfies a name-only rule, exactly as M5a/M5b satisfied the AST one
+        self.assertIn("_plain_value(", inspect.getsource(name_only_boundary))
+        m5 = ast.parse("def __post_init__(self):\n"
+                       "    _normalise_fields(InsufficientEvidence(1, 2, 'inert'))\n").body[0].body[0]
+        self.assertTrue(isinstance(m5, ast.Expr) and isinstance(m5.value, ast.Call)
+                        and getattr(m5.value.func, "id", None) == "_normalise_fields",
+                        "the field boundary's rule is a name check, which is the point of this test")
+        complaints = _parameter_coverage_complaints(boundary=name_only_boundary)
+        self.assertNotEqual(complaints, [], "a boundary that normalises an inert object passed this probe")
+        self.assertIn("probe_precision.kind: the callee received", " ".join(complaints))
+        self.assertIn("make_measure_fixture.rows: the callee received", " ".join(complaints))
+        self.assertIn("shift_jitter.eps: the callee received", " ".join(complaints))
+        self.assertIn("shift_scale.factor: the callee received", " ".join(complaints))
+
+    def test_a_declaration_for_a_parameter_that_can_carry_a_scalar_is_refused(self):
+        """The clause that stops `_PARAMETER_NO_SCALAR` being an escape hatch, and the difference from
+        the field boundary's `_NORMALISE_EXEMPT` (which really does skip the field): a declaration is
+        accepted only where the probe CONFIRMS there was nothing to collapse. Declaring F1's `kind` --
+        the parameter whose whole finding is that it carries one -- is refused."""
+        forged = dict(rb._PARAMETER_NO_SCALAR)
+        forged["probe_precision"] = {"kind": "a reason that reads plausibly and is false"}
+        with mock.patch.object(rb, "_PARAMETER_NO_SCALAR", forged):
+            complaints = [c for c in _parameter_coverage_complaints() if "probe_precision.kind" in c]
+        self.assertEqual(len(complaints), 1, complaints)
+        self.assertIn("declared as carrying no collapsible scalar, but its own probe value carries",
+                      complaints[0])
+
+    def test_a_stale_declaration_fails_at_import_not_at_review_time(self):
+        """A reason for a parameter that no longer exists is a stale reason, and a stale reason is how
+        `transform`'s wrong mechanism survived. The installer refuses one while importing the module."""
+        with self.assertRaises(ValueError) as cm:
+            rb._install_parameter_boundary({})      # a namespace with no public callables at all
+        self.assertIn("_PARAMETER_NO_SCALAR names parameters that do not exist", str(cm.exception))
+        self.assertIn("probe_shift.measure", str(cm.exception))
+        self.assertEqual(_parameter_coverage_complaints(), [])      # and nothing was disturbed
+
+    def test_every_declared_reason_names_a_mechanism_and_the_six_reasons_are_shared(self):
+        """Thirty declarations, six reasons: a reason written per site is a reason nobody re-reads. Each
+        names the mechanism that protects the parameter instead of this boundary."""
+        reasons = {why for ps in rb._PARAMETER_NO_SCALAR.values() for why in ps.values()}
+        self.assertEqual(len(reasons), 6, sorted(reasons))
+        for why in reasons:
+            self.assertTrue(why.strip())
+            self.assertTrue(any(m in why for m in ("_plain_measure", "_to_metric", "_normalise_fields",
+                                                   "isinstance", "check_mask")), why)
+        # the mask reason's claim is checkable, so it is checked: a non-bool mask element is refused
+        fx = rb.make_measure_fixture(1)
+        for m in (rb.mse_naive, rb.mse_fsum, rb.abs_bias_fsum):
+            with self.assertRaises((ValueError, TypeError, ArithmeticError)) as cm:
+                m(fx.pred, fx.target, tuple(1 if b else 0 for b in fx.mask))
+            self.assertIn("strict bool", str(cm.exception))
+        self.assertIn("truthiness is not accepted", rb._WHY_MASK)
+
+    def test_the_carrier_reason_states_the_duck_typed_route_it_does_not_close(self):
+        """A reason is only worth having if it is true, and writing this one honestly found a NOTE the
+        obvious wording would have hidden -- the same shape as the `transform` correction an attester
+        earned. `_WHY_CARRIER` covers seven parameters, and apart from `require_summary` NONE of their
+        functions type-checks the carrier. MEASURED: a hand-built namespace whose `min_seeds` has a lying
+        `__float__` is accepted by `scorecard_to_record`, which records `min_seeds_required = 1.0` beside
+        an `input_hashes["scorecard"]` for a card that says 10.
+        Recorded as a note, not fixed: a caller who can hand-build that namespace can write any
+        `ExperimentRecord` directly, so it grants them nothing they lack (the `transform` reasoning).
+        IF THIS TEST FAILS BECAUSE A TYPE CHECK WAS ADDED, that is a fix and not a regression -- update
+        `_WHY_CARRIER` to say so, because a reason that names the wrong mechanism is what this round had
+        to correct."""
+        card = sc_simple()
+
+        class LyingMin(int):
+            def __float__(self):
+                return 1.0
+        duck = SimpleNamespace(seeds=card.seeds, per_seed=card.per_seed, summary=card.summary,
+                               insufficient=None, min_seeds=LyingMin(10), seed_digest=card.seed_digest,
+                               probe_id="demo", probe_kind="seed_sensitivity", status=card.status,
+                               content_hash=card.content_hash)
+        rec = rb.scorecard_to_record(duck, run_id="r", timestamp_utc=TS)
+        self.assertEqual(bm._metric_read(rec.metrics["min_seeds_required"]), 1.0)
+        self.assertEqual(rec.provenance.input_hashes["scorecard"], card.content_hash())
+        self.assertEqual(card.min_seeds, 10)                 # the card the hash belongs to says 10
+        self.assertIs(rb._PARAMETER_NO_SCALAR["scorecard_to_record"]["sc"], rb._WHY_CARRIER)
+        self.assertIn("type-checks nothing either", rb._WHY_CARRIER)
+        self.assertIn("min_seeds_required = 1.0", rb._WHY_CARRIER)
+        self.assertIn("grants them nothing", rb._WHY_CARRIER)
+        # and the one carrier parameter that IS type-checked really is
+        with self.assertRaises(rb.InsufficientEvidenceError):
+            rb.require_summary(SimpleNamespace(n=12, mean=0.0, values=(1.0, 2.0, 3.0)))
+
+    def test_the_boundary_is_invisible_to_honest_data(self):
+        """A normalisation that moved an honest byte, or rebuilt an honest container, would be a breaking
+        change for every stored `content_hash` and a behaviour change a reader cannot see. Asserted as
+        IDENTITY of every argument of every public callable, and as equality of a card and a record built
+        THROUGH the boundary with the same built around it (`__wrapped__`)."""
+        for name, given in sorted(_canonical_calls().items()):
+            probe, seen = _spy_behind_the_boundary(name)
+            probe(**given)
+            for p, v in given.items():
+                self.assertIs(seen[p], v, f"{name}.{p} was rebuilt by the boundary")
+        f = lambda s: float(s % 1000)                                       # noqa: E731
+        around = rb.seed_sensitivity_probe.__wrapped__(f, SEEDS, CFG, probe_id="demo")
+        through = rb.seed_sensitivity_probe(f, SEEDS, CFG, probe_id="demo")
+        self.assertEqual(through.content_hash(), around.content_hash())
+        self.assertEqual(rb.scorecard_to_record(through, run_id="r", timestamp_utc=TS).content_hash(),
+                         rb.scorecard_to_record.__wrapped__(around, run_id="r", timestamp_utc=TS)
+                         .content_hash())
+        self.assertEqual(_impure_rb(through, "card"), [])
+
+    def test_the_boundary_did_not_weaken_a_single_existing_refusal(self):
+        """A normaliser that quietly became a coercion would be worse than the defect: `_plain_value`
+        collapses a SUBCLASS to the value it stores and must never make a value this module refuses by
+        TYPE acceptable. Every refusal on a parameter path is re-asserted."""
+        fx = rb.make_measure_fixture(1)
+        for bad in (True, -1, 2 ** 64, "7", 1.5):
+            with self.assertRaises((ValueError, TypeError), msg=repr(bad)):
+                rb.seed_sensitivity_probe(lambda s: 1.0, (bad, 2, 3), rb.ProbeConfig(3))
+        with self.assertRaises(ValueError):
+            rb.seed_sensitivity_probe(lambda s: 1.0, (7, 7, 7), rb.ProbeConfig(3))   # duplicate seeds
+        with self.assertRaises(ValueError):
+            rb.probe_precision("MAGNITUDE", 1.0, SEEDS, CFG)         # unknown kind
+        with self.assertRaises(ValueError):
+            rb.make_measure_fixture(1, rows=3)
+        with self.assertRaises(ValueError):
+            rb.make_measure_fixture(1, width=0)
+        with self.assertRaises(ValueError):
+            rb.arm_difference([("C0", MetricValue.measured(0.0))], "C0", "C0")   # not a mapping
+        with self.assertRaises(ValueError):
+            rb.summarize_seeds([1.0] * 12, 10)                       # not MetricValues
+        with self.assertRaises(ValueError):
+            rb.summarize_seeds([MetricValue.measured(1.0)] * 3, rb.SEED_FLOOR - 1)
+        with self.assertRaises(ValueError):
+            rb.deep_freeze({1: "a key that is not a str"})
+        with self.assertRaises(rb.InsufficientEvidenceError):
+            rb.require_summary(rb.InsufficientEvidence(3, 10, "3 of 10"))
+        with self.assertRaises(TypeError):
+            rb.mse_fsum(fx.pred, fx.target)                          # the callee's own arity error
+        with self.assertRaises(TypeError):
+            rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), SEEDS, CFG, no_such_parameter=1)
+
+
+class TheParameterBoundaryClosesFourLiveRoutes(unittest.TestCase):
+    """F1-F4 of round 7, each measured as the consequence it HAD, and each closed by the parameter
+    boundary rather than by a fifth hand-placed call.
+
+    Every lying type below is reachable through a PUBLIC parameter with no `object.__setattr__`, and lies
+    only in the operator the gate or the construction is written in -- `isinstance`, `str.__str__`,
+    `repr`, `float.__float__`, `int.__int__` and `math.frexp` are all honest, which is why the card the
+    pre-fix run produced looks exactly like an honest one. The assertion in each case is the strongest
+    available: the lying run's card is byte-identical to the honest run's."""
+
+    class LyingKind(str):
+        """Stores "magnitude"; compares and hashes as "cancellation"."""
+        def __eq__(self, other):
+            return "cancellation" == other if isinstance(other, str) else NotImplemented
+
+        def __ne__(self, other):
+            return not self.__eq__(other) if isinstance(other, str) else NotImplemented
+
+        def __hash__(self):
+            return hash("cancellation")
+
+    class LyingEps(float):
+        """Stores 1e-6; every multiplication it takes part in answers 1e9."""
+        def __mul__(self, other):
+            return 1e9
+
+        __rmul__ = __mul__
+
+    class LyingFactor(float):
+        """Stores 4.0; `factor ** degree` answers 4.0 for every degree."""
+        def __pow__(self, other, mod=None):
+            return 4.0
+
+    class LyingRows(int):
+        """Stores its value; answers False to every ordering comparison, so `rows < 4` is False."""
+        def __lt__(self, other):
+            return False
+
+        def __gt__(self, other):
+            return False
+
+        def __le__(self, other):
+            return False
+
+        def __ge__(self, other):
+            return False
+
+    def test_F1_a_lying_precision_kind_cannot_run_a_construction_the_card_does_not_name(self):
+        """`kind` is `tol`'s and `param`'s sibling IN THE SAME SIGNATURE, and the only one of the three
+        that was not normalised. PRE-FIX, measured on 3.13.5 and 3.12.4: INSUFFICIENT_EVIDENCE ->
+        PRECISION_OK, labels (NOT_VALIDATED, UNKNOWN) -> (NOT_VALIDATED, TOY_RESULT), summary None ->
+        n=12 mean=3.799e-17 sd=2.928e-17 -- a measurement where the honest run has NONE, on a card
+        reading `precision:magnitude:200.0` with `details["kind"] == "magnitude"`."""
+        honest = rb.probe_precision("magnitude", 200.0, SEEDS, CFG)
+        self.assertIs(honest.status, PS.INSUFFICIENT_EVIDENCE)       # the control: 10**200 squares overflow
+        self.assertIsNone(honest.summary)
+        self.assertEqual(sorted(e.name for e in honest.evidence_labels), ["NOT_VALIDATED", "UNKNOWN"])
+        k = self.LyingKind("magnitude")
+        self.assertIsInstance(k, str)                                # every honest read is honest
+        self.assertEqual(str(k), "magnitude")
+        self.assertEqual(repr(k), "'magnitude'")
+        self.assertTrue(k == "cancellation" and k != "magnitude")    # and the lie is the operator
+        lying = rb.probe_precision(k, 200.0, SEEDS, CFG)
+        self.assertIs(lying.status, PS.INSUFFICIENT_EVIDENCE)
+        self.assertIsNone(lying.summary)
+        self.assertNotIn(EvidenceClass.TOY_RESULT, lying.evidence_labels)
+        self.assertEqual(lying.content_hash(), honest.content_hash())
+        self.assertEqual(lying.details["kind"], "magnitude")
+        self.assertIs(type(lying.details["kind"]), str)
+
+    def test_F2_a_lying_jitter_eps_cannot_move_the_bound_it_is_measured_against(self):
+        """`eps` is `shift_reorder_rows`'s `rel_tol` one factory down, and NOT the already-closed
+        `spec.bound`-RETURN route: `_plain_measure` collapses that return correctly and the lie has
+        already happened inside the closure, which returns a perfectly plain float. PRE-FIX, on both
+        interpreters: SENSITIVITY_EXCEEDS_BOUND (12 violations, max_dev_over_bound 2.924e+04) ->
+        SENSITIVITY_WITHIN_BOUND (0 violations, 1.287e-16) with `max_abs_dev` IDENTICAL at
+        2.573404667950953e-07 -- the proof that the applied jitter never changed and only the bound
+        moved, and the self-contradiction the card then serialises."""
+        fac = lambda s: rb.make_measure_fixture(s, noise=1e-9)        # noqa: E731
+        honest = rb.probe_shift(rb.abs_bias_fsum, rb.shift_jitter(1e-6), SEEDS, CFG, fixture_factory=fac)
+        self.assertIs(honest.status, PS.SENSITIVITY_EXCEEDS_BOUND)   # the control: the bound IS exceeded
+        self.assertEqual(honest.details["n_violations"], 12)
+        e = self.LyingEps(1e-6)
+        self.assertEqual(float.__float__(e), 1e-6)
+        self.assertEqual(repr(e), "1e-06")
+        self.assertEqual(2.0 * e, 1e9)                               # the reflected operator decides
+        self.assertEqual(e * e, 1e9)
+        lying = rb.probe_shift(rb.abs_bias_fsum, rb.shift_jitter(e), SEEDS, CFG, fixture_factory=fac)
+        self.assertIs(lying.status, PS.SENSITIVITY_EXCEEDS_BOUND)
+        self.assertEqual(lying.details["n_violations"], 12)
+        self.assertEqual(lying.details["max_abs_dev"], honest.details["max_abs_dev"])
+        self.assertEqual(lying.content_hash(), honest.content_hash())
+
+    def test_F3_a_lying_scale_factor_cannot_certify_a_degree_2_invariance_on_a_degree_1_measure(self):
+        """`factor ** degree` is `type(factor).__pow__` inside the `expected` closure, and
+        `math.frexp(factor)` stays honest, so the card still reads INVARIANCE_EXACT and `scale_4.0`.
+        PRE-FIX, on both interpreters, with `abs_bias_fsum` (degree 1) under a DECLARED degree 2:
+        INVARIANCE_DEFECT (12 violations, max_abs_dev 1.225e-01) -> INVARIANCE_HOLDS with
+        n_bitwise_equal 12."""
+        honest = rb.probe_shift(rb.abs_bias_fsum, rb.shift_scale(4.0, 2), SEEDS, CFG)
+        self.assertIs(honest.status, PS.INVARIANCE_DEFECT)           # the control: degree 1 != degree 2
+        self.assertEqual(honest.details["n_violations"], 12)
+        f = self.LyingFactor(4.0)
+        self.assertEqual(math.frexp(f)[0], 0.5)                      # the honest read, and the classifier
+        self.assertEqual(float.__float__(f), 4.0)
+        self.assertEqual(f ** 2, 4.0)                                # the lie
+        spec = rb.shift_scale(f, 2)
+        self.assertEqual(spec.name, "scale_4.0")
+        self.assertIs(spec.kind, SK.INVARIANCE_EXACT)
+        lying = rb.probe_shift(rb.abs_bias_fsum, spec, SEEDS, CFG)
+        self.assertIs(lying.status, PS.INVARIANCE_DEFECT)
+        self.assertEqual(lying.details["n_bitwise_equal"], 0)
+        self.assertEqual(lying.content_hash(), honest.content_hash())
+
+    def test_F4_a_lying_row_count_cannot_measure_on_fixtures_the_module_refuses_to_build(self):
+        """`rows < 4` is `type(rows).__lt__`, so `rows` defeated its OWN gate. PRE-FIX, on both
+        interpreters: `make_measure_fixture(1, rows=Lo(3))` built 3 rows, and
+        `probe_shift(mse_fsum, shift_reorder_rows(), SEEDS, CFG, fixture_factory=...rows=Lo(3))` went
+        INSUFFICIENT_EVIDENCE -> INVARIANCE_HOLDS with TOY_RESULT and a 12-seed summary."""
+        r3 = self.LyingRows(3)
+        self.assertEqual(int.__int__(r3), 3)
+        self.assertIsInstance(r3, int)
+        self.assertFalse(isinstance(r3, bool))
+        self.assertFalse(r3 < 4)                                     # the lie, in the gate's own operator
+        with self.assertRaisesRegex(ValueError, "need rows >= 4"):
+            rb.make_measure_fixture(1, rows=r3)
+        honest = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), SEEDS, CFG,
+                                fixture_factory=lambda s: rb.make_measure_fixture(s, rows=3))
+        lying = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), SEEDS, CFG,
+                               fixture_factory=lambda s: rb.make_measure_fixture(s, rows=r3))
+        self.assertIs(honest.status, PS.INSUFFICIENT_EVIDENCE)       # the control
+        self.assertIs(lying.status, PS.INSUFFICIENT_EVIDENCE)
+        self.assertIsNone(lying.summary)
+        self.assertNotIn(EvidenceClass.TOY_RESULT, lying.evidence_labels)
+        self.assertEqual(lying.content_hash(), honest.content_hash())
+
+    def test_F4_the_second_consequence_an_error_outside_the_declared_family_escaping_a_public_probe(self):
+        """SEPARATE from the status flip, and the same class as the `OverflowError` escape
+        `toy.benchmark._check_margin` had to close. `make_measure_fixture(1, rows=2)` raises the
+        documented `ValueError`; PRE-FIX `rows=Lo(2)` reached `rng.sample(range(2), 2)`, forced both
+        indices True and then `rng.choice([])` -- `IndexError: Cannot choose from an empty sequence`,
+        OUTSIDE the `(ValueError, TypeError, ArithmeticError)` family every probe declares, so it
+        escaped `probe_shift`'s own fail-closed handler and propagated out of a public probe."""
+        r2 = self.LyingRows(2)
+        with self.assertRaises(ValueError) as cm:
+            rb.make_measure_fixture(1, rows=2)
+        self.assertIn("need rows >= 4", str(cm.exception))
+        with self.assertRaises(ValueError) as cm:                    # the SAME error, not an IndexError
+            rb.make_measure_fixture(1, rows=r2)
+        self.assertIn("need rows >= 4", str(cm.exception))
+        card = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), SEEDS, CFG,
+                              fixture_factory=lambda s: rb.make_measure_fixture(s, rows=r2))
+        self.assertIs(card.status, PS.INSUFFICIENT_EVIDENCE)         # recorded, not propagated
+        self.assertEqual(card.insufficient.n_measured, 0)
+        for m in card.per_seed:
+            self.assertFalse(bm._metric_ok(m))
+            self.assertIn("ValueError", m.reason)
+        # and the error family every probe declares is the one the module documents
+        self.assertIn("(ValueError, TypeError, ArithmeticError)", rb.make_measure_fixture.__doc__)
+
+
+class AClosureVariableOfAFactoryIsItsParameter(unittest.TestCase):
+    """Round 7's second warning, VERIFIED rather than assumed: "closure variables are not parameters of
+    the function that uses them", so a signature-driven boundary looks like it cannot reach F2's `eps`
+    and F3's `factor`. It does, and the reason is worth stating: those variables are not free variables
+    of some unrelated scope, they are the FACTORY's own parameters, captured by a lambda the factory
+    builds. Normalising the factory's parameter normalises the cell the lambda reads.
+    What this class asserts is the cell itself -- `spec.bound.__closure__` / `spec.expected.__closure__`
+    -- and not a status, because a status test could pass for a reason that has nothing to do with the
+    closure. The statuses are in `TheParameterBoundaryClosesFourLiveRoutes`."""
+
+    def cells(self, fn):
+        return {} if fn.__closure__ is None else dict(zip(fn.__code__.co_freevars, fn.__closure__))
+
+    def test_every_factory_captures_the_plain_value_in_the_cell_the_lambda_reads(self):
+        lying = {
+            "shift_jitter": (lambda v: rb.shift_jitter(v), TheParameterBoundaryClosesFourLiveRoutes.LyingEps(1e-6), "bound", "eps"),
+            "shift_scale": (lambda v: rb.shift_scale(v, 2), TheParameterBoundaryClosesFourLiveRoutes.LyingFactor(4.0), "expected", "factor"),
+            "shift_reorder_rows": (lambda v: rb.shift_reorder_rows(SK.INVARIANCE_TOLERANCE, v),
+                                   type("RelTol", (float,), {"__mul__": lambda s, o: 1e9})(0.0), "bound", "rel_tol"),
+            "shift_translate": (lambda v: rb.shift_translate(v), type("C", (float,), {})(1000.0), "transform", "c"),
+        }
+        for name, (build, value, attr, cell) in sorted(lying.items()):
+            with self.subTest(factory=name):
+                self.assertIsNot(type(value), float)                  # the input really is a subclass
+                spec = build(value)
+                cells = self.cells(getattr(spec, attr))
+                self.assertIn(cell, cells, f"{name}: {attr} does not close over {cell}")
+                held = cells[cell].cell_contents
+                self.assertIs(type(held), float, f"{name}: the closure cell holds a {type(held).__name__}")
+                self.assertEqual(held, float.__float__(value))
+        # the container case: elements, not just the cell
+        offs = type("Off", (float,), {})(3.0)
+        spec = rb.shift_column_offsets((offs, -7.0))
+        held = self.cells(spec.transform)["offsets"].cell_contents
+        self.assertEqual([type(x) for x in held], [float, float])
+
+    def test_the_boundary_reaches_the_cell_because_the_cell_is_a_parameter(self):
+        """The mechanism, asserted rather than described: the un-wrapped factory stores the caller's
+        object in the cell, the wrapped one stores the plain value, and nothing else differs."""
+        e = TheParameterBoundaryClosesFourLiveRoutes.LyingEps(1e-6)
+        around = rb.shift_jitter.__wrapped__(e)                      # the factory without the boundary
+        through = rb.shift_jitter(e)
+        self.assertIs(type(self.cells(around.bound)["eps"].cell_contents), type(e))
+        self.assertIs(type(self.cells(through.bound)["eps"].cell_contents), float)
+        self.assertEqual(around.name, through.name)
+        self.assertEqual(around.bound(1.0, 1.0, None), 2e9)          # and the cell really decides
+        self.assertAlmostEqual(through.bound(1.0, 1.0, None), 2e-6, delta=1e-11)
+
+    def test_the_transform_reason_names_the_mechanism_that_really_protects_it(self):
+        """THE WORDING CORRECTION AN ATTESTER EARNED, with the measurement that forced it.
+        `ShiftSpec._NORMALISE_EXEMPT["transform"]` claimed protection because the return "is a fixture,
+        which normalises its own fields in MeasureFixture.__post_init__" -- and `probe_shift` never
+        type-checks that return. MEASURED here: a duck-typed `SimpleNamespace` carrying a `float`
+        subclass whose `__abs__` answers 1e36 reaches `measure` and `_masked_stats` unchallenged and
+        moves `max_dev_over_bound` from 4.034e-02 to 4.042e-35 (a factor of ~1e33), while the SAME lying
+        element inside a real `MeasureFixture` is collapsed by that `__post_init__` and reproduces
+        4.034e-02 exactly. A NOTE, not a finding: no status flip (the honest probe has 0 violations and
+        the movement loosens the bound), and a caller who supplies `transform` supplies `bound` too, so
+        it grants them nothing they lack. The effective protection is consumption-side normalisation."""
+        class Big(float):
+            def __abs__(self):
+                return 1e36
+        base = rb.shift_translate(1000.0)
+
+        def lying_rows(fx, rng):
+            shifted = base.transform(fx, rng)
+            return shifted.seed, tuple((Big(r[0]),) + r[1:] for r in shifted.pred), shifted.target, shifted.mask
+
+        def duck(fx, rng):
+            seed, pred, target, mask = lying_rows(fx, rng)
+            return SimpleNamespace(seed=seed, pred=pred, target=target, mask=mask)
+
+        def real(fx, rng):
+            return rb.MeasureFixture(*lying_rows(fx, rng))
+        honest = rb.probe_shift(rb.mse_fsum, base, SEEDS, CFG)
+        ducked = rb.probe_shift(rb.mse_fsum, dataclasses.replace(base, transform=duck), SEEDS, CFG)
+        fixed = rb.probe_shift(rb.mse_fsum, dataclasses.replace(base, transform=real), SEEDS, CFG)
+        self.assertIs(honest.status, PS.SENSITIVITY_WITHIN_BOUND)
+        self.assertIs(ducked.status, PS.SENSITIVITY_WITHIN_BOUND)    # no status flip: hence a note
+        self.assertAlmostEqual(honest.details["max_dev_over_bound"], 4.0336744e-02, places=8)
+        self.assertLess(ducked.details["max_dev_over_bound"], 1e-30)  # the bound moved by ~1e33
+        self.assertEqual(fixed.details["max_dev_over_bound"],         # ... and a real fixture collapses it
+                         honest.details["max_dev_over_bound"])
+        self.assertEqual(fixed.content_hash(), honest.content_hash())
+        why = rb.ShiftSpec._NORMALISE_EXEMPT["transform"]
+        self.assertIn("probe_shift NEVER type-checks this return", why)
+        self.assertIn("4.042e-35", why)
+        self.assertIn("grants them nothing they", why)
+        self.assertEqual(rb._PARAMETER_NO_SCALAR["probe_shift"]["fixture_factory"],
+                         rb._WHY_CALLABLE_FIXTURE)
+        self.assertIn("does NOT type-check this return", rb._WHY_CALLABLE_FIXTURE)
 
 
 def _impure_rb(v, path):
