@@ -5107,3 +5107,129 @@ excluding on the bare substring `"yaml"`, so any reason containing it anywhere l
 column. And the **module-family** side of the socket enumeration pinning 8 of 12 members by name while
 the 4 disclosed local lookups rest on a count — the same asymmetry the socket-*method* side was fixed
 for one round earlier.
+
+---
+
+# Round-4 fixes: SR-13 and SR-15 closed, and both owners refused part of what I told them
+
+**Date:** 2026-11-10. `test_dashboard` **188 → 201**, `test_scripts` **128 → 132**, both OK.
+SR-10's fix is still in flight.
+
+## My endorsed SR-15 fix would have recreated the defect I introduced two rounds ago
+I endorsed anchoring the tool-exemption phrase with `fullmatch` or `\A…\Z`. **The live ruff skip
+reason is three lines long**, so that anchor rejects it and every machine without ruff goes red —
+every clean clone and both CI jobs, invisibly to anyone who has ruff. **That is verbatim my round-3
+FAIL, reintroduced by my own round-4 remedy.** The owner measured it rather than applying it.
+My second endorsement was worse: widening `DENY` to `unavailable|not available|absent` **breaks
+documented step (d) on every machine**, because `DENY` reads *every* skip and two reasons the real
+suite emits contain those words — `torch present; unavailable path is exercised in the subprocess
+test` (`test_failure_modes.py:165`) and `CUDA not available: …` (`test_tensor_ops.py:31`). Proved as
+mutant M5, with both reasons now driven through `--expect torch` by a test that also asserts each
+string still exists verbatim in the file that emits it.
+**Two of my three suggestions were measurably wrong, and one would have re-opened a FAIL I caused.**
+
+### What the owner built instead: one rule, no spellings
+> **A skip reason that names any package the kit measures gets no exemption** — it is judged as a
+> package skip in whatever mode is running.
+
+`PKGS = ("torch","numpy","yaml","pytest")` is **one** tuple, and `NONE_OK`, the baseline exclusion and
+the exemption rule are all derived from it. That answers the complaint in my own commit message: the
+rule is no longer a hand-kept list of spellings in three places, and **it is not a list of spellings
+at all.** `TOOL` is anchored with `\A` + `.match` + `\b` (so prose cannot carry it and `PATHological`
+is not the phrase) **without** `\Z`, which is what keeps the three-line live reason working.
+Thirteen laundering attempts, all rejected after the fix, including three spellings I had not listed.
+Before the fix the same table read **OK on 10 of 13**. One verdict legitimately flips *to* OK:
+`case-sensitive filesystem; torch unavailable` under `--expect none` is now read as the honest package
+skip it is, so it **counts toward** the floor instead of being exempted and failing it.
+
+**Two things my report did not contain:**
+- **The filesystem-case category had the identical hole** — `case-sensitive filesystem; torch
+  unavailable` passed `--expect torch` before the fix. The defect was in the *shape of an exemption*,
+  not in the tool category. Both are closed by the one rule.
+- **The hole was tighter than my "three more tests".** Re-parking an *existing* torch skip into either
+  category lowers that module's baseline skip column and trips `POLICY:BASELINE_SKIPS`; only **new**
+  tests could have been hidden.
+
+## SR-13: a cross-check, not a fifth mechanism — and my third source was unusable
+The fix compares `pair.n` against **two** sources already in the object: `benchmark`'s invariant
+verbatim (`n <= joint.n_attempted - joint.n_failed`, equality **not** required) and the producer's own
+`MIN_SEEDS_FLAG in pair.flags ⇒ n < c.min_n`.
+**I proposed a third source that must not be used, and the owner refused it with the right reason.**
+The gate row's "29 measured seeds vs minimum 30" is `GateResult.reason` — **free text**, reaching the
+page only through `_untrusted` — and structural guard 3 of that module is *"No verdict is ever parsed
+from any string."* Parsing producer prose to decide a verdict is exactly what this kit must not do.
+Nothing is lost: `evaluate_gates` computes that sentence from `len(scores) - sum(not s.ok …)`, the
+same number off the same list that the cross-check now reads **as typed data** — and that equivalence
+is pinned, so the argument must be re-made rather than inherited if the gate ever reports a different
+quantity.
+**The owner also anticipated what I had not: a cross-check is only as strong as the anchor on its
+second source.** With both sources in place but unanchored, forging `n_attempted` to 30, to 1000, or
+to 31-with-`n_failed`-1 **each restored `JOINT_SUPPORTED` with no alarm**. So the check also requires
+`n_attempted == len(seed_scores)` and `n_failed == the not-ok count`; `SeedScores.ok` is a read-only
+property and cannot be set in place at all. Residual stated and tested: a tamperer who rebuilds
+`seed_scores` consistently still gets through.
+**No false-firing across 18 legitimate shapes, 0 disagreements** — and the inequality is *strictly*
+less in three of them (`conv=False` → `pair.n = 0`; an unmeasured converged metric → 25 vs 30), which
+is why equality must not be required: a two-sided mutant fails 8 tests.
+
+### Two survivors fell to behavioural coverage with no mechanism at all
+This is the better generalisation, and it is the owner's, not mine. Both `M4` (a read behind a branch
+the probe's single render never takes) and `M5` (a duplicate read of a declared field on that branch)
+need `min_n > 10**6` to change behaviour — and `min_n` is a **declared** number whose stricter
+direction has a well-defined honest outcome. An existing test *"previously stopped at a spy on
+`interval_verdict`'s arguments and never asked what the page said"*; extending it to assert the
+**verdict and the alarm** across `min_n ∈ {31, 50, 10**6, 10**6+1, 2_000_000, 10**12}` **kills both.**
+> **An unexercised branch is only invisible while no test exercises the input range that selects it,
+> and the input ranges are enumerable from the declared table even when the branches are not.**
+
+`M2`/`M3` (`vars(…)`, `__dict__`) are **left surviving, deliberately and argued**: their behaviour
+change requires forging an *undeclared* field, so no behavioural sweep over declared numbers can
+reach them, and the only thing that could is a spelling rule — round 4's mechanism, already defeated,
+whose next bypass (`object.__getattribute__`) leaves the probe's bucket **empty**. Mapping reflection
+is a documented-uncovered class in `CLEAN_CLONE.md`, so this is known, not a surprise.
+**And the probe's docstring now states its measured coverage**, with the overstated sentence kept
+beside its correction rather than quietly rewritten.
+**My answer to the owner's direct question** — is the classification requirement
+(`SECOND_SOURCE ∪ NEUTRALISED_BY_A_FLOOR ∪ NO_SECOND_SOURCE == STORED_NUMBERS`) a fifth mechanism?
+**No.** It never inspects code, so no spelling can bypass it; it forces a decision to be written down,
+and the thing that catches a defect is the behavioural sweep it drives. That is a checklist with
+teeth, not a detector.
+**A cross-check it declined, and was right to:** `IntervalPair.level` has a second source on the page,
+but `alpha` is settable and the result carries only a `config_hash`, so comparing them would
+false-fire on every honest non-default-alpha study. Classified as a documented residual instead —
+**a cross-check that libels honest runs is worse than none**, the same conclusion the dashboard
+reached about `_weaker_than_protocol` two rounds earlier.
+
+## Both owners caught a masked test inside their own fix
+- SR-15: *"M1 initially SURVIVED."* Its batching helper matched candidate reasons by text, and one
+  candidate is a **substring** of another, so the rejected one's line satisfied the unrejected one's
+  check — *"a masked assertion in the test I wrote to close a masked hole."* Now matched on the
+  skip's own test id.
+- SR-13: `T1` initially survived — a real gap in its own new test table — fixed with a minimum-length
+  assertion and re-measured as killed.
+
+## Four more corrections to my figures, and a protocol trap worth keeping
+- **`CLEAN_CLONE.md` never claimed 26 policy tokens, or any count.** The wrong figure lived **only in
+  my journal**, so my own correction misattributed it. Live: **25** strict tokens, all asserted, 0
+  unasserted; the loose regex finds 27, the extras being the header placeholder and a comment
+  wildcard. The real artifact was the test's `>= 24` floor, now the true count plus a derived
+  accounting assertion.
+- **"16 UNKNOWN" is `h.count("UNKNOWN")`, not 16 cells** (5 unknown-styled cells; the rest are badges
+  and the legend) — and it is **18** for the `garbage` input, so my figure was right for three of the
+  four inputs I quoted it for.
+- `test_dashboard` is **201**, not 188, after the fix; `test_scripts` is **132**, not 128.
+- **A protocol trap:** `env -i` **without `HOME`** makes `import pytest` fail (`pygments` lives under
+  `~/.local`), silently skipping the pytest-dependent tests. Both owners kept the real `HOME`. Worth
+  knowing *"before someone reads a cleaner-looking run as a better one"* — a cleaner environment can
+  measure less.
+
+## Honesty about the measurement environment
+The SR-15 owner recorded that **the host was not quiet**, contrary to my serialization assumption, and
+named the live PIDs (`34869`, `45594`) plus rotating `unittest` runs from two other owners. It
+backgrounded nothing itself, and argues non-contamination from three agreeing full-module runs and a
+passing restored-state control after every mutant — while stating plainly that **timings are upper
+bounds** and that `test_dashboard.py` and `src/toy/*` were being rewritten underneath it.
+**No baseline regeneration is needed**, established rather than assumed: it enumerated all 16 skip
+reasons the live tree can emit **by AST** and compared old against new classification on each —
+**0 verdict differences**, so the generated file is byte-identical, and regenerating now would bake in
+another owner's in-flight counts.
