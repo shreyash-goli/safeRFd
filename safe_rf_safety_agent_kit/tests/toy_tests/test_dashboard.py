@@ -6411,11 +6411,12 @@ class TheSubjectKindValueTable(unittest.TestCase):
     (* the relabelled result's own label renders as the kind the TEXT names; what matters for the finding
     is that row 3 was BYTE-IDENTICAL to row 1 while `str(j.subject_kind)` was 'trained'.)
 
-    THE PUBLIC ROUTE is a label-and-figure discrepancy and not a verdict flip, and that limit is measured
-    rather than assumed: `analyze_scores(subject_kind=<liar>, fixture_name="oracle")` constructs, because
-    `JointResult.__post_init__` decides its three checks with `in`/`==`/`!=` too, and the result then
-    renders as an honest fixture -- the label and the subject-kind code are wrong, the exemption and the
-    label agree, so there is nothing for the cross-check to contradict and no verdict moves."""
+    THE PUBLIC ROUTE IS NOW REFUSED UPSTREAM, and this paragraph used to claim the opposite. It read
+    "`analyze_scores(subject_kind=<liar>, fixture_name=\"oracle\")` constructs ... and no verdict moves",
+    which was true when it was written and became false when SR-10 round 13 normalised `subject_kind` in
+    `JointResult.__post_init__`. `analyze_scores` now raises for every dunder in `WORD_DUNDERS`, which
+    `test_the_public_route_is_refused_upstream_for_every_dunder` asserts positively. Route (d) above is
+    unaffected and still carries the three rows."""
 
     def fixture(self):
         return bm.analyze_scores(make_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
@@ -6466,25 +6467,42 @@ class TheSubjectKindValueTable(unittest.TestCase):
         self.assertTrue(relabel)
         self.assertIn("relabelled after construction", problem)
 
-    def test_the_public_route_constructs_and_is_a_label_discrepancy_not_a_verdict_flip(self):
-        flips = []
+    def test_the_public_route_is_refused_upstream_for_every_dunder(self):
+        """ROUND-13 REWRITE, and the reason is worth more than the test. This method was named
+        `test_the_public_route_constructs_and_is_a_label_discrepancy_not_a_verdict_flip`, and its loop
+        TOLERATED a refusal -- `except Exception: flips.append(...); continue` -- because when it was
+        written `analyze_scores` really did construct. SR-10 round 13 closed that upstream, so EVERY
+        iteration began landing in the `except` branch: the four render assertions inside the loop became
+        dead code that can never fail, and the closing
+        `assertEqual([f for f in flips if "REFUSED" not in f], [], flips)` filtered out exactly the
+        strings it had just collected and compared [] to [], passing VACUOUSLY.
+
+        A tolerant `except ... continue` is how a test survives its own subject being fixed. That is the
+        mirror image of the `assertTrue(carries_exemption(...))` this class used to end with: one passes
+        because the module is broken, the other passes because the module was repaired. Neither asserts
+        anything. The refusal is now ASSERTED rather than tolerated, and the class docstring is pinned
+        below so the stale prose cannot outlive the behaviour again. The three render rows live in
+        `test_the_three_rows`, which uses route (d) and is unaffected."""
+        self.assertIn("THE PUBLIC ROUTE IS NOW REFUSED UPSTREAM", TheSubjectKindValueTable.__doc__,
+                      "the class docstring no longer describes what this class proves")
+        # COUNT, not absence, and both of the obvious spellings were measured wrong before this one.
+        # `assertNotIn('and no verdict moves\"\"\"')` is VACUOUS -- a docstring's value never contains its
+        # own delimiter -- and the mutant restoring the withdrawn clause passed against it. Plain
+        # `assertNotIn('and no verdict moves')` then failed on the HONEST tree, because the docstring
+        # above QUOTES the withdrawn claim inside its own retraction, which is what this project's
+        # withdrawal discipline requires it to do. So the pin is the one the rest of the kit uses:
+        # the withdrawn phrase may appear exactly ONCE, as a quotation. Restoring it as a live claim
+        # makes two, and fails.
+        self.assertEqual(TheSubjectKindValueTable.__doc__.count("and no verdict moves"), 1,
+                         "the withdrawn claim must appear exactly once, quoted inside its retraction")
         for d in WORD_DUNDERS:
-            liar = word_liar("trained", "fixture", d)
-            try:
-                j = bm.analyze_scores(make_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
+            with self.subTest(dunder=d):
+                liar = word_liar("trained", "fixture", d)
+                with self.assertRaises(ValueError) as caught:
+                    bm.analyze_scores(make_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
                                       subject="synthetic", cfg=SMALL, subject_kind=liar,
                                       fixture_name="oracle")
-            except Exception as ex:                   # noqa: BLE001 - a refusal upstream is the best case
-                flips.append(f"{d}: analyze_scores REFUSED it ({type(ex).__name__})")
-                continue
-            self.assertEqual(str.__str__(j.subject_kind), "trained", d)
-            h = db.render_scorecard(j)
-            # the LABEL is now the one the text names, and the page says the gates contradict it
-            self.assertIn("TRAINED SUBJECT", h, d)
-            self.assertNotIn("SCORER-VALIDATION FIXTURE", h, d)
-            self.assertIn("CONTRACT PROBLEM", h, d)
-            self.assertNotIn("vd-supported", joint_cell(h), d)
-        self.assertEqual([f for f in flips if "REFUSED" not in f], [], flips)
+                self.assertIn("fixture_name is required for, and only for", str(caught.exception))
         # THE CROSS-OWNER REQUEST, NOW CLOSED UPSTREAM (SR-10 round 13). The block that stood here
         # asserted the defect AS CORRECT BEHAVIOUR -- `assertTrue(carries_exemption(...))` with the
         # message "a result whose label stores 'trained' was granted the fixture exemption" -- which is

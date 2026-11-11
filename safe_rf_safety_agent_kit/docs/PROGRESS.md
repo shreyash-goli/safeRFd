@@ -9122,3 +9122,247 @@ out of scope by the orchestration prompt** (*"deliberately outside autonomous sc
 auto-start"*). 9 marked + 8 open in-scope = 17. That denominator had never been written down, which is
 the same gap as a figure in a comment: correct today, unverifiable tomorrow. **Verified: 9 of 17, with
 SR-17 excluded by scope and SR-06 and SR-10 both carrying fixes that no independent pass has checked.**
+
+## SR-06 re-attested: **FAIL** on the verification artifact, not the numerics. And the blocker was MINE.
+
+**Date:** 2026-11-11, HEAD `fcdd3c2`. All four named subjects **PASS on their merits**: F1–F5 and N1–N3
+closed by construction, every honest-value property preserved, nothing weakened. **The blocker is that
+the fix's own doc pins are not interpreter-portable.**
+
+### The error is mine: I ran the full suite on ONE interpreter
+
+**CPython 3.13 dedents docstrings at compile time.** Verified by me with an isolated four-line probe:
+
+```
+3.12.4 -> 'Line one.\n\n    indented continuation\n    '
+3.13.5 -> 'Line one.\n\nindented continuation\n'
+```
+
+The `D2`/`D3` pins quoted their passages **with the source's 4-space continuation indent**, so on 3.13
+`assertIn` could never match. Measured: `test_stability` **72 run, FAILED (failures=2)** on 3.13.5,
+green on 3.12.4, and **57 OK on both** before the fix — so the red was introduced by the fix.
+
+**I committed `fcdd3c2` as green having run the full suite on 3.12.4 only.** The standing rule I wrote
+says *"a suite result is not a fact about the repository unless the interpreter and the environment that
+produced it are recorded beside it"* — and I **did** record 3.12.4 faithfully. **Recording an
+interpreter is not covering the declared matrix.** `.github/workflows/ci.yml` runs `core-no-deps` on
+`python: ["3.12", "3.13"]`; `README.md` and `CLEAN_CLONE.md` both promise "Python 3.12 or newer"; and
+`CLEAN_CLONE.md` records a 3.13.11 run at 0 failed. **A failing test implies a failing suite, so CI
+would have gone red on a push.**
+
+And the near-miss is instructive: **the same commit's SR-10 work measured `test_benchmark` on 3.12.4
+*and* 3.13.5. SR-06's fixer measured 3.12.4 only.** Two owners, one commit, one of them covered the
+matrix.
+
+**Standing rule, third clause: a green suite is green on the interpreters it ran on. This project
+declares two, so "green" means green on both — and the orchestrator's pre-commit run must cover the
+matrix, not just record which half it chose.**
+
+### My fix, and all four pins watched killing on both interpreters
+
+The quoted passages and the docstrings now **both** go through `inspect.cleandoc`, so the literal's own
+indentation stops mattering in either direction. Plus the Finding B pin below. `test_stability`
+**72 OK on 3.12.4 and on 3.13.5**, and each pin verified against its own mutant **on both**:
+
+| mutant | 3.12.4 | 3.13.5 |
+|---|---|---|
+| D2 reworded | FAILED (1) | FAILED (1) |
+| D3 reworded | FAILED (1) | FAILED (1) |
+| D1's withdrawn wide sentence restored | FAILED (1) | FAILED (1) |
+| **Finding B:** `Fraction(_plain_real(a))` → `Fraction(a)` | FAILED (1) | FAILED (1) |
+
+### Finding B — a third channel the derived sweep cannot express, by design
+
+`stability.py:398`'s `Fraction(_plain_real(a)) != Fraction(_plain_real(b))`. Reverting to
+`Fraction(a) != Fraction(b)` was **unkilled by all three suites**, while **silently reopening F2**: a
+`float` subclass lying only through **`as_integer_ratio`** returns `0.0` instead of raising, because
+`Fraction(x)` for a float instance reads `x.as_integer_ratio()`.
+
+**The current behaviour is correct — this is a pinning gap, not a defect.** And the reason the sweep
+cannot reach it is structural: `_liar` overrides comparison, arithmetic and `__bool__`/`__hash__`/
+`__abs__`, and **deliberately leaves the conversion protocol honest** — and `as_integer_ratio` is
+**neither** a comparison dunder **nor** a conversion dunder. It is a *value-reading channel*, so it sits
+**inside** the module's claimed invariant rather than in the documented `__float__` carve-out. Now
+pinned, on both routes and both operand positions.
+
+### The attester checked my two judgment calls and sharpened both
+
+**The disclosed unkilled mutant's equivalence is SOUND, with a refinement to the stated reason.** It
+checked the premises rather than the prose: `float.__truediv__(4.0, D(2))` returns `2.0`, **not
+`NotImplemented`**, so the reflected leg is never reached; `4 / D(2)` **is** hijackable, confirming the
+site is live **iff** the accumulator is an `int`; `class Both(int, float)` is a `TypeError` (layout
+conflict); and **eight** attempts to force an `int` accumulator were all refused *before* the division.
+The refinement: *"a reflected dunder only wins when the right type subclasses the left"* **omits the
+second leg of Python's rule** — it also wins when the left operand's `__truediv__` returns
+`NotImplemented`. Both legs are closed here and both were measured.
+
+**The `__float__`-once judgment is accepted and UNDERSTATED.** Measured pre-fix, a stateful `__float__`
+answering `2.5` then `7.0` **returned 7.0** — a number that was never validated — and the backstop fired
+only on the non-finite subset: *"a guard that covered two of four cases of its own defect."* Calling the
+change a weakened guard would require the old behaviour to have been a guard. The backstop is unmodified
+and still mutation-killed.
+
+### Fail-closed triggers confirmed, and one shape-limit noted
+
+Each trigger watched going red: **add a public function**, **add a parameter**, **add a stale
+exemption** — plus set-equality catching a removal. And the boundary-leaves-F2-open claim **was
+rebuilt and reproduced**: `_plain_value(iter([...]))` is identity, so a collapse-only boundary leaves
+F2 open on the one-shot-iterable **and** generator-expression routes while per-site refuses both.
+
+**Note, no consequence today:** the enumeration is `inspect.isfunction`-shaped. A public
+`@functools.lru_cache`-wrapped function and a public class method, each given the F3 shape, were both
+**bypassable while `test_stability` stayed 72 OK**, because `_public()` sees neither. All nine public
+names are plain functions today — but **the shape is live in this codebase, since SR-10 just hit an
+`lru_cache`-plus-normalisation defect in `benchmark.py`.**
+
+Guard mutants: **11 of 11 guard-disabling mutants killed** (including the backstop at 2 failures),
+**14 of 16** new-code mutants killed, and the 27-mutant set re-run independently. **SR-06 stays `[ ]`**
+pending a re-attestation that only needs the two-interpreter run.
+
+## SR-10 re-attested: **FAIL**. The probe lane IS closed; the hole is its sibling. Plus two errors of mine.
+
+**Date:** 2026-11-11, HEAD `fcdd3c2`. Baseline derived independently: **742 OK** on **both** 3.12.4 and
+3.13.5 (314 + 247 + 181). Every mutant on a `git archive HEAD` copy; SR-10-scope files unmodified.
+
+**The lane as defined is closed, and the enumeration is honest.** An independent AST derivation yields
+**exactly** the 15 declared (function, lookup) pairs — `in decl not derived: []`,
+`derived not in decl: []` — the 308-case sweep is **0 complaints on both interpreters** against 116
+pre-fix, and both tripwires are non-vacuous. **The hole is in a *sibling* comprehension that is not a
+constant lookup at all**, so no probe-lane rule was ever going to name it.
+
+### FINDING 1 — a verdict flip with no tampering primitive and no lying dunder
+
+`benchmark.py:2105` filters `isinstance(g, GateResult)`; **`benchmark.py:2258` does not**:
+
+```python
+gate_m = {f"gate_{g.name}": MetricValue.measured(1.0 if g.passed else 0.0) for g in res.gates}
+```
+
+A duck-typed eighth gate is invisible to the completeness check — *that* much is documented. What is not
+is that this comprehension reads `.name`/`.passed` off **any** object and lets a **duplicate name
+silently overwrite a genuinely failed gate's `0.0` with `1.0`.** Measured, in-tree, identical on both
+interpreters:
+
+```
+honest : stored gate_seed_list_frozen=0.0  recompute=JOINT_INCONCLUSIVE  reasons=()
+forged : stored gate_seed_list_frozen=1.0  recompute=JOINT_SUPPORTED     reasons=()
+```
+
+**No `object.__setattr__`, no `str` subclass, no overridden dunder** — a plain object with five class
+attributes, `exempt=False` so no exemption guard fires. A second *genuine* `GateResult` with the same
+name is correctly refused; the hole is exactly the `isinstance` filter plus the unguarded overwrite.
+
+**Bounded but not closed:** `JointResult.verdict` stays honest and the dashboard raises
+`CONTRACT PROBLEM` — but **the serialised evidence itself is falsified**, and `verdict_from_records`,
+documented as rebuilding the verdict *"from them alone"*, reports SUPPORTED with no reason. **A
+records-only consumer never runs the dashboard.**
+
+**And it is this module's own named anti-pattern.** Round 13 added `_plain_word` to
+`failed = {_plain_word(g.name): g …}` *because* "this comprehension reads `.name` off ANY object in the
+list" — and left the sibling comprehension 145 lines later unguarded. *"The half-fix pattern this module
+has already failed to three times."* No test anywhere covers a duck gate duplicating a **failed** gate;
+the existing `Duck` uses a gate that *passes*, so the overwrite is a no-op there.
+
+### FINDING 2 — the round's own new admission has an unkilled clause
+
+`benchmark.py:364`: `return x if w is None else w` → `return str(x) if w is None else w` is **unkilled**
+by all three modules (742 OK with the mutant in). **`bm._plain_word` has no direct unit test at all.**
+The clause is load-bearing and `PROBE_LANE_CONSTANT_LOOKUPS` leans on it **by name**. Measured: an object
+that is **not** a `str` and merely defines `__str__` goes from **`ValueError`** at HEAD to **accepted,
+`carries_exemption` True, code 2.0, `JOINT_SUPPORTED`, `reasons=()`** under the mutant. HEAD is correct;
+the guard is simply unpinned — against this project's own rule to pin each load-bearing sentence.
+
+### Two accounting corrections the round's own corrections need
+
+**NOTE A — a fifth error in the round that corrected four.** *"Collecting variable keys costs **four**
+more declarations"* is wrong in three places including this journal: `KEY_LANE_ATTRIBUTE_LOOKUPS` went
+**3 → 6**. **Three**, not four. The "two of which say this is a `range` index" half is right.
+
+**NOTE B — and this one is the sharpest.** The 129-case classification and the 13/21/9/73 re-ranking
+exist **only in a docstring**. **No assertion pins `129` or `13`**; the only numeric guard is
+`assertGreaterEqual(swept, 100)`, so the sweep can lose 29 cases silently — while the probe-lane sibling
+pins `assertEqual(swept, 308)`. **The correction's own stated lesson was *"a figure in a test is pinned;
+a correction in a journal is not"* — and the replacement figure went into a docstring.** I relayed it as
+*"pinned in the test"*; it is **written in a test file**, which is not the same thing, and `grep` for
+`escalation` now returns five hits all inside that one docstring.
+
+**NOTE C** — a module-level word container whose name is not ALL-CAPS is invisible to **both** tripwires;
+its mutant dies only on an incidental `127 != 126` total, so relaxing that figure to a range would open
+it. No consequence today.
+
+### MY TWO ERRORS
+
+**1. My `test_dashboard` replacement left the enclosing loop vacuous — and the lesson is new.** I fixed
+the final block (which asserted the defect as correct behaviour) and never checked that the block
+*above* it still did anything. Post-fix `analyze_scores` raises for **every** dunder, so every iteration
+hits `except Exception: … continue`, the four render assertions became **dead code that can never
+fail**, and the closing `assertEqual([f for f in flips if "REFUSED" not in f], [], flips)` **filtered
+out exactly the strings it had just collected and compared `[]` to `[]`.** The method *name* asserted
+the opposite of what it proved, and the class docstring — claiming the public route *"constructs"* — was
+false and pinned by nothing.
+
+**Standing rule: a tolerant `except … continue` is how a test survives its own subject being fixed.**
+That is the **mirror image** of a test asserting the defect as correct behaviour: one passes because the
+module is broken, the other passes because the module was repaired. **Neither asserts anything.** Fixed:
+method renamed to name the refusal, the refusal **asserted** per dunder, the docstring rewritten with
+the withdrawn claim quoted, **and the docstring pinned** so stale prose cannot outlive the behaviour
+again. `test_dashboard` **247 OK** on 3.12.4.
+
+**2. `python3 -I` discards `PYTHONDONTWRITEBYTECODE`.** Verified myself: `under -I: False`,
+`without -I: True`, because `-I` implies `-E`. **I have used `python3 -I` for probe scripts throughout
+this session**, so my own bytecode hygiene was silently defeated every time — in a project bitten twice
+by stale `.pyc`. The sandboxing guidance to use `-I` on scratch scripts and the measurement-hygiene rule
+**do not compose**. **Use `-I -B`.**
+
+### What was confirmed, including one thing worse than documented
+
+The **count dispute**: `83 = 46 + 33 + 4` reproduced exactly, the four being the module-level
+`Matrix`/`Predictor`/`PredictorFactory` aliases an annotation exclusion cannot reach. **Both parties
+were right under different rules.** The **`lru_cache`** insight both halves — and **the second direction
+is worse than the docstring states**: removing only the call-site normalisation lets a liar poison the
+cache slot so that a *subsequent honest caller* is served the wrong arm. The **116/130** order
+dependence reproduced exactly, including *why* 130 (the cache-warming sibling sorts first
+alphabetically). The **`GATE_SCOPES` correction** is right — `sorted(names) == sorted(GATE_SCOPES)` is
+**True** for the liar, so that check never bounced it — **and the fix converts the accident into a
+property**, measured by adding a second scope-`H3` gate. **Finding B** both halves, including that
+`seed_records` is read by **no consumer anywhere** (`grep` → nothing outside its own definition).
+**M9c killed**, and a **text-keyed** declaration would have had **11** entries and been **byte-identical**
+under the moved-lookup mutant — the function keying is load-bearing exactly as claimed.
+
+And it checked something nobody asked it to: **whether SR-10's doc pins share the 3.13 dedent fragility
+that just failed SR-06.** They do not — they normalise with `" ".join(doc.split())`, and `test_benchmark`
+is **314 OK on both interpreters.** The journal's claim that this commit's SR-10 work covered the matrix
+checks out.
+
+## Round 13 close-out: the matrix run, and the skip delta that proves it was worth doing
+
+**Date:** 2026-11-11. The first full-suite run this project has done on **both** declared interpreters,
+which is the rule added after SR-06's fix went red on 3.13 while I had measured only 3.12.
+
+| interpreter | environment | result |
+|---|---|---|
+| **3.12.4** (`/Library/Frameworks/...`) | torch, numpy, ruff, pytest 8.4.1 present | **1379 ran, 2 skipped, 0 failed**, rc=0 |
+| **3.13.5** (miniconda, ambient), `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` | numpy present, **torch ABSENT**, pytest 9.0.1 | **1379 ran, 84 skipped, 0 failed**, rc=0 |
+
+**The skip delta is 2 → 84 and it is legitimate**: that interpreter has no torch, so the torch-gated
+tests skip. Recorded rather than glossed, because the standing rule is that a figure carries its
+interpreter **and its environment** — and "1379 OK on both" would have hidden an 82-test difference in
+what was actually exercised. **The run counts match exactly; it is the coverage that differs.**
+
+Three fixes land with this, each watched failing before it was trusted: `test_stability`'s doc pins
+routed through `inspect.cleandoc` on both sides (4 mutants killed on both interpreters) plus the
+Finding B `as_integer_ratio` pin; and `test_dashboard`'s vacuous method rewritten, with its class
+docstring pinned.
+
+### The docstring pin took three spellings, and the first two were wrong in instructive ways
+
+1. `assertNotIn('and no verdict moves"""', ...)` — **vacuous.** A docstring's *value* never contains its
+   own delimiter, so the mutant restoring the withdrawn claim **passed**. I wrote a vacuous assertion
+   while fixing a vacuous test.
+2. `assertNotIn('and no verdict moves', ...)` — **failed on the honest tree**, because the retraction
+   *quotes* the withdrawn claim, which this project's own withdrawal discipline requires it to do.
+3. `assertEqual(doc.count('and no verdict moves'), 1)` — correct, and it is the pattern the rest of the
+   kit already uses. Honest tree **OK**; mutant **FAILED**.
+
+**Only running the mutant distinguished these.** Two of the three spellings look right and assert
+nothing, which is the same failure mode as the test they replaced.

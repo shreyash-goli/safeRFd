@@ -745,6 +745,24 @@ class ReAttestationRegressions(unittest.TestCase):
             self.assertAlmostEqual(st.masked_squared_error_mean([_np.float32(1e-40)], [_np.float32(0.0)],
                                                                 [True], 1), 1e-80, delta=1e-81)
         self.assertEqual(st.masked_squared_error_mean([1e-200], [1e-200], [True], 1), 0.0)   # equal: fine
+        # FINDING B (round-13 re-attestation): `Fraction(x)` for a float instance reads
+        # `x.as_integer_ratio()`, so that is a THIRD channel into this guard -- neither a comparison
+        # dunder nor a conversion dunder, which is why the derived sweep's `_liar` cannot express it
+        # (it leaves the conversion protocol honest by design). `_plain_real` is what closes it, and
+        # without this subTest the mutant `Fraction(a) != Fraction(b)` was UNKILLED by all three
+        # suites while silently reopening F2.
+        class _AirLiar(float):
+            def as_integer_ratio(self):
+                return (0, 1)
+            __hash__ = float.__hash__
+
+        for pred, targ in ((_AirLiar(1e-200), 0.0), (1e-200, _AirLiar(0.0))):
+            with self.subTest(air=repr(pred)):
+                with self.assertRaises(st.UnderflowError):
+                    st.masked_squared_error_mean([pred], [targ], [True], 1)
+                with self.assertRaises(st.UnderflowError):
+                    st.masked_squared_error_mean(iter([pred]), iter([targ]), iter([True]), 1)
+
 
     def test_f3_no_pass_report_for_a_zero_gradient_whatever_zero_tol_is(self):
         """A PASS certificate for a severed gradient path is the most consequential of the four."""
@@ -861,23 +879,23 @@ class LoadBearingSentences(unittest.TestCase):
     a code-only regression. The passages are quoted in full rather than by keyword: a keyword pin in
     this project was itself found evadable by rewording around it."""
 
-    D1 = ("""Nothing in
+    D1 = inspect.cleandoc("""Nothing in
 this module warns or returns a sentinel, and no guard here is decided by the
 caller's object: every one of them compares, and divides by, the NORMALISED
 value (`_plain_real`, or the float a `check_finite_*` validator already
 returned), so an overridden `__eq__`, `__ne__`, `__ge__` or `__rmul__` cannot
 talk a guard out of raising.""")
     D1_WITHDRAWN = "warns, returns a sentinel, or returns a number computed from bad"
-    D2 = ("""The mismatch check and the division both use
+    D2 = inspect.cleandoc("""The mismatch check and the division both use
     `_plain_real(denominator)`, the int the object STORES, so an `int` subclass
     whose `__eq__`/`__ne__`/`__int__` is overridden cannot carry a divisor past
     this check""")
-    D3 = ("""`step`, `rtol`, `atol` and `zero_tol` are normalised to plain floats ONCE, immediately after
+    D3 = inspect.cleandoc("""`step`, `rtol`, `atol` and `zero_tol` are normalised to plain floats ONCE, immediately after
     validation, and every use below is of those floats""")
 
     def test_d1_module_headline_matches_its_mechanism(self):
-        self.assertIn(self.D1, st.__doc__)
-        self.assertNotIn(self.D1_WITHDRAWN, st.__doc__,
+        self.assertIn(self.D1, inspect.cleandoc(st.__doc__))
+        self.assertNotIn(self.D1_WITHDRAWN, inspect.cleandoc(st.__doc__),
                          "the withdrawn, wider sentence is back: it was violated three ways (F1/F2/F3)")
         # the mechanism, exercised: `_plain_real` reads what the object stores, and bool is not laundered
         self.assertIs(type(st._plain_real(_liar(2.5))), float)
@@ -896,7 +914,7 @@ talk a guard out of raising.""")
             st.check_gradient(lambda p: 1.0, lambda p: [0.0], [1.0], zero_tol=_liar(0.0))
 
     def test_d2_divisor_claim_matches_its_guard(self):
-        self.assertIn(self.D2, st.masked_mean_checked.__doc__)
+        self.assertIn(self.D2, inspect.cleandoc(st.masked_mean_checked.__doc__))
         m = [[1.0, 3.0], [9.0, 9.0]]
         self.assertEqual(st.masked_mean_checked(m, [True, False], 2), 2.0)
         for d in (1, _liar(1), _liar(8)):
@@ -905,9 +923,9 @@ talk a guard out of raising.""")
                     st.masked_mean_checked(m, [True, False], d)
 
     def test_d3_rejected_before_comparing_claim_matches_its_guard(self):
-        self.assertIn(self.D3, st.check_gradient.__doc__)
+        self.assertIn(self.D3, inspect.cleandoc(st.check_gradient.__doc__))
         self.assertIn("Rejected before comparing (none counts as evidence of a working gradient)",
-                      st.check_gradient.__doc__)
+                      inspect.cleandoc(st.check_gradient.__doc__))
         with self.assertRaises(st.DegenerateGradientError):
             st.check_gradient(_F_FLAT, _G_ZERO, [1.0, 2.0], zero_tol=_liar(0.0))
         r = st.check_gradient(_F_QUAD, _G_QUAD, [1.0, 2.0], step=_liar(1e-6), rtol=_liar(1e-4),
