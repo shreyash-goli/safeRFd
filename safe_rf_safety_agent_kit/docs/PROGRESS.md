@@ -6176,3 +6176,121 @@ identity lives and a test suite does not need it.
 **Next Linux step, after the SR-15 fix lands:** run `scripts/run_tests.sh --expect none --twice` in a
 bare Linux container against the committed baseline. That — not this — is what would attest the CI path
 and the machine-independence of the baseline figures.
+
+## SR-15 fix: one exemption-category registry. 11 mutants killed, and two self-caught defects.
+
+**Date:** 2026-11-11. `run_tests.sh +346`, `lint.sh +27`, `test_scripts.py +605`, `CLEAN_CLONE.md +155`.
+`test_scripts` **137 → 147**.
+
+### The category split is gone, replaced by a declaration the tests parse
+
+The hand-written `FS = re.compile(r"case[- ]sensitive", re.I)` and `TOOL = re.compile(...)` blocks are
+**deleted**. In their place: **`EXEMPT_CATEGORIES`, 2 rows × 6 columns**
+`(token, anchored phrase, cap, where-the-allowlist-lives, allowlist, note)`, with the script applying
+**seven** guards by the loop that reads it — anchored phrase (`\A`, and exactly **one**
+`anchored.match(` call site in the file), trailing `\b`, the shared package rule, a closed allowlist
+**iff** the phrase carries a name, every *occurrence* checked, one claim per reason, and a per-category
+cap plus exclusion from the floor/torch-cap/baseline. A row that violates the contract emits
+**`POLICY:INTERNAL`** naming itself. `PKG_EXEMPT` went from a **prefix** test to a **containment** test.
+
+Nine new tests **generated from the parsed tuple**, and **11 mutants killed** (control M0 = OK, so the
+verdicts belong to the mutants; each mutant on a fresh `tar` copy, so the live tree was never mutated):
+round-6's verbatim unanchored phrase → `POLICY:INTERNAL`; unanchored *application* with the declaration
+intact → 4 tests; `PKG_EXEMPT` back to a prefix → 3 (`libtorch`, `_torch`, `mytorch` on **both**
+categories); two-claims allowed → 3 subtests; only-the-anchored-occurrence → 2; pyflakes back through
+the interpreter → **3 tests on 3.13.5 but only the structural one on 3.12.4, which is why the
+structural one exists**; FS row deleted → 3.
+
+**The fail-closed property is M8: a new category declared properly but with NO tests is killed by three
+independent checks**, including token coverage (`ZZ_CAP`/`ZZ_UNDECLARED` asserted by nobody). A new
+exemption category cannot now arrive with fewer guards, without a driven table, or with unasserted
+tokens. Policy-token floor 26 → 27.
+
+### A correction to my brief, measured
+
+I passed on the attester's claim that the derivation test is bypassed by **appending**
+` (case-sensitive filesystem)`. **It is not.** On a verified byte-identical `git archive` copy, a probe
+site `optional developer tool \`mypy\` is not on PATH` **FAILS**
+`test_the_TOOLS_allowlist_is_exactly_the_tools_this_suite_gates_on` **both bare and with the phrase
+appended** — `.match` still sees the leading tool phrase. The bypass needs the FS phrase **in front**.
+The *conclusion* (green at test time and at run time) holds; the shape was wrong. Recorded in the docs
+and in `_suite_exempt_carriers`'s docstring.
+
+### The fix found a real site that was already wrong — and it would have reddened BOTH CI runners
+
+`test_scripts.py` carried the live skip reason *"filesystem is case-sensitive; case-varied path does not
+alias the repo"* — **phrase mid-sentence**. Under the anchored phrase that is `POLICY:NONE_REASON` in
+`--expect none` (measured), i.e. **the documented bare run, which is exactly what both CI jobs run,
+would have gone red.** Reworded to the declared phrase and measured exempt in all three modes.
+**This is the same reason string the Modal Linux run observed firing**, which makes the pending Linux
+`run_tests.sh` measurement sharper, not redundant.
+
+### A regression the owner introduced and caught itself
+
+The first draft applied the package rule **before** the undeclared-name check, which silently dropped
+`POLICY:TOOL_UNDECLARED` for any undeclared name *containing* a package name — ``optional developer tool
+`torchrun` is not on PATH``, **the exact reason round 5 pinned** — leaving `--expect any` green. Caught
+by three subtests of the undeclared-name test. The package rule is applied **last** and additively now,
+with the measurement in the comment. Reported unprompted; this is the kind of defect that hides.
+
+### F1–F3 before → after (none / torch / any)
+
+| reason | before | after |
+|---|---|---|
+| `FS; libtorch is gone` (also `_torch`, `mytorch`) | OK/OK/OK | `NONE_REASON` / `TORCH_MODE_UNEXPLAINED` / not exempt |
+| ``FS; optional developer tool `black` is not on PATH`` | OK/OK/OK | **`POLICY:EXEMPT_AMBIGUOUS` in all three** |
+| ``tool `mypy` … (case-sensitive filesystem)`` | OK/OK/OK | `NONE_REASON` / `TORCH_MODE_UNEXPLAINED` / not exempt |
+| `case-sensitive: this test is disabled for now` | OK/OK/OK | `NONE_REASON` / `TORCH_MODE_UNEXPLAINED` / not exempt |
+| **F2** live ruff reason + `` (see `scripts/lint.sh`) `` / `` (rule `F821`) `` | `TOOL_UNDECLARED` + FAIL in all three | **OK/OK/OK** |
+| **F3** live ruff reason + `" (case-sensitive filesystem)"` ×5 / ×8 / ×9 | **OK** (misreported as the Linux figure) | **`EXEMPT_AMBIGUOUS`**, no note |
+| live ruff reason; live FS reason | exempt | still exempt |
+
+F2's replacement judges **every occurrence of a declared category phrase**, not every pair of
+backticks. Cost stated in code, test and docs: a bare `` `mypy` `` tail is exempt — the same verdict
+`; mypy is gone` already got, so **the old rule made the verdict depend on typography**.
+
+### F4: PATH-gate pyflakes, because the asymmetry *was* the defect
+
+`lint.sh:230`'s `python3 -m pyflakes --version` → `command -v pyflakes`, run as `pyflakes src scripts`
+— symmetry with ruff's `command -v`. Reasoning, which I accept: making the *test* neutralise
+site-packages would leave the asymmetry in place, would change what every `_lint` test measures, and
+would not stop the next probe being written through the interpreter. It also makes `_toolfree_bin()`'s
+claim *"a directory we construct cannot drift that way"* **true** — that false sentence is withdrawn —
+and the revert is now killed on **every** interpreter.
+
+**Cost measured, not argued:** `-m` works wherever pyflakes is *importable*; `command -v` needs its
+console script. On this host both exist and print identical output (`ruff: OK`, `pyflakes: 3 finding(s)
+(advisory)`, `LINT: OK`). What is lost in general: the advisory run where pyflakes is importable but its
+console script is not on PATH. Neither CI job installs a linter, so CI is unchanged. **Side benefit
+measured:** the console script is shebanged to its own interpreter, so the `-m` form tied the linter to
+whichever `python3` PATH resolved — the probe and the run could disagree about what is installed.
+Pinned with a **stub** `pyflakes` on PATH rather than the real one, so no second name goes on `TOOLS`
+and `.github/workflows/ci.yml`'s comment stays true.
+
+### Measured, interpreters recorded
+
+| run | result |
+|---|---|
+| `test_scripts`, 3.12.4 | **147 OK** (was 137) |
+| `test_scripts`, 3.13.5 default, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` | **147 OK** |
+| **the CLAUDE.md-mandated command on the DEFAULT interpreter — F4's condition** | **147 OK**, was `FAILED (failures=1)` |
+| bare venv `--expect none --twice`, 3.12.4 | **1252 run, 90 skipped, 0 failed, run1 == run2** |
+| full suite, 3.12.4 | **1252 run, 2 skipped, 0 failed**, both runners |
+| baseline regenerated | 13 modules; `toy_tests.test_scripts 137 4 → 147 4` |
+
+**The owner predicted `toy_tests.test_scripts 147 4` by derivation and labelled it a derivation rather
+than a measurement. My `--update-baseline` run produced exactly that line.** The four ambient
+`llvmlite` failures remain and were correctly left alone — an interpreter fact, not a code defect.
+
+### Residuals, stated and not dressed as closed
+
+`--expect any` still applies no skip-reason check (documented behaviour of that mode; what *did* close
+there is that `EXEMPT_AMBIGUOUS`/`TOOL_UNDECLARED` are loud and a laundered reason no longer collects
+the exemption, so it no longer spends cap budget or drops out of the skip column). **The package rule is
+a substring rule**: `t0rch` and "the deep-learning framework" keep the exemption — measured, and
+asserted as *accepted* so the sentence saying so cannot drift. The loose direction has a measured cost
+too: a legitimate reason that merely contains those letters loses its exemption and goes red with
+`POLICY:NONE_REASON` — taken deliberately, because denying an exemption is the safe direction and it is
+loud. The caps 8 and 4 are **policy values, not derived**; the generated test checks each declared
+cap's *boundary*, so raising a cap is caught by the hand-written tests and the docs, not by the
+generated one.

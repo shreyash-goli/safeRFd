@@ -100,35 +100,105 @@ def _policy_tools():
 POLICY_TOOLS = _policy_tools()
 
 
+class _Cat:
+    """One row of the runner's `EXEMPT_CATEGORIES`: an environment-exemption CATEGORY as the policy declares it."""
+
+    def __init__(self, token, phrase, cap, where, allow, note):
+        self.token, self.phrase, self.cap = token, phrase, cap
+        self.where, self.allow, self.note = where, tuple(allow), note
+
+    @property
+    def anchored(self):
+        """The phrase as the policy applies it: `.match`ed, i.e. only at position 0."""
+        return re.compile(self.phrase, re.I)
+
+    @property
+    def loose(self):
+        """The same phrase with the leading `\\A` stripped -- what the policy uses to find a SECOND occurrence,
+        and what this file uses to find a skip site that CARRIES the phrase without claiming the category."""
+        return re.compile(self.phrase[2:] if self.phrase.startswith(r"\A") else self.phrase, re.I)
+
+    def __repr__(self):
+        return f"_Cat({self.token}, cap={self.cap}, allow={self.allow})"
+
+
+def _policy_exempt_categories():
+    """The runner's `EXEMPT_CATEGORIES` tuple -- ONE row per environment-exemption category -- parsed out of
+    `scripts/run_tests.sh`.
+
+    THE ROUND-6 FAIL IS WHY THIS IS PARSED. The tool category had three anchoring guards and a closed allowlist;
+    the filesystem-case category -- the same KIND of exemption -- had an unanchored `re.search` for
+    `case[- ]sensitive` and no allowlist at all, so `case-sensitive filesystem: variants differ; libtorch is
+    gone` was exempt in all three modes. Two hand-guarded sites cannot be kept in step by review, so the policy
+    declares its categories in one tuple and the checks in this file are generated FROM it: every guard, the cap
+    boundary, the laundering table, the cross-category case, the allowlist equality and the POLICY tokens a
+    category must have tests for. A category added to the script without a declaration this parse accepts is an
+    AssertionError here; a category declared badly is POLICY:INTERNAL at runtime.
+    """
+    text = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")
+    m = re.search(r"(?ms)^EXEMPT_CATEGORIES = \((.*?)^\)\n", text)
+    if m is None:
+        raise AssertionError("scripts/run_tests.sh no longer defines EXEMPT_CATEGORIES as a parenthesised tuple "
+                             "of rows; this file parses it (see _policy_exempt_categories) and must be updated "
+                             "together with it")
+    tree = ast.parse("(" + m.group(1) + ")", mode="eval").body
+    if not isinstance(tree, ast.Tuple) or not tree.elts:
+        raise AssertionError("EXEMPT_CATEGORIES is no longer a non-empty tuple of rows")
+    # the allowlist column may be a NAME (`TOOLS`) rather than a literal; resolve only the names the script
+    # really declares, so an unknown name fails here instead of being skipped
+    resolvable = {"TOOLS": POLICY_TOOLS}
+    cats = []
+    for row in tree.elts:
+        if not isinstance(row, ast.Tuple) or len(row.elts) != 6:
+            raise AssertionError("a row of EXEMPT_CATEGORIES is not a 6-tuple "
+                                 "(token, phrase, cap, where, allowlist, note); this file parses every column "
+                                 "(see _policy_exempt_categories) and a new column must be given a check here")
+        vals = []
+        for el in row.elts:
+            if isinstance(el, ast.Name):
+                if el.id not in resolvable:
+                    raise AssertionError(f"a row of EXEMPT_CATEGORIES refers to the name {el.id!r}, which this "
+                                         f"file cannot resolve; declare it as a literal or teach "
+                                         f"_policy_exempt_categories to read it")
+                vals.append(resolvable[el.id])
+            else:
+                vals.append(ast.literal_eval(el))
+        cats.append(_Cat(*vals))
+    return tuple(cats)
+
+
+EXEMPT_CATS = _policy_exempt_categories()
+
+
+def _cat(token):
+    """The one declared category with this token, or an AssertionError naming what is declared instead."""
+    hit = [c for c in EXEMPT_CATS if c.token == token]
+    if len(hit) != 1:
+        raise AssertionError(f"scripts/run_tests.sh declares {[c.token for c in EXEMPT_CATS]} as its "
+                             f"environment-exemption categories and this file needs exactly one {token!r}")
+    return hit[0]
+
+
 def _tool_phrase_re():
-    """The runner's `TOOL` pattern, parsed out of `scripts/run_tests.sh`, with its name capture group.
+    """The runner's TOOL-category phrase, taken from the parsed `EXEMPT_CATEGORIES` row, with its name group.
 
     Parsed rather than retyped for the same reason `_live_ruff_skip_reason` parses the decorator: the phrase and
     the thing that judges the phrase were written in two places by two people once already."""
-    text = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")
-    m = re.search(r'(?m)^TOOL = re\.compile\((r"[^"]*")', text)
-    if m is None:
-        raise AssertionError("scripts/run_tests.sh no longer defines TOOL as re.compile(r\"...\"); this file "
-                             "parses the pattern (see _tool_phrase_re) and must be updated together with it")
-    pat = re.compile(ast.literal_eval(m.group(1)), re.I)
+    pat = _cat("TOOL").anchored
     if pat.groups != 1:
-        raise AssertionError("the runner's TOOL pattern no longer captures the tool name in exactly one group; "
+        raise AssertionError("the runner's TOOL phrase no longer captures the tool name in exactly one group; "
                              "_suite_tool_gates reads group(1)")
     return pat
 
 
-def _suite_tool_gates():
-    """(tool name -> [file:line, ...], number of literal skip reasons scanned) for every skip site in
-    tests/toy_tests/ whose reason is SHAPED like the runner's optional-developer-tool category.
+def _suite_skip_sites():
+    """[(file:line, reason)] for every LITERAL skip reason in tests/toy_tests/.
 
-    This is the derivation the round-5 fix rests on: the allowlist in the script must be exactly the set of tools
-    this suite really gates a test on, and that set is read out of the live `@unittest.skipUnless(...)` /
-    `skipTest(...)` reasons rather than maintained beside them. Synthetic reasons built inside this file's
-    laundering tables are NOT skip sites (they are strings handed to helpers, or source text for a generated
-    module), so they are invisible here -- which is the point: the scan sees what the SUITE will emit.
+    Synthetic reasons built inside this file's laundering tables are NOT skip sites (they are strings handed to
+    helpers, or source text for a generated module), so they are invisible here -- which is the point: the scan
+    sees what the SUITE will emit.
     """
-    pat = _tool_phrase_re()
-    gates, sites = {}, 0
+    out = []
     for p in sorted((ROOT / "tests" / "toy_tests").glob("*.py")):
         for node in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
             if not isinstance(node, ast.Call):
@@ -143,11 +213,48 @@ def _suite_tool_gates():
             arg = node.args[i]
             if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
                 continue
-            sites += 1
-            m = pat.match(arg.value.strip())
-            if m:
-                gates.setdefault(m.group(1).lower(), []).append(f"{p.name}:{node.lineno}")
-    return gates, sites
+            out.append((f"{p.name}:{node.lineno}", arg.value.strip()))
+    return out
+
+
+def _suite_tool_gates():
+    """(tool name -> [file:line, ...], number of literal skip reasons scanned) for every skip site in
+    tests/toy_tests/ whose reason is SHAPED like the runner's optional-developer-tool category.
+
+    This is the derivation the round-5 fix rests on: the allowlist in the script must be exactly the set of tools
+    this suite really gates a test on, and that set is read out of the live `@unittest.skipUnless(...)` /
+    `skipTest(...)` reasons rather than maintained beside them.
+    """
+    pat = _tool_phrase_re()
+    sites = _suite_skip_sites()
+    gates = {}
+    for where, reason in sites:
+        m = pat.match(reason)
+        if m:
+            gates.setdefault(m.group(1).lower(), []).append(where)
+    return gates, len(sites)
+
+
+def _suite_exempt_carriers():
+    """[(file:line, category, reason)] for every literal skip reason in tests/toy_tests/ that CARRIES a declared
+    environment-exemption phrase ANYWHERE in it -- claiming the category or not.
+
+    Looking for the phrase LOOSELY is the whole value of this scan, and it is the round-6 defect stated as a
+    check. `_suite_tool_gates` looks for the TOOL phrase with `.match`, so a reason that does not BEGIN with it
+    is invisible to the derivation the allowlist rests on: measured on a byte-identical copy, a probe site
+    reading ``case-sensitive filesystem: optional developer tool `mypy` is not on PATH`` left
+    test_the_TOOLS_allowlist_is_exactly_the_tools_this_suite_gates_on GREEN while the skip was exempt at runtime
+    in all three modes -- a test gated on an undeclared tool, green at test time and at run time. (The same
+    reason WITHOUT the leading filesystem-case phrase fails that test, which is how the derivation is known to
+    work at all.) A carrier that does not properly claim its category is reported by
+    test_every_declared_exemption_category_is_claimed_properly_by_the_sites_that_use_it.
+    """
+    out = []
+    for where, reason in _suite_skip_sites():
+        for c in EXEMPT_CATS:
+            if c.loose.search(reason):
+                out.append((where, c, reason))
+    return out
 
 # One driving expression per patched entry point, keyed exactly as the guard names it ("socket." prefix = a
 # method on socket.socket). test_network_guard_blocks_every_patched_entry_point builds a synthetic suite out of
@@ -456,7 +563,7 @@ class TestNoNetworkImports(unittest.TestCase):
         the documented figure to equal it."""
         dash = (ROOT / "tests" / "toy_tests" / "test_dashboard.py").read_text(encoding="utf-8")
         # split so this expression does not match itself when it reads this very file
-        own_needle = 'self.skipTest("filesystem is ' + 'case-sensitive'
+        own_needle = 'self.skipTest("case-' + 'sensitive filesystem: a case-varied'
         gated = dash.count("self.need_ci()") + Path(__file__).read_text(encoding="utf-8").count(own_needle)
         self.assertEqual(gated, 4, "the number of case-sensitivity-gated tests changed: update the '4' in "
                                    "docs/CLEAN_CLONE.md (and the FS_CAP of 8 if it grew)")
@@ -1508,20 +1615,37 @@ class TestRunTestsMechanics(_SyntheticBase):
         drives the branch -- only that nobody added a token without reaching for one.
         """
         script = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")
-        # An EMISSION is `POLICY:<NAME>` followed by whitespace and then the message. The `(?=\s)` is what keeps
-        # the script's own prose out: the header writes the placeholder `POLICY:<NAME>` and a comment writes the
-        # wildcard `POLICY:BASELINE_*`, and neither is a token. (Without it the wildcard read as `BASELINE`.)
-        tokens = sorted(set(re.findall(r"POLICY:([A-Z_]+)(?=\s)", script)))
+        # An EMISSION is `POLICY:<NAME>` followed by whitespace (the message) or by a closing quote (a token
+        # carried in a tuple and printed by the caller). The lookahead is what keeps the script's own prose out:
+        # the header writes the placeholder `POLICY:<NAME>`, a comment writes the wildcard `POLICY:BASELINE_*`,
+        # and neither is a token. (Without it the wildcard read as `BASELINE`.)
+        tokens = set(re.findall(r'POLICY:([A-Z_]+)(?=["\s])', script))
+        # ...PLUS the tokens the policy builds from `EXEMPT_CATEGORIES`, which no regex over the script can see
+        # because the script spells them `f"POLICY:{_tok}_CAP ..."`. THIS IS THE FAIL-CLOSED PART, and the
+        # round-6 reason for it: a category added to that tuple brings a cap token (and, if its phrase carries a
+        # name, an undeclared-name token) that some test in this file must assert, or this check goes red with
+        # the token named. A category cannot arrive with tests nobody wrote.
+        for c in EXEMPT_CATS:
+            tokens.add(f"{c.token}_CAP")
+            if c.anchored.groups:
+                tokens.add(f"{c.token}_UNDECLARED")
+        tokens = sorted(tokens)
         # ANTI-VACUITY, in two parts, because the one part it had was off by one: `>= 24` against a script that
         # emits 25, so a token could be deleted and the floor still passed. The floor is now the real count
-        # (raise it when a token is added; it must never be lowered). 25 -> 26 with POLICY:TOOL_UNDECLARED...
-        self.assertGreaterEqual(len(tokens), 26, tokens)
+        # (raise it when a token is added; it must never be lowered). 25 -> 26 with POLICY:TOOL_UNDECLARED,
+        # 26 -> 27 with POLICY:EXEMPT_AMBIGUOUS.
+        self.assertGreaterEqual(len(tokens), 27, tokens)
         # ...and, derived rather than typed, EVERY `POLICY:` occurrence in the script is accounted for: each is
         # either an emission the strict regex above found, or one of the two documented non-emissions -- the
         # header's `POLICY:<NAME>` placeholder and a comment's `POLICY:BASELINE_*` wildcard. This is the half the
         # floor was standing in for: if the strict regex stops matching (the real hazard -- a token count is not
         # a bug, a broken regex is), the occurrences it no longer explains fail here whatever the count.
-        NON_EMISSIONS = {"<NAME>", "BASELINE_*"}
+        # The placeholders and TEMPLATES that are not tokens: the header's `POLICY:<NAME>`, a comment's
+        # `POLICY:BASELINE_*` wildcard, the two `POLICY:<TOKEN>_*` forms the header uses to describe a category's
+        # tokens generically, and the two f-string templates the policy really emits them through -- whose
+        # EXPANSIONS are required above, derived from EXEMPT_CATEGORIES rather than read out of the text.
+        NON_EMISSIONS = {"<NAME>", "BASELINE_*", "<TOKEN>_CAP", "<TOKEN>_UNDECLARED",
+                         "{_tok}_CAP", "{tok2}_UNDECLARED"}
         occurrences = set(re.findall(r"POLICY:([^\s`'\"),.;:]*)", script))
         self.assertEqual(sorted(occurrences - NON_EMISSIONS - set(tokens)), [],
                          "these POLICY: strings in scripts/run_tests.sh are matched by neither the token regex "
@@ -1725,10 +1849,29 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
         # `case-sensitive filesystem ...; torch2 is gone` BOTH collected the exemption in `--expect none` and
         # `--expect torch` before `PKG_EXEMPT` existed. Derived from the same tuple, so a package added to the
         # script is laundered past the suffixes too, not just past the bare word.
+        # ROUND 6: THIS TABLE ENUMERATED ONLY SUFFIXES, and that is exactly the half a PREFIX test closes.
+        # `\btorch\b` does not match `torchrun` and the prefix rule caught it; but there is no `\b` before
+        # `torch` in `libtorch` either, so the prefix rule could not catch THAT -- and `libtorch` and `_torch`
+        # appear ninety lines below as tool NAMES, where the allowlist rejects them, which is how the gap stayed
+        # invisible: the names were in the file, in the wrong table. Measured EXEMPT on the live script in all
+        # three modes, as a tail on BOTH categories: `; libtorch is gone`, `; _torch is gone`, `; mytorch is
+        # gone`. The rule is a CONTAINMENT test now and the table carries the prefix and infix forms with the
+        # suffix ones.
         for pkg in POLICY_PKGS:
-            for suffixed in (f"{pkg}run", f"{pkg}2", f"{pkg}vision", f"py{pkg}x", f"{pkg}_geometric"):
-                tails += [self.TOOL_REASON + f"; {suffixed} is gone", self.FS_REASON + f"; {suffixed} is gone"]
+            for affixed in (f"{pkg}run", f"{pkg}2", f"{pkg}vision", f"py{pkg}x", f"{pkg}_geometric",
+                            f"lib{pkg}", f"_{pkg}", f"my{pkg}", f"x{pkg}x"):
+                tails += [self.TOOL_REASON + f"; {affixed} is gone", self.FS_REASON + f"; {affixed} is gone"]
         self.rejects_each(tails, expect="torch")
+        # THE RESIDUE, measured rather than argued: containment is a SUBSTRING rule, so a name spelled with a
+        # character the name does not contain keeps the exemption. `t0rch` is exempt on both categories, in
+        # every mode, and so is any reason that describes a package without naming it. Asserted as ACCEPTED so
+        # that the sentence in scripts/run_tests.sh which says so cannot drift: the bound on it is the caps and
+        # the baseline, not the spelling rule. (docs/CLEAN_CLONE.md, "What is still exempt, stated plainly".)
+        for reason in (self.TOOL_REASON + "; t0rch is gone", self.FS_REASON + "; t0rch is gone",
+                       self.FS_REASON + "; the deep-learning framework is gone"):
+            with self.subTest(residue=reason):
+                self.ok(self.rt({"test_a.py": _pass_module(1),
+                                 "test_r.py": _skip_module(1, reason, cls="R", prefix="test_r")}, expect="any"))
 
     def test_the_TOOLS_allowlist_is_exactly_the_tools_this_suite_gates_on(self):
         """THE FIFTH SR-15 FAIL: `PKG` is a spelling rule, and its word boundaries are evadable.
@@ -1805,11 +1948,20 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
         self.assertIn("POLICY:TOOL_UNDECLARED", r.stdout)
         r = self.rejects_each(shaped, expect="none")
         self.assertIn("POLICY:TOOL_UNDECLARED", r.stdout)
-        # a tail may not introduce a second, undeclared BACKTICKED name either: the check is over every
-        # backticked name in the reason, not only the one in the phrase
+        # a tail may not introduce a second, undeclared CLAIM either: the check is over every OCCURRENCE of a
+        # declared category phrase in the reason, not only the anchored one.
+        # WHAT THIS USED TO BE, and it was withdrawn in round 6 because it was a LEGITIMATE DENY: the rule was
+        # "every BACKTICKED name in a tool-shaped reason must be a declared tool", so the live ruff reason plus
+        # `` (see `scripts/lint.sh`) `` -- or a backticked rule code such as `` `F821` `` -- was
+        # POLICY:TOOL_UNDECLARED in all three modes, RESULT: FAIL, with advice that cannot be followed
+        # ("declare the tool there" about a path). That is round 3's defect shape exactly: honest reason, red
+        # suite, unfollowable guidance. It was latent only because the live reason happens to backtick just
+        # `ruff`. The narrowing costs the one case below the line: a bare `` `mypy` `` in a tail is exempt now
+        # -- as `; mypy is gone` already was, so what the rule really did was make the verdict depend on
+        # TYPOGRAPHY. See test_a_backticked_name_is_judged_only_as_a_second_category_claim.
         self.rejects_each([self.TOOL_REASON + "; `torchrun` is gone",
-                           self.TOOL_REASON + "; `mypy` would have run it",
-                           self.TOOL_REASON + "; also optional developer tool `black` is not on PATH"],
+                           self.TOOL_REASON + "; also optional developer tool `black` is not on PATH",
+                           self.TOOL_REASON + "; also optional developer tool `mypy` is not on PATH"],
                           expect="none")
         # and a name the PHRASE cannot hold is rejected by the shape before the allowlist is reached: the name
         # class is [\w.+-]+, so a backtick inside the name means it is not tool-shaped at all
@@ -1826,6 +1978,250 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
                                                        cls="N", prefix="test_n")}, expect="none")
                 self.bad(r, "POLICY:NONE_REASON")
                 self.assertNotIn("skip(s) for an absent optional developer tool", r.stdout)
+
+    # --- THE SIXTH SR-15 FAIL: the category REGISTRY, and every check below generated from it ---------------
+    def _canonical(self, cat):
+        """A reason the SUITE really emits for this category, read out of its own skip sites.
+
+        The generated cases below are built from this rather than from a string typed here, for the reason
+        `_live_ruff_skip_reason` exists: a reason typed in one place and judged in another is how round 3's FAIL
+        happened. It is also what makes the generated tables non-vacuous -- a category with no site fails here
+        rather than producing an empty table.
+        """
+        live = sorted(r for _w, c, r in _suite_exempt_carriers() if c.token == cat.token)
+        self.assertTrue(live, f"no skip site in tests/toy_tests/ carries the {cat.token} phrase, so the category "
+                              f"is declared in scripts/run_tests.sh for nothing: delete the row, or the test it "
+                              f"existed for was deleted and its exemption has outlived it")
+        return live[0]
+
+    def test_every_exemption_category_is_declared_with_the_same_guards(self):
+        """THE ROOT OF THE SIXTH FAIL, as the property that replaced it.
+
+        Round 5 closed the TOOL category with three anchoring guards (`\\A` in the phrase, `.match` at the call,
+        a trailing `\\b`) PLUS a closed allowlist of names. The filesystem-case category is the same KIND of
+        exemption and got NONE of the four: `re.compile(r"case[- ]sensitive", re.I)`, applied with `.search`.
+        Reviewing two hand-guarded sites for symmetry is what failed, so the guards are now properties of a
+        DECLARATION and this test is the declaration's contract:
+
+          * the phrase is anchored and `\\b`-terminated, so prose can neither carry the claim nor extend it;
+          * it captures at most ONE name, and it carries a name IF AND ONLY IF it declares a closed allowlist
+            for it and says where that allowlist lives -- a name class with no allowlist is the OPEN SET that
+            was round 4's defect;
+          * it has a positive cap.
+
+        The script checks the same five properties at run time and refuses the run as POLICY:INTERNAL
+        (driven by test_a_category_declared_without_the_guards_is_refused_as_POLICY_INTERNAL), so this is the
+        static half of a check that exists on both sides.
+        """
+        self.assertGreaterEqual(len(EXEMPT_CATS), 2, EXEMPT_CATS)          # not vacuous if the parse degrades
+        self.assertEqual(sorted(c.token for c in EXEMPT_CATS), ["FS", "TOOL"],
+                         f"scripts/run_tests.sh declares {[c.token for c in EXEMPT_CATS]} as its "
+                         f"environment-exemption categories. A NEW category must be named HERE deliberately: "
+                         f"every generated table in this file then drives it, and POLICY:<TOKEN>_CAP and (if "
+                         f"its phrase carries a name) POLICY:<TOKEN>_UNDECLARED must be asserted by a test "
+                         f"(test_every_policy_token_is_asserted_by_some_test enforces that).")
+        for c in EXEMPT_CATS:
+            with self.subTest(category=c.token):
+                self.assertTrue(c.phrase.startswith(r"\A"), f"{c.token}'s phrase {c.phrase!r} is not anchored")
+                self.assertTrue(c.phrase.endswith(r"\b"), f"{c.token}'s phrase {c.phrase!r} does not end on \\b")
+                self.assertLessEqual(c.anchored.groups, 1, f"{c.token}'s phrase captures more than one name")
+                self.assertEqual(bool(c.anchored.groups), bool(c.allow),
+                                 f"{c.token} carries a name iff it declares an allowlist: {c.phrase!r} {c.allow}")
+                self.assertEqual(bool(c.anchored.groups), bool(c.where),
+                                 f"{c.token} must say where its allowlist lives iff it has one: {c.where!r}")
+                self.assertIsInstance(c.cap, int)
+                self.assertGreaterEqual(c.cap, 1, f"{c.token}'s cap is not positive")
+                for n in c.allow:                      # names, never patterns: a pattern reopens the open set
+                    self.assertRegex(n, r"\A[\w.+-]+\Z", f"{c.token} allowlist entry {n!r} is not a plain name")
+        # the SECOND anchor term: the policy applies a category phrase with `.match`, at ONE call site. The two
+        # terms are mutually redundant (see the runner's comment), so this pins the pair rather than either.
+        script = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")
+        self.assertEqual(len(re.findall(r"anchored\.match\(", script)), 1,
+                         "the policy no longer applies a category phrase with exactly one `anchored.match(` "
+                         "call; the anchor is written twice on purpose and this is the second term")
+        self.assertNotIn("anchored.search(", script)
+
+    def test_every_declared_exemption_category_is_claimed_properly_by_the_sites_that_use_it(self):
+        """THE DERIVATION, generalised from the TOOLS allowlist to every category -- and it is what a real site
+        in this very file failed.
+
+        `_suite_tool_gates` finds a tool gate with `.match`, so a skip reason that does not BEGIN with the
+        phrase is invisible to it. Measured on a byte-identical copy of the repo: a probe site reading
+        ``case-sensitive filesystem: optional developer tool `mypy` is not on PATH`` left
+        test_the_TOOLS_allowlist_is_exactly_the_tools_this_suite_gates_on GREEN, while the skip was exempt at
+        run time in all three modes -- a test gated on an undeclared tool, green at test time and at run time.
+        The same reason without the leading filesystem-case phrase fails that test, which is how the derivation
+        is known to work.
+        And the loose scan found a REAL one: this file skipped with "filesystem is case-sensitive; case-varied
+        path does not alias the repo" -- the phrase mid-sentence, claiming nothing. Under the anchored phrase
+        that skip is judged as a package skip, so the documented `--expect none` run would have gone red with
+        POLICY:NONE_REASON on every case-sensitive filesystem, i.e. on both CI runners.
+
+        So every reason in tests/toy_tests/ that CARRIES a declared phrase is driven through the live script and
+        must be reported as exempt under the category it carries. Not a text check: the script decides.
+        """
+        carriers = _suite_exempt_carriers()
+        self.assertGreaterEqual(len(carriers), 3, f"the carrier scan found almost nothing ({carriers}): it has "
+                                                  f"stopped looking and this check is vacuous")
+        for where, c, reason in carriers:
+            with self.subTest(site=where, category=c.token):
+                r = self.rt({"test_a.py": _pass_module(1),
+                             "test_c.py": _skip_module(1, reason, cls="E", prefix="test_e")}, expect="any")
+                self.ok(r)
+                self.assertIn(f"1 skip(s) {c.note}", r.stdout,
+                              f"the skip site at {where} carries the {c.token} phrase but does not CLAIM the "
+                              f"category: word it as the declared phrase (anchored, nothing before it), or it "
+                              f"will be judged as a package skip wherever it fires.\n" + r.stdout)
+        self.assertEqual(sorted({c.token for _w, c, _r in carriers}), sorted(c.token for c in EXEMPT_CATS),
+                         "a declared category has no skip site in tests/toy_tests/ at all: an exemption with "
+                         "no test behind it is a permission nobody needs")
+
+    def test_every_declared_exemption_category_rejects_the_same_laundering(self):
+        """ONE TABLE, GENERATED FOR EVERY DECLARED CATEGORY. The fourth FAIL's laundering was re-measured
+        against the tool category alone, and the filesystem-case category was never driven with most of it; this
+        generates both halves from `PKGS` and the registry, so a category declared tomorrow is laundered against
+        the same way with no table to remember to extend.
+        """
+        tails, prose = [], []
+        for c in EXEMPT_CATS:
+            canon = self._canonical(c)
+            prose += ["the suite reports: " + canon, "note: " + canon]
+            for pkg in POLICY_PKGS:
+                for affixed in (pkg, f"lib{pkg}", f"_{pkg}", f"my{pkg}", f"{pkg}run", f"{pkg}2", f"py{pkg}x"):
+                    tails.append(canon + f"; {affixed} is gone")
+        self.assertGreaterEqual(len(tails), 2 * 4 * 7, len(tails))        # not vacuous if a parse degrades
+        r = self.rejects_each(tails, expect="torch")
+        self.assertIn("POLICY:TORCH_MODE_UNEXPLAINED", r.stdout)
+        r = self.rejects_each(tails, expect="none")
+        self.assertIn("POLICY:NONE_REASON", r.stdout)
+        r = self.rejects_each(prose, expect="none")                       # the anchor, for every category
+        self.assertIn("POLICY:NONE_REASON", r.stdout)
+
+    def test_no_reason_may_claim_two_exemption_categories_at_once(self):
+        """F3 OF ROUND 6: a per-category cap is a bound only while a reason cannot be counted in the other
+        category's bucket.
+
+        Measured on the live script in `--expect any` with 5 identical skips: the live ruff reason x5 is
+        POLICY:TOOL_CAP (x4 is OK -- the documented 4/5 boundary), and the SAME reason plus
+        ` (case-sensitive filesystem)` x5 was **OK**, reported as "note: 5 skip(s) for a case-sensitive
+        filesystem", x8 OK, and POLICY:FS_CAP only at 9. The combined 12-skip ceiling was not breached; what
+        broke was the per-category bound the documents name as the thing that bounds tool parking -- and the run
+        then printed tool parks as the Linux filesystem figure docs/CLEAN_CLONE.md tells readers to expect.
+        Generated over ordered pairs, so a third category is covered against both of the others at once.
+        """
+        mixed = []
+        for a in EXEMPT_CATS:
+            for b in EXEMPT_CATS:
+                if a.token != b.token:
+                    mixed.append(self._canonical(a) + " (" + self._canonical(b) + ")")
+        self.assertGreaterEqual(len(mixed), 2, mixed)
+        for mode in ("none", "torch", "any"):
+            with self.subTest(mode=mode):
+                r = self.rejects_each(mixed, expect=mode)
+                self.assertIn("POLICY:EXEMPT_AMBIGUOUS", r.stdout)
+                for c in EXEMPT_CATS:                      # and neither bucket counted them
+                    self.assertNotIn(f"skip(s) {c.note}", r.stdout)
+
+    def test_every_declared_exemption_category_has_its_own_cap_and_its_boundary_is_driven(self):
+        """A cap per category, from the declaration, with the boundary measured for each: a category cannot be
+        declared without one, and a cap raised in the tuple is a cap this test re-measures at its new value."""
+        for c in EXEMPT_CATS:
+            canon = self._canonical(c)
+            with self.subTest(category=c.token, n=c.cap):
+                r = self.rt({"test_a.py": _pass_module(1),
+                             "test_c.py": _skip_module(c.cap, canon, cls="E", prefix="test_e")}, expect="any")
+                self.ok(r)
+                self.assertIn(f"{c.cap} skip(s) {c.note}", r.stdout)
+            with self.subTest(category=c.token, n=c.cap + 1):
+                self.bad(self.rt({"test_a.py": _pass_module(1),
+                                  "test_c.py": _skip_module(c.cap + 1, canon, cls="E", prefix="test_e")},
+                                 expect="any"), f"POLICY:{c.token}_CAP")
+
+    def test_an_undeclared_name_in_any_category_is_loud_in_every_mode(self):
+        """Generated from the registry for every category whose phrase carries a NAME, by substituting an
+        undeclared name into the live reason -- so the round-5 runtime guarantee is re-derived rather than
+        re-typed, for whatever categories exist."""
+        named = [c for c in EXEMPT_CATS if c.anchored.groups == 1]
+        self.assertTrue(named, "no declared category carries a name; this check is vacuous and the TOOLS "
+                               "allowlist has no runtime half")
+        probes = []
+        for c in named:
+            canon = self._canonical(c)
+            m = c.anchored.match(canon)
+            self.assertIsNotNone(m, canon)
+            self.assertNotIn("undeclared-probe-tool", canon)
+            probes.append((c, canon[:m.start(1)] + "undeclared-probe-tool" + canon[m.end(1):]))
+        for mode in ("none", "torch", "any"):
+            with self.subTest(mode=mode):
+                r = self.rejects_each([p for _c, p in probes], expect=mode)
+                for c, _p in probes:
+                    self.assertIn(f"POLICY:{c.token}_UNDECLARED", r.stdout)
+                    self.assertNotIn(f"skip(s) {c.note}", r.stdout)
+                self.assertIn("allowlist in scripts/run_tests.sh", r.stdout)     # the message says what to do
+
+    def test_a_category_declared_without_the_guards_is_refused_as_POLICY_INTERNAL(self):
+        """THE FAIL-CLOSED HALF, and the whole reason this is a registry and not two guarded sites: a category
+        declared with fewer guards than the others cannot exempt anything, because the run refuses to start
+        judging skips at all. Each row below is one a reviewer could plausibly have written -- the third is
+        round 4's open set, declared in one line -- and each is POLICY:INTERNAL, in every mode, naming the
+        category. The control run of the unmodified copy is what keeps this from passing for the wrong reason.
+        """
+        MUT = {
+            "no anchor": '("TUE", r"only on tuesdays\\b", 2, "", (), "for tuesdays"),',
+            "no trailing boundary": '("TUE", r"\\Aonly on tuesdays", 2, "", (), "for tuesdays"),',
+            "a name with no allowlist": '("TUE", r"\\Aonly on `([\\w.+-]+)` days\\b", 2, "", (), "for tuesdays"),',
+            "an allowlist with no name": '("TUE", r"\\Aonly on tuesdays\\b", 2, "TUE_OK", ("tue",), "for tuesdays"),',
+            "a cap of zero": '("TUE", r"\\Aonly on tuesdays\\b", 0, "", (), "for tuesdays"),',
+        }
+        anchor = "EXEMPT_CATEGORIES = (\n"
+        root = self.synth_root(_pass_module(1))
+        script = root / "scripts" / "run_tests.sh"
+        orig = script.read_text(encoding="utf-8")
+        self.assertEqual(orig.count(anchor), 1, "scripts/run_tests.sh no longer opens EXEMPT_CATEGORIES as this "
+                                                "test expects; update the mutations below with it")
+        self.ok(self.run_default(root))                                  # control: the copy is green as copied
+        try:
+            for label, row in MUT.items():
+                with self.subTest(declaration=label):
+                    script.write_text(orig.replace(anchor, anchor + "    " + row + "\n"), encoding="utf-8")
+                    r = self.run_default(root)
+                    self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+                    self.assertIn("POLICY:INTERNAL", r.stdout)
+                    self.assertIn("TUE", r.stdout)                       # ...and it says which category
+        finally:
+            script.write_text(orig, encoding="utf-8")
+
+    def test_a_backticked_name_is_judged_only_as_a_second_category_claim(self):
+        """F2 OF ROUND 6, and it is a LEGITIMATE DENY rather than a hole.
+
+        The rule was "every BACKTICKED name in a tool-shaped reason must be a declared tool". Measured on the
+        live script, the live ruff reason plus `` (see `scripts/lint.sh`) `` was POLICY:TOOL_UNDECLARED in ALL
+        THREE modes, RESULT: FAIL, with advice that cannot be followed -- "`scripts/lint.sh` is not in the TOOLS
+        allowlist ... declare the tool there" -- and the same for a backticked rule code such as `` `F821` ``.
+        That is round 3's defect shape exactly (honest reason, red suite, unfollowable guidance), and round 3's
+        SR-15 FAIL was caused by exactly that kind of over-eager guard; it was latent only because the live
+        reason happens to backtick just `ruff`. docs/CLEAN_CLONE.md presented the rule as a feature and did not
+        disclose the cost.
+
+        What replaced it is NARROWER and derived from the registry: every OCCURRENCE of a declared category
+        PHRASE is checked, not every pair of backticks. The cost, stated plainly: a bare `` `mypy` `` in a prose
+        tail is exempt now. It is the same verdict `; mypy is gone` already got, so what the old rule really did
+        was make the verdict depend on TYPOGRAPHY; the bound on either is the caps and the baseline.
+        """
+        tool = self._canonical(_cat("TOOL"))
+        honest = [" (see `scripts/lint.sh`)", " (rule `F821`)", "; `mypy` would have run it"]
+        for mode, extra in (("none", _mixed_none(50)), ("torch", _skip_module(1, "CUDA not available: x")),
+                            ("any", _pass_module(1))):
+            with self.subTest(mode=mode):
+                files = {"test_a.py": extra}
+                for i, tail in enumerate(honest):
+                    files[f"test_h{i}.py"] = _skip_module(1, tool + tail, cls=f"H{i}", prefix=f"test_h{i}_")
+                r = self.rt(files, expect=mode)
+                self.ok(r)
+                self.assertIn(f"{len(honest)} skip(s) for an absent optional developer tool", r.stdout)
+        # ...and a tail that really does claim the category again, with an undeclared name, is still rejected
+        r = self.rejects_each([tool + "; also optional developer tool `black` is not on PATH"], expect="any")
+        self.assertIn("POLICY:TOOL_UNDECLARED", r.stdout)
 
     def test_the_baseline_pyyaml_exclusion_is_built_from_PKGS_and_says_so_loudly(self):
         """D4: `PKGS`'s comment claimed it was the tuple "from which `NONE_OK`, the baseline exclusion and the
@@ -1917,9 +2313,52 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
         self.bad(self.rt({"test_a.py": _mixed_none(50), "test_f.py": self._fs(9)}, expect="none"), "POLICY:FS_CAP")
 
     def test_fs_reason_cannot_launder_a_missing_package_or_torch_present(self):
+        """THE SIXTH SR-15 FAIL IS THAT THIS TEST HAD EXACTLY TWO CASES, and both of them contained `\btorch\b`
+        -- the SAME SHAPE docs/CLEAN_CLONE.md records as what "used to pass throughout the fourth SR-15 FAIL"
+        for the tool category. Everything the filesystem-case category could really be laundered with avoided
+        the bare word, and all of it was EXEMPT (RESULT: OK) in all three modes on the live script:
+
+            case-sensitive filesystem: variants differ; libtorch is gone        (also `_torch`, `mytorch`)
+            case-sensitive filesystem: ...; optional developer tool `black` is not on PATH
+            the optional developer tool `mypy` is not on PATH (case-sensitive filesystem)
+            case-sensitive: this test is disabled for now
+
+        The first row is why `PKG_EXEMPT` is a CONTAINMENT test rather than a prefix test: there is no `\b`
+        before `torch` in `libtorch`, so the prefix rule that caught `torchrun` could never catch `libtorch`,
+        PyTorch's own C++ distribution. The rest are why the phrase is anchored, `\b`-terminated, and may not be
+        carried alongside another category's phrase.
+
+        The generated tables do the same thing for EVERY declared category
+        (test_every_declared_exemption_category_rejects_the_same_laundering); these are the measured strings
+        from the round, kept as the record of what passed.
+        """
         self.bad(self.rt({"test_a.py": _skip_module(1, "torch not installed; case-sensitive filesystem")}, expect="torch"), "POLICY:TORCH_MODE_MISSING")
         self.bad(self.rt({"test_a.py": _mixed_none(50), "test_b.py": _skip_module(1, "torch present; case-sensitive", cls="Q", prefix="test_q")},
                          expect="none"), "POLICY:TORCH_PRESENT")
+        # (1) the affixed package names -- the prefix side is what the prefix rule could not reach
+        r = self.rejects_each([self.FS_REASON + "; libtorch is gone", self.FS_REASON + "; _torch is gone",
+                               self.FS_REASON + "; mytorch is gone", self.FS_REASON + "; torchrun is gone",
+                               self.FS_REASON + "; numpy2 is gone", self.FS_REASON + "; yamllint is gone",
+                               self.TOOL_REASON + "; libtorch is gone", self.TOOL_REASON + "; _torch is gone"],
+                              expect="torch")
+        self.assertIn("POLICY:TORCH_MODE_UNEXPLAINED", r.stdout)
+        # (2) the phrase may not be CARRIED by prose, and `case-sensitive` alone is not the phrase
+        r = self.rejects_each(["the suite reports: " + self.FS_REASON,
+                               "note: " + self.FS_REASON,
+                               "case-sensitive: this test is disabled for now",
+                               "filesystem is case-sensitive; variants differ",
+                               "case-sensitive filesystems are different directories"], expect="none")
+        self.assertIn("POLICY:NONE_REASON", r.stdout)
+        # (3) ...and in `--expect any`, where NO reason check runs at all and the hole was therefore completely
+        #     silent, the change is visible as the exemption itself: the laundered reason no longer collects it,
+        #     so it no longer spends FS_CAP budget and no longer drops out of the per-module skip column that
+        #     catches a re-parked skip. (It is counted as a package skip there, which `any` mode does not judge
+        #     -- that is the documented property of the mode, not of this category.)
+        r = self.rt({"test_a.py": _pass_module(1),
+                     "test_y.py": _skip_module(1, self.FS_REASON + "; libtorch is gone", cls="Y", prefix="test_y")},
+                    expect="any")
+        self.ok(r)
+        self.assertNotIn("skip(s) for a case-sensitive filesystem", r.stdout)
 
     # --- reason wording (none mode) ---
     def test_none_mode_accepts_each_listed_phrase_and_package(self):
@@ -2029,10 +2468,19 @@ def _toolfree_bin():
     This used to be `str(Path(sys.executable).parent)`, whose comment claimed "PATH without ruff/pyflakes". That
     was true only by ACCIDENT, and the accident depended on which interpreter ran the suite: the interpreter's own
     `bin` directory is exactly where a linter installed into the same environment lives. On this host
-    `/Library/Frameworks/.../3.12/bin` has neither, but `/Users/shrey/miniconda3/bin` -- also a python3 on this
-    PATH -- holds both `ruff` and `pyflakes`, so under that interpreter every "no optional tool" lint test ran
-    WITH both tools present and measured the opposite branch from the one it names. A directory we construct
-    cannot drift that way.
+    `/Library/Frameworks/.../3.12/bin` has neither, but a conda `bin` -- also a python3 on this PATH -- holds
+    both `ruff` and `pyflakes`, so under that interpreter every "no optional tool" lint test ran WITH both tools
+    present and measured the opposite branch from the one it names.
+
+    WHAT THIS DOCSTRING USED TO END WITH, and it was FALSE: "A directory we construct cannot drift that way." It
+    can, and it did. A constructed directory removes a tool from PATH; it does not remove it from the
+    INTERPRETER, and the `python3` symlinked in here brings its own site-packages with it. `scripts/lint.sh`
+    probed pyflakes as `python3 -m pyflakes --version`, so on an interpreter with pyflakes importable (CPython
+    3.13.5, pyflakes 3.4.0) `RAN_ANY=1` and `test_missing_optional_tools_never_fail` FAILED -- a real live
+    failure, and the test was measuring the opposite branch from the one it names on every such interpreter.
+    What makes the claim true is that BOTH optional linters are now gated on PATH (`command -v`), which is why
+    test_every_optional_linter_is_gated_on_PATH_not_on_the_interpreter exists: this directory is only as
+    tool-free as the script's probes are PATH-based, and that is a property of the script, not of the directory.
     """
     if not _TOOLFREE:
         d = Path(tempfile.mkdtemp(prefix="saferf_toolfree_"))
@@ -2374,6 +2822,70 @@ class TestLintPolicy(unittest.TestCase):
         self.assertNotIn("ruff:", r.stdout)
         self.assertNotIn("pyflakes:", r.stdout)
 
+    def test_every_optional_linter_is_gated_on_PATH_not_on_the_interpreter(self):
+        """F4 OF ROUND 6, AND A REAL LIVE FAILURE: `test_missing_optional_tools_never_fail` measured the
+        opposite branch from the one it names, on any interpreter with pyflakes importable.
+
+        `ruff` was gated on `command -v ruff` (PATH) and `pyflakes` on `python3 -m pyflakes --version`
+        (THROUGH THE INTERPRETER). `_toolfree_bin` removes tools from PATH only -- the symlinked interpreter
+        brings its own site-packages -- so with pyflakes importable `RAN_ANY=1`, the
+        "no optional linter (ruff/pyflakes) installed; skipped" branch never fired, and the test asserting that
+        branch failed:
+
+            PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest
+            tests.toy_tests.test_scripts    ->  Ran 137 tests, FAILED (failures=1)
+            (CPython 3.13.5 with pyflakes 3.4.0; the same command on CPython 3.12.4, which has neither linter,
+             was OK -- which is why it was invisible, and CI installs no linter in either job either)
+
+        THE ASYMMETRY IS THE DEFECT, not the probe: two gates on the same kind of thing, written differently,
+        and the one nobody looked at was the one that drifted -- the same shape as this round's exemption
+        categories. So this is a STRUCTURAL check that every optional-linter gate in the section is a `command
+        -v` gate, and that the section invokes no linter through the interpreter. A mutant that puts the `-m`
+        probe back fails here on every interpreter, including those where the behavioural test cannot see it.
+        """
+        text = LINT.read_text(encoding="utf-8")
+        m = re.search(r'(?ms)^echo "== optional linters =="\n(.*?)^\[ "\$RAN_ANY" = 1 \]', text)
+        self.assertIsNotNone(m, "scripts/lint.sh no longer has an `== optional linters ==` section ending in "
+                                "the RAN_ANY report; this test reads that section by text and must be updated "
+                                "together with it")
+        # COMMENT LINES STRIPPED FIRST: the record of the defect below names the `python3 -m` probe it
+        # replaced, and a check that cannot tell the record from the code is a check that forbids the record.
+        # (Same convention as `_code_string_literals` for a .sh file: scan what the script EXECUTES.)
+        section = "\n".join(l for l in m.group(1).splitlines() if not l.lstrip().startswith("#"))
+        gates = re.findall(r"(?m)^if (.+?); then$", section)
+        self.assertEqual(sorted(gates), ["command -v pyflakes >/dev/null 2>&1", "command -v ruff >/dev/null 2>&1"],
+                         f"every optional linter must be gated on PATH with `command -v`, so that a PATH "
+                         f"without it really is a PATH without it (see _toolfree_bin). Found: {gates}")
+        self.assertNotIn("python3 -m", section,
+                         "an optional linter is invoked through the interpreter in this section: it then sees "
+                         "the interpreter's own site-packages and the tool-free-PATH tests measure the "
+                         "tools-PRESENT branch:\n" + section)
+
+    def test_a_pyflakes_on_PATH_runs_and_stays_advisory_unless_LINT_STRICT(self):
+        """The other half of the PATH gate: gating on PATH must not have quietly DISABLED pyflakes.
+
+        Driven with a stub `pyflakes` on PATH rather than with the real one, so it never skips and adds no
+        optional-developer-tool skip category member (`ruff` is the one name on the `TOOLS` allowlist in
+        scripts/run_tests.sh, and a second gated test would have to be declared there). The stub reports a
+        finding and exits non-zero, which is what the advisory branch is for.
+        """
+        d = Path(tempfile.mkdtemp(prefix="saferf_pyflakes_stub_"))
+        self.addCleanup(shutil.rmtree, str(d), True)
+        stub = d / "pyflakes"
+        stub.write_text("#!/bin/sh\necho \"x.py:1:1: 'os' imported but unused\"\nexit 1\n", encoding="utf-8")
+        stub.chmod(0o755)
+        env = {"PATH": _toolfree_bin() + ":" + str(d) + ":/usr/bin:/bin"}
+        r = _lint(self.tree({}), env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)            # advisory: a finding is not fatal
+        self.assertIn("pyflakes: 1 finding(s) (advisory)", r.stdout)
+        self.assertIn("imported but unused", r.stdout)
+        self.assertIn("LINT: OK", r.stdout)
+        self.assertNotIn("no optional linter", r.stdout)                  # RAN_ANY really was set
+        strict = dict(env, LINT_STRICT="1")
+        r = _lint(self.tree({}), strict)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)            # ...and LINT_STRICT makes it fatal
+        self.assertIn("LINT: FAIL", r.stdout)
+
     def test_string_annotation_static_getattr_and_breakpoint_executions_are_blocked_in_src(self):
         """Reported, agreed to be outside the failing criterion (the documentation already concedes "any stdlib
         code-execution or server entry point nobody has thought of yet"), and closed anyway because it cost three
@@ -2437,7 +2949,16 @@ class TestDemoRepoInodeGuard(unittest.TestCase):
         td = self._repo_dir()
         variant = td.swapcase()
         if variant == td or not os.path.exists(variant) or not os.path.samefile(variant, td):
-            self.skipTest("filesystem is case-sensitive; case-varied path does not alias the repo")
+            # WORDED AS THE DECLARED PHRASE, which is the round-6 fix reaching a real site: this reason used
+            # to read "filesystem is case-sensitive; ..." -- the phrase MID-SENTENCE. The runner's
+            # filesystem-case phrase is now anchored (`\A`, like the tool phrase since round 5), so this skip
+            # would have been judged as a package skip and the documented `--expect none` run would have gone
+            # red with POLICY:NONE_REASON on every case-sensitive filesystem, i.e. on both CI runners. The
+            # mid-sentence wording was also invisible to the category's own site scan
+            # (test_every_declared_exemption_category_is_claimed_properly_by_the_sites_that_use_it), which is
+            # how a reason that claims nothing can sit in the tree looking like a claim.
+            self.skipTest("case-sensitive filesystem: a case-varied path does not alias the repo here, so the "
+                          "aliasing this test refuses cannot be constructed")
         r = self._run(variant)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("temp dir root", r.stderr)          # the PRE-creation check fired, not a later one

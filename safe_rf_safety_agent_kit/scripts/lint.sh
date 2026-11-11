@@ -3,7 +3,11 @@
 # AST-based check written inline below. Optional linters are used only if present. ruff's correctness
 # rules (E9,F63,F7,F82 -- syntax, undefined names, bad comparisons) are FATAL when ruff is present;
 # pyflakes findings stay advisory (set LINT_STRICT=1 to make them fatal too). A MISSING tool never
-# fails this script, so the bare-interpreter path is unaffected.
+# fails this script, so the bare-interpreter path is unaffected. BOTH optional linters are gated on PATH
+# (`command -v`), which is asserted structurally by
+# test_every_optional_linter_is_gated_on_PATH_not_on_the_interpreter: an interpreter-gated probe
+# (`python3 -m <tool>`) sees the interpreter's own site-packages and made a test measure the opposite branch
+# from the one it names -- see the note on the pyflakes gate below.
 #
 # WHAT THIS IS: a module-name BLOCKLIST plus an attribute-name blocklist, plus (in src/ only) a positive
 # standard-library-only check. A blocklist is a TRIPWIRE and is inherently INCOMPLETE: the Python standard library
@@ -227,9 +231,26 @@ if command -v ruff >/dev/null 2>&1; then
   else echo "ruff: correctness findings above (FATAL: undefined names and syntax errors are not style)"
        FAIL=1; fi
 fi
-if python3 -m pyflakes --version >/dev/null 2>&1; then
+# GATED ON PATH, LIKE ruff ABOVE, AND THAT SYMMETRY IS THE POINT. This used to probe
+# `python3 -m pyflakes --version` -- THROUGH THE INTERPRETER -- while ruff was gated on `command -v`, and the
+# asymmetry made a test measure the opposite branch from the one it names: tests/toy_tests/test_scripts.py
+# builds a PATH directory holding only a `python3` symlink so that a lint run genuinely has no optional linter
+# on PATH, and its docstring claimed "a directory we construct cannot drift that way". It can: the symlinked
+# interpreter brings its OWN site-packages, so on an interpreter with pyflakes importable (measured on a
+# conda python3 on the development host, CPython 3.13.5, pyflakes 3.4.0) `RAN_ANY=1` and the
+# "no optional linter ... skipped" branch below NEVER FIRED -- a real live failure of
+# test_missing_optional_tools_never_fail, invisible under an interpreter without pyflakes and invisible in CI,
+# where neither job installs it.
+# THE BEHAVIOUR THIS CHANGES, measured rather than argued: `python3 -m pyflakes` works wherever pyflakes is
+# IMPORTABLE, and `command -v pyflakes` needs its console script on PATH. On this host both are present and
+# both print the same three advisory findings, so nothing is lost here; what is lost in general is the advisory
+# run (and, with LINT_STRICT=1, its fatality) in an environment where pyflakes is importable but its console
+# script is not on PATH. The trade is taken because the `-m` form also coupled the linter to whichever
+# `python3` the PATH resolves, while the console script carries its own interpreter -- so the probe and the run
+# could disagree about what is installed, which is the defect above in one sentence.
+if command -v pyflakes >/dev/null 2>&1; then
   RAN_ANY=1
-  if python3 -m pyflakes src scripts >"$TMP/pyflakes.txt" 2>&1; then echo "pyflakes: OK"
+  if pyflakes src scripts >"$TMP/pyflakes.txt" 2>&1; then echo "pyflakes: OK"
   else echo "pyflakes: $(wc -l <"$TMP/pyflakes.txt" | tr -d ' ') finding(s) (advisory)"; head -10 "$TMP/pyflakes.txt"
        [ "${LINT_STRICT:-0}" = 1 ] && FAIL=1; fi
 fi

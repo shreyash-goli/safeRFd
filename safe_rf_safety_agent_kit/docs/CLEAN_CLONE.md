@@ -396,9 +396,9 @@ these was **EXEMPT in `--expect none` AND `--expect torch`**, and round 4's actu
 | ``optional developer tool `torchrun` is not on PATH`` (PyTorch's own console script) | **EXEMPT, RESULT: OK** | `POLICY:TOOL_UNDECLARED` |
 | ``optional developer tool `libtorch` is not on PATH`` (its C++ distribution) | **EXEMPT, RESULT: OK** | `POLICY:TOOL_UNDECLARED` |
 | the same with `torchvision`, `torchaudio`, `torch_geometric`, `torch2`, `_torch`, `numpy2`, `pytestx`, `mypy`, `black`, `yamllint` | **EXEMPT, RESULT: OK** | `POLICY:TOOL_UNDECLARED` |
-| the live `ruff` reason + `; torchrun is gone` | **EXEMPT, RESULT: OK** | not exempt (`PKG_EXEMPT` prefix rule) |
+| the live `ruff` reason + `; torchrun is gone` | **EXEMPT, RESULT: OK** | not exempt (`PKG_EXEMPT`, a *containment* rule since round 6; it was a prefix rule here) |
 | `case-sensitive filesystem …; torch2 is gone` | **EXEMPT, RESULT: OK** | not exempt (same) |
-| the live `ruff` reason + ``; `mypy` would have run it`` | **EXEMPT, RESULT: OK** | `POLICY:TOOL_UNDECLARED` (every backticked name must be declared) |
+| the live `ruff` reason + ``; `mypy` would have run it`` | **EXEMPT, RESULT: OK** | **still exempt** — the "every backticked name must be declared" rule was WITHDRAWN in round 6 as a legitimate deny; see below |
 | ``optional developer tool `pytest-cov` is not on PATH``, `torch-cpu`, `TORCH`, `pytorch`, `py-torch`, `numpy-stubs` | already rejected | unchanged |
 
 **The fix is a positive allowlist, and the allowlist is derived, not hand-maintained.** `TOOLS` in
@@ -408,21 +408,143 @@ tool-gated skip site out of `tests/toy_tests/` (the `@unittest.skipUnless(...)` 
 match the runner's own `TOOL` pattern, itself parsed from the script) and requires the two sets to be **equal**.
 So a **new** tool-gated test is a red suite naming the tool and the tuple to declare it in — and
 `POLICY:TOOL_UNDECLARED` at runtime in every mode — never a silent exemption; and a name left in the tuple after
-its test is deleted fails the same test. The word-boundary problem is closed twice over: by the allowlist on the
-name, and by `PKG_EXEMPT` (the same `PKGS` tuple as a *prefix* test) on the rest of the reason. `PKG_EXEMPT` is
+its test is deleted fails the same test. **The word-boundary problem is closed on both sides of the word, and
+that sentence used to read "closed twice over", which was false**: it was closed by the allowlist on the *name*
+and by `PKG_EXEMPT` as a *prefix* test on the rest of the reason, and a prefix test has a word boundary of its
+own on the left. Measured on the live script, exempt in all three modes: ``optional developer tool `ruff` is not
+on PATH; libtorch is gone`` and `case-sensitive filesystem …; _torch is gone` — `libtorch` is PyTorch's own C++
+distribution, and there is no `\b` before `torch` in it. `PKG_EXEMPT` is the same `PKGS` tuple as a
+**containment** test now (`"|".join(PKGS)`, case-insensitive), so any affix on either side is caught. It is
 used **only** to deny an exemption, never to accept a reason: as the bare-mode accept rule it would read
 ``optional developer tool `torchrun` is not on PATH; it is missing`` as an honest package skip, and as the
 baseline exclusion it would drop any reason mentioning `yamllint` out of a module's recorded skip column.
 
 **What is still exempt, stated plainly.** A *declared* tool's reason (or a filesystem-case reason) with a prose
-tail that names no measured package and backticks no other name — ``optional developer tool `ruff` is not on
-PATH; mypy is gone`` — is still exempt, because no regex can tell a true claim from a false one. The bound is
-the one stated under the skip policy: `TOOL_CAP` 4 (one in use) + `FS_CAP` 8, and the baseline catches any
-*re-parked* existing skip. Two more measured residues: a tool name containing a newline or a zero-width space is
-rejected by the phrase's name class (`[\w.+-]+`) rather than by the allowlist, so it lands on
-`POLICY:NONE_REASON` instead of `POLICY:TOOL_UNDECLARED`; and `--expect any` applies no reason check, so a
-*package-naming* exempt-shaped reason is accepted there (it buys nothing — that mode has no skip floor and
-compares no skip column).
+tail that names no measured package — ``optional developer tool `ruff` is not on PATH; mypy is gone`` — is still
+exempt, because no regex can tell a true claim from a false one. **The clause "and backticks no other name" used
+to stand here and has been withdrawn**: a backticked name is no longer read as a tool name, because that rule
+denied honest reasons (see the round-6 section below, F2). The bound is the one stated under the skip policy:
+`TOOL_CAP` 4 (one in use) + `FS_CAP` 8, and the baseline catches any *re-parked* existing skip. Four more
+measured residues: a tool name containing a newline or a zero-width space is rejected by the phrase's name class
+(`[\w.+-]+`) rather than by the allowlist, so it lands on `POLICY:NONE_REASON` instead of
+`POLICY:TOOL_UNDECLARED`; `--expect any` applies no reason check, so a *package-naming* exempt-shaped reason is
+accepted there (it buys nothing — that mode has no skip floor and compares no skip column); and because the
+package rule is a **substring** rule and nothing more, a tail that spells a package with a character the name
+does not contain (`; t0rch is gone`) or that describes it without naming it (`; the deep-learning framework is
+gone`) keeps the exemption. Those last two are asserted as **accepted** by
+`test_no_environment_exemption_may_name_a_package_the_kit_MEASURES`, so the sentence cannot drift away from
+what the rule does.
+
+### A guard installed at hand-chosen sites: the exemption-category registry that replaced it
+
+Round 5 gave the optional-developer-tool category **three** anchoring guards (`\A` in the phrase, `.match` at
+the call site, a trailing `\b`) **and** a closed allowlist (`TOOLS = ("ruff",)`). The filesystem-case category
+is the same *kind* of exemption and got **none of the four**: it was `FS = re.compile(r"case[- ]sensitive",
+re.I)`, applied **unanchored** with `.search`. Reviewing two hand-written guards for symmetry is what failed, so
+the two categories are now **one declaration** — `EXEMPT_CATEGORIES` in `scripts/run_tests.sh` — and every
+guard, cap, exclusion and failure token is applied by the loop that reads it.
+
+**F1 — the filesystem-case exemption was an open set.** Measured on the live script, **zero policy tokens in all
+three modes** before, with the fix beside it:
+
+| skip reason | before | now |
+|---|---|---|
+| `case-sensitive filesystem: variants differ; libtorch is gone` (also `_torch`, `mytorch`) | **EXEMPT, OK / OK / OK** | `POLICY:NONE_REASON` / `POLICY:TORCH_MODE_UNEXPLAINED`; not exempt in `any` |
+| `case-sensitive filesystem: …; optional developer tool `black` is not on PATH` | **EXEMPT, OK / OK / OK** | `POLICY:EXEMPT_AMBIGUOUS` in **all three** modes |
+| ``the optional developer tool `mypy` is not on PATH (case-sensitive filesystem)`` | **EXEMPT, OK / OK / OK** | `POLICY:NONE_REASON` / `POLICY:TORCH_MODE_UNEXPLAINED`; not exempt in `any` |
+| `case-sensitive: this test is disabled for now` | **EXEMPT, OK / OK / OK** | same — `case-sensitive` alone is not the phrase |
+| the live `ruff` reason + `; torchrun is gone` (control: the tool category worked) | already rejected | unchanged |
+
+The declared phrase is `\Acase[- ]sensitive filesystem\b`. Two consequences worth stating: a **prefix** evasion
+(`libtorch`, `_torch`) was permitted while the symmetric **suffix** evasion (`torchrun`, `numpy2`) was denied,
+because `PKG_EXEMPT` was a prefix test — it is a containment test now; and the suite's own laundering table
+enumerated **only** suffixes, with `libtorch` and `_torch` ninety lines further down as tool *names*, where the
+allowlist rejects them. The names were in the file, in the wrong table.
+
+**The same hole bypassed the round-5 derivation test.** `_suite_tool_gates` finds a tool gate with `.match`, so
+a skip reason that does not *begin* with the tool phrase is invisible to it. Measured on a byte-identical copy
+of the repo: a probe site reading ``optional developer tool `mypy` is not on PATH`` makes
+`test_the_TOOLS_allowlist_is_exactly_the_tools_this_suite_gates_on` **fail** (the derivation works), and the
+same reason **led** by the filesystem-case phrase — ``case-sensitive filesystem: optional developer tool `mypy`
+is not on PATH`` — makes it **pass**, while the skip was exempt at run time in all three modes: a test gated on
+an undeclared tool, green at test time *and* at run time. (Appending ` (case-sensitive filesystem)` does **not**
+bypass it; `.match` still sees the leading phrase. The bypass needs the other phrase in front.)
+
+**The bound, measured, and not overstated.** Re-parking an *existing* baseline-counted skip was
+`POLICY:BASELINE_SKIPS` throughout — the hole could not hide a skip the baseline counts. *Adding* laundered
+filesystem-case skips was OK up to 8 and `POLICY:FS_CAP` at 9. So the reach was **≤ 8 newly parked tests**, ≤ 4
+on a Linux runner where the real case-sensitivity skips occupy the bucket.
+
+**F2 — every backticked token was treated as a tool name, and that was a legitimate deny.** The rule "every
+backticked name in a tool-shaped reason must be a declared tool" turned honest reasons red: the live `ruff`
+reason plus `` (see `scripts/lint.sh`) `` was `POLICY:TOOL_UNDECLARED` in **all three** modes, `RESULT: FAIL`,
+with advice that cannot be followed (*"`scripts/lint.sh` is not in the TOOLS allowlist … declare the tool
+there"*), and the same for a backticked rule code (`` `F821` ``). That is round 3's defect shape exactly —
+honest reason, red suite, unfollowable guidance — and it was latent only because the live reason happens to
+backtick just `ruff`. What replaced it is narrower and derived from the registry: **every occurrence of a
+declared category phrase** is checked, not every pair of backticks. The cost, stated plainly: a bare
+`` `mypy` `` in a prose tail is exempt now — the same verdict `; mypy is gone` already got, so what the old rule
+really did was make the verdict depend on typography. ``; also optional developer tool `black` is not on PATH``
+is still `POLICY:TOOL_UNDECLARED`, and `; `torchrun` is gone` is still denied by the package rule.
+
+**F3 — a per-category cap was evadable by appending the other category's phrase.** Measured in `--expect any`
+with 5 identical skips: the live `ruff` reason ×5 → `POLICY:TOOL_CAP` (×4 → OK, the documented 4/5 boundary);
+the same reason + `" (case-sensitive filesystem)"` ×5 → **OK**, reported as *"note: 5 skip(s) for a
+case-sensitive filesystem"*, ×8 → OK, `FS_CAP` only at 9. The combined 12-skip ceiling was never breached; what
+broke was the per-category bound these documents name as the thing that bounds tool parking — and the run then
+**printed tool parks as the Linux filesystem figure** a reader is told to expect. A reason may now claim exactly
+one category: carrying a second category's phrase is `POLICY:EXEMPT_AMBIGUOUS` in every mode.
+
+**What the registry gives that two guarded sites could not.** Each row declares a token, an anchored
+`\b`-terminated phrase, a cap, a closed allowlist (and where it lives) if the phrase carries a name, and how the
+run reports it. A row that is wrong is `POLICY:INTERNAL` **before any skip is judged** — driven for five bad
+declarations, including round 4's open set in one line (a name class with no allowlist) — and
+`tests/toy_tests/test_scripts.py` **parses the tuple** and generates from it: the structural contract, a
+laundering table per category in all three modes, the cap boundary for each cap, the cross-category case over
+ordered pairs, the equality between a category's allowlist and the skip sites that claim it, and the `POLICY:`
+tokens a category must have a test for. A new category is therefore covered the moment it is declared and must
+be named deliberately in two places; it cannot arrive with fewer guards or no tests.
+
+**A real site was wrong, and the loose scan found it.** `tests/toy_tests/test_scripts.py` skipped with
+`"filesystem is case-sensitive; case-varied path does not alias the repo"` — the phrase **mid-sentence**,
+claiming nothing. Under the anchored phrase that skip is judged as a package skip, so the documented
+`--expect none` run would have gone red with `POLICY:NONE_REASON` on every case-sensitive filesystem, i.e. on
+both CI runners. It is worded as the declared phrase now, and every skip site in `tests/toy_tests/` that carries
+a declared phrase is driven through the live script and required to be reported as exempt.
+
+### `lint.sh` probed one optional linter through PATH and the other through the interpreter
+
+`ruff` was gated on `command -v ruff`; `pyflakes` was gated on `python3 -m pyflakes --version` — **through the
+interpreter**. `_toolfree_bin()` in `tests/toy_tests/test_scripts.py` builds a PATH directory holding only a
+`python3` symlink so that a lint run genuinely has no optional linter on PATH, and its docstring claimed *"A
+directory we construct cannot drift that way."* **It can:** the symlinked interpreter brings its own
+site-packages, so with pyflakes importable `RAN_ANY=1` and the *"no optional linter (ruff/pyflakes) installed;
+skipped"* branch never fired — `test_missing_optional_tools_never_fail` measured the opposite branch from the
+one it names, and **failed**:
+
+```
+# CPython 3.13.5 (conda), pyflakes 3.4.0 importable
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest \
+    tests.toy_tests.test_scripts
+  -> Ran 137 tests, FAILED (failures=1)
+     FAIL: TestLintPolicy.test_missing_optional_tools_never_fail
+# CPython 3.12.4, neither linter importable -> Ran 137 tests, OK
+```
+
+The asymmetry *is* the defect — two gates on the same kind of thing, written differently, and the one nobody
+looked at drifted — so **both linters are gated on PATH** now, and
+`test_every_optional_linter_is_gated_on_PATH_not_on_the_interpreter` asserts that structurally over the
+`== optional linters ==` section (comment lines stripped, so the record of the old probe is allowed to stay).
+**What the change costs, measured:** `python3 -m pyflakes` works wherever pyflakes is *importable*, and
+`command -v pyflakes` needs its console script on PATH. On the development host both are present and both print
+the same three advisory findings, so nothing is lost there; what is lost in general is the advisory run (and,
+with `LINT_STRICT=1`, its fatality) where pyflakes is importable but its console script is not on PATH. The
+trade is taken because the `-m` form also tied the linter to whichever `python3` the PATH resolves while the
+console script carries its own interpreter, so the probe and the run could disagree about what is installed.
+That pyflakes still *runs* when it is on PATH is pinned by
+`test_a_pyflakes_on_PATH_runs_and_stays_advisory_unless_LINT_STRICT`, which drives a **stub** `pyflakes` rather
+than the real one — so it never skips, and no second name has to go on the `TOOLS` allowlist. **Neither CI job
+installs a linter**, so there this test measures the branch it names and passed before the fix as well.
 
 ## Interpreting skips
 
@@ -743,7 +865,14 @@ This is hygiene, not a sandbox; the runtime socket guard is a second, partial la
   the five added for the fifth cost about 30 s between them, three of them because they drive the script once
   per mode or once per laundering table. The suite is **1165 tests** at that commit, and
   `scripts/test_baseline.txt` still records `toy_tests.test_scripts 132 4`, so that row carries five tests of
-  slack until it is regenerated — green by design, because the column is a floor. At the fourth FAIL, the four new ones cost about 6 s between them: the laundering tables
+  slack until it is regenerated — green by design, because the column is a floor. At the commit that closed the
+  SIXTH FAIL the module is **147 tests** and takes **158 s** on CPython 3.12.4 and **51 s** on a conda CPython
+  3.13.5 (`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`; that interpreter has pytest, so four of the module's skips run
+  there instead) — a suite result is not a fact about this repository unless the interpreter that produced it is
+  recorded beside it. The ten added tests are generated per exemption category, so most of their cost is one run
+  of the script per category per mode. The baseline row recorded `toy_tests.test_scripts 137 4` when they were
+  written, which carries ten tests of slack; the bare-skip column is still **4** (the four pytest skips: nothing
+  added skips in a bare environment, and both exempt categories' exclusions are unchanged). At the fourth FAIL, the four new ones cost about 6 s between them: the laundering tables
   they drive are long, so each is driven as ONE run of the script carrying every candidate reason as its own
   skip, and attributed by test id — 48 separate runs of the same table cost 57 s for no more information.
   That bare, no-`ruff` run gives **6 skips in this module**: 4 need pytest, 1 needs PyYAML, 1 is the
