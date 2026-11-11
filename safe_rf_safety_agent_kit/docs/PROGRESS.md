@@ -8689,3 +8689,436 @@ Its first draft said three marked tasks rest on attestations whose artifacts mov
 `docs/PROGRESS.md` carried my uncommitted 18-line SR-04 correction when that pass began. The report
 **left it untouched** rather than reverting or committing another owner's in-flight work, and recorded
 the discrepancy. Correct call, and my briefing error.
+
+## SR-06 re-attested: **FAIL**, and UNMARKED. Verified 10 → 9. The provenance question is settled.
+
+**Date:** 2026-11-11, HEAD `e66cf71`. **3.12.4**, env exactly `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src`,
+serial. `test_stability` **57 OK, 0 skipped** (the baseline's `57 1` second column is a *bare*-environment
+numpy skip, which does not apply where numpy is importable — stated rather than glossed). All mutation
+on a `git archive HEAD` copy; `git status --porcelain` **empty**.
+
+### The provenance question is closed, and better than closed — the defects are bisected
+
+**HEAD's `stability.py` bytes are byte-identical to `905bbfe`'s.** Verified three ways by the attester
+and re-verified by me: `rev-parse HEAD:…`, `rev-parse 905bbfe:…` and `hash-object` all give
+**`4e8200fa9a1a2c938e23efd40bc40f012e2bab4e`**.
+
+**And the unknown-coverage worry is now discriminated from an ordinary miss**, by `git log -S` on each
+defect site:
+
+- **F2 is inside the ambiguous region.** `UnderflowError` **and its guard were introduced by `905bbfe`
+  itself** — the atomic commit that records the QA PASS. Whether the reviewer saw the pre- or post-fix
+  bytes cannot be said, and a defect sits exactly there.
+- **F1 and F3 predate `905bbfe`** (both from `d87b48f`), so they were present in the attested bytes **on
+  either reading**. Those two are *"a plain miss by round 1, not an artifact of the ambiguity."*
+- **Correction to this journal:** `ShapeError` **in this file** predates `905bbfe` too, so it is **not**
+  a post-PASS fix here, whatever it may be elsewhere. My earlier characterisation was wrong.
+
+### Four findings, one root
+
+*"The module computes the normalised float and then makes the decision — or does the arithmetic — on the
+raw object."* In F1 and F3 the normalised value **is sitting in a local variable and is discarded.**
+
+| # | site | measured consequence |
+|---|---|---|
+| **F1** | `:268` decision, `:277` arithmetic | `masked_mean_checked(M, mask, EqInt(1))` → **4.0**, twice the honest 2.0, no exception; `EqInt(8)` → 0.5. **The one defect this function exists to catch — the "off by the row width" normalisation — passes through silently**, including via the public MSE wrapper using the divisor `teacher_student` explicitly rejects. |
+| **F2** | `:322` | `masked_squared_error_mean([EqFloat(1e-200)], [0.0], [True], 1)` → **0.0**, where the comment at `:318` says *"a nonzero input that becomes exactly 0.0 is an error, not a zero loss … refusing a silent zero."* |
+| **F3** | `:420` | `check_gradient(..., zero_tol=G(0.0))` **issues a PASS report for an identically-zero analytic gradient** — `analytic=(0.0, 0.0)` in the report — where the docstring says a zero gradient *"matches a flat function and also a severed gradient path, so agreement proves nothing."* **The most consequential of the four**: a PASS certificate for a severed gradient path, in a kit built to refuse exactly that overclaim. |
+| **F4** | `:431` | `2.0 * step` resolves to `step.__rmul__`, so `ZeroDivisionError` escapes **both** `StabilityError` and `ValueError` — a caller's fail-closed handler does not catch it. Loud, so lower severity. |
+
+### The sharpest technical insight of this round
+
+**"Arithmetic normalises; a bare comparison does not."** At `:436` the tolerance is *arithmetic*
+(`atol + rtol * max(...)`), which collapses to a plain float before the `>` — which is **why
+`atol`/`rtol` with lying comparison dunders all bounced**. At `:420` the caller's object is the **bare
+right operand** of `<=`, so its reflected `__ge__` wins. That single distinction separates F3 from the
+atol/rtol bounce and is the shape of the fix.
+
+### Its first fix was wrong, the suite killed it, and it understood why
+
+It mutated `:322` to `fa != fb` — the obvious fix — and **the existing suite killed it**: 2 failures in
+`test_underflow_to_zero_raises`, on `Fraction(1, 10**400)`. The docstring's own parenthetical says why:
+*"Inputs that themselves round to 0.0, e.g. a tiny Fraction, are caught because `a != b`."* `float()`
+collapses that Fraction to `0.0`, losing exactly the case the test pins. **F2 is a real design tension,
+not a careless slip.** The fix that satisfies both is `Fraction(a) != Fraction(b)`, measured **286 OK**.
+
+### It triaged its own sweep rather than reporting the raw number
+
+**943 derived cases** (≈53 adversarial factories × every entry point and argument position):
+`COLLAPSED 642, REFUSED 262, DIVERGENT 34, ESCAPE 5`. It then hand-triaged all 39 violations and
+reported that **most were its own oracle's fault** — a `step=1` comparison against a default-`1e-6` run,
+one adversary object reused across three entry points advancing its counter, and `__float__`-lie
+divergences that are *the declared contract* — *"and saying so is part of the result."*
+
+### Two of the six shapes are NOT APPLICABLE, verified rather than assumed
+
+**No Enum** exists in the module; the only `is`/`is not` in executable code are three `None`-singleton
+checks, the correct use. **No mapping lookup at all** — `Mapping`/`set`/`frozenset` appear only as
+*rejection* predicates, and those rejections were swept and bounced.
+
+### Round 1's attestation was not empty, and the gap is narrow
+
+It disabled **8 guards** in turn; the existing 57 tests **killed all 8**. *"The guards are well pinned
+against ordinary regressions. The gap is specific and narrow: the un-normalised route into those same
+guards."* Consistent with `905bbfe`'s own claim of eight killed truncation mutants on `check_gradient` —
+*"they exercised it with honest values."* **Round 1 did real work against the threat model that existed
+then.**
+
+### The architectural finding: the kit already built this fix, and the delegate never got it
+
+Importers verified by grep, not guessed: only **`robustness.py`** and **`checkpoint.py`**
+(**`teacher_student` does not import stability — my brief's guess was wrong**). `checkpoint` imports
+only the exception classes. **`robustness` is not exposed because its parameter boundary collapses each
+argument or refuses a duck-typed scalar** — the round-8 disjunction. Measured:
+`rb.mse_naive(...)` → `UnderflowError` **refused**; `rb.mse_naive.__wrapped__(...)` → **0.0**, F2 with
+the boundary removed.
+
+`stability.py` has **no such boundary** (`_AT_PARAMETER_BOUNDARY` False on all seven public functions).
+*"The kit already built the fix for exactly this defect class — in the module that delegates its
+numerics to `stability.py` — and the delegate never received it."*
+
+### Three overclaiming sentences, and eleven that held
+
+Wider than their mechanism: the **module docstring's headline** — *"Nothing in this module warns,
+returns a sentinel, **or returns a number computed from bad input**"* — violated three ways; `:246`'s
+*"…**and raises** NormalizationMismatchError"*; `:369`'s *"**Rejected before comparing**"*.
+
+**Eleven claims held under measurement**, and the attester pinned them individually rather than
+sweeping: the **SMALL-SCALE BLIND SPOT** paragraph's **four** stated numbers all reproduce exactly; the
+compensated-`sum` claim holds through a generator accumulator; `-0.0` sign preservation **including its
+own documented carve-out**; in-place mutation detected on all four routes; one-shot iterables on five
+arguments with a byte-identical report; all **13** error classes subclassing `ValueError`; numpy scalars
+rejected. **This module's prose is unusually honest about its own limits, and the honesty is real.**
+
+### Disposition: SR-06 `[x]` → `[ ]`. **Verified 9 of 17.**
+
+The attester's qualification, which I adopt: **every one of F1–F4 needs a caller-supplied lying dunder;
+no honest-value route was found** — unlike round 10's Enum finding, which flipped a verdict with an
+entirely honest value. *"If this kit's standard were 'honest values only', SR-06 would pass."* **But the
+standard this project established is the round-8 disjunction**, and `robustness.py` carries a whole
+mechanism built to meet it while its own delegate has neither that boundary nor per-site normalisation.
+**Judged by the kit's own bar, consistently applied, this is a FAIL** — and applying the bar
+inconsistently to protect a count is the failure mode this journal exists to prevent.
+
+**Dependency check before unmarking:** only SR-10 depends on SR-06, and SR-10 is already open. No `[x]`
+is left on an unchecked dependency. **Verified: 9 of 17** — SR-00…SR-05, SR-07, SR-08, SR-09. Count
+history: 9 → 8 → 11 → 10 → **9**.
+
+### Also flagged: the concurrent owner is writing bytecode
+
+`src/toy/__pycache__/` acquired `.pyc` files mid-run. Every measurement above set
+`PYTHONDONTWRITEBYTECODE=1` so these figures are unaffected, but **that is the stale-`.pyc` hazard class
+this project has been bitten by twice**, and `__pycache__/` is gitignored so it never shows in
+`git status`.
+
+## SR-06 fix: per-site, because the boundary was BUILT and measured incomplete. Plus F5, found in passing.
+
+**Date:** 2026-11-11. `stability.py` 498 → 612 lines (+150/−18), `test_stability.py` 523 → 920 (+397),
+**15 new tests, no existing test altered or removed**. **`test_stability` 57 → 72 OK, 0 skipped**;
+regression `test_stability`+`test_robustness`+`test_checkpoint` **286 → 301 OK**. Interpreter **3.12.4**,
+numpy 2.4.6 importable (**not** the bare environment), `PYTHONDONTWRITEBYTECODE=1`, serial. Implied
+baseline line **`72 1`** — the second column is the bare-environment numpy skip, which is why it reads
+`72 0` here.
+
+### The structural decision was measured, and it corrects my framing
+
+I briefed `robustness.py`'s parameter boundary as *"the kit's own established answer to this exact
+class."* The owner **built a local boundary prototype** — collapse-only, i.e. its best case — and
+measured it against the per-site fix:
+
+| route | boundary prototype | per-site |
+|---|---|---|
+| F1 `denominator=EqInt(1)` | refused | refused |
+| F2 `[EqFloat(1e-200)]` (list) | refused | refused |
+| **F2 `iter([EqFloat(1e-200)])`** | **returned 0.0 — still open** | refused |
+| F3 `zero_tol=GeFalse(0.0)` | refused | refused |
+| 286 existing tests | OK | OK |
+
+**The boundary is incomplete for exactly this module's defect set:** `_plain_value` walks
+`list`/`tuple`/`Mapping`, and **F2's liar is an element, not a scalar parameter** — so a boundary closes
+F2 only for the container types it walks, **while this module documents and tests one-shot iterables as
+supported input** (an existing pin). *"The robustness measurement in the brief — `rb.mse_naive` refuses,
+`__wrapped__` returns 0.0 — is the list route; it does not generalise."*
+
+Three further costs the 286 tests could not see: ~60 lines of machinery in a 498-line module whose
+virtue is that each guard is individually pinned; **the kit's refusal half raises a bare `TypeError`,
+outside the `StabilityError ⊂ ValueError` family this module's docstring commits to**; and importing
+`schema._plain_value` would make these guards depend on another owner's private helper.
+
+**My framing was wrong in a specific, measurable way, and the right move was to build the thing and
+measure it rather than argue from the sibling module's success.**
+
+### The fail-closed condition is met by derivation
+
+`NormalisationIsDerivedNotEnumerated`, three tests: the **public function set is derived** from
+`inspect.isfunction` over `vars(st)` and required to equal the sweep table's keys; **parameters are
+derived** from `inspect.signature` and each must be swept **or** listed in `_NOT_A_LYING_NUMBER` **with
+a reason** (12 entries), **and a stale exemption fails too**; the invariant is asserted one argument
+position at a time — wrap exactly one parameter's numbers in a subclass that lies through every
+comparison and arithmetic dunder **while converting honestly**, and require the outcome (value or
+exception **type**) to equal the honest one. **And the one-shot-iterable variant is kept in the suite**,
+so the boundary-vs-per-site measurement is permanent rather than a note in a report.
+
+Conversion dunders are deliberately **not** lied through, with the reason stated: `check_finite_scalar`
+is documented to return `float(value)`, *"so that channel is a documented protocol, not a bypass."*
+
+### F5 — a fifth defect, found while verifying the fix, in the direction nobody swept
+
+A `float` subclass that **stores nan** while its `__float__` answers innocuously. On HEAD, measured:
+`rtol` built that way **returned a PASS report for a wrong analytic gradient** — `analytic=(99.0, 3.0)`
+against a true `(2.0, 3.0)`; `atol` the same; `zero_tol` passed an identically-zero gradient;
+`min_abs_change` silently kept its `NoOpUpdateError`. *"The attestation's sweep lied through `__float__`
+away from a finite stored value and never in this direction."*
+
+**And F5 is why `_plain_real` uses `float.__float__` rather than `float()`** — the `float(v)` mutant is
+killed **only** by the F5 pin. Measured for the int half too: `int(L(1)) == 2` versus
+`int.__int__(L(1)) == 1`. The `bool` carve-out is deliberate: `bool` is returned unchanged so it cannot
+be laundered past the `isinstance(v, bool)` gates.
+
+### F1–F4 closed, with the two questions I asked answered by construction
+
+`EqInt(1)` → `NormalizationMismatchError` (was **4.0**); the `teacher_student`-rejected divisor through
+the public MSE wrapper → refused (was **2.0**); F2 refused on the list, generator **and** nested-matrix
+routes while `Fraction(1, 10**400)` **still** raises — both properties kept; `np.float32` route
+unchanged with no escaping `TypeError`.
+
+**Is a PASS report for a zero gradient now impossible?** Yes, *by construction rather than enumeration*:
+`zero_tol` is a validated, finite, non-negative **plain float**, and `max(abs(x) for x in g)` is `0.0`
+for an identically-zero gradient, so `0.0 <= zero_tol` always holds. Measured across seven `zero_tol`
+spellings × three zero-gradient shapes: `DegenerateGradientError` every time. **Is `ZeroDivisionError`
+in-family?** It no longer arises from this module's arithmetic; the only one left is the documented one
+raised *inside a caller's `fn`*, whose propagate-unwrapped pin is untouched.
+
+### Nothing weakened, and the one unkilled mutant is reported with its equivalence measured
+
+**All 8 guards the attestation disabled are still killed** (2–14 failures each). Of **16 mutants of the
+owner's own new code, 15 were killed.** The sixteenth is reported honestly as **unkilled**: reverting
+`total / denom` to `/ denominator`. The measured reason is a real equivalence — `4.0 / D(2) == 2.0` for
+an `int` subclass, because **a reflected dunder only wins when the right type subclasses the left, and
+`int` does not subclass `float`**, while `4 / D(2) == 0.0` — so the site is live only if the accumulator
+is an `int`, and `sum()` over validated floats is always a `float`. Kept as defence in depth, filed as a
+**note, not a finding.**
+
+Re-running the attestation's own 943-case sweep: **ESCAPE 5 → 2**, and the four that disappeared map
+exactly onto F1, N3, F4 and N1. The two newly-DIVERGENT are **the same oracle artifact as 18
+pre-existing ones** (the sweep compares an `int`-subclass `step` against the default `1e-6`), and *"HEAD
+'refused' them only by believing the lie."*
+
+### N1, N2, N3 all fixed, and N3's behaviour change stated rather than buried
+
+N1's bare `tuple(mask)` now raises `MaskTypeError`, matching its sibling. N2 normalises `expected_len`
+**and** requires a non-bool `int`, closing the duck-typed half a bare normalisation would leave open.
+N3: the row of floats is built during validation and summed, so `__float__` runs **once** per masked-in
+element. **The honest consequence is stated:** a stateful `__float__` that used to trip the result-level
+backstop now returns the value that was **validated** — *"not a weakened guard … it is the 'validated on
+one answer, summed on another' defect removed"* — with the backstop untouched and still mutation-killed.
+
+### Three narrowed claims, each pinned by a doc-only mutant that was watched failing
+
+The headline now says what the mechanism does — *"no guard here is decided by the caller's object"* —
+**and states what it does not cover**: a number a caller's own `__float__`/`__int__` or a
+caller-supplied callable returns is taken at its word, by protocol. **The pin also asserts the wide
+sentence is gone**, so reverting to it fails. Each pin **quotes its whole passage verbatim and exercises
+the behaviour it claims**, so a doc-only edit and a code-only regression both fail it — which is the
+shape D4 needed after its own loop was found evadable.
+
+### Housekeeping the owner caught on itself
+
+Its own `compileall` sanity check **wrote two `.pyc` files despite `PYTHONDONTWRITEBYTECODE=1`** —
+*"compileall writes by design."* Caught, cleared, and every reported count re-measured afterwards.
+Worth recording because this project has been bitten by stale bytecode twice and the env var is not
+sufficient on its own.
+
+## SR-10 fix (round 13): the probe lane closed. And a test that asserted the defect as correct behaviour.
+
+**Date:** 2026-11-11. `benchmark.py` + `test_benchmark.py`; **`test_benchmark` 301 → 314 OK on 3.12.4
+AND 3.13.5**. Plus one block replaced in `test_dashboard.py` (mine, below) → **247 OK**.
+
+### The count dispute is settled, and both figures now live in a test
+
+**46 reproduces exactly**, and the owner explained the 83: **`83 = 46 + 33 + 4`** — 33 integer-index and
+slice subscripts (`history[-1]`, `boot[0]`), plus **4 typing-generic subscripts in non-annotation
+position**, because the module-level aliases `Matrix`/`Predictor`/`PredictorFactory` write
+`Callable[...]`/`Sequence[...]` as ordinary expressions, which the annotation exclusion does not reach.
+*"The independent re-implementation had the rule right and was counting indices and type aliases as
+lookups."* Both figures are now derived in `test_the_variable_key_count_is_derived_here_and_not_inherited`
+— **the only place either should live.**
+
+Its own probe-lane count, derived rather than inherited: **24 module-constant lookups, 5 with literal
+keys, 19 probe keys across 15 distinct (function, lookup) pairs.**
+
+### Two insights in the fix that I would not have specified
+
+**The declaration is keyed by enclosing function, not by subscript text.** `GATE_SCOPES[self.name]` is
+read in both `GateResult.__post_init__` and `GateResult.scope`, and *"collapsing them is how a site
+moves out from under its declaration."* The non-vacuity test proves it: a probe lookup that **moves to
+another function keeping its text** is reported — the case a text-keyed declaration would miss.
+
+**`lru_cache` hashes the argument before the function body runs.** So `_plain_word` is applied **at the
+call**, not only inside `_arm_fit`: *"normalising inside a cached function does not normalise its cache
+key."* And that produced a finding of its own — **pre-fix the complaint count was order-dependent**, 130
+after a sibling test warmed the cache versus 116 in a fresh process, *"because `lru_cache` is keyed by
+the probe, so a liar-hashed entry left by one test is served to the next. That order dependence is part
+of the defect."* The committed sweep calls `cache_clear()` first so the green result cannot depend on
+leftover state either, and both numbers are in the docstring.
+
+### The sweep, and M9c killed
+
+**308 cases**, every factor the module's own: each route paired with **the constant itself** as its
+vocabulary, read off `bm` at run time, **plus one word derived from the constant's name that it does not
+contain (asserted absent)**, so both directions sweep — a valid word answering an invalid one must keep
+succeeding, an invalid word answering a valid one must keep being refused. Pre-fix **116 of 308**
+complaints and 5 of 6 tests failing; post-fix **0 of 308**, 6 of 6 OK, identical on both interpreters.
+Coverage is asserted against the declaration: all 15 declared sites either claimed by a route or named
+in `_UNREACHABLE` with a reason, the two sets disjoint, union equal to the declaration.
+
+**M9c is KILLED** — the mutant that was unkilled at the previous commit. The mechanism is the point:
+**the key-lane tripwire now collects variable keys too.** It had collected string and f-string keys only
+and deferred variable keys *"to the payload walk"* — but the walk reaches record mappings and nothing
+else, so `self.anything[k]` was covered by neither. Collecting them cost **four more declarations**, two
+of which say *"this is a `range` index, not a word."* **Enumeration, not a promise about where the other
+sweep looks.**
+
+**And that surfaced a lexical rule of the class this project has retired three times:** "through a
+field" was `"." in container and "(" not in container` on the **unparsed text**, which began reporting
+`o.conditioned[i]` once variable keys were collected. It is now `isinstance(container, ast.Attribute)`,
+*"which is what the sentence means."*
+
+### Findings A and B closed — and two corrections to my brief
+
+**A:** `HypothesisResult(HidLiar('H3'), (1 comp,), conv)` now raises **the same**
+`ValueError: wrong number of components for H3` as the honest short build, and the pin additionally
+asserts the two-component build with the liar **keeps both components**, comes out UNSUPPORTED, yields
+JOINT_UNSUPPORTED, and that `type(h.hid) is str`. **The selectivity requirement is enforced, not merely
+refused by name.** Extra detail I did not have: the recompute raised pre-fix because `_tag` also reads
+`len(PRIMARY[hid])`, so all three H3 records were filed under one tag and collided.
+
+**B:** the JOINT, agg **and seed** records now file `subject_kind_code = 2.0` where all three filed
+**1.0** — the trained code — pre-fix. The pin fails pre-fix on the **numbers** `(1.0,1.0,1.0,0.0) !=
+(2.0,2.0,2.0,0.0)`, and the owner **ordered the number assertion before the rendered-field assertion on
+purpose**, *"because a pin that checked the rendered field first would report the weaker fact and
+stop."*
+
+**Correction 1 to my brief:** through `analyze_scores` — where `evaluate_gates` *does* grant the
+exemption — **the recompute DOES catch it**, tripping the gate-11(c) cross-check. *"The recompute does
+not catch it"* holds **only** for a gate list claiming no exemption. Still consequential, and the reason
+is sharper than mine: the records were all wrong, and **`seed_records`' per-seed audit trail is read by
+no cross-check anywhere**, so a wrong code there is wrong in the only place a reader goes for per-seed
+provenance.
+
+**Correction 2, to something I told the owner to build on:** I said `GATE_SCOPES[self.name]` bounces
+*"by reading rather than by accident."* **Wrong.** It is **not** `sorted(names) != sorted(GATE_SCOPES)` —
+`sorted` uses un-overridden `str.__lt__`, so a liar answering two words satisfies that check. What
+actually closed it is narrower and **is** an accident: `'convergence'` is the **only** scope-`'H3'` gate,
+so a probe must answer `'convergence'` to downgrade a failed global gate, and then `'convergence' in
+failed` finds it by the same hash. *"That would stop holding the day a second `'H3'` scope is added."*
+Closed by reading **now**; the corrected reason is in the site comment and the declaration.
+
+### All four accounting corrections applied, and the escalation count is now IN the test
+
+The "four flips" docstring now says **one** is the generator's, names the cyclic donor each of the other
+three actually pairs with, and says **why they are kept**: *"'The generator catches these' and 'these are
+hand-built illustrations of what the generator is for' are different claims; only the second is true."*
+`_mapping_fields` **now walks the object** (the list was complete — sweep size unchanged at 129 — *"but
+the property it claimed was false"*). The `:4816` figure is corrected **and the whole classification is
+pinned in the test**, re-measured independently at `29bd06b`: all five buckets reproduce exactly, **13
+escalations**, the 73 sharpened to 48 metric-name-only and 25 which-refusal-fires. `grep -rn 'escalation'`
+returned nothing before this change — **the correction now lives in the test that states the number, not
+only in the journal.**
+
+The enum table's `combine_joint` row is corrected to **two, not three** sites, with the no-op measured
+(`Verdict(liar) → Verdict.SUPPORTED`, so `vs` holds genuine members before the comparison), the wrap
+kept because the module-wide AST rule costs nothing where it does nothing, and **the whole table
+re-keyed by function instead of line number — all six line numbers had gone stale, which is the same rot
+as a hand-maintained list of spellings.** And `other.params`' inference is restated: the branch **is**
+reachable (`ARM_FACTORIES` is public, `treatment_kind(ARM_FACTORIES['C_rand'])` → `'trained'`); what
+carries the declaration is the **in-process** argument, *"whoever runs the arm."*
+
+### The `test_dashboard` block I replaced, and why it had to go
+
+The fix made one `test_dashboard` test error — and its final block was:
+`self.assertTrue(bm.carries_exemption(j.gates), "a result whose label stores 'trained' was granted the
+fixture exemption")`. **That is a test asserting the defect as correct behaviour** — the shape round 5
+found in `_SneakyBound`'s docstring, where a test passes *because* the thing it describes is broken.
+
+Replaced with a strictly stronger block: the two raw-constant facts are **kept deliberately**, because
+they are properties of the public constants under a caller's own direct subscript which `benchmark.py`
+cannot intercept and does not claim to — and then the module's refusal is asserted
+(`fixture_name is required for, and only for`), plus `type(j.subject_kind) is str` and
+`carries_exemption` **False**. Measured: `test_dashboard` **247 OK**.
+
+## The derived scan caught the SR-16 report — and caught a process error of mine with it.
+
+**Date:** 2026-11-11. The full suite at **1379 tests** came back `FAILED (failures=1)`:
+`test_no_withdrawn_guarantee_is_restated_in_a_comment`, naming **`docs/SR16_AUDIT_REPORT.md`** at the
+block beginning line 356.
+
+### What it caught, and why that is the mechanism working
+
+Round 10's SR-15 fix replaced an **enumerated** list of scanned files with a set **derived** from
+`git ls-files`, minus the one file `CLAUDE.md` names as the durable journal. Its owner wrote the
+prediction down: *"the derived scope now includes the attesters' in-flight files … an unmarked
+withdrawn-guarantee sentence added there will now turn `test_scripts` red — which is the intended
+direction, and is the point of deriving the set."*
+
+**The first thing it caught was the SR-16 audit report** — a document whose entire job is to not
+overclaim — asserting the retracted egress wording `reaches a remote host` as current. And the failure
+message named the cause: a `.` or an ellipsis **inside a quotation** splits the sentence and strands the
+retraction marker in the previous one. Here **`ci.yml` and `README.md` both contain a `.`**, so any
+marker placed earlier in that sentence landed in a different fragment. Fixed by putting the marker
+**adjacent** to the needle with nothing `.`-bearing between them; `test_scripts` **156 OK**.
+
+### The process error, which is mine
+
+**I committed that report at `e66cf71` without running the full suite**, on the assumption that a
+docs-only change is test-inert.
+
+Earlier in this session I **checked** that assumption before committing a docs change — I verified that
+no test read `docs/BUILD_BLUEPRINT.md` before unmarking SR-09. **But the moment round 10 made the scan's
+file scope derived rather than enumerated, docs stopped being test-inert, and I never re-derived the
+assumption.** The owner had told me so in writing, in the report I journaled myself.
+
+So the tree at `e66cf71` has been failing its own suite since I committed it, and the failure was
+invisible to me because I did not look.
+
+**This is the same class as every finding in this project: a precondition that was true when it was
+checked, carried forward after the thing that made it true had changed.** The journal already holds the
+general form of it — *"a suite result is not a fact about the repository unless the interpreter **and the
+environment** that produced it are recorded beside it"* — and this is its sibling: **a change is only
+test-inert against the tests that existed when you checked.**
+
+**Standing rule: run the full suite before every commit, including a docs-only one.** CLAUDE.md already
+says the orchestrator runs the full suite before each commit; it does not carve out documentation, and I
+carved it out myself.
+
+## Measured state at round 13, recorded in THIS file and not only in a commit message
+
+**Date:** 2026-11-11. Recorded here deliberately: the SR-16 report found that my suite totals had been
+living in commit messages while `CLAUDE.md` designates this file as the durable journal, so
+`grep -c '1351'` returned **0** on the record that is supposed to hold it. This corrects the practice,
+not just one entry.
+
+| run | interpreter / environment | result |
+|---|---|---|
+| full suite | **3.12.4**, torch+numpy+ruff+pytest 8.4.1 present | **1379 ran, 2 skipped, 0 failed**, both runners, rc=0 |
+| bare venv `--expect none --twice` | **3.12.4**, `venv --without-pip` | **1379 / 90 / 0**, `run1 == run2`, identical per-module counts **and skip list** |
+| `test_scripts` after the report wording fix | 3.12.4 | **156 OK** |
+| `test_dashboard` after the block replacement | 3.12.4 | **247 OK** |
+| baseline regenerated | bare, 13 modules | `test_benchmark 301 → 314`, `test_stability 57 → 72` — **exactly the two predicted lines, zero slack** |
+
+`test_stability`'s second column stays **1**, the bare-environment numpy skip, exactly as its fixer
+derived. 1351 + 13 + 15 = **1379**; the arithmetic closes.
+
+### The denominator, stated explicitly for the first time
+
+Derived, not typed (`grep -cE '^- \[x\] \*\*SR-'` and its `[ ]` twin): **9 marked, 9 open, 18
+checkboxes.**
+
+- **MARKED (9):** SR-00, SR-01, SR-02, SR-03, SR-04, SR-05, SR-07, SR-08, SR-09.
+- **OPEN (9):** SR-06, SR-10, SR-11, SR-12, SR-13, SR-14, SR-15, SR-16, SR-17.
+
+**There are 18 tasks, and the "of 17" this journal has used throughout is right only because SR-17 is
+out of scope by the orchestration prompt** (*"deliberately outside autonomous scope … Do not
+auto-start"*). 9 marked + 8 open in-scope = 17. That denominator had never been written down, which is
+the same gap as a figure in a comment: correct today, unverifiable tomorrow. **Verified: 9 of 17, with
+SR-17 excluded by scope and SR-06 and SR-10 both carrying fixes that no independent pass has checked.**

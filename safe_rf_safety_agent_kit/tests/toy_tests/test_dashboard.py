@@ -6485,16 +6485,30 @@ class TheSubjectKindValueTable(unittest.TestCase):
             self.assertIn("CONTRACT PROBLEM", h, d)
             self.assertNotIn("vd-supported", joint_cell(h), d)
         self.assertEqual([f for f in flips if "REFUSED" not in f], [], flips)
-        # THE CROSS-OWNER REQUEST, measured and recorded rather than acted on: `benchmark.py:1701-1706`
-        # admits the liar, grants the gate-11(c) exemption to it, and encodes it as a FIXTURE. This
-        # module cannot fix that and does not try; it reports the result honestly instead.
+        # THE CROSS-OWNER REQUEST, NOW CLOSED UPSTREAM (SR-10 round 13). The block that stood here
+        # asserted the defect AS CORRECT BEHAVIOUR -- `assertTrue(carries_exemption(...))` with the
+        # message "a result whose label stores 'trained' was granted the fixture exemption" -- which is
+        # the shape round 5 found in `_SneakyBound`'s docstring: a test that passes because the thing it
+        # describes is broken. `benchmark.py` now normalises `subject_kind` to the characters it stores
+        # in `JointResult.__post_init__`, so no module path admits the liar as a fixture.
+        #
+        # The two raw-constant facts BELOW ARE UNCHANGED and are kept deliberately: they are properties
+        # of the public constants under a caller's own direct subscript, which `benchmark.py` cannot
+        # intercept and does not claim to. What changed is that no module code path reaches them.
         liar = word_liar("trained", "fixture", "eq")
-        self.assertIn(liar, bm.SUBJECT_KINDS)                    # benchmark's membership admits it
+        self.assertIn(liar, bm.SUBJECT_KINDS)                    # the raw constant still admits it
         self.assertEqual(bm.SUBJECT_KIND_CODE[liar], bm.SUBJECT_KIND_CODE["fixture"])
+        with self.assertRaises(ValueError) as caught:            # but the module refuses it
+            bm.analyze_scores(make_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
+                              subject="synthetic", cfg=SMALL, subject_kind=liar,
+                              fixture_name="oracle")
+        self.assertIn("fixture_name is required for, and only for", str(caught.exception))
         j = bm.analyze_scores(make_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
-                              subject="synthetic", cfg=SMALL, subject_kind=liar, fixture_name="oracle")
-        self.assertTrue(bm.carries_exemption(j.gates),
-                        "a result whose label stores 'trained' was granted the fixture exemption")
+                              subject="synthetic", cfg=SMALL, subject_kind=liar, fixture_name=None)
+        self.assertEqual(str(j.subject_kind), "trained")
+        self.assertIs(type(j.subject_kind), str, "the stored characters are what is kept")
+        self.assertFalse(bm.carries_exemption(j.gates),
+                         "a label storing 'trained' is no longer granted the fixture exemption")
 
 
 if __name__ == "__main__":

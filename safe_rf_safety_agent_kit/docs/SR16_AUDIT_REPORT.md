@@ -355,9 +355,10 @@ and on the guard's nature:
 
 Round 10 verified that no document asserts hermeticity (`docs/PROGRESS.md:7810`): checked across
 `README.md`, `CLEAN_CLONE.md`, `ci.yml` and `run_tests.sh` — *"all state it is **unattested** and
-name the unrun measurement."* One wording note, no finding: `ci.yml:9-10` asserts "NO STEP … reaches
-a remote host" (arrival, not the address asked for) and is *"rescued only by the following
-sentence"*.
+name the unrun measurement."* One wording note, no finding: the CI header's old phrasing was **retracted** in round 10 because it
+said a step `reaches a remote host` — arrival, rather than the address a step asks for — and was
+*"rescued only by the following sentence"*. The live wording is narrower in two ways at once: about the
+suite rather than the workflow, and about the address asked for rather than arrival.
 
 **The measurement that would attest it is defined and deliberately unrun.** It lives in
 `docs/CLEAN_CLONE.md`'s Known-limits bullet, which `README.md` points to by name. Reproduced

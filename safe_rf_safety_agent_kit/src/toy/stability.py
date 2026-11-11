@@ -6,9 +6,16 @@ says nothing about RFdiffusion, any real model, or any safety property.
 Purpose: make numerical failure patterns loud and immediate. (`toy.failure_modes`
 *demonstrates* defect patterns; this module is the defensive counterpart.)
 "Fail safely" here means: raise a specific, informative exception. Nothing in
-this module warns, returns a sentinel, or returns a number computed from bad
-input. Validators never mutate their arguments and return fresh immutable
-copies (tuples) of validated data.
+this module warns or returns a sentinel, and no guard here is decided by the
+caller's object: every one of them compares, and divides by, the NORMALISED
+value (`_plain_real`, or the float a `check_finite_*` validator already
+returned), so an overridden `__eq__`, `__ne__`, `__ge__` or `__rmul__` cannot
+talk a guard out of raising. What that does NOT cover, stated rather than left
+to be discovered: a number a caller's own `__float__`/`__int__` or a
+caller-supplied CALLABLE returns is taken as the value, by protocol -- this
+module cannot see behind it, and `check_finite_scalar` is documented to return
+`float(value)`. Validators never mutate their arguments and return fresh
+immutable copies (tuples) of validated data.
 
 Exception design: every error derives from `StabilityError`, which derives from
 `ValueError`. Existing callers that already catch ValueError (as
@@ -35,6 +42,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from fractions import Fraction
 from dataclasses import dataclass
 from numbers import Real
 from typing import Callable, Sequence
@@ -92,6 +100,49 @@ class UnderflowError(StabilityError):
 
 class NoOpUpdateError(StabilityError):
     """A parameter update changed nothing."""
+
+
+# ------------------------------------------------------------- normalisation
+def _plain_real(v):
+    """The plain `int`/`float` value `v` STORES, for a guard to decide on.
+
+    ARITHMETIC NORMALISES; A BARE COMPARISON DOES NOT. `atol + rtol * max(...)`
+    collapses to a plain float before the `>` that uses it, which is why a lying
+    `atol`/`rtol` changes nothing -- but `denominator != n_elements`,
+    `max(abs(x) for x in g) <= zero_tol` and `a != b` put the caller's object on
+    one side of a BARE operator, where its own `__ne__`/`__ge__`/`__eq__` decides
+    (as the right operand, its REFLECTED dunder wins even against a plain float).
+    Every guard in this module therefore compares, and divides by, what this
+    function returns -- or the float a `check_finite_*` validator already
+    returned, which is the same normalisation done by conversion.
+
+    `int.__int__` / `float.__float__` rather than `int()` / `float()`,
+    DELIBERATELY: they read the value the object stores, so an overridden
+    `__int__`/`__float__` is not consulted and the value a guard inspected cannot
+    differ from the value it used. Measured: `int(L(1)) == 2` for
+    `class L(int): __int__ = lambda s: 2`, while `int.__int__(L(1)) == 1`.
+    (`toy.schema._plain_value` reaches the same rule for the same reason; it is
+    re-derived in four lines here rather than imported, to keep this module
+    standard-library-only and to avoid depending on another module's private
+    helper for this one's guards.)
+
+    WHAT THIS DOES NOT REACH, by construction:
+      * `bool` is returned UNCHANGED. The gates that must refuse a bool
+        (`check_finite_scalar`, `_finite_at`, `check_mask`, the `denominator`
+        type check) do so with `isinstance(v, bool)`, and collapsing True to 1
+        would launder it past them.
+      * any other `Real` -- a `Fraction`, a `numpy` scalar -- is returned
+        unchanged, because it stores no `int`/`float` to read. There the
+        caller's `__float__` is the only reading there is, and the
+        `check_finite_*` validators consult it by protocol.
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int):
+        return int.__int__(v)
+    if isinstance(v, float):
+        return float.__float__(v)
+    return v
 
 
 # ------------------------------------------------------- finite-value checks
@@ -182,13 +233,22 @@ def check_mask(mask: Sequence[bool], expected_len: int | None = None, name: str 
     """
     if isinstance(mask, (str, bytes, Mapping, set, frozenset)) or not hasattr(mask, "__iter__"):
         raise MaskTypeError(f"{name} must be a sequence of bool, got {type(mask).__name__}")
-    items = tuple(mask)
+    try:
+        items = tuple(mask)
+    except TypeError:   # a broken `__iter__`: the sibling `_as_flat_items` wraps the identical call
+        raise MaskTypeError(f"{name} must be a sequence of bool, got {type(mask).__name__} "
+                            "(its __iter__ is not usable)") from None
     for i, b in enumerate(items):
         if not isinstance(b, bool):
             raise MaskTypeError(f"{name}[{i}] must be a strict bool, got {b!r} ({type(b).__name__}); "
                                 "truthiness is not accepted")
-    if expected_len is not None and len(items) != expected_len:
-        raise MaskLengthError(f"{name} length {len(items)} != data length {expected_len}")
+    if expected_len is not None:
+        want = _plain_real(expected_len)
+        if isinstance(want, bool) or not isinstance(want, int):
+            raise MaskLengthError(f"expected_len must be an int element count, got {expected_len!r} "
+                                  f"({type(expected_len).__name__})")
+        if len(items) != want:
+            raise MaskLengthError(f"{name} length {len(items)} != data length {want}")
     if not any(items):
         raise EmptyMaskError(f"{name} selects nothing ({'empty' if not items else 'all False'}); "
                              "refusing to compute a loss")
@@ -214,6 +274,11 @@ def _validated_masked_values(values, mask, name: str, strict: bool):
     rows, width = _split_values(outer, mk, name)
     kept = []
     for i, (r, use) in enumerate(zip(rows, mk)):
+        # ONE float() per element, and the value SUMMED is the value VALIDATED: `float(v)` used to be
+        # called twice per masked-in element (once here, once in the `kept` row below), so a stateful
+        # `__float__` was validated on one answer and summed on another -- fail-closed only because the
+        # result-level finiteness backstop in `masked_mean_checked` caught it afterwards.
+        row = []
         for j, v in enumerate(r):
             where = f"{name}[{i}][{j}]" if width > 1 or _is_nested(outer) else f"{name}[{i}]"
             if isinstance(v, bool) or not isinstance(v, Real):
@@ -227,8 +292,9 @@ def _validated_masked_values(values, mask, name: str, strict: bool):
                     tag = "" if use else " (masked OUT; strict_masked_out=True rejects hidden non-finite values)"
                     raise NonFiniteError(f"{where} is non-finite or not representable as a float: "
                                          f"{fv!r}{tag}")
+                row.append(fv)
         if use:
-            kept.append(tuple(float(v) for v in r))
+            kept.append(tuple(row))
     return tuple(kept), mk, width
 
 
@@ -247,7 +313,12 @@ def masked_mean_checked(values, mask: Sequence[bool], denominator: int, *,
     count is `sum(mask) * width`). A divisor that equals only `sum(mask)` for a
     matrix is the audited "off by the row width" normalization mismatch and
     raises NormalizationMismatchError. `denominator` must be a positive int
-    (bool rejected).
+    (bool rejected). The mismatch check and the division both use
+    `_plain_real(denominator)`, the int the object STORES, so an `int` subclass
+    whose `__eq__`/`__ne__`/`__int__` is overridden cannot carry a divisor past
+    this check (measured before that: `EqInt(1)` returned 4.0 against an honest
+    2.0, and `EqInt(8)` returned 0.5 -- the very defect this function exists to
+    catch, through its own public MSE wrapper).
 
     strict_masked_out (default True): masked-out elements must also be finite,
     because a NaN hidden by today's mask surfaces when the mask changes.
@@ -262,19 +333,20 @@ def masked_mean_checked(values, mask: Sequence[bool], denominator: int, *,
     """
     if isinstance(denominator, bool) or not isinstance(denominator, int):
         raise NormalizationMismatchError(f"denominator must be an int element count, got {denominator!r}")
+    denom = _plain_real(denominator)    # decide AND divide on the stored int, never on the object
     kept, mk, width = _validated_masked_values(values, mask, name, strict_masked_out)
     n_entries = sum(mk)
     n_elements = n_entries * width
-    if denominator != n_elements:
+    if denom != n_elements:
         hint = ""
-        if width > 1 and denominator == n_entries:
+        if width > 1 and denom == n_entries:
             hint = (f"; denominator equals the number of masked rows, i.e. per-mask-entry normalization "
                     f"off by the row width {width}")
         raise NormalizationMismatchError(
-            f"denominator {denominator} != summed element count {n_elements} "
+            f"denominator {denom} != summed element count {n_elements} "
             f"({n_entries} masked entries x width {width}){hint}")
     total = sum(v for r in kept for v in r)
-    result = total / denominator
+    result = total / denom
     if not math.isfinite(result):
         raise NonFiniteError(f"masked mean overflowed or became non-finite: {result!r}")
     return result
@@ -305,6 +377,29 @@ def masked_squared_error_mean(prediction, target, mask: Sequence[bool], denomina
                                name="squared_error")
 
 
+def _distinct_values(a, b, fa: float, fb: float) -> bool:
+    """True if `a` and `b` are different values: the second half of `_sq`'s underflow condition.
+
+    TWO PROPERTIES THAT PULL IN OPPOSITE DIRECTIONS, kept together here deliberately, because each
+    obvious one-liner loses the other and both were measured:
+      * `a != b` is a BARE comparison on the caller's objects, so an `__eq__`/`__ne__` override
+        decides it. Measured on the previous spelling: a `float` subclass returning False from
+        `__ne__` made `masked_squared_error_mean([x], [0.0], [True], 1)` return 0.0 for
+        x = 1e-200 -- precisely the "silent zero" the message below refuses.
+      * `float(a) != float(b)` normalises, but collapses `Fraction(1, 10**400)` to 0.0 and so
+        loses the tiny-exact-input case this guard exists for. Measured: that spelling fails
+        `test_underflow_to_zero_raises` twice.
+    So: compare the EXACT rational value each object stores (`_plain_real` first, so a `float`/`int`
+    subclass cannot answer for itself). A `Real` with no exact rational reading falls back to the
+    floats `_sq` already converted, rather than escaping the documented error family -- measured:
+    `Fraction(np.float32(1e-40))` raises TypeError, and a numpy `float32` pair must not do that here.
+    """
+    try:
+        return Fraction(_plain_real(a)) != Fraction(_plain_real(b))
+    except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+        return fa != fb
+
+
 def _sq(a, b):
     for label, v in (("prediction", a), ("target", b)):
         if isinstance(v, bool) or not isinstance(v, Real):
@@ -317,9 +412,10 @@ def _sq(a, b):
         return math.inf
     # Deliberate policy: a nonzero input that becomes exactly 0.0 is an error, not a
     # zero loss. This applies to every element, masked-out ones included, because
-    # `_sq` runs before the mask is applied. Genuinely equal inputs (a == b) are fine. (Inputs that
-    # themselves round to 0.0, e.g. a tiny Fraction, are caught because a != b.)
-    if sq == 0.0 and a != b:
+    # `_sq` runs before the mask is applied. Genuinely equal inputs are fine. (Inputs that
+    # themselves round to 0.0, e.g. a tiny Fraction, are caught because they are not EQUAL --
+    # see `_distinct_values`, which is where the two halves of that sentence are kept together.)
+    if sq == 0.0 and _distinct_values(a, b, fa, fb):
         raise UnderflowError(f"squared error underflowed to 0.0 from nonzero input "
                              f"(prediction={a!r}, target={b!r}); refusing a silent zero")
     return sq
@@ -366,6 +462,14 @@ def check_gradient(fn: Callable[[list], float], grad_fn: Callable[[list], Sequen
     1.0 there, not 0.0); masked means can differ in the last bits on
     older Pythons.
 
+    `step`, `rtol`, `atol` and `zero_tol` are normalised to plain floats ONCE, immediately after
+    validation, and every use below is of those floats: the rejection that follows is a bare `<=`
+    against `zero_tol`, where the caller's object would otherwise be the right operand and its own
+    reflected `__ge__` would decide whether an identically-zero gradient is "zero" (measured before
+    this: a `float` subclass returning False from `__ge__` obtained a PASS report for
+    `analytic=(0.0, 0.0)`). `2.0 * step` likewise consulted `step.__rmul__`, and a zero from it
+    raised a ZeroDivisionError that is outside both StabilityError and ValueError.
+
     Rejected before comparing (none counts as evidence of a working gradient):
       * analytic gradient with any NaN/inf (NonFiniteError),
       * analytic gradient with max |g_i| <= zero_tol, default exactly zero
@@ -391,10 +495,16 @@ def check_gradient(fn: Callable[[list], float], grad_fn: Callable[[list], Sequen
     atol + rtol*|g|, and it only tests one point: agreement there is not a proof
     of correctness elsewhere, and says nothing about learning.
     """
+    config = []
     for label, v in (("step", step), ("rtol", rtol), ("atol", atol), ("zero_tol", zero_tol)):
-        f = check_finite_scalar(v, label)
+        f = check_finite_scalar(_plain_real(v), label)
         if f < 0 or (label == "step" and f == 0):
             raise StabilityError(f"{label} must be {'> 0' if label == 'step' else '>= 0'}, got {v!r}")
+        config.append(f)
+    # The normalised floats REPLACE the caller's objects for the rest of this function. The validated
+    # value used to sit in `f` and be discarded, which is what left the `<= zero_tol` rejection and the
+    # `2.0 * step` differencing to the caller's dunders (F3/F4 of the SR-06 re-attestation).
+    step, rtol, atol, zero_tol = config
     p0 = check_finite_sequence(point, "point")
     n = len(p0)
     for i, x in enumerate(p0):
@@ -439,10 +549,14 @@ def check_gradient(fn: Callable[[list], float], grad_fn: Callable[[list], Sequen
                 f"|diff|={abs(a - d):.3e} > atol {atol} + rtol {rtol} * max(|a|,|d|) (step {step})")
     abs_err = max(abs(a - d) for a, d in zip(g, num))
     rel_err = max(abs(a - d) / max(abs(a), abs(d), 1e-300) for a, d in zip(g, num))
-    return GradientCheckReport(g, num, abs_err, rel_err, float(step), float(rtol), float(atol))
+    return GradientCheckReport(g, num, abs_err, rel_err, step, rtol, atol)   # already plain floats
 
 
 def _same(a, b) -> bool:
+    """`a` comes back from the caller's callable and `b` is this module's snapshot, so `a` is the LEFT
+    operand of a bare `==` and answers for itself: `_plain_real` first, or a callable that swaps a
+    point coordinate for a `float` subclass with a lying `__eq__` hides its own in-place mutation."""
+    a = _plain_real(a)
     return a == b or (a != a and b != b)
 
 
@@ -487,7 +601,7 @@ def check_params_changed(before: Sequence[float], after: Sequence[float], *,
     b, a = check_finite_sequence(before, f"{name} before"), check_finite_sequence(after, f"{name} after")
     if len(a) != len(b):
         raise ShapeError(f"{name} length changed: {len(b)} -> {len(a)}")
-    mc = check_finite_scalar(min_abs_change, "min_abs_change")
+    mc = check_finite_scalar(_plain_real(min_abs_change), "min_abs_change")
     if mc < 0:
         raise StabilityError("min_abs_change must be >= 0")
     delta = max(abs(x - y) for x, y in zip(a, b))

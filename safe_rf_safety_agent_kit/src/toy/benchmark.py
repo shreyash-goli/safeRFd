@@ -337,6 +337,43 @@ def _word_keyed(m: Any) -> dict:
     return out
 
 
+def _plain_word(x: Any) -> Any:
+    """THE ONE ADMISSION for a word this module looks up IN ONE OF ITS OWN CONSTANTS -- the PROBE side of
+    the key lane. `_word_keyed` normalises the names a STORED mapping files its values under; this
+    normalises the name the module itself carries to a lookup, when that name came from a caller.
+
+    WHY A SECOND ADMISSION AND NOT THE FIRST ONE. `_word_keyed` rewrites the keys of the mapping being
+    probed, so it has nothing to do at `PRIMARY[self.hid]` or `SUBJECT_KIND_CODE[res.subject_kind]`: there
+    the mapping is a module constant whose keys are this file's own literals and are already honest, and
+    the liar is the SUBSCRIPT. `PRIMARY[HidLiar("H3")]` -- a `str` subclass storing 'H3' whose `__hash__`
+    is `hash("H1")` and whose `__eq__` answers True to both -- serves H1's ONE-component row for an id
+    that renders as 'H3' and requires TWO, so `HypothesisResult.__post_init__`'s length check passes on
+    the wrong row and the SELECTIVITY component is dropped and never evaluated (MEASURED:
+    JOINT_UNSUPPORTED -> JOINT_SUPPORTED, `h3.hid` rendering 'H3', components `['delta']`, and nothing in
+    the output saying a requirement was skipped). The same object shape at `SUBJECT_KIND_CODE[...]` files
+    a declared scorer-validation FIXTURE under the TRAINED code 1.0 (MEASURED, and the recompute does not
+    catch it when the gate list claims no exemption), which erases the one disclaimer this module's header
+    exists for.
+
+    Anything that is not a `str` is returned UNCHANGED, so this is a normaliser, never a validator: every
+    caller still runs its own membership check, and `None` must keep reading as "not a gate name" rather
+    than as the characters of `'None'`. Same ordering rule as `_plain_number` and `_plain_parameter`
+    (normalise, THEN compare), and the same reason `str.__str__` rather than `str()`: see `_stored_word`.
+    THE SITES ARE ENUMERATED, not remembered -- see `PROBE_LANE_CONSTANT_LOOKUPS`."""
+    w = _stored_word(x)
+    return x if w is None else w
+
+
+def _plain_word_fields(obj: Any, *names: str) -> None:
+    """`_plain_word` applied to named fields of a frozen dataclass, at construction. One admission per
+    OBJECT beats one per site for the same reason `SeedScores` admits `metrics` at the class rather than
+    at `ok`, `evaluate_gates`, `joint_verdict` and `seed_records` separately: `JointResult.subject_kind`
+    alone is probed at four sites in three functions, and a fix per site is the half-fix pattern this
+    module has already failed to three times."""
+    for n in names:
+        object.__setattr__(obj, n, _plain_word(getattr(obj, n)))
+
+
 def _enum_member(cls: Any, x: Any) -> Any:
     """THE ONE ADMISSION for an Enum-valued field this module compares by IDENTITY. The genuine member of
     `cls` whose value the object STORES, or None.
@@ -347,16 +384,34 @@ def _enum_member(cls: Any, x: Any) -> Any:
     previous HEAD, with `VL` a `str` subclass whose `__eq__` answers True to `Verdict.SUPPORTED`:
         VL == Verdict.SUPPORTED  ->  True        VL is Verdict.SUPPORTED  ->  False
     and the six identity sites in this module pointed in MIXED directions, which is why neither `is` nor
-    `==` is right everywhere and a blanket rewrite to `==` would have opened three sites to close one:
-        line 1717 `self.h3.verdict is Verdict.SUPPORTED`  -- FAIL OPEN. The class invariant "gate 12
-            (convergence) failed => H3 cannot be SUPPORTED" does not fire, and `combine_joint` then
-            coerces the same object with `Verdict(h3)` and reports JOINT_SUPPORTED.
-        lines 998 / 1079 / 1089 `v is Verdict.SUPPORTED`  -- fail CLOSED as written (the liar reads as
-            not-supported => INCONCLUSIVE); `==` would have made all three read SUPPORTED.
-        line 1713 `h.verdict is not Verdict.INCONCLUSIVE`  -- fail CLOSED as written; `!=` would have let
-            a decisive hypothesis past the failed-global-gate check.
-        line 1977 `r.evidence_class is not EvidenceClass.TOY_RESULT` -- fail CLOSED as written; `!=`
-            would ACCEPT a non-member that merely compares equal.
+    `==` is right everywhere and a blanket rewrite to `==` would have opened TWO sites to close one.
+    THE TABLE IS KEYED BY FUNCTION, NOT BY LINE NUMBER: every line number it used to carry (1717, 998,
+    1079, 1089, 1713, 1977) had gone stale, which is the same rot as a hand-maintained list of spellings.
+        `JointResult.__post_init__`'s `self.h3.verdict is Verdict.SUPPORTED`  -- FAIL OPEN. The class
+            invariant "gate 12 (convergence) failed => H3 cannot be SUPPORTED" does not fire, and
+            `combine_joint` then coerces the same object with `Verdict(h3)` and reports JOINT_SUPPORTED.
+        `HypothesisResult.__post_init__`, TWICE (`v is Verdict.SUPPORTED` over the components and
+            `c.verdict is Verdict.SUPPORTED` over the converged-budget components) -- fail CLOSED as
+            written (the liar reads as not-supported => INCONCLUSIVE); `==` would have made these TWO
+            read SUPPORTED. These two, and not three, are the whole of what the uniform rule buys here.
+        `combine_joint`'s `all(... is Verdict.SUPPORTED for v in vs)` -- THIS ROW USED TO BE COUNTED WITH
+            THE THREE ABOVE AND THAT WAS FALSE, which is why the count above is two and not three. The
+            site was ALREADY FAIL-OPEN one line further up: `vs = (Verdict(h1), Verdict(h2), Verdict(h3))`
+            is itself a `_value2member_map_` probe, i.e. `__hash__` + `__eq__` on the caller's object, and
+            the liar WINS it. MEASURED at this HEAD with `VL` as above: `Verdict(VL)` ->
+            `Verdict.SUPPORTED` (the real member), `_enum_member(Verdict, VL)` -> None, and
+            `combine_joint(SUPPORTED, SUPPORTED, VL, True)` -> JOINT_SUPPORTED. So `vs` holds genuine
+            members by the time the comparison runs, the `_enum_member` wrap added here is a NO-OP, and
+            `==` would have changed nothing at this site. The wrap STAYS: the rule is module-wide and
+            enforced by the AST sweep, a no-op that satisfies it costs nothing, and the alternative is a
+            per-site exemption that has to be re-derived whenever a site moves -- which is exactly how
+            this row went stale. What the row does NOT excuse is the coercion itself; `Verdict(h3)` is a
+            separate lane (a constructor probe, not an identity comparison) and is out of this sweep's
+            scope, stated here rather than left implicit.
+        `JointResult.__post_init__`'s `h.verdict is not Verdict.INCONCLUSIVE`  -- fail CLOSED as written;
+            `!=` would have let a decisive hypothesis past the failed-global-gate check.
+        `verdict_from_records`'s `r.evidence_class is not EvidenceClass.TOY_RESULT` -- fail CLOSED as
+            written; `!=` would ACCEPT a non-member that merely compares equal.
     ADMITTING THE OPERAND closes both directions at once and leaves the direction argument unnecessary:
     after this call the thing compared is a real member, so `is` means what it says. `isinstance(x, cls)`
     is required FIRST and deliberately, so that a plain `str` "TOY_RESULT" is still not an
@@ -380,7 +435,7 @@ def _enum_member(cls: Any, x: Any) -> Any:
 # explicitly exempted, rather than noticed by a reviewer.
 ENUM_ADMISSIONS = ("_enum_member", "Verdict", "JointVerdict", "EvidenceClass")
 
-# Every place this module looks a WORD up in a mapping it reaches THROUGH A FIELD, rather than in a local
+# Every place this module looks a key up in a mapping it reaches THROUGH A FIELD, rather than in a local
 # already admitted by `_word_keyed` or in one of its own constants. A DECLARATION, not a proof: what makes
 # it load-bearing is that `test_benchmark.TheKeyLaneSweepIsDerivedFromTheModuleNotFromAList` enumerates
 # these sites from this file's AST -- string-literal AND f-STRING keys, since the `gate_*` lookup is an
@@ -388,21 +443,136 @@ ENUM_ADMISSIONS = ("_enum_member", "Verdict", "JointVerdict", "EvidenceClass")
 # NEW lookup through a field therefore has to be admitted or written down here with its reason, which is
 # the property no previous round's fix had: `input_hashes` was found in round 6, normalised on its VALUES,
 # and came back in round 12 through its KEYS because nothing enumerated the sites.
+#   VARIABLE KEYS ARE COLLECTED TOO, as of this round, and that is a correction rather than an extension.
+# The sweep used to collect string and f-string keys only and defer a variable key "to the payload walk" --
+# but the payload walk reaches RECORD mappings and nothing else, so `self.newmap[k]` on any other object
+# was covered by neither. MEASURED: mutant M9c (a new mapping field plus a verdict-deciding variable-key
+# read of it) was unkilled by `test_benchmark`, `test_dashboard` and `test_robustness` together. Collecting
+# variable keys costs four more declarations, listed below, and closes the gap by enumeration instead of by
+# a promise about where the other sweep looks.
 KEY_LANE_ATTRIBUTE_LOOKUPS = MappingProxyType({
     "s.metrics": "ADMITTED AT THE CLASS, not at the site: `SeedScores.__post_init__` runs `_word_keyed` "
                  "over `metrics` before its exact-key-set check, so every `s.metrics[...]` in this module "
                  "and every key `seed_records` copies into a record is the word the producer's key stored. "
                  "One admission per object beats one per site here because `ok`, `evaluate_gates`, "
-                 "`joint_verdict` and `seed_records` all read the same mapping. The same field is also "
-                 "read as `self.metrics[k]` inside `SeedScores.ok`, with a VARIABLE key, which the AST "
-                 "sweep cannot see and the class admission covers anyway.",
-    "other.params": "NOT caller-reachable, measured rather than argued: `other` is "
+                 "`joint_verdict` and `seed_records` all read the same mapping. Both the literal-key and "
+                 "the VARIABLE-key spellings (`s.metrics[key]` in `evaluate_gates`, `s.metrics[k]` in "
+                 "`analyze_scores`) are covered by that one admission.",
+    "self.metrics": "the SAME field and the same class admission, read from inside `SeedScores.ok` as "
+                    "`self.metrics[k]` with a VARIABLE key. It used to be mentioned only in prose inside "
+                    "the `s.metrics` entry, on the grounds that the AST sweep could not see a variable "
+                    "key; the sweep now sees it, so it is declared where the sweep reads rather than "
+                    "described where a reader might not.",
+    "other.params": "REACHABLE, and the previous reason for this entry was WRONG in its inference while "
+                    "right in its count. It used to say the C_rand branch is one 'no study builds' -- but "
+                    "`ARM_FACTORIES` is public, `run_study`'s `treatment` is a caller-supplied argument, "
+                    "and `ARM_FACTORIES['C_rand']` declares `trained_student=True` with `arm_name` "
+                    "'C_rand', so `run_study(frozen, ARM_FACTORIES['C_rand'], ...)` reaches this branch "
+                    "(MEASURED: `treatment_kind(ARM_FACTORIES['C_rand'])` -> 'trained'). What actually "
+                    "carries the entry is the IN-PROCESS ARGUMENT: `other` is "
                     "`make_teacher(derive_seed(seed, 'rand_target'), cfg.width)` and `teacher` is "
-                    "`build_fixture(...).teacher`, both produced by `toy.teacher_student.make_teacher`, "
-                    "which writes the four keys as literals in this process. The branch is also in arm "
-                    "C_rand, which no study builds -- `run_study` instantiates only C_init, C0 and "
-                    "C_shuf -- so no stored record and no verdict reads it.",
-    "teacher.params": "the same construction and the same branch; see `other.params`.",
+                    "`build_fixture(...).teacher`, both built by `toy.teacher_student.make_teacher` in "
+                    "this process, which writes the four keys as literals -- so no caller object is ever "
+                    "a key of either mapping, whoever runs the arm.",
+    "teacher.params": "the same construction and the same in-process argument; see `other.params`.",
+    "o.conditioned": "NOT A WORD LOOKUP AT ALL, declared because the sweep now collects variable keys and "
+                     "therefore sees it: `o` is a `TeacherOutputs` and `i`/`j` are integers from "
+                     "`range(...)` in `_control_adequacy`, so the subscript is a SEQUENCE INDEX. A rule "
+                     "that guessed index-ness from the spelling of the variable would be the lexical "
+                     "rule this project has retired three times, so it is written down instead.",
+    "o.unconditioned": "the same object and the same integer `range` indices; see `o.conditioned`.",
+})
+
+# The PROBE side of the key lane: every place this module looks a word up in ONE OF ITS OWN CONSTANTS
+# with a key that is NOT a literal. There `_word_keyed` has nothing to normalise -- the constant's keys
+# are this file's literals and are already honest -- and the liar is the SUBSCRIPT. A DECLARATION on the
+# same terms as `KEY_LANE_ATTRIBUTE_LOOKUPS`: `test_benchmark.TheProbeLaneSweepIsDerivedFromTheModule`
+# enumerates these sites from this file's AST, keyed by ENCLOSING FUNCTION so a moved site fails closed
+# rather than hiding behind an identical subscript text elsewhere, and fails if the set differs. Each
+# value names the admission that makes the site read the characters the probe stores.
+#   THE INVARIANT: a lookup into a module constant decides on the characters the probe stores.
+# Every entry is either admitted by `_plain_word` / `_plain_word_fields` at or above the site, or is
+# UNREACHABLE BY A CALLER'S OBJECT and says why. Nothing here is "a reviewer looked at it".
+PROBE_LANE_CONSTANT_LOOKUPS = MappingProxyType({
+    "HypothesisResult.__post_init__: PRIMARY[self.hid]":
+        "`_plain_word_fields(self, 'hid')` is the first statement of `__post_init__`, so both the "
+        "membership refusal and the component-count check read the stored characters. THE FINDING THIS "
+        "CLOSES: `PRIMARY[HidLiar('H3')]` served H1's one-component row, the length check passed, and the "
+        "SELECTIVITY component was dropped and never evaluated -- JOINT_UNSUPPORTED -> JOINT_SUPPORTED.",
+    "evaluate_primary: PRIMARY[hid]":
+        "`hid = _plain_word(hid)` at the top, before the refusal and before `build(PRIMARY[hid])`. "
+        "Normalising only inside `HypothesisResult` would be too late: this function picks the component "
+        "TABLE off the probe and builds the components from it.",
+    "exploratory_interval: PRIMARY[name]":
+        "`name = _plain_word(name)` at the top. The consequential direction here is mild and stated "
+        "rather than inflated: `ExploratoryResult` has no verdict field at all, so a probe that evaded "
+        "the refusal bought a label, not a verdict. Closed anyway, because the refusal is the sentence "
+        "'only H1, H2, H3 can produce a verdict' in executable form.",
+    "_tag: PRIMARY[hid]":
+        "`hid = _plain_word(hid)` at the top. `len(PRIMARY[hid]) == 1` decides whether a component is "
+        "filed as `H3` or as `H3a`/`H3b`, i.e. the NAME a record is stored under and the name "
+        "`verdict_from_records` requires -- a probe reading as H1 collapsed all three H3 records onto one "
+        "tag (MEASURED: `records missing for ['H3a','H3b','H3a_conv','H3b_conv']`).",
+    "GateResult.scope: GATE_SCOPES[self.name]":
+        "the same normalised field, read by the `scope` property -- which is the one that DECIDES whether "
+        "a failed gate forces INCONCLUSIVE everywhere ('all') or only blocks a SUPPORTED H3 ('H3'). It "
+        "gets its own entry rather than sharing `__post_init__`'s because the sweep is keyed by enclosing "
+        "function: two identical subscripts in two methods are two sites, and collapsing them is how a "
+        "site moves out from under a declaration unnoticed.",
+    "GateResult.__post_init__: GATE_SCOPES[self.name]":
+        "`_plain_word_fields(self, 'name')` is the first statement of `__post_init__`, so the unknown-gate "
+        "refusal and the `scope` property read the same characters. MEASURED AT THE PRE-FIX HEAD THIS SITE "
+        "ALREADY FAILED CLOSED, and the reason matters because the reason previously recorded for it was "
+        "wrong: it is NOT `sorted(names) != sorted(GATE_SCOPES)` (a liar that answers its own stored word "
+        "passes that elementwise `==`), it is that 'convergence' is the only scope-'H3' gate, so a probe "
+        "must answer 'convergence' to downgrade a global gate -- and then `'convergence' in failed` finds "
+        "it by the same hash and the gate-12 invariant fires. Closed by reading now, not by that accident.",
+    "JointResult.__post_init__: GATE_SCOPES[n]":
+        "`failed` is built with `_plain_word(g.name)` as its keys. `g.name` is normalised for a real "
+        "`GateResult`, but this comprehension reads `.name` off ANY object in the list -- a hand-built "
+        "gate list may carry a duck-typed object, exactly as `carries_exemption` already documents -- so "
+        "the normalisation is at the comprehension and not left to the class.",
+    "verdict_from_records: GATE_SCOPES[n]":
+        "UNREACHABLE BY A CALLER'S OBJECT: `n` iterates `GATE_SCOPES` itself (`state = {n: gm.get(...) "
+        "for n in GATE_SCOPES}`, then `failed` filters that dict), so every probe is one of this file's "
+        "own literal keys. Nothing to admit; declared so the site is enumerated rather than overlooked.",
+    "evaluate_gates: SUBJECT_KINDS[subject_kind]":
+        "`subject_kind = _plain_word(subject_kind)` at the top, before the refusal and before "
+        "`exempt = subject_kind == 'fixture'` -- the one line that decides whether gate 11(c)'s E-loss "
+        "check runs at all.",
+    "JointResult.__post_init__: SUBJECT_KINDS[self.subject_kind]":
+        "`_plain_word_fields(self, 'subject_kind')` is the first statement of `__post_init__`, so the "
+        "membership refusal, the `fixture_name` biconditional and the `carries_exemption(gates) and "
+        "self.subject_kind != 'fixture'` invariant all read the stored characters. THE FINDING THIS "
+        "CLOSES: a probe storing 'fixture' and answering 'trained' was accepted, rendered as 'fixture', "
+        "and made every record file the TRAINED code.",
+    "_agg_metrics: SUBJECT_KIND_CODE[subject_kind]":
+        "`subject_kind = _plain_word(subject_kind)` at the top. Its only caller passes "
+        "`res.subject_kind`, which `JointResult` already normalises, but this function is the one that "
+        "turns a word into the STORED NUMBER a recompute decodes, so it does not inherit the guarantee.",
+    "to_experiment_records: SUBJECT_KIND_CODE[res.subject_kind]":
+        "`res.subject_kind` is normalised by `JointResult.__post_init__`; this is the JOINT record's "
+        "`subject_kind_code`, the number `verdict_from_records` decodes the kind from. MEASURED pre-fix: "
+        "2.0 (fixture) became 1.0 (trained) with `loss_check_exempt` 0.0, so the gate-11(c) cross-check "
+        "had nothing to fire on and the recompute reported `subject_kind 'trained'`, JOINT_SUPPORTED, "
+        "`reasons = ()`.",
+    "seed_records: SUBJECT_KIND_CODE[res.subject_kind]":
+        "the same normalised field, on the per-seed audit trail. Worth its own entry because this record "
+        "set is NOT the one `verdict_from_records` reads, so no cross-check anywhere covers it: a wrong "
+        "code here is wrong in the only place a reader goes for per-seed provenance.",
+    "_arm_fit: ARM_NAMES[arm]":
+        "`arm = _plain_word(arm)` at the top -- AND, separately, at both call paths that can carry a "
+        "caller's object (`_arm_params` and `score_seed`'s `trained_arm`). The second half is not "
+        "belt-and-braces: `_arm_fit` is `functools.lru_cache`d, so the cache key is HASHED BEFORE THE "
+        "BODY RUNS and a normalisation inside the body cannot reach it. A probe storing 'C_rand' that "
+        "answers 'C0' would otherwise be served the C0 entry of the cache.",
+    "treatment_kind: ARM_NAMES[_plain_word(getattr(treatment, 'arm_name', None))]":
+        "the probe is read through `_plain_word`. `None` must keep reading as 'not an arm name', which is "
+        "why `_plain_word` returns a non-`str` unchanged instead of stringifying it. This is the "
+        "TRUSTED-DECLARATION boundary and the entry claims no more: a caller who declares a trained "
+        "student still gets 'trained'. What is closed is the narrower thing -- the declared arm name is "
+        "validated against the characters it stores, so it cannot pass validation as one arm and then be "
+        "cached, scored and reported as another.",
 })
 
 
@@ -1201,6 +1371,22 @@ class HypothesisResult:
     reasons: tuple = dataclasses.field(init=False)
 
     def __post_init__(self) -> None:
+        # NORMALISE THE PROBE, THEN LOOK IT UP -- the ordering rule of `_plain_number`, one lane further
+        # out. `hid` is not just validated against `PRIMARY`, it SELECTS THE ROW THAT SAYS HOW MANY
+        # COMPONENTS THIS HYPOTHESIS REQUIRES, so a probe that answers as another id does not merely
+        # evade a refusal, it replaces the requirement. MEASURED through this PUBLIC constructor with no
+        # `object.__setattr__`, with `HidLiar` a `str` subclass storing 'H3' whose `__hash__` is
+        # `hash('H1')` and whose `__eq__` answers True to 'H3' and 'H1':
+        #     PRIMARY[HidLiar('H3')] -> one row (H1's), where H3 requires two
+        #     HidLiar('H3') != 'H3'  -> False, so the H3 converged-budget path below still runs
+        #     HypothesisResult('H3', (one component,))  -> ValueError, the honest short build
+        #     HypothesisResult(HidLiar('H3'), (one component,), conv)  -> ACCEPTED, verdict SUPPORTED,
+        #         `hid` rendering as 'H3', components ['delta'], and NOTHING in `reasons` saying the
+        #         selectivity requirement was skipped
+        # and `JointResult.__post_init__`'s `h.hid != hid` read False too, so the construction stood:
+        # JOINT_UNSUPPORTED -> JOINT_SUPPORTED on a study whose shuffled-control comparison was the only
+        # thing holding it down. See `_plain_word` and `PROBE_LANE_CONSTANT_LOOKUPS`.
+        _plain_word_fields(self, "hid")
         if self.hid not in PRIMARY:
             raise ValueError(f"{self.hid!r} is not a primary hypothesis")
         if len(self.components) != len(PRIMARY[self.hid]):
@@ -1250,6 +1436,7 @@ def evaluate_primary(hid: str, series: Mapping[str, Sequence[float]], margins: M
                      base_seed: int, blocking: Sequence[str] = (), supported_blockers: Sequence[str] = ()
                      ) -> HypothesisResult:
     """Evaluate one primary hypothesis at the Bonferroni level (m=4). Refuses anything outside {H1,H2,H3}."""
+    hid = _plain_word(hid)      # the probe decides WHICH component table is built; see `_plain_word`
     if hid not in PRIMARY:
         raise ValueError(f"{hid!r} is not a primary hypothesis; non-primary metrics are exploratory and "
                          f"cannot produce a verdict (use exploratory_interval)")
@@ -1274,6 +1461,7 @@ def evaluate_primary(hid: str, series: Mapping[str, Sequence[float]], margins: M
 def exploratory_interval(name: str, values: Sequence[float], cfg: BenchmarkConfig, base_seed: int
                          ) -> ExploratoryResult:
     """Interval at the unadjusted level 1-alpha, labelled EXPLORATORY. Never yields a verdict."""
+    name = _plain_word(name)    # see `_plain_word`; the refusal below must read the stored characters
     if name in PRIMARY:
         raise ValueError(f"{name!r} is a primary hypothesis id; use evaluate_primary")
     return ExploratoryResult(name, summarize("explore:" + name, values, 1.0 - cfg.alpha, cfg.n_boot, base_seed,
@@ -1415,7 +1603,12 @@ class ArmFit:
 @functools.lru_cache(maxsize=4096)
 def _arm_fit(seed: int, arm: str, cfg: BenchmarkConfig) -> ArmFit:
     """Trained student for (seed, arm, cfg). Pure function of its arguments; arms differ from E in exactly
-    one declared factor and share TRAIN, lr, student init (derive_seed(seed,'student_init'))."""
+    one declared factor and share TRAIN, lr, student init (derive_seed(seed,'student_init')).
+    `arm` is normalised here AND at both call paths that can carry a caller's object (`_arm_params` and
+    `score_seed`'s `trained_arm`), because `functools.lru_cache` HASHES THE ARGUMENT BEFORE THIS BODY
+    RUNS: normalising only here would leave the cache key itself a probe, and a probe storing 'C_rand'
+    that answers 'C0' would be served the C0 entry. See `PROBE_LANE_CONSTANT_LOOKUPS`."""
+    arm = _plain_word(arm)
     if arm not in ARM_NAMES:
         raise ValueError(f"unknown arm {arm!r}; allowed {ARM_NAMES}")
     fx = build_fixture(seed, cfg)
@@ -1443,7 +1636,8 @@ def _arm_fit(seed: int, arm: str, cfg: BenchmarkConfig) -> ArmFit:
 
 
 def _arm_params(seed: int, arm: str, cfg: BenchmarkConfig) -> tuple:
-    return _arm_fit(seed, arm, cfg).params
+    # `_plain_word` HERE, not only inside `_arm_fit`: the `lru_cache` key is hashed before that body runs.
+    return _arm_fit(seed, _plain_word(arm), cfg).params
 
 
 def _student_factory(arm: str) -> PredictorFactory:
@@ -1481,7 +1675,10 @@ def treatment_kind(treatment) -> str:
     t, f = getattr(treatment, "trained_student", False) is True, getattr(treatment, "scorer_validation_fixture", False) is True
     if t and f:
         raise ValueError("treatment declares both trained_student and scorer_validation_fixture")
-    if t and getattr(treatment, "arm_name", None) not in ARM_NAMES:
+    # `_plain_word`, so the declared arm name is validated against the characters it stores: a probe
+    # cannot pass this check as one arm and then be cached, scored and reported as another. A non-`str`
+    # (including the `None` default) is returned unchanged and still reads as "not an arm name".
+    if t and _plain_word(getattr(treatment, "arm_name", None)) not in ARM_NAMES:
         raise ValueError("a trained_student treatment must declare a valid arm_name")
     if f and not (isinstance(getattr(treatment, "fixture_name", None), str) and treatment.fixture_name.strip()):
         raise ValueError("a scorer-validation fixture must declare a nonempty fixture_name")
@@ -1683,7 +1880,8 @@ def score_seed(seed: int, treatment: PredictorFactory, cfg: BenchmarkConfig) -> 
     Whether the treatment is a trained student is read from the factory's own declaration (`treatment_kind`),
     never from a caller flag: an undeclared factory gets E_loss_ratio unmeasured (and so fails gate 11(c))."""
     kind = treatment_kind(treatment)
-    trained_arm = treatment.arm_name if kind == "trained" else None
+    # `_plain_word` at the point the declared name becomes an `lru_cache` KEY (see `_arm_fit`).
+    trained_arm = _plain_word(treatment.arm_name) if kind == "trained" else None
     try:
         fx = build_fixture(seed, cfg)
     except IneligibleSeed:
@@ -1723,6 +1921,19 @@ class GateResult:
     exempt: bool = False   # True only for control_adequacy when the gate-11(c) loss check was waived (fixtures)
 
     def __post_init__(self) -> None:
+        # NORMALISE THE PROBE, THEN LOOK IT UP. `name` is refused against `GATE_SCOPES` below and then
+        # subscripts it in `scope`, which decides whether a failed gate forces INCONCLUSIVE everywhere
+        # ('all') or only blocks a SUPPORTED H3 ('H3'). MEASURED AT THE PRE-FIX HEAD THIS ALREADY FAILED
+        # CLOSED -- but NOT for the reason previously recorded here. It is not that
+        # `JointResult.__post_init__`'s `sorted(names) != sorted(GATE_SCOPES)` catches it: `sorted` uses
+        # the un-overridden `str.__lt__` so a liar sorts by its stored characters, and the elementwise
+        # `==` then only requires it to answer its OWN stored word, which a liar answering two words
+        # does. What actually closed it is narrower: 'convergence' is the ONLY scope-'H3' gate, so a
+        # probe has to answer 'convergence' to downgrade a failed global gate -- and `'convergence' in
+        # failed` then finds it under the same hash and the gate-12 invariant fires. That is an accident
+        # of the scope table having one 'H3' entry, and it would stop holding the day a second one is
+        # added. Closed by reading the stored characters instead. See `_plain_word`.
+        _plain_word_fields(self, "name")
         if self.exempt is not True and self.exempt is not False:
             raise ValueError("GateResult.exempt must be exactly True or False")
         if self.exempt and self.name != "control_adequacy":
@@ -1760,6 +1971,10 @@ def evaluate_gates(scores: Sequence[SeedScores], frozen: FrozenSeedList, registe
     # `margins` is ACCEPTED AND IGNORED: no gate threshold depends on a margin (they are all `cfg` fields),
     # and the body never reads it. Kept in the signature only because `analyze_scores` passes it positionally.
     # Stated so a reader does not infer that gates move when margins do -- they do not.
+    # NORMALISE THE PROBE FIRST: `subject_kind` is refused against `SUBJECT_KINDS` below and then decides
+    # `exempt = subject_kind == "fixture"`, the one line that says whether gate 11(c)'s E-loss check runs
+    # at all. See `_plain_word`.
+    subject_kind = _plain_word(subject_kind)
     gates = []
     ids = [s.seed for s in scores]
     if registered_digest is None:
@@ -1848,6 +2063,23 @@ class JointResult:
     deferred_gates = DEFERRED_GATES   # class-level constant: not an init argument, not settable per instance
 
     def __post_init__(self) -> None:
+        # NORMALISE THE PROBE, THEN LOOK IT UP, before any of the four reads below. `subject_kind` is
+        # refused against `SUBJECT_KINDS`, gates the `fixture_name` biconditional, carries the
+        # `carries_exemption(gates) and self.subject_kind != "fixture"` invariant, and is the word
+        # `_agg_metrics`, `to_experiment_records` and `seed_records` turn into the STORED CODE a
+        # recompute decodes. MEASURED through public constructors with no `object.__setattr__`, with a
+        # `str` subclass storing 'fixture' whose `__hash__` is `hash('trained')` and whose `__eq__`
+        # answers True to both:
+        #     accepted; renders as 'fixture'; `self.subject_kind != "fixture"` -> False, so the
+        #     exemption invariant does not fire; and EVERY record files
+        #     `subject_kind_code = 1.0` -- the TRAINED code, where fixture is 2.0.
+        # With a gate list that claims no exemption (the public `GateResult` constructor, `exempt`
+        # defaulting to False) `verdict_from_records` has nothing to cross-check and reports
+        # `subject_kind 'trained'`, JOINT_SUPPORTED, `reasons = ()`. A declared scorer-validation
+        # fixture, whose JOINT_SUPPORTED means ONLY "the scorer can say yes when the answer is yes by
+        # construction", reported as a trained subject erases the disclaimer this module's header exists
+        # for. This is the flip round 12 closed on the RECORD side, reached from the producer side.
+        _plain_word_fields(self, "subject_kind")
         for h, hid in ((self.h1, "H1"), (self.h2, "H2"), (self.h3, "H3")):
             if not isinstance(h, HypothesisResult) or h.hid != hid:
                 raise ValueError(f"JointResult needs HypothesisResult {hid} in its slot")
@@ -1874,7 +2106,11 @@ class JointResult:
         if sorted(names) != sorted(GATE_SCOPES):
             raise ValueError(f"gates must contain exactly {sorted(GATE_SCOPES)} (empty gates do not pass vacuously)")
         # Single-place invariant, independent of how the HypothesisResults were built (e.g. without `blocking`):
-        failed = {g.name: g for g in self.gates if not g.passed}
+        # `_plain_word` ON THE KEYS: `g.name` is normalised by `GateResult.__post_init__`, but this
+        # comprehension reads `.name` off ANY object in the list -- a hand-built gate list may carry a
+        # duck-typed one, exactly as `carries_exemption` already documents -- so the normalisation is
+        # here and not left to the class. See `PROBE_LANE_CONSTANT_LOOKUPS`.
+        failed = {_plain_word(g.name): g for g in self.gates if not g.passed}
         if any(GATE_SCOPES[n] == "all" for n in failed):
             bad = [h.hid for h in (self.h1, self.h2, self.h3)
                    if _enum_member(Verdict, h.verdict) is not Verdict.INCONCLUSIVE]
@@ -1962,6 +2198,9 @@ _AGG_KEYS = ("mean", "sd", "iqr", "min", "max", "max_over_median_abs", "ci_boot_
 
 
 def _agg_metrics(pair: IntervalPair, margin: float, n_failed: int, subject_kind: str = "unknown") -> dict:
+    # This function turns a word into the STORED NUMBER a recompute decodes the subject kind from, so it
+    # normalises its own probe rather than inheriting `JointResult`'s. See `_plain_word`.
+    subject_kind = _plain_word(subject_kind)
     m = {"mean": pair.mean, "sd": pair.sd, "iqr": pair.iqr, "min": pair.minimum, "max": pair.maximum,
          "max_over_median_abs": pair.max_over_median_abs,
          "ci_boot_lo": pair.boot_lo, "ci_boot_hi": pair.boot_hi, "ci_t_lo": pair.t_lo, "ci_t_hi": pair.t_hi,
@@ -1973,6 +2212,9 @@ def _agg_metrics(pair: IntervalPair, margin: float, n_failed: int, subject_kind:
 
 
 def _tag(hid: str, metric: str, conv: bool = False) -> str:
+    # The probe picks the component table that decides whether this record is filed as `H3` or as
+    # `H3a`/`H3b` -- i.e. the name `verdict_from_records` will require. See `_plain_word`.
+    hid = _plain_word(hid)
     if len(PRIMARY[hid]) == 1:
         return hid
     return hid + ("a" if metric.startswith("delta") and "minus" not in metric else "b") + ("_conv" if conv else "")

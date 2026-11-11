@@ -4609,11 +4609,54 @@ def _recompute_outcome(recs, cfg):
 
 
 def _mapping_fields(rec):
-    """The mappings of one record whose KEYS this module looks words up in, by the route it reads them:
-    walked off the OBJECT, not listed, so a mapping a producer starts filing is swept the day it exists."""
-    return (("metrics", rec.metrics, lambda r, m: object.__setattr__(r, "metrics", m)),
-            ("provenance.input_hashes", rec.provenance.input_hashes,
-             lambda r, m: object.__setattr__(r.provenance, "input_hashes", m)))
+    """The mappings of one record whose KEYS this module looks words up in: WALKED OFF THE OBJECT, not
+    listed, so a mapping a producer starts filing is swept the day it exists.
+
+    CORRECTION, ONE OF THREE ACCOUNTING ERRORS THIS ROUND FOUND IN THE PREVIOUS ROUND'S OWN TESTS. The
+    sentence above is what this function's docstring already said; the body was a HARDCODED TWO-ENTRY
+    TUPLE, and `test_the_sweep_is_not_vacuous_and_the_honest_study_is_decisive` asserted that hardcoded
+    set as a literal (`{"metrics", "provenance.input_hashes"}`). The list was COMPLETE -- measured, those
+    are still the only two today, and the sweep size is unchanged at 129 -- so nothing was unswept. But
+    the PROPERTY it claimed was false: a mapping a producer started filing would NOT have been swept the
+    day it existed, and the test that looked like it guarded the walk was pinning the literal instead.
+    A figure in a test is pinned; a docstring is not, and the two had drifted.
+    It walks now. Every `Mapping`-valued attribute of the record is yielded, and every dataclass-valued
+    attribute is DESCENDED INTO (which is how `provenance.input_hashes` is reached without being named),
+    each with a setter that writes the replacement back. Duck-typed records -- which
+    `verdict_from_records` accepts, deliberately and on the record -- are walked through `vars`, so the
+    route this file documents with `FakeRecord` is covered by the walk too.
+    A `str` is not a `Mapping` and an `Enum` member is not a dataclass, so `name`, `notes` and
+    `evidence_class` are not yielded; the recursion depth is bounded by the record's own nesting."""
+    def setter(owner_path, attr):
+        def put(r, m):
+            target = r
+            for step in owner_path:
+                target = getattr(target, step)
+            object.__setattr__(target, attr, m)
+        return put
+
+    def walk(obj, path, seen):
+        if id(obj) in seen:
+            return
+        seen = seen | {id(obj)}
+        if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+            names = [f.name for f in dataclasses.fields(obj)]
+        else:
+            names = sorted(vars(obj)) if hasattr(obj, "__dict__") else []
+        for attr in names:
+            try:
+                v = getattr(obj, attr)
+            except AttributeError:
+                continue
+            if isinstance(v, collections.abc.Mapping):
+                yield (".".join(path + [attr]), v, setter(tuple(path), attr))
+            elif (dataclasses.is_dataclass(v) and not isinstance(v, type)) or (
+                    hasattr(v, "__dict__") and not isinstance(v, (type, str, bytes))
+                    and type(v).__module__ not in ("builtins",) and not isinstance(v, Enum)
+                    and not callable(v)):
+                yield from walk(v, path + [attr], seen)
+
+    return tuple(walk(rec, [], frozenset()))
 
 
 class TheConfigBindingReadsTheWordTheKeyStores(unittest.TestCase):
@@ -4761,11 +4804,27 @@ class EveryWordLookedUpInAStoredMappingIsSwept(unittest.TestCase):
     WITH THAT KEY PLAINIFIED -- the donor's value under the donor's own name and the target name absent,
     which is `base` minus the target key. So the assertion is exactly the round's invariant: the lookup
     reads the characters the key stores. A site satisfying neither that nor "cannot decide anything" is a
-    complaint, and four were, all with `reasons = ()`:
-        input_hashes 'seed_list_2' -> 'config'                  JOINT_INCONCLUSIVE -> JOINT_SUPPORTED
-        metrics 'loss_check_exempt' -> 'gate_seed_list_frozen'   JOINT_INCONCLUSIVE -> JOINT_SUPPORTED
-        metrics 'loss_check_exempt' -> 'subject_kind_code'       subject_kind fixture -> 'trained'
-        metrics the exemption flag hidden behind an unread word  ValueError -> JOINT_SUPPORTED
+    complaint, and 116 of 129 were pre-fix.
+
+    THE FOUR NAMED FLIPS ARE NOT FOUR CASES OF THIS GENERATOR, and the attribution used to say they were.
+    CORRECTION, the first of three accounting errors this round found in the previous round's own tests:
+    the evidence is real and was measured, but only ONE of the four is a (target, donor) pair the cyclic
+    rule below produces, and the sibling test's claim "These are the same cases the generator above
+    produces" was false for three of four. MEASURED at this HEAD:
+        input_hashes 'seed_list_2' -> 'config'    NOT a generator case: 'seed_list_2' is not an
+            `input_hashes` key at all (the keys are config / registered_seed_list / seed_list), so the
+            cyclic rule never names it. The generator's donor for 'config' is 'registered_seed_list'.
+        metrics 'loss_check_exempt' -> 'gate_seed_list_frozen'   IS a generator case, and the only one:
+            the cyclic donor for 'gate_seed_list_frozen' on the JOINT record IS 'loss_check_exempt'.
+            (The hand-built version below additionally runs a DIFFERENT study, one with a failed
+            seed_list_frozen gate, which is where its JOINT_INCONCLUSIVE -> JOINT_SUPPORTED comes from.)
+        metrics 'loss_check_exempt' -> 'subject_kind_code'   NOT a generator case: the cyclic donor for
+            'subject_kind_code' is 'gate_control_adequacy'.
+        metrics the exemption flag hidden behind an unread word   NOT a generator case: it invents the
+            donor key 'zzz_never_read', which no record files, and mutates a second key as well.
+    The three hand-built cases are kept BECAUSE they are not generator cases: they reach consequences the
+    cyclic donor rule cannot pair up, and naming them is how a reader learns what the sweep is for. What
+    is corrected is only the claim that the generator produced them.
     SWEEP SIZE is asserted below rather than described, so the sweep cannot quietly shrink to nothing."""
     TS = "2025-01-02T03:04:05Z"
 
@@ -4802,19 +4861,41 @@ class EveryWordLookedUpInAStoredMappingIsSwept(unittest.TestCase):
         first and reported ONE site where the pre-fix module has 116 -- and the count is what
         distinguishes "the invariant is broken here" from "the invariant is broken module-wide".
 
-        MEASURED against the pre-fix module, all 129 cases classified (3.12.4, PYTHONPATH=src, cleared
-        `__pycache__`, nothing else running). 116 complaints, and they are NOT all the same severity --
-        the distinction is the point, because a longer finding list is worth less than a classified one:
+        MEASURED against the pre-fix module (`git archive eb21eef^`), all 129 cases classified, 3.12.4,
+        `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src`, cleared `__pycache__`, nothing else running. 116
+        complaints, and they are NOT all the same severity -- the distinction is the point, because a
+        longer finding list is worth less than a classified one:
              13  agree: the lookup already read the word the key stored
              73  both raise, and only the metric NAMED in the message differs. UNCOVERED, NOT
                  CONSEQUENTIAL: the record is refused either way, and the harm is a misleading error
-                 string, not a verdict. These are what a raw count of 116 would overstate.
+                 string, not a verdict. These are what a raw count of 116 would overstate. Re-measured
+                 this round and SHARPENED: 48 differ only in the metric named, 25 differ in WHICH
+                 REFUSAL FIRES (e.g. "stores no margin metric" where the reference says "missing the
+                 metrics [...]"). The severity label is unchanged; the description was understated.
              14  the forgery RAISES where the plainified mapping recomputes -- the fail-closed direction
              12  CONSEQUENTIAL: the forgery RECOMPUTES where the plainified mapping RAISES, i.e. it buys
                  a decisive verdict out of a record that is missing a metric
              17  CONSEQUENTIAL: both recompute and the verdict, the subject kind or the reasons differ
-        So 29 of 129 forgeries move a verdict, a subject kind or a reasons tuple, and that is the number
-        this round is about. Post-fix: 129 agree, 0 complaints."""
+
+        29 of 129 is the CONSEQUENTIAL bucket and this docstring used to call it "the number this round
+        is about". CORRECTION, the third of three accounting errors this round found in the previous
+        round's own tests: 29 is a defensible conservative bucket that errs toward over-reporting -- the
+        right direction for a safety audit -- but it is NOT the escalation count, and the sentence
+        claiming it was existed only in the journal, never in a test. `grep -rn 'escalation' tests/ src/`
+        returned nothing, so the correction was unpinned while the figure it corrected was pinned here.
+        RE-MEASURED INDEPENDENTLY AT THE SAME PRE-FIX COMMIT, re-ranking the same 129 by DIRECTION (how
+        much the forger gains, raise < UNSUPPORTED < INCONCLUSIVE < SUPPORTED):
+             13  ESCALATIONS -- 12 turning a hard `ValueError` into JOINT_SUPPORTED ('n_failed' answering
+                 as 'n_boot' and 'subject_kind_code' answering as 'sd', on each of the six agg records),
+                 and exactly ONE moving the joint verdict ('loss_check_exempt' answering as
+                 'gate_seed_list_frozen' on the JOINT record: JOINT_INCONCLUSIVE -> JOINT_SUPPORTED)
+             21  DENIALS -- the forged outcome is MORE conservative than the reference. Not exploitable.
+              9  LATERAL -- same rank; a differing reason string or component verdict under an
+                 unchanged joint
+             73  both-raise, as above
+        13 + 21 + 9 + 73 = 116. So the honest headline is 13 escalations of 129, of which 1 moves the
+        joint verdict. 116 is not usable as a severity count and 29 is not the escalation count.
+        Post-fix: 129 agree, 0 complaints."""
         swept = 0
         complaints = []
         for index, field, target, donor in self._cases():
@@ -4840,8 +4921,14 @@ class EveryWordLookedUpInAStoredMappingIsSwept(unittest.TestCase):
         self.assertEqual(honest[1], J.JOINT_SUPPORTED)
         self.assertEqual(honest[5], "fixture")
         self.assertEqual(honest[7], ())
+        # The two mapping fields are what the WALK finds today, asserted as the walk's OUTPUT and not as
+        # the hardcoded input it used to be (see `_mapping_fields`). A producer that starts filing a
+        # third mapping makes this fail naming it, which is the point: the sweep then has to be
+        # re-measured rather than silently covering one field less than the payload has.
         fields = {f for _, f, _, _ in self._cases()}
         self.assertEqual(fields, {"metrics", "provenance.input_hashes"})
+        walked = {n for rec in self.recs for n, _, _ in _mapping_fields(rec)}
+        self.assertEqual(walked, fields, "the walk and the cases it yields must agree")
         names = {t for _, f, t, _ in self._cases() if f == "metrics"}
         for required in ("subject_kind_code", "loss_check_exempt", "margin", "ci_level", "n_seeds",
                          "gate_seed_list_frozen", "gate_convergence", "ci_boot_lo", "ci_boot_hi"):
@@ -4851,8 +4938,17 @@ class EveryWordLookedUpInAStoredMappingIsSwept(unittest.TestCase):
     def test_the_sweep_catches_the_four_flips_it_exists_for(self):
         """THE EVIDENCE, as a test rather than as a claim in a report: each of the four complaints is
         rebuilt here and asserted to fail closed. Pre-fix each returned a decisive, reason-free recompute.
-        These are the same cases the generator above produces; they are repeated by hand ONLY so that the
-        consequences are named where a reader looks for them."""
+
+        CORRECTED ATTRIBUTION. This docstring used to end "These are the same cases the generator above
+        produces", and that is FALSE FOR THREE OF THE FOUR -- measured, and set out case by case in
+        `EveryWordLookedUpInAStoredMappingIsSwept`'s class docstring. Only (a)'s (target, donor) pair,
+        `'gate_seed_list_frozen'` <- `'loss_check_exempt'`, is one the cyclic rule produces, and even
+        that one is run here on a DIFFERENT study (a failed seed_list_frozen gate). (b) uses a donor the
+        cyclic rule never pairs with its target, (c) invents a key no record files, and (d) likewise.
+        They are kept, and they are hand-built ON PURPOSE: they reach consequences the donor rule cannot
+        pair up. What is corrected is the claim that the generator produced them -- because "the
+        generator catches these" and "these are hand-built illustrations of what the generator is for"
+        are different claims, and only the second one is true."""
         joint = [i for i, r in enumerate(self.recs) if str.__str__(r.name).endswith("/agg/JOINT")]
         self.assertEqual(len(joint), 1)
         at = joint[0]
@@ -5004,13 +5100,28 @@ class TheKeyLaneSweepIsDerivedFromTheModuleNotFromAList(unittest.TestCase):
     """THE AST TRIPWIRE behind the payload walk, and the reason `input_hashes` could come back at all:
     round 6 normalised the values of the site it remembered, and nothing enumerated the sites.
 
-    Every place `benchmark.py` looks a WORD up in a mapping it reaches THROUGH A FIELD is collected from
+    Every place `benchmark.py` looks a key up in a mapping it reaches THROUGH A FIELD is collected from
     the AST and checked against `bm.KEY_LANE_ATTRIBUTE_LOOKUPS`, which is declared IN THE MODULE so that
     nothing is listed in this test file and a new lookup fails closed. F-STRING keys are collected as well
     as literals, which is not decoration: `gm.get(f"gate_{n}")` is the site that turned a FAILED global
     gate into a passing one, and the first sweep written for this round -- `ast.Constant` subscripts
-    only -- did not see it. MEASURED: 42 literal-key sites and one
-    f-string site, which is the one that turned the gate."""
+    only -- did not see it. MEASURED: 42 literal-key sites and one f-string site, which is the one that
+    turned the gate.
+
+    TWO CORRECTIONS THIS ROUND, both in the SCOPE of the rule rather than in its figures.
+    (1) VARIABLE KEYS ARE NOW COLLECTED. The sweep used to declare a variable key out of scope and defer
+    it "to the payload walk" -- but the payload walk reaches RECORD mappings and nothing else, so a
+    variable-key read of any OTHER mapping was covered by neither sweep. MEASURED: mutant M9c (a new
+    mapping field plus a verdict-deciding variable-key read of it) was unkilled by `test_benchmark`,
+    `test_dashboard` and `test_robustness` together, 729 OK. It is killed here now, by enumeration: a new
+    container appears in the collected set and is not in the declaration. The cost was four more
+    declarations, two of which say "this is a `range` index, not a word".
+    (2) "THROUGH A FIELD" IS NOW A NODE-TYPE TEST, not a string test. It used to be
+    `"." in container and "(" not in container` on the UNPARSED text, which is exactly the lexical-rule
+    class this project has retired three times; with variable keys collected it also started reporting
+    `o.conditioned[i]` -- an element of a nested sequence, whose container is a `Subscript` and not a
+    field at all -- as a field read. The test is `isinstance(container, ast.Attribute)`, which is what
+    the sentence "reached through a field" actually means."""
 
     @staticmethod
     def _annotation_nodes(tree):
@@ -5024,28 +5135,37 @@ class TheKeyLaneSweepIsDerivedFromTheModuleNotFromAList(unittest.TestCase):
 
     @classmethod
     def _word_lookups(cls, source):
-        """(line, container source, key source, is_fstring) for every mapping lookup with a STRING or
-        F-STRING key, in all three spellings a module can write one: `m[k]`, `m.get(k)` and `k in m`.
+        """(line, container source, key source, kind, through_a_field) for EVERY mapping lookup, in all
+        three spellings a module can write one: `m[k]`, `m.get(k)` and `k in m`.
 
-        `is_fstring` comes from the AST NODE TYPE, not from sniffing the unparsed key text -- the first
-        version of this test asked `"f'" in key` and the literal `'C_shuf'` matched it, which is the same
-        class of mistake as every lexical rule this project has retired.
-        OUT OF SCOPE, stated so the sweep does not read as larger than it is: a lookup whose key is a
-        VARIABLE (`self.metrics[k]`, `series[metric]`). No static rule resolves what word those hold, and
-        they are covered instead by the payload walk in `EveryWordLookedUpInAStoredMappingIsSwept`, which
-        sees the read however it is spelled because it hooks the mapping rather than the source text."""
+        `kind` is one of 'literal', 'fstring', 'index' or 'variable', and it comes from the AST NODE
+        TYPE, never from sniffing the unparsed text -- the first version of this test asked `"f'" in key`
+        and the literal `'C_shuf'` matched it, which is the same class of mistake as every lexical rule
+        this project has retired. 'index' is an integer constant, a unary-minus integer or a slice: those
+        are SEQUENCE INDICES and not key lookups at all, and separating them by node type is what lets
+        variable keys be collected without the count filling up with `history[-1]` and `sorted_v[i]`.
+        `through_a_field` is `isinstance(container, ast.Attribute)` -- see the class docstring for why
+        that replaced a string test on the unparsed container."""
         tree = ast.parse(source)
         skip = cls._annotation_nodes(tree)
         found = []
 
-        def wordish(node):
-            return ((isinstance(node, ast.Constant) and isinstance(node.value, str))
-                    or isinstance(node, ast.JoinedStr))
+        def kind_of(node):
+            if isinstance(node, ast.JoinedStr):
+                return "fstring"
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return "literal"
+            if isinstance(node, ast.Slice) or (isinstance(node, ast.Constant)
+                                               and isinstance(node.value, int)):
+                return "index"
+            if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+                return "index"
+            return "variable"
 
         def add(node, container, key):
-            if id(node) not in skip and wordish(key):
-                found.append((node.lineno, ast.unparse(container), ast.unparse(key),
-                              isinstance(key, ast.JoinedStr)))
+            if id(node) not in skip:
+                found.append((node.lineno, ast.unparse(container), ast.unparse(key), kind_of(key),
+                              isinstance(container, ast.Attribute)))
 
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
@@ -5060,8 +5180,11 @@ class TheKeyLaneSweepIsDerivedFromTheModuleNotFromAList(unittest.TestCase):
 
     def test_every_word_lookup_through_a_field_is_admitted_or_declared(self):
         found = self._word_lookups(_SRC_FILES["benchmark"].read_text())
-        through_a_field = sorted({container for _, container, _, _ in found
-                                  if "." in container and "(" not in container})
+        # Index subscripts are excluded by NODE TYPE, not by the spelling of the variable: `history[-1]`
+        # and `sorted_v[i]` name positions, not words. Everything else -- literal, f-string and VARIABLE
+        # key alike -- has to be declared if it is read through a field.
+        through_a_field = sorted({container for _, container, _, kind, fld in found
+                                  if fld and kind != "index"})
         self.assertEqual(through_a_field, sorted(bm.KEY_LANE_ATTRIBUTE_LOOKUPS),
                          "a word is looked up in a mapping reached through a field that is neither "
                          "admitted by `_word_keyed` nor declared in `KEY_LANE_ATTRIBUTE_LOOKUPS` with "
@@ -5073,25 +5196,63 @@ class TheKeyLaneSweepIsDerivedFromTheModuleNotFromAList(unittest.TestCase):
         """The three lookups this round moved, pinned by ABSENCE, so reinstating any of them fails here
         as well as in the payload walk."""
         found = self._word_lookups(_SRC_FILES["benchmark"].read_text())
-        containers = {container for _, container, _, _ in found}
+        containers = {container for _, container, _, _, _ in found}
         for gone in ("r.metrics", "rec.metrics", "r.provenance.input_hashes", "by['JOINT'].metrics"):
             self.assertNotIn(gone, containers, f"{gone} is read with a word key again; wrap it in "
                                                f"`_word_keyed` as `verdict_from_records` does")
         self.assertIn(("_word_keyed(r.provenance.input_hashes)", "'config'"),
-                      {(c, k) for _, c, k, _ in found})
+                      {(c, k) for _, c, k, _, _ in found})
 
     def test_the_f_string_key_site_is_collected_and_a_constant_only_sweep_misses_it(self):
         """THE SWEEP'S OWN PROOF, and the measurement that justifies collecting `JoinedStr` at all."""
         source = _SRC_FILES["benchmark"].read_text()
         found = self._word_lookups(source)
-        fstrings = [(c, k) for _, c, k, is_f in found if is_f]
+        fstrings = [(c, k) for _, c, k, kind, _ in found if kind == "fstring"]
         self.assertEqual(fstrings, [("gm", "f'gate_{n}'")])
-        literals = [f for f in found if not f[3]]
+        literals = [f for f in found if f[3] == "literal"]
         # 42, not the 44 a first count gave: that one also collected the two string FORWARD
         # REFERENCES `Optional["BenchmarkConfig"]` and `Optional["Margins"]`, which are string
         # Constants inside an annotation and not lookups at all. Annotation subtrees are excluded.
         self.assertEqual(len(literals), 42)
-        self.assertNotIn("f'gate_{n}'", {k for _, _, k, _ in literals})
+        self.assertNotIn("f'gate_{n}'", {k for _, _, k, _, _ in literals})
+
+    def test_the_variable_key_count_is_derived_here_and_not_inherited(self):
+        """THE FIGURE 46, DERIVED. A previous round's prose said "46 variable-key lookups exist in the
+        module" and that figure was UNREPRODUCED: an independent re-implementation of this sweep's STATED
+        rule reproduced the pinned 42 + 1 exactly but got 83 non-string-key sites, a strict superset, and
+        neither party could say what the difference was. It is this, measured and now pinned, so the
+        number is a consequence of the rule rather than a remembered total:
+
+            126  every lookup in the three spellings, annotation subtrees excluded
+           - 42  string-literal keys           (pinned above)
+           -  1  f-string key  f'gate_{n}'     (pinned above)
+           - 33  integer-index or slice subscripts -- `history[-1]`, `sorted_v[i]`, `boot[0]`: positions,
+                 not names, and never a key lookup
+           -  4  typing-generic subscripts in NON-annotation position: the module-level aliases
+                 `Matrix`/`Predictor`/`PredictorFactory` write `Callable[...]` and `Sequence[...]` as
+                 ordinary expressions, so the annotation exclusion does not reach them
+           = 46  VARIABLE-KEY word lookups
+
+        83 = 46 + 33 + 4, which is exactly the superset the re-implementation reported: it had the rule
+        right and was counting indices and type aliases as lookups. Both figures are now reproducible
+        from this test, which is the only place either of them should live."""
+        source = _SRC_FILES["benchmark"].read_text()
+        found = self._word_lookups(source)
+        self.assertEqual(len(found), 126)
+        by_kind = collections.Counter(kind for _, _, _, kind, _ in found)
+        self.assertEqual(by_kind["literal"], 42)
+        self.assertEqual(by_kind["fstring"], 1)
+        self.assertEqual(by_kind["index"], 33)
+        TYPING = {"Callable", "Sequence", "Mapping", "Optional"}
+        typing_generics = [f for f in found if f[3] == "variable" and f[1] in TYPING]
+        self.assertEqual(len(typing_generics), 4, typing_generics)
+        variable_words = [f for f in found if f[3] == "variable" and f[1] not in TYPING]
+        self.assertEqual(len(variable_words), 46)
+        self.assertEqual(by_kind["variable"], 50, "46 variable-key words + 4 typing-generic aliases")
+        self.assertEqual(by_kind["literal"] + by_kind["fstring"] + by_kind["index"]
+                         + by_kind["variable"], 126)
+        # And the 83 the independent re-implementation reported, derived rather than quoted.
+        self.assertEqual(len(variable_words) + by_kind["index"] + len(typing_generics), 83)
 
     def test_the_tripwire_fails_on_a_reinstated_unadmitted_lookup(self):
         """NOT VACUOUS: the pre-fix spelling of the defect, fed back in as source text, is reported."""
@@ -5101,7 +5262,8 @@ class TheKeyLaneSweepIsDerivedFromTheModuleNotFromAList(unittest.TestCase):
             'stored = {r.provenance.input_hashes.get("config") for r in by.values()}', 1)
         self.assertNotEqual(pre_fix, source, "the anchor for the mutation is gone; update this test")
         ast.parse(pre_fix)
-        containers = {c for _, c, _, _ in self._word_lookups(pre_fix) if "." in c and "(" not in c}
+        containers = {c for _, c, _, kind, fld in self._word_lookups(pre_fix)
+                      if fld and kind != "index"}
         self.assertIn("r.provenance.input_hashes", containers)
         self.assertNotIn("r.provenance.input_hashes", set(bm.KEY_LANE_ATTRIBUTE_LOOKUPS))
 
@@ -5248,6 +5410,695 @@ class NoIdentityComparisonAgainstAnEnumMemberStandsUnadmitted(unittest.TestCase)
         with self.assertRaises(ValueError) as caught:
             bm.verdict_from_records(recs, SMALL)
         self.assertIn("only TOY_RESULT records can carry a recomputed verdict", str(caught.exception))
+
+
+# ============================================================== the PROBE lane
+def _probe_liar(stores, answers):
+    """A `str` storing `stores` that HASHES as `answers` and COMPARES EQUAL TO BOTH: the minimum object
+    that makes a MODULE CONSTANT serve one word's row under another word's name while the field it came
+    out of still renders honestly.
+
+    The twin of `_key_liar`, pointing the other way. `_key_liar` is a stored mapping's KEY and the module
+    probes it with a literal; this is the module's own PROBE and the mapping's keys are honest literals.
+    It must answer True to `answers` for the lookup to resolve there (CPython compares the STORED key
+    with the probe, and `do_richcompare` gives the subclass the first word, so the probe's `__eq__` is
+    what runs) -- and True to `stores` as well, because the forgery is only interesting if the object
+    also survives the module's own `x == 'the word I claim to be'` checks. `str.__str__` is not
+    overridable, so `_stored_word` still reads the characters it holds."""
+    class ProbeLiar(str):
+        def __hash__(self):
+            return hash(answers)
+
+        def __eq__(self, other):
+            return other in (stores, answers) if isinstance(other, str) else NotImplemented
+
+        def __ne__(self, other):
+            r = self.__eq__(other)
+            return NotImplemented if r is NotImplemented else not r
+
+    return ProbeLiar(stores)
+
+
+class TheProbeLaneSweepIsDerivedFromTheModule(unittest.TestCase):
+    """THE AST TRIPWIRE for the PROBE side of the key lane, and the structural gap it closes.
+
+    Round 12 closed the STORED-KEY lane in this module: `_word_keyed` normalises the names a stored
+    mapping files its values under, and the payload walk enumerates those sites off a real payload. Both
+    are silent about the OTHER half of every one of those lookups. When the module writes
+    `PRIMARY[self.hid]` or `SUBJECT_KIND_CODE[res.subject_kind]`, the mapping is one of its OWN CONSTANTS,
+    its keys are this file's literals and are already honest, and the liar is the SUBSCRIPT -- so
+    `_word_keyed` has nothing to normalise and the payload walk has no payload to walk.
+
+    HOW THE SITES ARE ENUMERATED: every lookup into a module-level constant that is a container of words,
+    in the same three spellings the key-lane sweep uses (`C[k]`, `C.get(k)`, `k in C`), with annotation
+    subtrees excluded by the same rule -- collected from the AST of `benchmark.py` and split by whether
+    the KEY is a literal or a PROBE. The probe sites are checked against
+    `bm.PROBE_LANE_CONSTANT_LOOKUPS`, declared IN THE MODULE, so nothing is listed in this file and a new
+    probe lookup fails closed. The declaration is keyed by ENCLOSING FUNCTION, not by subscript text: two
+    identical subscripts in two methods are two sites (`GATE_SCOPES[self.name]` is read in both
+    `GateResult.__post_init__` and `GateResult.scope`), and collapsing them is how a site moves out from
+    under its declaration unnoticed.
+
+    MY OWN COUNT AND HOW I GOT IT, because the figure a previous round carried was unreproduced: 24
+    module-constant lookups in `benchmark.py` -- 5 with a literal key (all `ARM_FACTORIES['...']`) and 19
+    with a PROBE key, falling in 15 distinct (function, lookup) pairs. The 19 is derived by the rule
+    stated above and pinned below; it is not the 46 nor the 83 of the earlier prose, both of which count
+    EVERY variable-key lookup in the file rather than the ones that probe a module constant (and both of
+    which are now derived in `test_the_variable_key_count_is_derived_here_and_not_inherited`).
+
+    WHAT IT ASSERTS: that the set of probe sites equals the declaration, and that every declared site is
+    either swept behaviourally by `EveryProbeIntoAModuleConstantReadsTheWordItStores` or declared
+    unreachable by a caller's object with its reason. The enumeration IS the claim; the declaration's
+    prose is evidence, not a substitute."""
+
+    @staticmethod
+    def _word_containers():
+        """The module-level constants a word can be looked up IN, read off the MODULE, never listed."""
+        out = {}
+        for name, value in vars(bm).items():
+            if name.startswith("__") or name.strip("_") != name.strip("_").upper():
+                continue
+            if isinstance(value, collections.abc.Mapping):
+                if any(isinstance(k, str) for k in value):
+                    out[name] = value
+            elif isinstance(value, (tuple, list, frozenset, set)):
+                if any(isinstance(x, str) for x in value):
+                    out[name] = value
+        return out
+
+    @classmethod
+    def _constant_lookups(cls, source):
+        """(line, 'qualname: CONST[key]', is_probe) for every lookup into one of those constants."""
+        tree = ast.parse(source)
+        consts = cls._word_containers()
+        qual = {id(tree): "<module>"}
+
+        def walk(node, stack):
+            for child in ast.iter_child_nodes(node):
+                qual[id(child)] = ".".join(stack) or "<module>"
+                inner = (stack + [child.name]
+                         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                         else stack)
+                walk(child, inner)
+
+        walk(tree, [])
+        skip = set()
+        for node in ast.walk(tree):
+            for field in ("annotation", "returns"):
+                sub = getattr(node, field, None)
+                if sub is not None:
+                    skip.update(id(n) for n in ast.walk(sub))
+
+        def literal(key):
+            return ((isinstance(key, ast.Constant) and isinstance(key.value, str))
+                    or isinstance(key, ast.JoinedStr))
+
+        found = []
+        for node in ast.walk(tree):
+            pairs = []
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("get", "pop", "setdefault") and node.args):
+                pairs.append((node.func.value, node.args[0]))
+            if isinstance(node, ast.Subscript):
+                pairs.append((node.value, node.slice))
+            if (isinstance(node, ast.Compare) and len(node.ops) == 1
+                    and isinstance(node.ops[0], (ast.In, ast.NotIn))):
+                pairs.append((node.comparators[0], node.left))
+            for container, key in pairs:
+                if id(node) in skip or not isinstance(container, ast.Name) or container.id not in consts:
+                    continue
+                found.append((node.lineno, f"{qual[id(node)]}: {container.id}[{ast.unparse(key)}]",
+                              not literal(key)))
+        return found
+
+    def test_every_probe_into_a_module_constant_is_declared_with_its_admission(self):
+        found = self._constant_lookups(_SRC_FILES["benchmark"].read_text())
+        probes = sorted({site for _, site, is_probe in found if is_probe})
+        self.assertEqual(probes, sorted(bm.PROBE_LANE_CONSTANT_LOOKUPS),
+                         "a word is looked up in one of this module's own constants with a key that is "
+                         "not a literal, and the site is not declared in "
+                         "`PROBE_LANE_CONSTANT_LOOKUPS`. Normalise the probe with `_plain_word` (or "
+                         "`_plain_word_fields` at the class) and declare the site, or write down the "
+                         "measurement that makes a caller's object unable to reach it.")
+        for site, why in bm.PROBE_LANE_CONSTANT_LOOKUPS.items():
+            self.assertTrue(why.strip() and len(why) > 80, site)
+
+    def test_the_counts_are_derived_from_the_rule_not_inherited(self):
+        """MY OWN COUNT, pinned so the sweep cannot quietly shrink and so the figure has a derivation."""
+        found = self._constant_lookups(_SRC_FILES["benchmark"].read_text())
+        self.assertEqual(len(found), 24, "module-constant lookups in all three spellings")
+        probe_sites = [f for f in found if f[2]]
+        literal_sites = [f for f in found if not f[2]]
+        self.assertEqual(len(probe_sites), 19)
+        self.assertEqual(len(literal_sites), 5)
+        self.assertEqual({s.split(": ", 1)[1] for _, s, _ in literal_sites},
+                         {"ARM_FACTORIES['C_init']", "ARM_FACTORIES['C0']", "ARM_FACTORIES['C_shuf']"})
+        self.assertEqual(len({s for _, s, _ in probe_sites}), 15, "distinct (function, lookup) pairs")
+        self.assertIn("PRIMARY", self._word_containers())
+        self.assertIn("SUBJECT_KIND_CODE", self._word_containers())
+        self.assertIn("GATE_SCOPES", self._word_containers())
+
+    def test_the_tripwire_fails_on_an_undeclared_and_on_a_moved_probe(self):
+        """NOT VACUOUS, in the two ways this tripwire can rot. A NEW probe lookup must be reported, and
+        so must a probe lookup that MOVES to another function while keeping its text -- which is the one
+        a declaration keyed on subscript text alone would miss."""
+        source = _SRC_FILES["benchmark"].read_text()
+        added = source.replace(
+            "def _now() -> str:\n    return ",
+            "def _now(kind='unknown') -> str:\n    _ = SUBJECT_KIND_CODE[kind]\n    return ", 1)
+        self.assertNotEqual(added, source, "the anchor for the mutation is gone; update this test")
+        ast.parse(added)
+        probes = {s for _, s, p in self._constant_lookups(added) if p}
+        self.assertIn("_now: SUBJECT_KIND_CODE[kind]", probes)
+        self.assertNotIn("_now: SUBJECT_KIND_CODE[kind]", set(bm.PROBE_LANE_CONSTANT_LOOKUPS))
+
+        moved = source.replace("    def scope(self) -> str:\n        return GATE_SCOPES[self.name]",
+                               "    def scope_v2(self) -> str:\n        return GATE_SCOPES[self.name]", 1)
+        self.assertNotEqual(moved, source)
+        probes = {s for _, s, p in self._constant_lookups(moved) if p}
+        self.assertIn("GateResult.scope_v2: GATE_SCOPES[self.name]", probes)
+        self.assertNotIn("GateResult.scope_v2: GATE_SCOPES[self.name]",
+                         set(bm.PROBE_LANE_CONSTANT_LOOKUPS))
+        self.assertNotIn("GateResult.scope: GATE_SCOPES[self.name]", probes,
+                         "the moved site must no longer satisfy its old declaration")
+
+    def test_the_pre_fix_spellings_of_both_findings_are_reported(self):
+        """The two sites this round's findings came through, pinned by the ABSENCE of the admission: feed
+        the pre-fix source back in and the normaliser is gone, so the site stands where the declaration
+        says the admission is."""
+        source = _SRC_FILES["benchmark"].read_text()
+        for anchor in ('        _plain_word_fields(self, "hid")\n',
+                       '        _plain_word_fields(self, "subject_kind")\n'):
+            self.assertIn(anchor, source, "the admission this test pins by absence is gone")
+            pre_fix = source.replace(anchor, "", 1)
+            ast.parse(pre_fix)
+            self.assertNotIn(anchor, pre_fix)
+        self.assertIn("hid = _plain_word(hid)", source)
+        self.assertIn("subject_kind = _plain_word(subject_kind)", source)
+
+
+class EveryProbeIntoAModuleConstantReadsTheWordItStores(unittest.TestCase):
+    """THE BEHAVIOURAL SWEEP of the probe lane, and the deliverable of this round rather than the two
+    patches it contains.
+
+    HOW THE CASES ARE GENERATED, and why this is not a list of findings. Each route below is one public
+    entry point that carries a word into a module-constant lookup, paired with THE CONSTANT ITSELF as its
+    vocabulary. The generator then takes every ORDERED PAIR of distinct words from that constant --
+    `itertools.permutations(constant, 2)`, read off `bm` at run time -- and builds the route twice: once
+    with `_probe_liar(stores, answers)` and once with the plain `stores`. Nothing is typed here: adding a
+    hypothesis to `PRIMARY`, a gate to `GATE_SCOPES`, a kind to `SUBJECT_KIND_CODE` or an arm to
+    `ARM_NAMES` enlarges the sweep the day it happens, and a route whose constant is wrong produces
+    `KeyError` rather than passing quietly.
+
+    WHAT IT ASSERTS, and why the reference is not "the honest study": the probe really does name a
+    different word, so the honest outcome is the wrong comparison. The reference is THE SAME ROUTE WITH
+    THE PROBE PLAINIFIED -- `stores` as an ordinary `str` -- which makes the assertion exactly the
+    round's invariant and nothing more:
+
+        A LOOKUP INTO A MODULE CONSTANT DECIDES ON THE CHARACTERS THE PROBE STORES.
+
+    An outcome is everything a consumer can observe from that route: the exception type and message if it
+    raises, and otherwise the verdicts, the rendered field, the component metric names, the reasons and
+    the STORED SUBJECT-KIND CODE. The codes are in it deliberately, for the same reason the key-lane
+    sweep put `reasons` in its outcome: Finding B's signature was a record set that was wrong in a
+    number while every rendered string stayed honest, so an outcome that compared only rendered fields
+    would have missed it.
+
+    COVERAGE IS ASSERTED AGAINST THE DECLARATION, not described: every site in
+    `bm.PROBE_LANE_CONSTANT_LOOKUPS` is claimed by a route here or named in `_UNREACHABLE` with the
+    reason it cannot carry a caller's object, and the two sets together must be the whole declaration.
+    That is what makes the enumeration the claim rather than a longer list of cases."""
+
+    # The one declared site no route can reach, and why. Asserted against the declaration below, so it
+    # cannot drift into a silent exemption.
+    _UNREACHABLE = {"verdict_from_records: GATE_SCOPES[n]":
+                    "`n` iterates `GATE_SCOPES` itself, so every probe is one of the module's own "
+                    "literal keys and no caller object can be substituted."}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.res = oracle()
+        cls.comps = {"H1": cls.res.h1.components, "H2": cls.res.h2.components,
+                     "H3": cls.res.h3.components}
+        cls.conv = cls.res.h3.converged_components
+        # A hand-built series for the `evaluate_primary` route: the PUBLIC `series` argument, so the
+        # route needs no study of its own and every hypothesis's table finds its metrics.
+        n = 30
+        cls.series = {m: [1.0 + 0.001 * i for i in range(n)]
+                      for m in bm.SEED_METRICS + ("delta_minus_shuf_conv",)}
+        cls.series["L"] = [-1.0 + 0.001 * i for i in range(n)]
+
+    # ---------------------------------------------------------------- routes
+    def _route_hypothesis_result(self, stores, probe):
+        """`HypothesisResult.hid` -> `PRIMARY[self.hid]`: the component-count requirement itself."""
+        conv = self.conv if stores == "H3" else ()
+        h = bm.HypothesisResult(probe, tuple(self.comps[stores]), conv)
+        return (str(h.hid), h.verdict, h.reasons,
+                tuple(str.__str__(c.metric) for c in h.components),
+                tuple(str.__str__(c.metric) for c in h.converged_components))
+
+    def _route_evaluate_primary(self, stores, probe):
+        """`evaluate_primary.hid` -> `PRIMARY[hid]`: which component TABLE is built."""
+        h = bm.evaluate_primary(probe, self.series, bm.Margins(), SMALL, 7)
+        return (str(h.hid), h.verdict, tuple(str.__str__(c.metric) for c in h.components))
+
+    def _route_tag(self, stores, probe):
+        """`_tag.hid` -> `PRIMARY[hid]`: the NAME a component record is filed under."""
+        return tuple(str(bm._tag(probe, m, conv))
+                     for m in ("delta", "delta_minus_shuf") for conv in (False, True))
+
+    def _route_exploratory(self, stores, probe):
+        """`exploratory_interval.name` -> `PRIMARY[name]`: the refusal that keeps a verdict out."""
+        e = bm.exploratory_interval(probe, [1.0, 2.0, 3.0], SMALL, 7)
+        return (str(e.name), str(e.label))
+
+    def _route_gate_result(self, stores, probe):
+        """`GateResult.name` -> `GATE_SCOPES[self.name]` in `__post_init__` and in `scope`."""
+        g = bm.GateResult(probe, False, "r")
+        return (str(g.name), str(g.scope), g.passed, g.exempt)
+
+    def _route_joint_gates(self, stores, probe):
+        """`JointResult.__post_init__` -> `GATE_SCOPES[n]`: whether a failed gate is global or H3-only."""
+        gates = tuple(bm.GateResult(probe if str.__str__(g.name) == stores else g.name,
+                                    g.passed, g.reason)
+                      for g in self.res.gates)
+        j = self._joint(gates, "fixture", "oracle_gated")
+        return j if isinstance(j, tuple) else (str(j.verdict), j.gates_ok,
+                                               tuple(sorted(str(g.scope) for g in j.gates)))
+
+    def _route_joint_kind(self, stores, probe):
+        """`JointResult.subject_kind` -> `SUBJECT_KINDS` and the three `SUBJECT_KIND_CODE` record sites."""
+        gates = tuple(bm.GateResult(g.name, g.passed, g.reason) for g in self.res.gates)
+        fname = "oracle_gated" if stores == "fixture" else None
+        j = self._joint(gates, probe, fname)
+        if isinstance(j, tuple):
+            return j
+        recs = bm.to_experiment_records(j, study_id="p", base_seed=7, timestamp_utc=TS_PROBE)
+        srecs = bm.seed_records(j, study_id="p", timestamp_utc=TS_PROBE)
+        code = lambda r: bm._metric_read(r.metrics["subject_kind_code"])
+        return (str(j.subject_kind), str(j.verdict), code(recs[0]), code(recs[-1]), code(srecs[0]),
+                bm._metric_read(recs[-1].metrics["loss_check_exempt"]),
+                _recompute_outcome(recs, SMALL))
+
+    def _route_evaluate_gates(self, stores, probe):
+        """`evaluate_gates.subject_kind` -> `SUBJECT_KINDS`, and `exempt = subject_kind == 'fixture'`."""
+        gates = bm.evaluate_gates(self.res.seed_scores, FZ, FZ.digest, SMALL, probe, self.res.margins)
+        return tuple((str(g.name), g.passed, g.exempt, str(g.scope)) for g in gates)
+
+    def _route_agg_metrics(self, stores, probe):
+        """`_agg_metrics.subject_kind` -> `SUBJECT_KIND_CODE[subject_kind]`: the stored number."""
+        m = bm._agg_metrics(self.res.h1.components[0].pair, 0.1, 0, probe)
+        return bm._metric_read(m["subject_kind_code"])
+
+    def _route_arm_params(self, stores, probe):
+        """`_arm_fit.arm` -> `ARM_NAMES[arm]`, AND the `lru_cache` key the probe becomes."""
+        params = bm._arm_params(7, probe, SMALL)
+        flat = [v for row in params for v in row] if params and not isinstance(params[0], float) \
+            else list(params)
+        return tuple(round(float(v), 12) for v in flat)
+
+    def _route_treatment_kind(self, stores, probe):
+        """`treatment_kind` -> `ARM_NAMES[arm_name]`: the declared-arm validation."""
+        def factory(fx, cfg):
+            raise AssertionError("not called")
+
+        factory.trained_student = True
+        factory.arm_name = probe
+        return (bm.treatment_kind(factory), bm.treatment_fixture_name(factory))
+
+    _ROUTES = (("HypothesisResult.hid", "PRIMARY", "_route_hypothesis_result",
+                ("HypothesisResult.__post_init__: PRIMARY[self.hid]",)),
+               ("evaluate_primary.hid", "PRIMARY", "_route_evaluate_primary",
+                ("evaluate_primary: PRIMARY[hid]",)),
+               ("_tag.hid", "PRIMARY", "_route_tag", ("_tag: PRIMARY[hid]",)),
+               ("exploratory_interval.name", "PRIMARY", "_route_exploratory",
+                ("exploratory_interval: PRIMARY[name]",)),
+               ("GateResult.name", "GATE_SCOPES", "_route_gate_result",
+                ("GateResult.__post_init__: GATE_SCOPES[self.name]",
+                 "GateResult.scope: GATE_SCOPES[self.name]")),
+               ("JointResult.gates", "GATE_SCOPES", "_route_joint_gates",
+                ("JointResult.__post_init__: GATE_SCOPES[n]",)),
+               ("JointResult.subject_kind", "SUBJECT_KIND_CODE", "_route_joint_kind",
+                ("JointResult.__post_init__: SUBJECT_KINDS[self.subject_kind]",
+                 "to_experiment_records: SUBJECT_KIND_CODE[res.subject_kind]",
+                 "seed_records: SUBJECT_KIND_CODE[res.subject_kind]")),
+               ("evaluate_gates.subject_kind", "SUBJECT_KIND_CODE", "_route_evaluate_gates",
+                ("evaluate_gates: SUBJECT_KINDS[subject_kind]",)),
+               ("_agg_metrics.subject_kind", "SUBJECT_KIND_CODE", "_route_agg_metrics",
+                ("_agg_metrics: SUBJECT_KIND_CODE[subject_kind]",)),
+               ("_arm_fit.arm", "ARM_NAMES", "_route_arm_params", ("_arm_fit: ARM_NAMES[arm]",)),
+               ("treatment_kind.arm_name", "ARM_NAMES", "_route_treatment_kind",
+                ("treatment_kind: ARM_NAMES[_plain_word(getattr(treatment, 'arm_name', None))]",)))
+
+    def _joint(self, gates, kind, fname):
+        try:
+            return bm.JointResult(self.res.subject, self.res.h1, self.res.h2, self.res.h3, gates,
+                                  self.res.seed_scores, self.res.ineligible, self.res.n_attempted,
+                                  self.res.n_failed, self.res.seed_list_digest,
+                                  self.res.registered_digest, self.res.config_hash, self.res.margins,
+                                  kind, fname)
+        except Exception as exc:                        # noqa: BLE001 - the error IS the outcome
+            return ("raised", type(exc).__name__, str(exc))
+
+    @staticmethod
+    def _vocabulary(const):
+        """The constant's own words, PLUS one word it does not contain.
+
+        The outside word is not decoration: without it only the valid-answers-another-valid direction is
+        swept, and the two directions a probe can point are different findings. A probe storing a VALID
+        word that answers an invalid one must keep succeeding (it is an honest word); a probe storing an
+        INVALID word that answers a valid one must keep being refused. It is derived from the constant's
+        name rather than typed, and asserted absent, so it cannot silently become a real member the day
+        the vocabulary grows."""
+        words = sorted(getattr(bm, const))
+        outside = "zzz_not_a_" + const.lower()
+        assert outside not in getattr(bm, const), (const, outside)
+        return words + [outside]
+
+    def _cases(self):
+        """Every (route, stored word, answered word) the module's own constants yield. Derived, never
+        typed: the vocabulary is the constant itself, read off `bm` at run time, and the generator takes
+        every ordered pair of distinct words from it."""
+        for label, const, method, _sites in self._ROUTES:
+            for stores, answers in itertools.permutations(self._vocabulary(const), 2):
+                yield label, method, stores, answers
+
+    def _probe_outcome(self, method, stores, probe):
+        # NOT `_outcome`: `unittest.TestCase` already owns that attribute (it holds the
+        # running test's `_Outcome`), and shadowing it makes every case raise TypeError
+        # instead of comparing -- a sweep that reports nothing because it cannot run.
+        try:
+            return ("ok", getattr(self, method)(stores, probe))
+        except Exception as exc:                        # noqa: BLE001 - the error IS the outcome
+            return ("raised", type(exc).__name__, str(exc))
+
+    def test_every_probe_reads_the_word_it_stores(self):
+        """THE SWEEP. Every complaint is collected before failing, deliberately: the count is what
+        distinguishes "the invariant is broken here" from "the invariant is broken module-wide", and the
+        first version of the key-lane sweep stopped at the first complaint and reported one site where
+        the module had 116.
+
+        MEASURED AGAINST THE PRE-FIX MODULE (`git archive HEAD` of commit e66cf71 with the
+        `_plain_word` admissions removed), 3.12.4, `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src`, cleared
+        `__pycache__`, nothing else running: the figures are in this round's report. Post-fix every case
+        agrees with its plainified reference."""
+        # CLEAR THE SHARED CACHE FIRST. `_arm_fit` is `lru_cache`d and its key is the probe, so a
+        # liar-hashed entry left by ANOTHER test is served to this one -- and pre-fix that made this
+        # sweep's own complaint count depend on test ORDER (130 complaints after the arm test had run,
+        # 116 in a fresh process). The order dependence is part of the defect, not an artefact of the
+        # harness, and the fix removes it by making every key a plain word; the clear is here so the
+        # green result cannot depend on leftover state either way.
+        bm._arm_fit.cache_clear()
+        swept, complaints = 0, []
+        for label, method, stores, answers in self._cases():
+            swept += 1
+            forged = self._probe_outcome(method, stores, _probe_liar(stores, answers))
+            plain = self._probe_outcome(method, stores, stores)
+            if forged != plain:
+                complaints.append(f"{label}: a probe storing {stores!r} that answers as {answers!r} is "
+                                  f"not read as the word it stores.\n      forged: {forged}\n"
+                                  f"      plain : {plain}")
+        self.assertEqual(complaints, [],
+                         f"{len(complaints)} of {swept} swept (route, stored word, answered word) "
+                         f"probes decide a lookup into a module constant on a word the probe does not "
+                         f"store:\n" + "\n".join(complaints[:6]))
+        # 308 = 4 routes over PRIMARY (3+1 words, 12 ordered pairs) + 2 over GATE_SCOPES (7+1, 56)
+        # + 3 over SUBJECT_KIND_CODE (3+1, 12) + 2 over ARM_NAMES (7+1, 56). Every factor is read off
+        # the module, so the figure is a consequence of the module's own vocabularies.
+        self.assertEqual(swept, 308, "the generator's size is a product of the module's own "
+                                     "constants; it changed, so re-measure rather than re-pin")
+        self.assertEqual(swept, len(list(self._cases())))
+
+    def test_the_sweep_is_not_vacuous_and_covers_every_declared_site(self):
+        """NOT VACUOUS in the three ways a sweep like this fails silently: the routes have to RUN (a
+        route that raised for every input would pass every assertion above), the plainified reference
+        has to be DECISIVE for the routes that produce a verdict, and the routes together have to claim
+        every declared site -- otherwise the enumeration is not the claim."""
+        bm._arm_fit.cache_clear()
+        reached = collections.Counter()
+        for label, method, stores, answers in self._cases():
+            plain = self._probe_outcome(method, stores, stores)
+            reached[(label, plain[0])] += 1
+        for label, _const, _m, _s in self._ROUTES:
+            self.assertGreater(reached[(label, "ok")], 0,
+                               f"{label} never completed for any honest word: the route is broken, not "
+                               f"the module")
+        # The honest references that carry a verdict must actually be decisive.
+        self.assertEqual(self._probe_outcome("_route_hypothesis_result", "H3", "H3")[1][1], V.SUPPORTED)
+        self.assertEqual(self._probe_outcome("_route_joint_kind", "fixture", "fixture")[1][1],
+                         str(J.JOINT_SUPPORTED))
+        claimed = {site for _l, _c, _m, sites in self._ROUTES for site in sites}
+        self.assertEqual(sorted(claimed | set(self._UNREACHABLE)),
+                         sorted(bm.PROBE_LANE_CONSTANT_LOOKUPS),
+                         "every declared probe site must be swept by a route here or named in "
+                         "`_UNREACHABLE` with its reason")
+        self.assertEqual(sorted(claimed & set(self._UNREACHABLE)), [],
+                         "a site cannot be both swept and declared unreachable")
+
+    def test_finding_a_the_selectivity_requirement_cannot_be_skipped_by_a_lying_hid(self):
+        """FINDING A, pinned where a reader looks for the consequence rather than only in the sweep.
+
+        `PRIMARY[self.hid]` does not merely validate `hid`, it SELECTS THE ROW THAT SAYS HOW MANY
+        COMPONENTS THE HYPOTHESIS REQUIRES. H3 requires two: the suppression contrast `delta` and the
+        SELECTIVITY contrast `delta_minus_shuf`, which is the comparison against the shuffled control.
+        MEASURED at the pre-fix HEAD through PUBLIC constructors with no `object.__setattr__`:
+            PRIMARY[HidLiar('H3')]  ->  one row (H1's), where H3 requires two
+            HidLiar('H3') != 'H3'   ->  False, so the H3 converged-budget path still ran
+            HypothesisResult('H3', (one component,), conv)       ->  ValueError (the honest reference)
+            HypothesisResult(HidLiar('H3'), (one component,), conv)  ->  ACCEPTED, SUPPORTED,
+                `hid` rendering 'H3', components ['delta'], reasons naming only `delta`
+            JointResult with that H3  ->  ACCEPTED,  JOINT_UNSUPPORTED -> JOINT_SUPPORTED
+        and nothing in the output said a requirement had been skipped. The forgery did NOT survive a
+        recompute (`_tag` filed all three H3 records under one tag, so `verdict_from_records` raised
+        `records missing for ['H3a','H3b','H3a_conv','H3b_conv']`) -- the consequence was for a consumer
+        reading `JointResult.verdict` or `run_study`'s return directly, which is most of them."""
+        # The honest study whose selectivity component is the only thing holding it down: built through
+        # `evaluate_primary`'s PUBLIC `series` argument, so no tampering primitive appears anywhere.
+        n = 30
+        series = {"delta": [1.0 + 0.001 * i for i in range(n)],
+                  "delta_minus_shuf": [0.0 + 0.001 * i for i in range(n)],
+                  "delta_conv": [1.0 + 0.001 * i for i in range(n)],
+                  "delta_minus_shuf_conv": [1.0 + 0.001 * i for i in range(n)]}
+        honest = bm.evaluate_primary("H3", series, bm.Margins(), SMALL, 7)
+        self.assertEqual([str.__str__(c.metric) for c in honest.components],
+                         ["delta", "delta_minus_shuf"])
+        self.assertEqual(honest.components[0].verdict, V.SUPPORTED)
+        self.assertEqual(honest.components[1].verdict, V.UNSUPPORTED, "the selectivity contrast fails")
+        self.assertEqual(honest.verdict, V.UNSUPPORTED)
+
+        res = oracle()
+        def joint(h3):
+            return bm.JointResult(res.subject, res.h1, res.h2, h3, res.gates, res.seed_scores,
+                                  res.ineligible, res.n_attempted, res.n_failed, res.seed_list_digest,
+                                  res.registered_digest, res.config_hash, res.margins,
+                                  res.subject_kind, res.fixture_name)
+        self.assertEqual(joint(honest).verdict, J.JOINT_UNSUPPORTED, "the reference the forgery must "
+                                                                     "not improve on")
+
+        liar = _probe_liar("H3", "H1")
+        self.assertEqual(len(bm.PRIMARY[liar]), 1, "the premise: the lookup still serves H1's row")
+        self.assertEqual(len(bm.PRIMARY["H3"]), 2)
+        self.assertFalse(liar != "H3", "the premise: the H3 converged path is not skipped")
+        with self.assertRaises(ValueError) as honest_short:          # the honest reference
+            bm.HypothesisResult("H3", (honest.components[0],), honest.converged_components)
+        self.assertIn("wrong number of components for H3", str(honest_short.exception))
+        with self.assertRaises(ValueError) as caught:                # and the liar gets the same answer
+            bm.HypothesisResult(liar, (honest.components[0],), honest.converged_components)
+        self.assertIn("wrong number of components for H3", str(caught.exception))
+        # THE REQUIREMENT IS ENFORCED, not merely refused by name: the two-component build is accepted
+        # and keeps the selectivity component, and a probe cannot reduce it to one.
+        kept = bm.HypothesisResult(liar, tuple(honest.components), honest.converged_components)
+        self.assertEqual([str.__str__(c.metric) for c in kept.components],
+                         ["delta", "delta_minus_shuf"])
+        self.assertEqual(kept.verdict, V.UNSUPPORTED)
+        self.assertIs(type(kept.hid), str, "the field stores the characters it was given")
+        self.assertEqual(joint(kept).verdict, J.JOINT_UNSUPPORTED)
+
+    def test_finding_b_a_declared_fixture_cannot_file_as_a_trained_subject(self):
+        """FINDING B, pinned on the number rather than on the rendered word -- which is the whole point
+        of it, because every rendered string stayed honest.
+
+        A declared scorer-validation fixture's JOINT_SUPPORTED means only "the scorer can say yes when
+        the answer is yes by construction"; reported as a TRAINED subject it erases precisely the
+        disclaimer this module's header exists for. MEASURED at the pre-fix HEAD, through the PUBLIC
+        `GateResult` constructor (rebuilding the study's own gate list with `exempt` at its default) and
+        a `str` subclass storing 'fixture' that answers 'trained':
+            accepted; `subject_kind` rendering 'fixture'; notes saying 'SCORER-VALIDATION FIXTURE'
+            JOINT record  subject_kind_code = 1.0   (TRAINED; fixture is 2.0)
+            agg records   subject_kind_code = 1.0
+            seed records  subject_kind_code = 1.0
+            `carries_exemption(gates) and self.subject_kind != 'fixture'` -> False, so that invariant
+                did not fire
+            verdict_from_records -> JOINT_SUPPORTED, subject_kind 'trained', reasons ()
+        THE RECOMPUTE DID NOT CATCH IT: the gate-11(c) cross-check fires only on
+        `loss_check_exempt == 1.0 and kind != 'fixture'`, and a gate list that claims no exemption
+        gives it nothing to compare. (Through `analyze_scores`, where `evaluate_gates` DOES set the
+        exemption, the same probe is caught by that cross-check -- fail-closed, but one step downstream
+        and with every record still filing the wrong code. Both are asserted below.)"""
+        res = oracle()
+        self.assertEqual(bm.SUBJECT_KIND_CODE["fixture"], 2.0)
+        self.assertEqual(bm.SUBJECT_KIND_CODE["trained"], 1.0)
+        liar = _probe_liar("fixture", "trained")
+        self.assertEqual(bm.SUBJECT_KIND_CODE[liar], 1.0, "the premise: the lookup still serves 1.0")
+        self.assertIn(liar, bm.SUBJECT_KINDS, "the premise: the membership refusal still admits it")
+        self.assertFalse(liar != "fixture", "the premise: the exemption invariant still reads False")
+        self.assertEqual(str.__str__(liar), "fixture")
+
+        gates = tuple(bm.GateResult(g.name, g.passed, g.reason) for g in res.gates)
+        self.assertFalse(bm.carries_exemption(gates), "the premise: no exemption is claimed")
+
+        def build(kind):
+            return bm.JointResult(res.subject, res.h1, res.h2, res.h3, gates, res.seed_scores,
+                                  res.ineligible, res.n_attempted, res.n_failed, res.seed_list_digest,
+                                  res.registered_digest, res.config_hash, res.margins, kind,
+                                  "oracle_gated")
+
+        def codes(j):
+            recs = bm.to_experiment_records(j, study_id="b", base_seed=7, timestamp_utc=TS_PROBE)
+            srecs = bm.seed_records(j, study_id="b", timestamp_utc=TS_PROBE)
+            rv = bm.verdict_from_records(recs, SMALL)
+            return (bm._metric_read(recs[0].metrics["subject_kind_code"]),
+                    bm._metric_read(recs[-1].metrics["subject_kind_code"]),
+                    bm._metric_read(srecs[0].metrics["subject_kind_code"]),
+                    bm._metric_read(recs[-1].metrics["loss_check_exempt"]),
+                    str(rv.subject_kind), rv.joint, rv.reasons)
+
+        honest, forged = build("fixture"), build(liar)
+        self.assertEqual(str(forged.subject_kind), "fixture")
+        # THE NUMBER FIRST, because the number is the finding: pre-fix every one of these was 1.0 while
+        # `str(forged.subject_kind)` was already 'fixture' and the notes already said
+        # 'SCORER-VALIDATION FIXTURE'. A pin that checked the rendered field first would report the
+        # weaker fact and stop.
+        self.assertEqual(codes(forged)[:4], (2.0, 2.0, 2.0, 0.0),
+                         "a declared fixture files the FIXTURE code 2.0 on the agg records, the JOINT "
+                         "record and the per-seed audit trail, and claims no exemption")
+        self.assertEqual(codes(forged)[4], "fixture", "and the recompute decodes it as a fixture")
+        self.assertEqual(codes(forged)[5], J.JOINT_SUPPORTED)
+        self.assertEqual(codes(forged)[6], ())
+        self.assertEqual(codes(forged), codes(honest))
+        self.assertIs(type(forged.subject_kind), str, "the field stores the characters it was given")
+
+        # The second route, through `analyze_scores`, where `evaluate_gates` DOES grant the exemption.
+        through_analyze = bm.analyze_scores(res.seed_scores, frozen=FZ, registered_digest=FZ.digest,
+                                            subject="oracle_gated", ineligible=res.ineligible,
+                                            cfg=SMALL, margins=res.margins, subject_kind=liar,
+                                            fixture_name="oracle_gated")
+        self.assertTrue(bm.carries_exemption(through_analyze.gates))
+        arecs = bm.to_experiment_records(through_analyze, study_id="b2", base_seed=7,
+                                         timestamp_utc=TS_PROBE)
+        jrec = next(r for r in arecs if str.__str__(r.name).endswith("/agg/JOINT"))
+        self.assertEqual(bm._metric_read(jrec.metrics["subject_kind_code"]), 2.0)
+        self.assertEqual(bm._metric_read(jrec.metrics["loss_check_exempt"]), 1.0)
+        arv = bm.verdict_from_records(arecs, SMALL)
+        self.assertEqual((str(arv.subject_kind), arv.joint), ("fixture", J.JOINT_SUPPORTED))
+
+    def test_a_probe_cannot_be_served_another_arms_cached_fit(self):
+        """The `lru_cache` half of `_arm_fit`, stated as its own test because it is the one place where
+        normalising INSIDE the function would not have been enough: `functools.lru_cache` hashes the
+        argument before the body runs, so the cache key is itself a probe. A probe storing 'C_rand' that
+        answers 'C0' must not be handed C0's trained parameters."""
+        self.assertIsNot(bm._arm_fit.cache_info, None)
+        bm._arm_fit.cache_clear()       # see the sweep: this cache is shared and keyed by the probe
+        for stores, answers in (("C_rand", "C0"), ("C0", "C_init"), ("E", "C_all")):
+            liar = _probe_liar(stores, answers)
+            self.assertEqual(bm._arm_params(7, liar, SMALL), bm._arm_params(7, stores, SMALL))
+            self.assertNotEqual(bm._arm_params(7, stores, SMALL), bm._arm_params(7, answers, SMALL),
+                                f"the premise: arms {stores} and {answers} differ, so being served the "
+                                f"wrong cache entry would be observable")
+
+    def test_the_c_rand_branch_is_reachable_which_is_why_its_declaration_was_restated(self):
+        """`KEY_LANE_ATTRIBUTE_LOOKUPS['other.params']` used to say the C_rand branch is unreachable
+        because "no study builds it". MEASURED: `ARM_FACTORIES` is public and `run_study`'s `treatment`
+        is a caller-supplied argument, so the branch IS reachable. The declaration's COUNT was right and
+        its INFERENCE was wrong; what carries the entry is the in-process argument, and the declaration
+        now says so."""
+        bm._arm_fit.cache_clear()       # shared, keyed by the probe; see the sweep
+        self.assertIn("C_rand", bm.ARM_FACTORIES)
+        factory = bm.ARM_FACTORIES["C_rand"]
+        self.assertEqual(bm.treatment_kind(factory), "trained")
+        self.assertEqual(str(factory.arm_name), "C_rand")
+        fit = bm._arm_fit(7, "C_rand", SMALL)                 # the branch runs
+        self.assertTrue(fit.params)
+        self.assertNotEqual(fit.params, bm._arm_fit(7, "E", SMALL).params,
+                            "C_rand really is a different arm, so the branch really ran")
+        why = bm.KEY_LANE_ATTRIBUTE_LOOKUPS["other.params"]
+        self.assertTrue(why.startswith("REACHABLE"), "the entry must not open by calling it unreachable")
+        self.assertIn("IN-PROCESS ARGUMENT", why, "the argument that actually carries the entry")
+        self.assertNotIn("NOT caller-reachable, measured rather than argued", why,
+                         "that was the wrong inference; the count was right and the reason was not")
+        self.assertIn("whoever runs the arm", why)
+        # And the keys of both mappings are plain `str` written as literals in this process.
+        fx = bm.build_fixture(7, SMALL)
+        self.assertEqual({type(k) for k in fx.teacher.params}, {str})
+
+
+class TheEnumTableRowThatWasFalseIsCorrected(unittest.TestCase):
+    """THE FOURTH CORRECTION, and the only one in `benchmark.py`'s own prose rather than in a test.
+
+    `_enum_member`'s docstring carried a table of the six identity sites and claimed a blanket rewrite to
+    `==` "would have opened three sites to close one". One row of that table was FALSE. `combine_joint`'s
+    `all(... is Verdict.SUPPORTED for v in vs)` was counted among the three that `==` would have opened,
+    but the site was ALREADY FAIL-OPEN one line above it: `vs = (Verdict(h1), Verdict(h2), Verdict(h3))`
+    is itself a `_value2member_map_` probe -- `__hash__` + `__eq__` on the caller's object -- and the
+    liar WINS it, so `vs` holds genuine members by the time the comparison runs. The `_enum_member` wrap
+    added there is a NO-OP and `==` would have opened TWO, not three.
+    The wrap stays: the rule is module-wide, enforced by the AST sweep, and a no-op that satisfies it
+    costs nothing, whereas a per-site exemption has to be re-derived whenever a site moves -- which is
+    exactly how this row and all six of its line numbers went stale."""
+
+    @staticmethod
+    def _liar():
+        class VerdictLiar(str):
+            def __eq__(self, other):
+                return other == bm.Verdict.SUPPORTED.value or other is bm.Verdict.SUPPORTED
+
+            def __ne__(self, other):
+                return not self.__eq__(other)
+
+            def __hash__(self):
+                return hash(bm.Verdict.SUPPORTED.value)
+
+        return VerdictLiar("not-a-member")
+
+    def test_the_combine_joint_site_was_already_fail_open_above_the_comparison(self):
+        liar = self._liar()
+        self.assertIs(bm.Verdict(liar), V.SUPPORTED, "the Enum constructor probe the liar wins")
+        self.assertIsNone(bm._enum_member(bm.Verdict, liar), "and which the admission refuses")
+        self.assertEqual(bm.combine_joint(V.SUPPORTED, V.SUPPORTED, liar, True), J.JOINT_SUPPORTED,
+                         "so the admission at this site changes nothing: it is a no-op")
+        # The no-op is not a hole in THIS class's invariants, because `JointResult.__post_init__`
+        # refuses the construction before `combine_joint` is ever reached. Re-asserted here so the
+        # correction cannot be read as "the site is open".
+        res = oracle()
+        gates = tuple(bm.GateResult(g.name, g.passed, g.reason, exempt=g.exempt) for g in res.gates)
+        object.__setattr__(res.h3, "verdict", liar)
+        try:
+            with self.assertRaises(ValueError) as caught:
+                bm.JointResult(res.subject, res.h1, res.h2, res.h3, gates, res.seed_scores,
+                               res.ineligible, res.n_attempted, res.n_failed, res.seed_list_digest,
+                               res.registered_digest, res.config_hash, res.margins, res.subject_kind,
+                               res.fixture_name)
+            self.assertIn("is not a Verdict member", str(caught.exception))
+        finally:
+            object.__setattr__(res.h3, "verdict", V.SUPPORTED)
+
+    def test_the_table_says_two_and_is_keyed_by_function_not_by_stale_line_numbers(self):
+        """The corrected prose, pinned per CLAUDE.md's per-sentence rule: a doc-only mutant that restores
+        "three", or that reinstates the line numbers, fails here."""
+        doc = " ".join(bm._enum_member.__doc__.split())
+        self.assertIn("would have opened TWO sites to close one", doc)
+        self.assertNotIn("would have opened three sites to close one", doc)
+        self.assertIn("THE TABLE IS KEYED BY FUNCTION, NOT BY LINE NUMBER", doc)
+        self.assertIn("the `_enum_member` wrap added here is a NO-OP", doc)
+        self.assertIn("THIS ROW USED TO BE COUNTED WITH THE THREE ABOVE AND THAT WAS FALSE", doc)
+        # The table's rows must name the functions the sweep actually finds, so the table cannot go
+        # stale the way its line numbers did.
+        sites, _enums = NoIdentityComparisonAgainstAnEnumMemberStandsUnadmitted._identity_sites(
+            _SRC_FILES["benchmark"].read_text())
+        self.assertEqual(len(sites), 6)
+        for function in ("combine_joint", "HypothesisResult.__post_init__",
+                         "JointResult.__post_init__", "verdict_from_records"):
+            self.assertIn(function, doc, f"the table does not name {function}")
 
 
 if __name__ == "__main__":
