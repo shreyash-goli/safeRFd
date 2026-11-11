@@ -42,7 +42,18 @@ Design points (each traceable to the protocol):
   turned JOINT_INCONCLUSIVE into JOINT_SUPPORTED.
 * n >= min_seeds is enforced where a component verdict is produced
   (`interval_verdict`, implemented in `_verdict_from_bounds`), and again by the
-  `min_seeds` gate; no component verdict exists below the minimum.
+  `min_seeds` gate. THIS BULLET USED TO END "no component verdict exists below
+  the minimum", FULL STOP, AND THAT WAS FALSE: the comparison is `n < min_n` on
+  two fields that nothing normalised, so an `int` subclass answering False to
+  `__lt__` (as `IntervalPair.n`) or to `__gt__` (as `ComponentResult.min_n`)
+  produced a decisive SUPPORTED off a two-value series while both fields still
+  rendered as honest numbers -- and `IntervalPair` had no `__post_init__` at all,
+  so the sweep that fixed every other entry point had no place to look. Both are
+  normalised at construction now (see `IntervalPair.__post_init__` and
+  `ComponentResult.__post_init__`) and the claim holds for every value either
+  field can hold, which is what it should have said. A doc-only mutant weakening
+  this sentence used to survive the whole suite; it is now asserted by
+  `test_benchmark.TheMinimumSeedsFloorHoldsForEveryValueTheFieldsCanHold`.
 * `JointResult` refuses to be constructed if any in-scope gate failed while a
   hypothesis it holds is decisive, however the hypotheses were built.
 
@@ -156,10 +167,20 @@ Predictor = Callable[[Sequence[Sequence[float]]], Matrix]
 #   round 3 (here): `IntervalPair._bound` closed the LEFT operand of `lo > margin` while the RIGHT operand,
 #     one line away in the same call chain, still had the identical `is_measured`-only gate.
 # `MetricValue.is_measured` is ONLY `value is not None` (`toy/schema.py`). `MetricValue.__post_init__`
-# refuses a non-float, a bool and a non-finite float AT CONSTRUCTION, so a `MetricValue` built by the
-# public API is sound -- but `object.__setattr__(mv, "value", <anything>)` is route (b) of this module's
-# own threat model, and every stored metric reaching a recompute has been through serialisation. So NO
-# consumer may read `.value` or `.is_measured` for itself.
+# refuses a non-float, a bool and a non-finite float AT CONSTRUCTION.
+#   THIS COMMENT USED TO CONTINUE "so a `MetricValue` built by the public API is sound". THAT WAS FALSE,
+#   it was the premise the whole checked-reader architecture was said to rest on, and nothing read it (a
+#   doc-only mutant DELETING the sentence survived the suite). The construction check was
+#   inspect-before-normalise: `isinstance(v, float)` admits a float SUBCLASS, `math.isfinite` reads the
+#   stored double, and the `value == 0.0` normalisation at the end was `type(v).__eq__` -- so
+#   `MetricValue.measured(EqZero(7.0)).value` was 0.0, the SCHEMA'S OWN VALIDATOR substituting the
+#   stored measurement, and an honest JOINT_UNSUPPORTED recomputed as JOINT_SUPPORTED with `reasons=()`.
+#   `MetricValue.__post_init__` now stores the plain double it checked (see `toy/schema.py`), so a
+#   metric built by the public API holds the number that was validated. The REST of this rule stands
+#   unchanged and is why the readers below are not optional: `object.__setattr__(mv, "value",
+#   <anything>)` is route (b) of this module's own threat model, every stored metric reaching a
+#   recompute has been through serialisation, and a construction-time guarantee says nothing about
+#   either. So NO consumer may read `.value` or `.is_measured` for itself.
 #
 # THE RULE: in this module and in `toy/robustness.py` every read of a stored metric goes through
 # `_metric_read` below (which reaches the field by `getattr` with a string literal, inside one function);
@@ -221,6 +242,26 @@ def _plain_number(v: Any) -> Optional[float]:
     if type(f) is not float or not math.isfinite(f):
         return None
     return f
+
+
+def _plain_parameter(v: Any) -> Any:
+    """Collapse an `int`/`float` SUBCLASS to the plain number it STORES, PRESERVING int-vs-float.
+
+    The companion to `_plain_number` for a field that must keep its declared TYPE. `_plain_number`
+    returns a float for everything, which is wrong for a COUNT (`IntervalPair.n`, `n_boot`,
+    `ComponentResult.min_n`, `SeedScores.seed`): those are compared with `len()`, used as dict keys and
+    digest inputs, and written to records as integral values. A `bool` is returned UNCHANGED, because
+    every caller's own type check rejects it by name and silently turning `True` into 1 is the D5 defect.
+    Anything that is not an int/float subclass instance is returned unchanged, so this is a normaliser,
+    never a validator: the caller still checks what it requires. Same ordering rule as `_plain_number`
+    (normalise, THEN compare) and the same pattern as `BenchmarkConfig.__post_init__`'s own loop."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, float) and type(v) is not float:
+        return float.__float__(v)
+    if isinstance(v, int) and type(v) is not int:
+        return int.__int__(v)
+    return v
 
 
 def _metric_read(x: Any) -> Optional[float]:
@@ -790,6 +831,33 @@ class IntervalPair:
     t_hi: MetricValue
     flags: tuple = ()
 
+    def __post_init__(self) -> None:
+        """STORE WHAT WAS CHECKED, for the three scalars that are NOT `MetricValue`s.
+
+        This class had NO `__post_init__` at all, which is how it escaped the entry-point sweep that
+        fixed `_check_margin`, `_check_level`, `_metric_count` and `Margins`: there was no place to look.
+        `n` is the one that matters, and it is DATA (the number of seeds a series was measured on), not
+        a protocol parameter -- protocol 6.1's floor is applied as `n < min_n` inside
+        `_verdict_from_bounds`, i.e. as `type(n).__lt__`. MEASURED, with no `object.__setattr__`
+        (`dataclasses.replace` suffices, and so does any direct constructor call):
+
+            class NSub(int):
+                def __lt__(self, o):  return False
+                def __ge__(self, o):  return True
+            interval_verdict(replace(pair_of_2_values, n=NSub(1)), 0.1, "greater")  ->  SUPPORTED
+
+        a decisive SUPPORTED off a TWO-value series whose own record then stores `n_seeds = 1.0`. The
+        module docstring's "no component verdict exists below the minimum" was false in exactly that
+        way. `level` and `n_boot` are recorded, cross-checked against the Bonferroni level and written
+        to records as `ci_level` / `n_boot`, so they are normalised here too and nothing downstream
+        re-converts them. The MetricValue fields need nothing: `MetricValue.__post_init__` stores the
+        plain double it checked and `_bound` / `_metric_read` plainify every read anyway."""
+        for k in ("n", "n_boot", "level"):
+            v = getattr(self, k)
+            p = _plain_parameter(v)
+            if p is not v:
+                object.__setattr__(self, k, p)
+
     @staticmethod
     def _bound(m: Any) -> Optional[float]:
         """A bound is usable only if it is a genuine finite `float`, not merely `is_measured`.
@@ -873,6 +941,18 @@ def _verdict_from_bounds(n: int, boot: Optional[tuple], tint: Optional[tuple], m
     # `Margins` object), `verdict_from_records.comp` (margin from a stored metric), and any direct
     # `interval_verdict` / `ComponentResult` call -- so `_check_margin` needs no list of call sites.
     margin = _check_margin(margin, "margin")
+    # ... AND THE SAME ARGUMENT APPLIES TO THE OTHER THREE NUMBERS THAT DECIDE HERE. `_check_margin`'s
+    # docstring states the principle this line implements -- the check belongs at the single point of
+    # USE, "so every path is covered by construction [and] there is no set of call sites to remember,
+    # which is the mistake that produced three rounds of half-fixes" -- and `n`, `min_n` and `width_tol`
+    # were the three it had not been applied to. `n < min_n` and (inside `intervals_disagree`)
+    # `... > width_tol` are overridable comparisons; normalising in `IntervalPair.__post_init__` and
+    # `ComponentResult.__post_init__` alone would have left the PUBLIC `interval_verdict(pair, margin,
+    # direction, width_tol=..., min_n=...)` parameters un-normalised, which is a half-fix of exactly the
+    # shape this module keeps rediscovering. (Found by the test written for the dataclass fix, not by
+    # reading the code.) The dataclasses still normalise what they STORE, so a field and the record
+    # built from it cannot disagree; this covers what they DECIDE.
+    n, min_n, width_tol = _plain_parameter(n), _plain_parameter(min_n), _plain_parameter(width_tol)
     if n < min_n:   # protocol 6.1: no verdict below the minimum number of seeds, wherever the verdict is made
         return Verdict.INCONCLUSIVE, f"n={n} below protocol minimum {min_n}: no verdict"
     if boot is None or tint is None:
@@ -949,6 +1029,16 @@ class ComponentResult:
         # the caller's object while only the DERIVED verdict saw the checked value, so `_agg_metrics` wrote
         # `MetricValue.measured(float(c.margin))` -- a third conversion -- into the record.
         object.__setattr__(self, "margin", _check_margin(self.margin, "margin"))
+        # `min_n` and `width_tol` are passed in the SAME call as `margin` and were left untouched, which
+        # is the half-fix pattern this module has failed to three times. Both decide a verdict through an
+        # overridable comparison -- `n < min_n` in `_verdict_from_bounds` and `abs(wb - wt) / big >
+        # width_tol` in `intervals_disagree`, each resolving to the REFLECTED operator because the
+        # subclass is the right operand. MEASURED: `width_tol=WSub(0.25)` with `__lt__`/`__gt__` returning
+        # False turned a genuine INCONCLUSIVE ("widths differ by more than 25%") into SUPPORTED, and
+        # `min_n=MSub(30)` gave SUPPORTED off a two-value series -- both while the fields still RENDER as
+        # 0.25 and 30 and the margin beside them was fully validated.
+        for k in ("min_n", "width_tol"):
+            object.__setattr__(self, k, _plain_parameter(getattr(self, k)))
         v, why = interval_verdict(self.pair, self.margin, self.direction, self.width_tol, self.min_n)
         object.__setattr__(self, "verdict", v)
         object.__setattr__(self, "reason", why)
@@ -1349,6 +1439,26 @@ class SeedScores:
     input_hashes: Mapping[str, str] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        # THE SEED IS THE UNIT OF REPLICATION (design point 2), and this is where it enters the analysis
+        # path, so it is checked and NORMALISED here. `evaluate_gates` refuses a repeated seed with
+        # `len(set(ids)) != len(ids)` and requires `set(ids) <= set(frozen.seeds)`; BOTH are
+        # `__hash__`/`__eq__` on whatever object this field holds. MEASURED, through the public
+        # `SeedScores.from_values` + `analyze_scores` with no `object.__setattr__` anywhere:
+        #     class SelSeed(int):                       # honest hash; equal to a PLAIN int of the same
+        #         def __eq__(self, o):                  # value (so the frozen-list SUBSET check finds
+        #             return type(o) is int and int.__int__(self) == o   # it) and unequal to another
+        #         def __ne__(self, o):  return not self.__eq__(o)       # SelSeed (so the DUPLICATE
+        #         __hash__ = int.__hash__                               # check does not collapse it)
+        #     analyze_scores([SeedScores.from_values(SelSeed(one), ...)] * 30, ...)
+        # gave seed_list_frozen PASSED, min_seeds PASSED, JOINT_SUPPORTED, a recompute of
+        # JOINT_SUPPORTED with `reasons = ()`, a stored `n_seeds` of 30.0 and thirty per-seed records --
+        # all from ONE seed, which the plain-int list is correctly refused for. The same defect as
+        # `toy.robustness._check_seeds` (F2 there), and here it buys a joint verdict. Normalising makes
+        # both gate comparisons run on the plain int, which is also the value `seed_list_digest` hashes
+        # and `RunProvenance` records, so the card and its own digest cannot disagree.
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int):
+            raise ValueError(f"seed must be an int, got {type(self.seed).__name__}")
+        object.__setattr__(self, "seed", int.__int__(self.seed))
         if set(self.metrics) != set(SEED_METRICS):
             raise ValueError(f"metrics must have exactly keys {SEED_METRICS}")
         if not all(isinstance(v, MetricValue) for v in self.metrics.values()):

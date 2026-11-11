@@ -41,6 +41,28 @@
   **re-run it serially before attributing it to anything.**
 - Clear `__pycache__` and set `PYTHONDONTWRITEBYTECODE=1` for every measurement. Stale bytecode has
   produced both a false mutation survivor and a misattributed 10-failure spike here.
+- **A quietness check built on `pgrep -f` or `ps | grep` SELF-MATCHES its own command line**, so an
+  `until`-loop waiting for a suite to finish never exits — hit twice in one round. Wait on a specific
+  PID (`until ! ps -p "$PID"`), and identify other owners' work by reading each PID's argv, not by
+  pattern. `pgrep -f "python3"` also fails to match the real argv `.../Python -I script.py`.
+- **A mutation harness must restore on SIGTERM and SIGINT, not only in `finally`.** Killing one with
+  SIGTERM skips the `finally` block: a real run left `IntervalPair.__post_init__` replaced by `pass`
+  in the working tree, caught only by comparing `git diff --stat` line counts and then grepping every
+  mutation anchor. Install signal handlers that restore first, and verify the tree after any abort.
+- **A targeted test run is logically sufficient to prove a KILL** — a failing test implies a failing
+  suite — and is ~20× cheaper. Only a SURVIVE claim needs the full suite, because only it asserts
+  that *nothing* catches the mutant. One round spent ~17 minutes per mutant to learn what 90 seconds
+  would have shown.
+- **When you avoid an input because it would make a test "pass for the wrong reason", that input is a
+  finding.** A `MetricValue` value-substitution route survived five review rounds because a test
+  docstring recorded exactly that avoidance. Two sibling smells: "I needed `object.__setattr__` to
+  reproduce it" (re-check the public route) and "it only holds for the default parameter" (the range
+  is unswept).
+- **A lexical sweep for overstated guarantees does not work; per-sentence assertion does.** Measured:
+  of 60 absolute-claim sentences in three modules, 19 co-occurred with a guard term and ~2 were real
+  claims — and the worst overclaim found in this project ("so a `MetricValue` built by the public API
+  is sound") contains no modal, no "cannot" and no "guarantee". Pin each load-bearing sentence with a
+  test whose doc-only mutant dies.
 - For each feature: concrete proof and relevant negative/edge cases.
 - A concept-erasure training *run* is not evidence of selective unlearning or safety.
 - Include utility retention, uncertainty, and robustness in any claims framework.

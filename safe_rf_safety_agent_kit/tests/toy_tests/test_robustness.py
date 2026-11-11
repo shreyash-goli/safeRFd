@@ -1786,5 +1786,445 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
         self.assertNotIn("six paths reach them", mod)
 
 
+class OneExampleCannotBeRepeatedPastTheSeedGuard(unittest.TestCase):
+    """F2. The module docstring names ONE defence against a single example dressed as n of them --
+    "Duplicate SEEDS are rejected only on the probe path (`_check_seeds`...)" -- and that defence was
+    `len(set(seeds)) != len(seeds)`, i.e. `__hash__` and `__eq__` on the caller's own objects.
+
+    MEASURED, with no `object.__setattr__` and through every public probe: three instances of an `int`
+    subclass with `__hash__ = id` and identity `__eq__`, each storing 7, were ACCEPTED where the plain
+    list `[7, 7, 7]` is refused. `probe_shift` returned status INVARIANCE_HOLDS with n=3 and
+    `violating_seeds=()`; `seed_sensitivity_probe` returned MEASURED with n=3, mean 0.25 and SD 0.0;
+    the `outcome` callback really was called three times with 7; and `make_measure_fixture(Seed(7))` is
+    the identical fixture. `SEED_FLOOR = 3` -- the whole point of which is "no claims from single
+    examples" -- was satisfied by ONE seed.
+    `test_duplicate_seeds_rejected` used plain ints only, and this module's `int`-subclass hardening
+    class (`ThePolicyParametersAreThemselvesPinned`) pointed at `ProbeConfig`, never at `_check_seeds`.
+    The honest limit the fix does NOT remove: the card was already self-incriminating (it serialises
+    `[7, 7, 7]` and its `seed_digest` matches), so a reader who recomputed could detect it. The guard
+    whose job was to refuse it did not, and the decisive status was produced."""
+
+    class Seed(int):
+        def __hash__(self):
+            return id(self)
+
+        def __eq__(self, o):
+            return self is o
+
+        def __ne__(self, o):
+            return self is not o
+
+    class StrSeed(int):
+        """Distinct stored values; a lying `__str__`, which is what `derive_seed` formats."""
+        def __str__(self):
+            return "7"
+
+        def __format__(self, spec):
+            return "7"
+
+    def test_every_probe_refuses_a_repeated_seed_however_it_is_spelled(self):
+        three = [self.Seed(7), self.Seed(7), self.Seed(7)]
+        self.assertEqual([int.__int__(s) for s in three], [7, 7, 7])     # the stored values really repeat
+        self.assertNotEqual(three[0], three[1])                          # ... and the subclass denies it
+        self.assertEqual(len(set(three)), 3)
+        cfg3 = rb.ProbeConfig(3)
+        probes = {
+            "seed_sensitivity": lambda s: rb.seed_sensitivity_probe(lambda x: 0.25, s, cfg3),
+            "shift": lambda s: rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), s, cfg3),
+            "missing_inputs": lambda s: rb.probe_missing_inputs(rb.mse_fsum, s, cfg3),
+            "precision": lambda s: rb.probe_precision("accumulation", 10, s, cfg3),
+            "no_silent_default": lambda s: rb.assert_no_silent_default(rb.mse_fsum, s),
+            "build_scorecard": lambda s: rb.build_scorecard(
+                probe_id="p", probe_kind="k", seeds=s, per_seed=[MetricValue.measured(1.0)] * 3,
+                cfg=cfg3, status_if_summarized=PS.MEASURED, details_always={}),
+        }
+        for name, fn in probes.items():
+            with self.subTest(probe=name):
+                for seeds in ([7, 7, 7], three, [self.Seed(7), 7, self.Seed(7)]):
+                    with self.assertRaisesRegex(ValueError, "duplicate seeds are rejected"):
+                        fn(seeds)
+                fn([self.Seed(11), self.Seed(12), self.Seed(13)])        # the honest control still runs
+
+    def test_an_accepted_subclass_seed_is_stored_hashed_and_used_as_a_plain_int(self):
+        a = rb.seed_sensitivity_probe(lambda s: float(s % 5), [self.Seed(k) for k in (11, 12, 13)],
+                                      rb.ProbeConfig(3), probe_id="p")
+        b = rb.seed_sensitivity_probe(lambda s: float(s % 5), (11, 12, 13), rb.ProbeConfig(3),
+                                      probe_id="p")
+        self.assertEqual({type(s) for s in a.seeds}, {int})
+        self.assertEqual(a.to_dict()["seeds"], [11, 12, 13])
+        self.assertEqual(a.content_hash(), b.content_hash())     # byte-identical to the plain-int card
+        self.assertEqual(a.seed_digest, bm.seed_list_digest((11, 12, 13)))
+
+    def test_two_distinct_seeds_cannot_be_one_fixture(self):
+        """F2b's consequence here: `derive_seed` FORMATS the seed into the string it hashes, so a lying
+        `__str__` made `derive_seed(StrSeed(9), ...) == derive_seed(7, ...)`. Two seeds that
+        `_check_seeds` correctly sees as DISTINCT then produced the same fixture and the same outcome --
+        one example n times, with no repeated value anywhere on the card to give it away. Fixed in
+        `toy.schema._check_seed`, which returns the plain int every caller then uses."""
+        self.assertNotEqual(rb.make_measure_fixture(self.StrSeed(9)).pred,
+                            rb.make_measure_fixture(7).pred)
+        self.assertEqual(rb.make_measure_fixture(self.StrSeed(9)).pred,
+                         rb.make_measure_fixture(9).pred)
+        seeds = (7, self.StrSeed(9), 20, 21, 22)
+        card = rb.seed_sensitivity_probe(
+            lambda s: rb.mse_fsum(*((f := rb.make_measure_fixture(s)).pred, f.target, f.mask)),
+            seeds, rb.ProbeConfig(3))
+        self.assertIs(card.status, PS.MEASURED)
+        self.assertEqual(card.details["n_distinct_values"], 5)     # five fixtures, five outcomes
+        self.assertEqual(card.to_dict()["seeds"], [7, 9, 20, 21, 22])
+
+
+class ACardCannotAssertAMinimumItDoesNotMeet(unittest.TestCase):
+    """F3 and the string half of the same sweep.
+
+    `Scorecard.__post_init__` called `ProbeConfig(self.min_seeds)` and THREW THE RESULT AWAY -- the only
+    `ProbeConfig(...)` in the module whose result was discarded, 135 lines below `summarize_seeds`'s own
+    call, whose comment states the lesson ("The returned object is USED, not discarded") that this site
+    did not apply. The field therefore kept the caller's object and `len(measured) < self.min_seeds`,
+    sixteen lines below, ran on it with the subclass as the RIGHT operand, so the REFLECTED `__gt__`
+    decided -- the same variant the suite had already found for `summarize_seeds` and fixed THERE ONLY.
+
+    The same class of defect in this class's text guards: `self.seed_digest != seed_list_digest(seeds)`
+    and `for std in STANDARD_NON_CLAIMS: if std not in dne` are `str` comparisons on fields a caller
+    supplies, and a `str` subclass with a lying `__eq__` passes both. Measured consequences: a card
+    whose `seed_digest` was "0"*64 over a real seed list (and `scorecard_to_record` then wrote that into
+    the record's `input_hashes["seed_list"]`, the provenance anchor), and a card whose entire
+    `does_not_establish` tuple was the single string "THIS IS A SAFETY FINDING." while satisfying the
+    guard that requires every STANDARD_NON_CLAIMS entry."""
+
+    class Lo(int):
+        def __gt__(self, o):
+            return False
+
+        def __ge__(self, o):
+            return False
+
+    class LoInt(Lo):
+        def __int__(self):
+            return 999
+
+        def __index__(self):
+            return 999
+
+    class LieStr(str):
+        def __eq__(self, o):
+            return True
+
+        def __ne__(self, o):
+            return False
+
+        def __hash__(self):
+            return 0
+
+    def three(self):
+        return rb.seed_sensitivity_probe(lambda s: float(s % 7), (101, 102, 103), rb.ProbeConfig(3))
+
+    def test_a_forged_min_seeds_cannot_be_laundered_onto_a_card(self):
+        three = self.three()
+        self.assertEqual(three.summary.n, 3)                         # the control: a real 3-seed card
+        for v in (10, self.Lo(10), self.LoInt(10), self.Lo(4), self.LoInt(10 ** 6)):
+            with self.subTest(min_seeds=type(v).__name__ + repr(int.__int__(v))):
+                with self.assertRaisesRegex(ValueError, "fewer measured seeds than min_seeds"):
+                    dataclasses.replace(three, min_seeds=v)
+        # below the absolute floor the ProbeConfig delegation must still raise, subclass or not
+        for v in (2, self.Lo(2), self.LoInt(0)):
+            with self.assertRaises(ValueError, msg=repr(int.__int__(v))):
+                dataclasses.replace(three, min_seeds=v)
+        # an in-range subclass is accepted and STORED PLAIN, so nothing downstream re-converts it
+        ok = dataclasses.replace(three, min_seeds=self.LoInt(3))
+        self.assertIs(type(ok.min_seeds), int)
+        self.assertEqual(ok.min_seeds, 3)
+        self.assertEqual(ok.to_dict()["min_seeds"], 3)
+        rec = rb.scorecard_to_record(ok, run_id="r", timestamp_utc=TS)
+        self.assertEqual(rec.metrics["min_seeds_required"].value, 3.0)   # NOT 999.0 from __int__
+        self.assertIs(type(rec.metrics["min_seeds_required"].value), float)
+        self.assertEqual(ok.content_hash(), dataclasses.replace(three, min_seeds=3).content_hash())
+
+    def test_an_insufficient_card_counts_cannot_disagree_with_their_own_minimum(self):
+        card = rb.seed_sensitivity_probe(lambda s: 4.0, SEEDS[:5], rb.ProbeConfig(10))
+        self.assertIs(card.status, PS.INSUFFICIENT_EVIDENCE)
+        self.assertEqual((card.insufficient.n_measured, card.insufficient.n_required), (5, 10))
+        self.assertEqual({type(card.insufficient.n_measured), type(card.insufficient.n_required)},
+                         {int})
+        # the counts are normalised where they are checked, so a subclass cannot assert a false order
+        class Ge(int):
+            def __ge__(self, o):
+                return False
+
+            def __gt__(self, o):
+                return False
+        with self.assertRaises(ValueError):
+            rb.InsufficientEvidence(Ge(10), Ge(3), "forged")
+        ok = rb.InsufficientEvidence(Ge(3), Ge(10), "honest")
+        self.assertEqual({type(ok.n_measured), type(ok.n_required)}, {int})
+        with self.assertRaises(ValueError):
+            dataclasses.replace(card, insufficient=rb.InsufficientEvidence(5, Ge(11), "wrong required"))
+
+    def test_a_card_cannot_drop_the_non_claims_it_is_required_to_carry(self):
+        card = self.three()
+        for bad in ((self.LieStr("THIS IS A SAFETY FINDING."),),
+                    (self.LieStr("validated safe"),) + rb.STANDARD_NON_CLAIMS[1:],
+                    tuple(self.LieStr("x") for _ in rb.STANDARD_NON_CLAIMS)):
+            with self.subTest(dne=bad[0]):
+                with self.assertRaisesRegex(ValueError, "STANDARD_NON_CLAIMS"):
+                    dataclasses.replace(card, does_not_establish=bad)
+        # the honest control: the real entries are accepted and stored as plain strings
+        ok = dataclasses.replace(card, does_not_establish=rb.STANDARD_NON_CLAIMS + ("extra",))
+        self.assertEqual({type(s) for s in ok.does_not_establish}, {str})
+        for std in rb.STANDARD_NON_CLAIMS:
+            self.assertIn(std, ok.to_dict()["does_not_establish"])
+
+    def test_a_card_cannot_carry_a_digest_that_is_not_its_seed_lists(self):
+        card = self.three()
+        for bad in (self.LieStr("0" * 64), self.LieStr(bm.seed_list_digest((1, 2, 3))),
+                    self.LieStr("")):
+            with self.subTest(digest=bad[:8]):
+                with self.assertRaisesRegex(ValueError, "seed_digest does not match"):
+                    dataclasses.replace(card, seed_digest=bad)
+        ok = dataclasses.replace(card, seed_digest=self.LieStr(bm.seed_list_digest((101, 102, 103))))
+        self.assertIs(type(ok.seed_digest), str)
+        self.assertEqual(ok.seed_digest, bm.seed_list_digest((101, 102, 103)))
+        rec = rb.scorecard_to_record(ok, run_id="r", timestamp_utc=TS)
+        self.assertEqual(rec.provenance.input_hashes["seed_list"], ok.seed_digest)
+        self.assertEqual(ok.content_hash(), card.content_hash())
+
+    def test_the_module_docstring_states_what_these_guards_now_do(self):
+        doc = " ".join(rb.__doc__.split())
+        self.assertIn('THAT SENTENCE NAMES THE ONLY DEFENCE, AND THE DEFENCE WAS DEFEATABLE', doc)
+        self.assertIn('THE "COUNTS" HALF OF THAT SENTENCE WAS FALSE', doc)
+        self.assertIn("ONE OF THE EIGHT USED TO DEFEND LESS THAN THE COUNT IMPLIED", doc)
+        self.assertIn("`SEED_FLOOR = 3` was satisfied by ONE seed", doc)
+
+
+class AMeasureCannotDecideItsOwnProbe(unittest.TestCase):
+    """The data-intake points of SR-11's two numeric probes, swept rather than reported one at a time.
+
+    `probe_shift`'s `measure` IS the probe's subject: the module exists to probe arbitrary measures, and
+    everything that decides the status is arithmetic on the measure's RETURN VALUE (`dev = abs(val -
+    exp)`, then `dev > bound`). MEASURED on a measure that genuinely violates permutation invariance
+    (row-position weighting), with ONLY `__sub__` / `__rsub__` overridden to return 0.0 and every
+    comparison left honest:
+        honest -> INVARIANCE_DEFECT, n_violations=12, max_abs_dev=1.47e-02
+        lying  -> INVARIANCE_HOLDS,  n_violations=0,  max_abs_dev=0.0, n_bitwise_equal=12
+    i.e. the measure under probe decided that it passes, and the module's own asymmetry ("one failing
+    seed refutes an invariance") became unenforceable from the inside.
+    `probe_precision`'s `tol` is the same shape one level up: `worst > tol` with `tol` as the right
+    operand, so a `float` subclass's reflected `__lt__` reported PRECISION_OK on a worst relative error
+    of 5.49e-17 while `details["tolerance"]` serialized the honest 1e-20 -- a card whose declared
+    tolerance contradicts its own status."""
+
+    class Hold(float):
+        def __sub__(self, o):
+            return 0.0
+
+        def __rsub__(self, o):
+            return 0.0
+
+    class HoldAll(Hold):
+        def __abs__(self):
+            return 0.0
+
+        def __gt__(self, o):
+            return False
+
+        def __lt__(self, o):
+            return True
+
+    class WTol(float):
+        def __lt__(self, o):
+            return False
+
+        def __gt__(self, o):
+            return False
+
+        def __float__(self):
+            return 10.0 ** 9
+
+    def test_a_lying_measure_still_reports_its_own_invariance_defect(self):
+        honest = rb.probe_shift(row_weighted_mse, rb.shift_reorder_rows(), SEEDS, CFG)
+        self.assertIs(honest.status, PS.INVARIANCE_DEFECT)      # the control: the defect IS detected
+        for cls in (self.Hold, self.HoldAll):
+            def lying(p, t, m, _c=cls):
+                return _c(row_weighted_mse(p, t, m))
+            lying.__name__ = "row_weighted_mse"
+            with self.subTest(sneak=cls.__name__):
+                card = rb.probe_shift(lying, rb.shift_reorder_rows(), SEEDS, CFG)
+                self.assertIs(card.status, PS.INVARIANCE_DEFECT)
+                self.assertEqual(card.details["n_violations"], honest.details["n_violations"])
+                self.assertEqual(card.details["violating_seeds"], honest.details["violating_seeds"])
+                self.assertEqual(card.details["max_abs_dev"], honest.details["max_abs_dev"])
+                self.assertEqual(card.details["n_bitwise_equal"], 0)
+                self.assertEqual(card.content_hash(), honest.content_hash())
+        # and a measure whose returns are not usable numbers at all is unmeasured, never 0.0
+        class NotANumber(float):
+            def __float__(self):
+                return float("nan")
+        for bad in (lambda p, t, m: float("nan"), lambda p, t, m: None, lambda p, t, m: "0.0"):
+            card = rb.probe_shift(bad, rb.shift_reorder_rows(), SEEDS, CFG)
+            self.assertIs(card.status, PS.INSUFFICIENT_EVIDENCE)
+            self.assertTrue(all(not m.is_measured for m in card.per_seed))
+
+    def test_a_lying_declared_expectation_cannot_hide_a_deviation(self):
+        """`ShiftSpec.expected` is the other public callable on this path: `exp = spec.expected(base)`
+        feeds `exp > 0`, `dev = abs(val - exp)` and the per-seed headline `dev / exp`. A spec whose
+        `expected` returns a float subclass therefore chooses its own deviation, even when the measure
+        is honest."""
+        honest_spec = rb.shift_reorder_rows()
+        honest = rb.probe_shift(row_weighted_mse, honest_spec, SEEDS, CFG)
+        self.assertIs(honest.status, PS.INVARIANCE_DEFECT)
+        lying_spec = dataclasses.replace(honest_spec, expected=lambda b: self.HoldAll(b))
+        card = rb.probe_shift(row_weighted_mse, lying_spec, SEEDS, CFG)
+        self.assertIs(card.status, PS.INVARIANCE_DEFECT)
+        self.assertEqual(card.details["n_violations"], honest.details["n_violations"])
+        self.assertEqual(card.details["max_abs_dev"], honest.details["max_abs_dev"])
+        # an expectation that is not a usable number at all is unmeasured with a reason, never 0.0
+        for bad in (None, "1.0", float("inf")):
+            c = rb.probe_shift(rb.mse_fsum, dataclasses.replace(honest_spec, expected=lambda b, _v=bad: _v),
+                               SEEDS, CFG)
+            self.assertIs(c.status, PS.INSUFFICIENT_EVIDENCE)
+            self.assertTrue(all(not m.is_measured for m in c.per_seed))
+
+    def test_the_baseline_value_a_declared_expectation_is_computed_from_is_the_stored_one(self):
+        """The third intake on this path, and the one whose mutant SURVIVED the first measurement.
+
+        `base` reaches the decision only through `spec.expected(base)` and `spec.bound(base, exp, fx)`,
+        and the result of each is normalised -- so normalising `base` itself is invisible for a spec
+        whose `expected` is the identity (every INVARIANCE spec). It is NOT invisible for a spec that
+        COMPUTES from the baseline: `shift_scale`'s `expected = lambda b: b * factor ** degree` runs
+        `type(base).__mul__`. Measured here on `offset_mse`, which is genuinely not scale-covariant
+        (it adds a constant, so scaling by 2**10 must be an EXACT-invariance DEFECT), with a measure
+        whose returned value supplies a `__mul__` that reproduces exactly what the measure will return
+        on the SHIFTED fixture: the deviation then computes as 0.0 and the defect reads as
+        INVARIANCE_HOLDS. Without the normalisation this test fails; with it, `expected` is computed
+        from the plain double the measure stored, and the defect is reported."""
+        spec = rb.shift_scale(2.0 ** 10)
+        honest = rb.probe_shift(offset_mse, spec, SEEDS, CFG)
+        self.assertIs(honest.status, PS.INVARIANCE_DEFECT)      # the control: offset_mse IS a defect
+
+        class Arranged(float):
+            """`__mul__` answers with the value `offset_mse` returns on the scaled fixture."""
+            def __mul__(self, o):
+                return (float.__float__(self) - 1.0) * o + 1.0
+
+            def __rmul__(self, o):
+                return self.__mul__(o)
+
+        def arranged_measure(p, t, m):
+            return Arranged(offset_mse(p, t, m))
+
+        arranged_measure.__name__ = "offset_mse"
+        card = rb.probe_shift(arranged_measure, spec, SEEDS, CFG)
+        self.assertIs(card.status, PS.INVARIANCE_DEFECT)
+        self.assertEqual(card.details["n_violations"], honest.details["n_violations"])
+        self.assertEqual(card.content_hash(), honest.content_hash())
+
+    def test_an_exact_invariance_that_really_holds_is_unaffected(self):
+        """The normalisation must not turn a holding invariance into a defect: the bit-for-bit case is
+        where any spurious conversion would show up first."""
+        plain = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), SEEDS, CFG)
+        self.assertIs(plain.status, PS.INVARIANCE_HOLDS)
+        self.assertEqual(plain.details["n_bitwise_equal"], len(SEEDS))
+        self.assertEqual(plain.details["max_abs_dev"], 0.0)
+
+    def test_a_lying_tolerance_cannot_report_precision_ok(self):
+        honest = rb.probe_precision("cancellation", 12, SEEDS, CFG, tol=1e-20)
+        self.assertIs(honest.status, PS.PRECISION_LOSS)         # the control: the loss IS reported
+        card = rb.probe_precision("cancellation", 12, SEEDS, CFG, tol=self.WTol(1e-20))
+        self.assertIs(card.status, PS.PRECISION_LOSS)
+        self.assertEqual(card.details["tolerance"], 1e-20)
+        self.assertIs(type(card.details["tolerance"]), float)
+        self.assertEqual(card.content_hash(), honest.content_hash())
+        # the honest direction: a tolerance the error really meets still reads PRECISION_OK
+        loose = rb.probe_precision("cancellation", 12, SEEDS, CFG, tol=self.WTol(1e-6))
+        self.assertIs(loose.status, PS.PRECISION_OK)
+        self.assertEqual(loose.details["tolerance"], 1e-6)
+
+    def test_a_lying_param_cannot_make_the_card_describe_another_probe(self):
+        """`param` was used as `int(param)` (how many values are accumulated) and recorded as
+        `float(param)`: two independently overridable conversions of one never-normalised argument, so
+        `details["param"]` and `probe_id` said 3.0 while 400 values were summed."""
+        class PSub(float):
+            def __int__(self):
+                return 400
+
+            def __index__(self):
+                return 400
+
+            def __float__(self):
+                return 3.0
+        honest = rb.probe_precision("accumulation", 40.0, SEEDS, CFG)
+        card = rb.probe_precision("accumulation", PSub(40.0), SEEDS, CFG)
+        self.assertEqual(card.details["param"], 40.0)
+        self.assertEqual(card.probe_id, honest.probe_id)
+        self.assertEqual(card.content_hash(), honest.content_hash())
+        # an int param keeps its int spelling, so no probe_id or stored hash moved for the fix
+        self.assertEqual(rb.probe_precision("accumulation", 40, SEEDS, CFG).probe_id,
+                         "precision:accumulation:40")
+
+
+class AForgedOutcomeCannotBecomeAZeroVarianceMeasurement(unittest.TestCase):
+    """F1's SR-11 entry point, asserted on the probe's own output.
+
+    `_to_metric` -- the data-intake point for the user-supplied `outcome` callback, which is this
+    probe's INTENDED extension point -- hands the callback's return straight to
+    `MetricValue.measured(v)`. The schema's `value == 0.0` normalisation then asked that object whether
+    it was zero, and a `float` subclass with a lying `__eq__` answered yes and had its value REPLACED:
+        seed_sensitivity_probe(honest_outcome, range(1, 11)) -> MEASURED mean=7.55 sd=0.303 zvw=False
+        seed_sensitivity_probe(forged_outcome, range(1, 11)) -> MEASURED mean=0.0  sd=0.0  zvw=True
+    Fixed at the schema (see `test_schema.AMetricStoresTheNumberItChecked`), not at `_to_metric`, and
+    this class is the consequence test that makes the schema fix observable from SR-11: the probe's
+    status, statistics, per-seed vector and content hash must all be those of the honest outcome."""
+
+    class EqZero(float):
+        def __eq__(self, o):
+            return True
+
+        def __ne__(self, o):
+            return False
+
+        def __hash__(self):
+            return 0
+
+    def test_the_probe_reports_the_outcome_it_was_given(self):
+        def honest(seed):
+            return 7.0 + (seed % 100) / 100.0
+
+        def forged(seed):
+            return AForgedOutcomeCannotBecomeAZeroVarianceMeasurement.EqZero(honest(seed))
+
+        forged.__name__ = "honest"
+        a = rb.seed_sensitivity_probe(honest, range(1, 11), CFG)
+        b = rb.seed_sensitivity_probe(forged, range(1, 11), CFG)
+        self.assertIs(a.status, PS.MEASURED)
+        self.assertIs(b.status, PS.MEASURED)
+        self.assertEqual(b.summary.mean, a.summary.mean)
+        self.assertEqual(b.summary.sd, a.summary.sd)
+        self.assertEqual(b.summary.values, a.summary.values)
+        self.assertNotEqual(b.summary.sd, 0.0)
+        self.assertFalse(b.details["zero_variance_warning"])
+        self.assertEqual(b.details["n_distinct_values"], 10)
+        self.assertEqual({type(m.value) for m in b.per_seed}, {float})
+        self.assertEqual(b.content_hash(), a.content_hash())
+
+    def test_a_genuinely_constant_outcome_is_still_flagged(self):
+        """The control for the control: the zero-variance flag must still fire when it should, or the
+        test above could pass on a probe that never flags anything."""
+        c = rb.seed_sensitivity_probe(lambda s: 2.5, range(1, 11), CFG)
+        self.assertIs(c.status, PS.MEASURED)
+        self.assertEqual(c.summary.sd, 0.0)
+        self.assertTrue(c.details["zero_variance_warning"])
+        z = rb.seed_sensitivity_probe(lambda s: self.EqZero(2.5), range(1, 11), CFG)
+        self.assertEqual(z.summary.mean, 2.5)
+        self.assertTrue(z.details["zero_variance_warning"])
+
+    def test_the_decision_to_fix_at_the_schema_is_recorded_where_the_cast_is_missing(self):
+        """`SeedSummary.from_values` casts with `float.__float__` and says why; `_to_metric` does not,
+        and the asymmetry would read as an oversight. Its docstring states the measured reason."""
+        doc = " ".join(rb._to_metric.__doc__.split())
+        self.assertIn("WHY THERE IS NO `float.__float__` HERE", doc)
+        self.assertIn("it never compares or computes with it", doc)
+        self.assertIn("a mutant removing it survives every test", doc)
+
+
 if __name__ == "__main__":
     unittest.main()

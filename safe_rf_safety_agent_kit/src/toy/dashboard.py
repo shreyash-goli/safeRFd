@@ -189,9 +189,20 @@ def _panel(title: str, ec: EvidenceClass, body: str, problem: Optional[str] = No
 #      in `_num`, downstream of all four, because every coercion that ever existed here was a
 #      laundering step.
 #   2. A DECLARED TABLE. `STORED_NUMBERS` names every attribute of a scorer object that this renderer
-#      turns into a figure or feeds to a verdict, with its kind. `_admitted` is the only reader and it
-#      returns the admitted VALUES, so each field is admitted exactly once; `_recompute` uses those
-#      values and fails closed on any entry of a verdict-bearing class.
+#      turns into a figure or feeds to a verdict, with its kind. `_admitted` is the only reader in the
+#      VERDICT path and it returns the admitted VALUES, so that path admits each field once;
+#      `_recompute` uses those values and fails closed on any entry of a verdict-bearing class.
+#      THE SENTENCE THIS REPLACES SAID "`_admitted` is the only reader and it returns the admitted
+#      VALUES, SO EACH FIELD IS ADMITTED EXACTLY ONCE", and that was false as written. Counted, for
+#      `pair.n`: `_admitted` (inside `_pair_numbers_ok`), its display cell in `render_scorecard`
+#      (`_kind_text(pair.n, 'n', 'count')`), and `_n_sources_disagree`'s own `_count(getattr(pair, "n"))`
+#      -- three admissions -- plus a FOURTH read straight off the object by `bm.interval_verdict`, which
+#      applies protocol 6.1's `n < min_n` with no kind function at all. THE PROPERTY THAT MATTERS IS NOT
+#      THE COUNT: all three admissions go through the same kind function, `_count`, SO THEY CANNOT
+#      DISAGREE, and that -- not "exactly once" -- is what rounds 2 and 3 lacked (a display cell and a
+#      verdict path with two different predicates). `_n_sources_disagree`'s duplicate admission is
+#      argued where it lives; the fourth, raw read is the reason `_pair_numbers_ok` must gate
+#      `interval_verdict` rather than trust it.
 #   3. THE ENUMERATION IS PERFORMED, NOT ASSERTED. Two tests do the work a reviewer kept doing by eye:
 #      `test_the_enumeration_is_performed_by_probe_not_asserted` swaps each scorer class for a
 #      recording subclass, renders a whole dashboard, and compares the attributes ACTUALLY READ (by
@@ -199,9 +210,18 @@ def _panel(title: str, ec: EvidenceClass, body: str, problem: Optional[str] = No
 #      an undeclared number fails the suite naming the attribute; and
 #      `test_no_numeric_predicate_lives_outside_the_kind_functions` reads this file's own source and
 #      fails if `isinstance(..., int/float)`, `math.isfinite` or `float(` appears outside the block
-#      below. A future reader cannot add an unchecked consumer without turning one of those red.
+#      below.
+#      THIS COMMENT USED TO END "A future reader cannot add an unchecked consumer without turning one
+#      of those red." THAT IS OVERSTATED and the correction lived only in the test module, where a
+#      reader of this file could not see it. Four mutants were MEASURED to survive both tests: the same
+#      consumer spelled `vars(c.pair)["n_boot"]` or `c.pair.__dict__["n_boot"]` (both bypass
+#      `__getattribute__`, both lint-clean by design, both with a demonstrated behaviour change), an
+#      undeclared read behind a branch the probe's single render never takes, and a DUPLICATE read of an
+#      already-declared number, which an attribute-SET comparison cannot see at all. The two tests name
+#      a new consumer early; they do not close the space.
 #      Every entry of `STORED_NUMBERS` is then forged by a table-driven sweep that asserts the VERDICT
 #      CELL and the ALARM, not just the figure cell -- which is what all three rounds' tests omitted.
+#      THAT is the guarantee: a behavioural sweep dies regardless of spelling, branch or mechanism.
 #   4. TYPE IS NOT THE WHOLE OF ADMISSION. Where a stored number has a SECOND SOURCE in the same result,
 #      the two are compared and a disagreement fails closed; where it has none, that is declared and the
 #      residual is stated. The classification is itself enumerated, by `SECOND_SOURCE` /
@@ -211,6 +231,22 @@ def _panel(title: str, ec: EvidenceClass, body: str, problem: Optional[str] = No
 #      because the type table is now the known-weak half: `HOSTILE_BY_KIND["count"]` claimed to hold
 #      "everything an honest producer of a field of this kind cannot emit" and contained not one legal
 #      int, though an honest producer of `pair.n` on a 29-seed run cannot emit `30` either.
+#
+#   5. ROUND 6: A PERFORMED CLASSIFICATION IS NOT A TRUE ONE, and this is the round-6 defect in one
+#      sentence. The three dicts of item 4 PARTITIONED `STORED_NUMBERS` exactly -- 7 + 2 + 6 = 15,
+#      pairwise disjoint, the test green -- and SIX `NO_SECOND_SOURCE` entries said "the interval itself
+#      is producer-asserted" while an EXACT second source for four of them (`mean`, `t_lo`, `t_hi`,
+#      `level`) sat in the same `JointResult` and this module ALREADY READ IT: the per-seed series
+#      rebuilt from `joint.seed_scores`, which `_measured_seeds` has read since round 5. `bm.mean` and
+#      `bm.t_interval` reproduce all three bounds BIT-EXACTLY (measured: 324 of 324 component-field
+#      comparisons over 18 honest shapes), and `t_lo`/`t_hi` carry protocol 6.3's bootstrap/t
+#      disagreement rule, so they are verdict-bearing: two `object.__setattr__` turned an honest
+#      6.3-INCONCLUSIVE study into a displayed JOINT_SUPPORTED with no alarm. A machine can check that a
+#      classification is a partition; NOTHING IN A TEST SUITE CAN CHECK THAT THE REASON WRITTEN IN IT IS
+#      TRUE. So each surviving `NO_SECOND_SOURCE` reason must now (a) name the source it does NOT have
+#      and why it cannot be had, and (b) carry a test that fails if that source turns out to exist --
+#      for the two bootstrap bounds, `test_the_two_bootstrap_bounds_have_no_recoverable_second_source`.
+#      See `_interval_problem`.
 #
 # WHAT IS DELIBERATELY NOT IN THE SCHEME is argued at `_valid_history` and `_protocol_params`.
 def _num(x: float) -> str:
@@ -293,7 +329,13 @@ _NUM_KINDS = {"float": _finite_float, "num": _finite_number, "count": _count, "m
 # EVERY stored number this renderer turns into a figure or feeds to a verdict, by the class that holds
 # it. Keyed by class NAME, not by the class, so this table does not add an import-time dependency on
 # `benchmark` beyond the one the module already declares (attributes are looked up at call time so API
-# drift is detected). Proved complete by the recording-probe test, not by anyone's reading.
+# drift is detected).
+# THIS COMMENT USED TO SAY "Proved complete by the recording-probe test, not by anyone's reading."
+# SOFTENED, because the probe does not prove completeness: it hooks `__getattribute__`, so it is blind
+# to `vars()`/`__dict__`/`object.__getattribute__`, blind to a read behind a branch its single render
+# does not take, and blind BY CONSTRUCTION to a second read of an already-declared number (it compares
+# attribute SETS). All four were measured as surviving mutants. The probe NAMES a new consumer cheaply;
+# completeness, so far as it is established at all, rests on the behavioural forgery sweeps.
 STORED_NUMBERS = {
     "IntervalPair": {"mean": "mv", "boot_lo": "mv", "boot_hi": "mv", "t_lo": "mv", "t_hi": "mv",
                      "n": "count", "level": "float"},
@@ -766,6 +808,8 @@ def _protocol_params() -> tuple:
 
 NO_SECOND_SOURCE_MSG = ("the study's own measured-seed count (n_attempted - n_failed) is not readable, "
                         "so the sample size behind every interval cannot be cross-checked")
+NO_INTERVAL_SOURCE_MSG = ("the per-seed series behind this interval is not readable from this result's own "
+                          "seed_scores, so the stored mean and t-interval cannot be cross-checked")
 MIN_SEEDS_FLAG = "n below protocol minimum"
 # The literal `benchmark.summarize` appends to `IntervalPair.flags` when `n < min_n`. It is a string
 # SHARED with the scorer, so a rename there would silently disable source (2) of `_n_problem` rather
@@ -798,13 +842,33 @@ def _measured_seeds(joint: Any) -> Optional[int]:
     `JointResult(..., scores, ..., len(scores), sum(not s.ok for s in scores), ...)`, so
     `n_attempted == len(seed_scores)` and `n_failed == the number of not-ok entries` hold identically
     for every result the scorer produces, and `seed_scores` is a LIST OF OBJECTS rather than an integer.
-    RESIDUAL, stated plainly: this raises the cost of the forgery to fabricating seed-score objects, it
-    does not remove it. A tamperer who rebuilds `seed_scores` consistently still gets through, which is
-    the same residual class as the consistently-forged `Margins` already documented at `_recompute`.
+    RESIDUAL, RE-MEASURED AND RESTATED. This used to say the anchor "raises the cost of the forgery to
+    fabricating seed-score objects". MEASURED at the previous HEAD, that cost was ZERO fabricated
+    objects: duplicating one EXISTING entry (`seed_scores[0]`) plus two `object.__setattr__` and
+    clearing the six `flags` tuples gave `_measured_seeds = 30`, no alarm and a displayed JOINT_SUPPORTED
+    on a genuine 29-seed run. The distinctness equality below closes exactly that variant, and
+    `_interval_problem`'s series cross-check independently closes BOTH it and the
+    fabricate-one-new-seed variant, because an appended entry changes the series every stored `mean` and
+    t-interval was computed from (measured on both variants: stored mean 0.9995971789304974 against a
+    recomputed 0.99982530375834). WHAT REMAINS: a tamperer who rebuilds `seed_scores` AND every
+    component's pair consistently -- who produces a study of the shape they claim -- still gets through.
+    That is the same residual class as the consistently-forged `Margins` at `_recompute`; it is no longer
+    a cheap one.
 
     `attempted - failed` needs no nonnegativity guard, and one is deliberately absent rather than left
     as an unpinnable surviving mutant: `failed` equals the not-ok count of a tuple whose length equals
-    `attempted`, so `failed <= attempted` is already proved by the two equalities above it."""
+    `attempted`, so `failed <= attempted` is already proved by the two equalities above it.
+
+    THE SEED IDS MUST BE DISTINCT, and that third equality is this round's addition -- the measurement
+    that forced it is the one in the residual paragraph above: `len(seed_scores) = 30` over 29 DISTINCT
+    seeds satisfied both of the other equalities. `benchmark.evaluate_gates` already applies
+    `len(set(ids)) != len(ids)` to the same list for `seed_list_frozen`; this function did not.
+    Cannot false-fire: measured over all 18 honest shapes, 0 have a repeated seed id, and a
+    study that honestly analysed one seed twice FAILS `seed_list_frozen`, a global gate, so every verdict
+    is already withheld -- and with ids repeated there is genuinely no readable count of DISTINCT seeds
+    that produced data, which is the quantity `pair.n` is being compared against.
+    `_MISSING` as the stand-in for an absent `seed` is deliberate: it is ONE sentinel object, so two
+    attribute-less entries collide and the check refuses them, which is the fail-closed direction."""
     nums = _admitted(joint, "JointResult")      # the ONLY admission of these two in the verdict path
     if nums is None:
         return None
@@ -812,11 +876,173 @@ def _measured_seeds(joint: Any) -> Optional[int]:
     try:
         scores = tuple(joint.seed_scores)
         listed_failed = sum(1 for s in scores if getattr(s, "ok", None) is not True)
+        ids = [getattr(s, "seed", _MISSING) for s in scores]
+        distinct = len(set(ids)) == len(ids)
     except Exception:  # noqa: BLE001 - an absent or unreadable seed-score list is no second source
         return None
-    if attempted != len(scores) or failed != listed_failed:
+    if attempted != len(scores) or failed != listed_failed or not distinct:
         return None
     return attempted - failed
+
+
+def _seed_series(scores: tuple, metric: Any) -> Optional[list]:
+    """The per-seed series this study's own `seed_scores` yield for one protocol metric, or None if the
+    list cannot be read as one. THE SECOND SOURCE FOR `mean`, `t_lo` and `t_hi` (see `_interval_problem`).
+
+    Rebuilt the way `benchmark.analyze_scores` builds it -- the OK seeds' readable values, in list order:
+        series[k] = [v for v in (_metric_read(s.metrics[k]) for s in scores if s.ok) if v is not None]
+    with two deliberate differences, both in the fail-closed direction:
+
+      * `getattr(s, "ok", None) is not True` skips an entry, matching `_measured_seeds` exactly rather
+        than `analyze_scores`' truthiness test, so the two halves of the anchor agree on which entries
+        count. A duck-typed `ok` of `1` is excluded here and included there, which can only make the
+        recomputed series disagree with the stored interval, never agree with a forged one.
+      * A per-seed metric that is not an INTACT `MetricValue` returns None for the whole series instead
+        of being silently dropped. `analyze_scores` drops it because for IT a `None` read is an honestly
+        unmeasured metric; HERE the difference matters, because dropping a forged entry would let a
+        tamperer SHORTEN the series the cross-check is computed from. `_mv_intact` separates the two: an
+        honestly unmeasured metric satisfies `MetricValue`'s own constructor invariant and is skipped (it
+        has to be -- that is the `delta_conv`-unmeasured-on-5-seeds shape, a legitimate study), while a
+        value forged by `object.__setattr__` fails it and the series is refused.
+
+    An absent/unreadable `metrics`, or a metric this result does not carry, is likewise None.
+
+    THE WHOLE WALK IS INSIDE ONE `try`, AND THE `ok` READ IS THE REASON. `getattr(s, "ok", None)` does
+    NOT fail safe on its own: `SeedScores.ok` is a PROPERTY that subscripts `self.metrics`, so with
+    `metrics` replaced by `None` the property raises `TypeError` and `getattr`'s default never applies --
+    found by this module's own junk-input test, which crashed the first draft of this function.
+    `render_dashboard` promises that a malformed object is refused with no figures rather than taking the
+    page down, so an exception here would contradict the module docstring as well as fail open."""
+    vals = []
+    try:
+        for s in scores:
+            if getattr(s, "ok", None) is not True:
+                continue
+            mv = s.metrics[metric]
+            if _mv_intact(mv) is None:
+                return None
+            v = _mv_float(mv)
+            if v is not None:                   # honestly unmeasured on this seed: skipped, as upstream
+                vals.append(v)
+    except Exception:  # noqa: BLE001 - no readable per-seed metric is no second source
+        return None
+    return vals
+
+
+def _measured_series(joint: Any) -> dict:
+    """{metric: `_seed_series`} for every metric the PROTOCOL TABLES declare, read ONCE per card.
+
+    Keyed off `bm.PRIMARY` / `bm.CONVERGED` rather than off the components, for the same reason
+    `_component_sets_ok` and `_declared` are: the expected set of metrics is the protocol's, not the
+    result's. A metric whose series cannot be rebuilt maps to None, and a metric that is not in the dict
+    at all (a component with an unrecognised `metric`) is read by `_series_of` as None -- both of which
+    every caller treats as fail-closed, NOT as "skip the cross-check"."""
+    try:
+        want = [m for table in (*bm.PRIMARY.values(), bm.CONVERGED) for m, _d, _a in table]
+        scores = tuple(joint.seed_scores)
+    except Exception:  # noqa: BLE001 - no tables or no seed-score list is no second source
+        return {}
+    return {m: _seed_series(scores, m) for m in want}
+
+
+def _series_of(series: Any, metric: Any) -> Optional[list]:
+    """One metric's series out of `_measured_series`' dict. The single lookup, so "no entry" and "entry
+    is None" cannot be told apart by a caller and accidentally treated differently."""
+    try:
+        return series[metric]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _show_num(x: Any) -> str:
+    """An already-admitted optional number, for a message. None is the honestly-unmeasured state."""
+    return _num(x) if x is not None else "unmeasured"
+
+
+def _same_number(stored: Any, want: Any) -> bool:
+    """Exact equality between a stored number and a recomputed one, on the doubles they actually STORE.
+
+    NOT `stored == want`, and the reason is `benchmark._plain_number`'s, argued over the public API
+    rather than assumed: `MetricValue.__post_init__` tests `isinstance(self.value, float)`, which a
+    `float` SUBCLASS passes, and `math.isfinite` reads the stored double, which the subclass need not lie
+    about -- so `MetricValue.measured(Sneaky(0.5))` is constructible through the PUBLIC api with
+    `__eq__` returning whatever it likes. A cross-check decided by an overridable `__eq__` is not a
+    cross-check. `bm.mean([x])` is the scorer's own normalise-before-checking reader (`_plain_number`
+    -> `float.__float__`, which reads the stored value and never consults a `__float__` override); it
+    returns a plain `float`, so the comparison that decides is `float.__eq__` on two plain floats. It
+    also RAISES on a non-number or a non-finite one, which is the fail-closed answer here."""
+    try:
+        return bm.mean([stored]) == bm.mean([want])
+    except Exception:  # noqa: BLE001 - not comparable as numbers: not equal
+        return False
+
+
+def _interval_problem(nums: Mapping, series: Optional[list]) -> Optional[str]:
+    """THE ROUND-6 CROSS-CHECK on `mean`, `t_lo` and `t_hi`. None means cross-checked; a string is the
+    disagreement, in the words the page prints. `nums` is `_admitted(pair, "IntervalPair")`'s output, so
+    nothing is admitted twice here.
+
+    WHAT THE PREVIOUS ROUND DECLARED, AND WHY IT WAS FALSE. These three were classified
+    `NO_SECOND_SOURCE`, "the interval itself is producer-asserted". An EXACT second source was already
+    in the same `JointResult` and this module already read it: the per-seed series rebuilt from
+    `joint.seed_scores` (which `_measured_seeds` has read since round 5) plus the admitted `pair.level`.
+    `benchmark.evaluate_primary` builds every pair as `summarize(name, series[metric], level, ...)`, and
+    `summarize` sets `mean = _mv(mean(vals))` and `(t_lo, t_hi) = t_interval(vals, level)`, so
+    `bm.mean` and `bm.t_interval` reproduce all three BIT-EXACTLY. MEASURED over the 18 honest shapes:
+    108 component instances, 324 component-field comparisons, 324 exact, 0 mismatched.
+
+    AND `t_lo`/`t_hi` ARE VERDICT-BEARING. They are protocol 6.3's bootstrap/t disagreement rule, which
+    `docs/EVALUATION_PROTOCOL.md` names as one of only two verdict-bearing safeguards for tails. The
+    only check applied to them was `_mv_intact`, a TYPE check -- verbatim the round-5 defect, admitted by
+    type alone while a second source in the same object went unused. MEASURED at the previous HEAD on an
+    HONEST 30-seed study with one heavy-tailed seed, whose H1 is INCONCLUSIVE because the real t-interval
+    straddles the margin while the bootstrap interval does not:
+        untouched                                   -> H1 INCONCLUSIVE, JOINT_INCONCLUSIVE   (correct)
+        t_lo/t_hi forged to the bootstrap bounds     -> H1 SUPPORTED, JOINT_SUPPORTED, NO ALARM
+    i.e. two `object.__setattr__` inside two `MetricValue`s turned a run that protocol 6.3 refuses a
+    verdict into a displayed, decisive success. `mean` reaches no verdict, like `level`; it is checked on
+    this module's own standing rule for `level` -- an edited figure is unalarmed tampering even when it
+    buys nothing -- and at the previous HEAD `mean` forged to `0.5` on every component rendered `0.5` in
+    `.measured` monospace beside a decisive JOINT_SUPPORTED with no alarm.
+
+    THE RECOMPUTATION'S OWN INPUTS FAIL CLOSED, and this is the mutant-D5 lesson from last round applied
+    before it can be repeated: `series is None` (an unreadable `seed_scores`, a tampered per-seed metric,
+    an unrecognised metric name) returns a PROBLEM, never None. An unusable second source must not
+    silently skip the check. The same holds for `level`: it is an input to `t_interval`, so a forged
+    level either makes `t_interval` raise (out of (0, 1): `_check_level`) or produce different bounds --
+    both caught here. That is why `level` is no longer classified as having no second source.
+
+    `boot_lo`/`boot_hi` ARE NOT CHECKED HERE AND CANNOT BE. `summarize` computes them as
+    `bootstrap_ci(vals, level, n_boot, make_rng(derive_seed(base_seed, "bootstrap:" + name)))`, and
+    NEITHER `n_boot` NOR `base_seed` IS A FIELD OF `JointResult` -- confirmed from
+    `dataclasses.fields(JointResult)`: it carries an opaque `config_hash` and a `seed_list_digest`, and
+    `freeze_seed_list` derives the seeds by `derive_seed(base_seed, "replicate:k")`, a hash. The
+    bootstrap resample is therefore not reproducible from the result, and the two bootstrap bounds stay a
+    stated residual rather than a check that could only be written by guessing a seed.
+
+    Cannot false-fire: every honest pair is `summarize`'s own output over the series this function
+    rebuilds, which is the 324/324 measurement above, and the n < 2 shapes are handled explicitly --
+    `summarize` returns all-unmeasured for n == 0 and an unmeasured t-interval for n == 1, so those are
+    what is REQUIRED there, not what is tolerated."""
+    if series is None:
+        return NO_INTERVAL_SOURCE_MSG
+    try:
+        if len(series) == 0:                     # summarize's n == 0 branch: nothing is measured
+            want = (None, None, None)
+        elif len(series) == 1:                   # ... and its n == 1 branch: a mean, no t-interval
+            want = (bm.mean(series), None, None)
+        else:
+            want = (bm.mean(series), *bm.t_interval(series, nums["level"]))
+    except Exception:  # noqa: BLE001 - the series or the level is not usable: no readable second source
+        return NO_INTERVAL_SOURCE_MSG
+    for attr, w in zip(("mean", "t_lo", "t_hi"), want):
+        got = _mv_float(nums[attr])              # None is the honestly-unmeasured state, not a rejection
+        if (got is None) != (w is None) or (got is not None and not _same_number(got, w)):
+            return (f"the interval's stored {attr} is {_show_num(got)} but the {len(series)} per-seed "
+                    f"value(s) this study records for this metric give {_show_num(w)} at the stored "
+                    f"level {_num(nums['level'])}: an interval cannot disagree with the data it was "
+                    f"computed from")
+    return None
 
 
 def _n_problem(pair: Any, n: int, min_n: int, measured_n: Optional[int]) -> Optional[str]:
@@ -832,9 +1058,12 @@ def _n_problem(pair: Any, n: int, min_n: int, measured_n: Optional[int]) -> Opti
         a component's `n` is the size of a SUBSET of the measured seeds. MEASURED over 12 legitimate
         study shapes (30-seed default, S=0.0, L=1.0, conv=False, gate_inputs=False, unregistered digest,
         29 seeds, 1 seed, n_failed = 1 / 3 / 10, and one converged metric left unmeasured on 5 OK
-        seeds): the inequality held in 12 of 12 and was STRICT in three of them -- `conv=False` gives
-        `pair.n = 0` on the converged components, and the unmeasured-metric shape gives
-        `delta_conv n = 25` against 30 measured seeds -- which is why equality must not be required.
+        seeds): the inequality held in 12 of 12 and was STRICT in THREE COMPONENT INSTANCES ACROSS TWO
+        SHAPES -- `conv=False` gives `pair.n = 0` on BOTH of its converged components (two instances,
+        one shape) and the unmeasured-metric shape gives `delta_conv n = 25` against 30 measured seeds
+        (one instance) -- which is why equality must not be required. The sentence this replaces said
+        "STRICT in three of them", which reads as three SHAPES and is false; re-counted over the 18
+        honest shapes the suite now builds: 3 strict instances of 108, in 2 shapes of 18.
 
     (2) The producer's own statement, `MIN_SEEDS_FLAG in pair.flags`. `summarize` appends it exactly
         when `n < min_n`, and `evaluate_primary` passes the same `cfg.min_seeds` to `summarize` and to
@@ -887,10 +1116,10 @@ def _n_problem(pair: Any, n: int, min_n: int, measured_n: Optional[int]) -> Opti
     return None
 
 
-def _pair_numbers_ok(pair: Any, min_n: int, measured_n: Optional[int]) -> bool:
+def _pair_numbers_ok(pair: Any, min_n: int, measured_n: Optional[int], series: Optional[list]) -> bool:
     """EVERY number `STORED_NUMBERS` declares on an `IntervalPair` -- not just the four bounds -- must
-    still be admitted by its kind AND, for `n`, agree with the result's own second sources, or the
-    recomputation fails closed.
+    still be admitted by its kind AND, for `n`, `mean`, `t_lo` and `t_hi`, agree with the result's own
+    second sources, or the recomputation fails closed.
 
     WHY IT IS THE WHOLE DECLARED SET AND NOT A HAND-WRITTEN LIST (the round-4 FAIL ground, G1). This
     function used to list `boot_lo, boot_hi, t_lo, t_hi` inline and nothing else, and `pair.n` was
@@ -909,34 +1138,51 @@ def _pair_numbers_ok(pair: Any, min_n: int, measured_n: Optional[int]) -> bool:
     cross-check that closes it and this is the single place in the verdict path that calls it, so there
     is one implementation of "is this n believable" rather than one per consumer.
 
-    `pair.level` IS DELIBERATELY NOT CROSS-CHECKED, although a second source for it is already on this
-    page: `_protocol_params`' sibling `bm.bonferroni_level()` is printed in the family line, and an
-    honest `pair.level` is `bonferroni_level(cfg.alpha, N_PRIMARY)`. The two agree only when the study
-    ran at the default `alpha`, and `BenchmarkConfig.alpha` IS settable while `JointResult` carries only
-    an opaque `config_hash` -- so comparing them would false-fire on every honest non-default-alpha
-    study, which is the identical undecidability already argued for `min_n` and `width_tol` at
-    `_recompute`. `level` also reaches no verdict (`interval_verdict` never reads it), so there is
-    nothing a forged level could buy that the type check does not already refuse.
+    AND THE DECLARED SET WITH ONE CROSS-CHECK WAS STILL NOT ENOUGH (the round-6 FAIL ground). `mean`,
+    `t_lo` and `t_hi` were admitted BY TYPE ALONE and DECLARED to have no second source, while an exact
+    one sat in the same `JointResult` -- the per-seed series `_measured_seeds` already reads. `t_lo`/`t_hi`
+    carry protocol 6.3's disagreement rule, so that was round 5's defect in a second lane.
+    `_interval_problem` is the cross-check that closes it, and this is the single place in the verdict
+    path that calls it.
+
+    ONE CLAIM ABOUT `pair.level` IS WITHDRAWN HERE AND ONE IS KEPT. WITHDRAWN: "level reaches no verdict
+    (`interval_verdict` never reads it), so there is nothing a forged level could buy that the type check
+    does not already refuse." `interval_verdict` still never reads it, but this module now passes it to
+    `bm.t_interval` as the second source for the t-interval, so a forged level changes a recomputation
+    and is caught. MEASURED at the previous HEAD, forging `level` on every pair of an honest 30-seed
+    study to each of 0.95, 0.99, 0.5, 5.0, -1.0 and 0.0: the level cell rendered the forged number as a
+    measurement, `_pair_numbers_ok` returned True, and the page displayed JOINT_SUPPORTED with no alarm
+    -- for `5.0`, `-1.0` and `0.0` too, which are not confidence levels and which `bm._check_level`
+    refuses outright. KEPT, because it is about a DIFFERENT second source and is still correct: the
+    `bm.bonferroni_level()` figure printed in the family line is NOT compared with `pair.level`, because
+    an honest level is `bonferroni_level(cfg.alpha, N_PRIMARY)`, `BenchmarkConfig.alpha` IS settable, and
+    `JointResult` carries only an opaque `config_hash` -- so that comparison would false-fire on every
+    honest non-default-alpha study, the identical undecidability argued for `min_n` and `width_tol` at
+    `_recompute`. The t-interval equation needs no `alpha` and so has no such limit.
 
     Cannot false-fire: nothing an honest producer builds fails it. Each bound and `mean` must satisfy
     `MetricValue`'s own constructor invariant (so a genuinely unmeasured n<2 bound is fine), `n` is
-    `len(values)` and `level` is `bonferroni_level()`. Only post-construction tampering reaches it, and
-    the no-false-alarm sweep below measures that over every honest fixture variation -- which now has to
-    cover the cross-check too, since a false-firing cross-check is itself a defect."""
-    nums = _admitted(pair, "IntervalPair")      # the ONLY admission of the pair's numbers
-    return nums is not None and _n_problem(pair, nums["n"], min_n, measured_n) is None
+    `len(values)`, `level` is `bonferroni_level()`, and `mean`/`t_lo`/`t_hi` are `summarize`'s own output
+    over the series `_seed_series` rebuilds (measured: 324 of 324 component-field comparisons exact over
+    18 honest shapes). Only post-construction tampering reaches it, and the no-false-alarm sweep below
+    measures that over every honest fixture variation -- which now has to cover both cross-checks, since
+    a false-firing cross-check is itself a defect."""
+    nums = _admitted(pair, "IntervalPair")      # the ONLY admission of the pair's numbers in this path
+    return (nums is not None and _n_problem(pair, nums["n"], min_n, measured_n) is None
+            and _interval_problem(nums, series) is None)
 
 
-def _recompute(c: Any, margins: Any, measured_n: Optional[int]) -> Optional[Verdict]:
+def _recompute(c: Any, margins: Any, measured_n: Optional[int], series: Mapping) -> Optional[Verdict]:
     """Verdict recomputed from the interval alone. None means 'could not recompute' (always treated as a
     mismatch and shown INCONCLUSIVE with an alarm, never as SUPPORTED).
 
-    `measured_n` IS A REQUIRED ARGUMENT WITH NO DEFAULT, and that is the point of round 5. It is the
-    study's own measured-seed count from `_measured_seeds`, the second source `pair.n` is checked
-    against; `None` means "unreadable", which fails closed. Giving it a default of `None` would have
-    made "nobody passed the second source" indistinguishable from "the second source is broken" at every
-    call site -- a fail-open default on the exact parameter this round exists to add -- so the three
-    internal callers and every direct test call name it explicitly instead.
+    `measured_n` AND `series` ARE REQUIRED ARGUMENTS WITH NO DEFAULTS, and that is the point of rounds 5
+    and 6. They are the result's own second sources, from `_measured_seeds` (the measured-seed count that
+    `pair.n` is checked against) and `_measured_series` (the per-seed series that `mean`, `t_lo` and
+    `t_hi` are checked against); an unreadable one fails closed. Giving either a default would make
+    "nobody passed the second source" indistinguishable from "the second source is broken" at every call
+    site -- a fail-open default on the exact parameters these rounds exist to add -- so the internal
+    callers and every direct test call name them explicitly instead.
 
     If `margins` is given, the component's own margin/direction must equal what the protocol tables
     (benchmark.PRIMARY / CONVERGED) declare for that metric under the result's Margins; a component whose
@@ -962,21 +1208,27 @@ def _recompute(c: Any, margins: Any, measured_n: Optional[int]) -> Optional[Verd
     RESIDUAL LIMITS, stated plainly: the renderer has no second source of truth for the registered margins
     themselves. A result whose Margins object AND component margins were forged consistently recomputes
     consistently and raises no alarm. Margins are shown on the page (see 'Uncertainty and protocol limits')
-    but are producer-asserted, not authenticated. Likewise the intervals themselves are producer-asserted:
-    a same-name component with a self-consistent forged pair is a residual (only missing, extra or wrongly
-    named components are alarmed, by `_component_sets_ok`). And a forged protocol parameter that is weaker
+    but are producer-asserted, not authenticated. The intervals are producer-asserted too, and ROUND 6
+    NARROWED -- did not remove -- that residual: a same-name component carrying a forged pair is now
+    caught unless the per-seed series in the SAME result is restated to match it (`_interval_problem`), so
+    what remains is a forger who rewrites the data as well. MEASURED: transplanting a strong H3 component
+    into a weak study is now INCONCLUSIVE and named, while the same transplant plus 90 rewritten per-seed
+    `MetricValue`s is still SUPPORTED with no alarm. And a forged protocol parameter that is weaker
     than the floor but would not have changed this component's verdict anyway raises no alarm, because the
     floor makes it unable to change what is displayed.
 
     EVERY NUMBER IT READS IS ADMITTED BY THE SHARED SCHEME FIRST, by class, from `STORED_NUMBERS` --
     `VERDICT_BEARING` names the four classes and this is the function that owes them a fail-closed. The
     bare `float(c.margin)` that used to stand here is G2 (see `_declared`); the missing `pair.n` is G1
-    (see `_pair_numbers_ok`); admitting that `pair.n` BY TYPE ALONE is round 5 (see `_n_problem`). What
-    stays local, because it is DOMAIN and not admission: a negative `width_tol` or `min_n` is a
-    nonsensical protocol parameter rather than a non-number, and the one-sided floor itself."""
+    (see `_pair_numbers_ok`); admitting that `pair.n` BY TYPE ALONE is round 5 (see `_n_problem`);
+    admitting `mean`/`t_lo`/`t_hi` BY TYPE ALONE while declaring they had no second source is round 6
+    (see `_interval_problem`). What stays local, because it is DOMAIN and not admission: a negative
+    `width_tol` or `min_n` is a nonsensical protocol parameter rather than a non-number, and the
+    one-sided floor itself."""
     try:
         nums = _admitted(c, "ComponentResult")                  # the ONLY admission of these three
-        if nums is None or not _pair_numbers_ok(getattr(c, "pair", None), nums["min_n"], measured_n):
+        if nums is None or not _pair_numbers_ok(getattr(c, "pair", None), nums["min_n"], measured_n,
+                                                _series_of(series, getattr(c, "metric", _MISSING))):
             return None
         margin, mn, wt = nums["margin"], nums["min_n"], nums["width_tol"]
         if margins is not None:
@@ -1004,10 +1256,11 @@ def _failed(g: Any) -> bool:
     return getattr(g, "passed", None) is not True
 
 
-def _eff_component(c: Any, withheld: bool, contract_bad: bool, margins: Any, measured_n: Optional[int]) -> tuple:
+def _eff_component(c: Any, withheld: bool, contract_bad: bool, margins: Any, measured_n: Optional[int],
+                   series: Mapping) -> tuple:
     """(displayed verdict or None, mismatch). Decisive only if stored AND recomputed agree and nothing withholds it."""
     stored = _vcoerce(Verdict, getattr(c, "verdict", None))
-    rec = _recompute(c, margins, measured_n)
+    rec = _recompute(c, margins, measured_n, series)
     if stored is None or rec is None or rec is not stored:
         return Verdict.INCONCLUSIVE, True
     if withheld or contract_bad:
@@ -1021,8 +1274,13 @@ def _component_sets_ok(h: Any) -> bool:
     duplicated, extra or wrongly-named component is alarmed.
 
     RESIDUAL LIMIT, stated plainly: this checks names only. The INTERVALS inside a component are
-    producer-asserted; a component with the correct metric name carrying a forged but self-consistent
-    interval pair (and a matching stored verdict) recomputes consistently and raises no alarm."""
+    producer-asserted, and a component with the correct metric name carrying a forged interval pair (and
+    a matching stored verdict) is not caught HERE. It is no longer unalarmed, though, which is a round-6
+    correction to this paragraph: `_interval_problem` compares the pair's `mean` and t-interval against
+    the per-seed series the same result carries, so the forged pair must agree with that data too. The
+    residual is now a forger who restates the series as well (measured at
+    `test_the_transplanted_pair_residual_now_costs_the_whole_series`), and the two BOOTSTRAP bounds,
+    whose resample is not reproducible from a `JointResult` at all."""
     try:
         want = sorted(m for m, _d, _a in bm.PRIMARY[h.hid])
         if sorted(str(c.metric) for c in h.components) != want:
@@ -1117,6 +1375,39 @@ def _n_sources_disagree(joint: Any, measured_n: Optional[int]) -> list:
     return out
 
 
+def _interval_sources_disagree(joint: Any, series: Mapping) -> list:
+    """Components whose stored `mean`/`t_lo`/`t_hi` disagree with the per-seed series the result carries.
+
+    THE PROSE SIBLING OF `_interval_problem`, for the same reason `_n_sources_disagree` is `_n_problem`'s
+    and on the same terms: the GUARD lives at the point of use in `_recompute`, and the page still has to
+    be able to say WHICH finding it is rather than emit the generic "stored verdict disagrees" warning
+    that an honest below-minimum CONFIGURATION also gets. Both walks call `_interval_problem`, the single
+    implementation, so this one cannot drift from the one that withholds the verdict.
+
+    It reports a problem only for a pair whose numbers are otherwise ADMITTED (`_admitted` is not None).
+    A pair with a forged non-float bound is not a cross-source contradiction -- it is an ill-typed field,
+    which the kind functions alarm on in their own words -- so saying both would name the wrong finding;
+    that is the same division `_n_sources_disagree` makes with its `n is None or mn is None` guard."""
+    try:
+        hyps = (joint.h1, joint.h2, joint.h3)
+    except Exception:  # noqa: BLE001 - a malformed result is refused before this is reached
+        return []
+    out = []
+    for h in hyps:
+        try:
+            comps = (*h.components, *(tuple(getattr(h, "converged_components", ()) or ())))
+        except Exception:  # noqa: BLE001
+            continue
+        for c in comps:
+            nums = _admitted(getattr(c, "pair", None), "IntervalPair")
+            if nums is None:
+                continue        # ill-typed, not contradicted: the kind functions say so in their words
+            p = _interval_problem(nums, _series_of(series, getattr(c, "metric", _MISSING)))
+            if p is not None:
+                out.append(f"{h.hid}/{_visible(str(getattr(c, 'metric', '?')))[:40]}: {p}")
+    return out
+
+
 def _gate_set_ok(gates: Any) -> bool:
     """The validity-gate NAMES must be exactly what the scorer declares in `benchmark.GATE_SCOPES`, as
     sorted sequences (so an extra duplicate alarms too). A deleted, duplicated, extra or wrongly-named
@@ -1150,13 +1441,14 @@ def _gate_set_ok(gates: Any) -> bool:
         return False
 
 
-def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool, margins: Any, measured_n: Optional[int]) -> tuple:
+def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool, margins: Any, measured_n: Optional[int],
+                    series: Mapping) -> tuple:
     """(displayed verdict, mismatch). Decisive only if the stored hypothesis verdict equals an independent
     recomputation from recomputed component verdicts, scope-aware gates, and (H3) converged components."""
     if not _component_sets_ok(h):
         return Verdict.INCONCLUSIVE, True
-    rc = [_recompute(c, margins, measured_n) for c in h.components]
-    mismatch = any(_eff_component(c, False, False, margins, measured_n)[1] for c in h.components)
+    rc = [_recompute(c, margins, measured_n, series) for c in h.components]
+    mismatch = any(_eff_component(c, False, False, margins, measured_n, series)[1] for c in h.components)
     if None in rc:
         return Verdict.INCONCLUSIVE, True
     blocked = bool(getattr(h, "blocking", ())) or any(
@@ -1174,7 +1466,7 @@ def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool, margins: Any, meas
         rv = Verdict.INCONCLUSIVE
     if rv is Verdict.SUPPORTED and h.hid == "H3":
         conv = tuple(getattr(h, "converged_components", ()) or ())
-        if sup_block or not conv or not all(_recompute(c, margins, measured_n) is Verdict.SUPPORTED
+        if sup_block or not conv or not all(_recompute(c, margins, measured_n, series) is Verdict.SUPPORTED
                                             for c in conv):
             rv = Verdict.INCONCLUSIVE
     stored = _vcoerce(Verdict, getattr(h, "verdict", None))
@@ -1250,15 +1542,16 @@ def render_scorecard(joint: Any) -> str:
         problems = [*problems, "subject_kind contradicts the fixture exemption recorded in the gates"]
         bad = True
     any_failed = any(_failed(g) for g in gates) or gate_set_bad
-    # THE SECOND SOURCE, read ONCE for the whole card and handed to every recomputation. Not re-derived
-    # per component: `n_attempted`/`n_failed` are admitted here and in `_int_or_unk`'s display cell, by
-    # the same kind function, and nowhere else.
+    # THE TWO SECOND SOURCES, read ONCE for the whole card and handed to every recomputation. Not
+    # re-derived per component: `n_attempted`/`n_failed` are admitted here and in `_int_or_unk`'s display
+    # cell, by the same kind function, and nowhere else; the per-seed series is rebuilt once per metric.
     measured_n = _measured_seeds(joint)
+    series = _measured_series(joint)
     mismatch = []
     eff = {}
     rows = ""
     for h in (joint.h1, joint.h2, joint.h3):
-        ev, mm = _eff_hypothesis(h, gates, bad, joint.margins, measured_n)
+        ev, mm = _eff_hypothesis(h, gates, bad, joint.margins, measured_n, series)
         eff[h.hid] = ev
         if mm or gate_set_bad:
             mismatch.append(h.hid)
@@ -1269,7 +1562,7 @@ def render_scorecard(joint: Any) -> str:
         for comps, suffix in groups:
             for c in comps:
                 pair = c.pair
-                ecv, cmm = _eff_component(c, any_failed, bad, joint.margins, measured_n)
+                ecv, cmm = _eff_component(c, any_failed, bad, joint.margins, measured_n, series)
                 if cmm and h.hid not in mismatch:
                     mismatch.append(h.hid)
                 rows += (
@@ -1362,6 +1655,23 @@ def render_scorecard(joint: Any) -> str:
                  'result states it twice with two different values. WHETHER A FIELD WAS EDITED AFTER THE '
                  'FACT OR THE SCORER NOW COUNTS SEEDS DIFFERENTLY CANNOT BE DETERMINED FROM THIS RESULT, '
                  'and this page asserts neither.</p>')
+    i_bad = _interval_sources_disagree(joint, series)
+    if i_bad:
+        # SAME DISCIPLINE AS THE PARAGRAPH ABOVE, and for the same reason. It names the two contradicting
+        # numbers and says what was withheld -- both observable right here -- and asserts NOTHING about
+        # why. `t_lo`/`t_hi` carry protocol 6.3's bootstrap/t disagreement rule, so a contradicted
+        # t-interval is not a cosmetic figure; `mean` reaches no verdict and is still withheld, because
+        # an interval that disagrees with the data behind it is not an interval this page can read.
+        body += ('<p class="warn">INTERVAL CONTRADICTED BY THIS RESULT\'S OWN PER-SEED DATA: '
+                 + _e("; ".join(i_bad)) + '. Every verdict derived from a contradicted interval is '
+                 'withheld (INCONCLUSIVE shown): protocol 6.3 makes the t-interval verdict-bearing '
+                 'through the bootstrap/t disagreement rule, and this result states the same interval '
+                 'twice -- once as a stored bound and once as the per-seed values it was computed from -- '
+                 'with two different answers. WHETHER A FIELD WAS EDITED AFTER THE FACT OR THE SCORER '
+                 'NOW SUMMARISES A SERIES DIFFERENTLY CANNOT BE DETERMINED FROM THIS RESULT, and this '
+                 'page asserts neither. The two BOOTSTRAP bounds are not cross-checked at all and are a '
+                 'stated residual: their resample needs n_boot and the study base seed, and JointResult '
+                 'carries neither.</p>')
     weaker = _weaker_than_protocol(joint)
     if weaker:
         # LABELLING ONLY -- which in this kit is the product. The GUARD is sound and is not touched here:

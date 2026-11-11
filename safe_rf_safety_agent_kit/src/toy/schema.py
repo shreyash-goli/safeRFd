@@ -68,10 +68,28 @@ def _nonblank(name: str, value: Any) -> None:
 
 
 def _check_keys(what: str, data: Any, expected: set[str]) -> None:
+    """Exact key-set check. NORMALISE THE KEYS BEFORE COMPARING THEM.
+
+    `set(data) - expected` is `__hash__` plus `__eq__` on the caller's keys, and a `str` SUBCLASS whose
+    `__hash__` returns `hash("run_id")` and whose `__eq__` returns True is treated as that key: the
+    unknown-key check then sees nothing unknown and nothing missing. MEASURED, on a hand-built dict
+    (not reachable through `from_json`, whose keys come out of the JSON decoder as plain `str`):
+      * at the top level the liar is HARMLESS and that is stated rather than assumed --
+        `ExperimentRecord.from_dict` reads its fields by explicit `data["name"]` lookups, which the same
+        lying `__eq__` resolves to the same values, so the record built is BYTE-IDENTICAL to the honest
+        one. Nothing is gained, because nothing was renamed as far as any reader is concerned.
+      * nested, `RunProvenance.from_dict` passes `cls(**data)`, and a mislabelled key then reached the
+        constructor as a keyword and raised `TypeError: got multiple values for argument 'b...'` --
+        outside this module's stated `ValueError` contract, the same class of escape as the
+        `OverflowError` that `toy.benchmark._check_margin` had to close.
+    `str.__str__` reads the characters the object holds, so the key set compared is the key set the
+    constructor will be handed, and a mislabelled key gets the diagnostic it should: "unknown keys
+    [...]" plus "missing keys [...]"."""
     if not isinstance(data, dict):
         raise ValueError(f"{what} must be a JSON object, got {type(data).__name__}")
-    unknown = set(data) - expected
-    missing = expected - set(data)
+    keys = {str.__str__(k) if isinstance(k, str) and type(k) is not str else k for k in data}
+    unknown = keys - expected
+    missing = expected - keys
     if unknown:
         raise ValueError(f"{what}: unknown keys {sorted(unknown)}")
     if missing:
@@ -80,26 +98,45 @@ def _check_keys(what: str, data: Any, expected: set[str]) -> None:
 
 # ---------------------------------------------------------------- seeding
 def make_rng(seed: int) -> random.Random:
-    """Return an independent generator; never touches the global `random` state."""
-    _check_seed(seed)
-    return random.Random(seed)
+    """Return an independent generator; never touches the global `random` state.
+
+    Seeded with the PLAIN int `_check_seed` returns, not with the caller's object: see `_check_seed`."""
+    return random.Random(_check_seed(seed))
 
 
 def derive_seed(seed: int, label: str) -> int:
-    """Canonical sub-run seed: first 8 bytes of sha256("<seed>:<label>"). No time/PID entropy."""
-    _check_seed(seed)
+    """Canonical sub-run seed: first 8 bytes of sha256("<seed>:<label>"). No time/PID entropy.
+
+    The seed is FORMATTED into the hashed string, and `__format__` / `__str__` are overridable, so the
+    plain int `_check_seed` returns is what gets hashed. MEASURED before that: an `int` subclass whose
+    `__str__` returned "7" made `derive_seed(StrSeed(9), "a") == derive_seed(7, "a")`, i.e. two seeds
+    that a duplicate check sees as DISTINCT derived the same sub-run seed and therefore the same
+    fixture -- "n distinct seeds" with one example behind it (`toy.robustness._check_seeds`'s guarantee).
+    """
+    seed = _check_seed(seed)
     _nonblank("label", label)
     digest = hashlib.sha256(f"{seed}:{label}".encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big")
 
 
-def _check_seed(seed: Any) -> None:
+def _check_seed(seed: Any) -> int:
+    """Validate a seed and RETURN IT AS A PLAIN `int`, so the seed checked is the seed used.
+
+    NORMALISE BEFORE COMPARING, and return what was compared (the pattern of
+    `toy.benchmark._plain_number`, which is where it was first measured): `seed < 0` and
+    `seed > MAX_SEED` are `type(seed).__lt__` / `__gt__`, so an `int` SUBCLASS answering False to both
+    passed this gate holding -5 and 2**200 -- through the public `make_rng` / `derive_seed` /
+    `RunProvenance`, with no `object.__setattr__`. `int.__int__` reads the value the object actually
+    STORES, which is the value every caller then uses. Callers must use the RETURN VALUE; ignoring it
+    (which every caller used to do) leaves the overrides in play one line later."""
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise ValueError(f"seed must be an int, got {type(seed).__name__}")
+    seed = int.__int__(seed)
     if seed < 0:
         raise ValueError("seed must be nonnegative")
     if seed > MAX_SEED:
         raise ValueError("seed must be <= 2**64 - 1")
+    return seed
 
 
 def current_python_version() -> str:
@@ -127,7 +164,7 @@ class RunProvenance:
             datetime.strptime(self.timestamp_utc, "%Y-%m-%dT%H:%M:%SZ")
         except ValueError:
             raise ValueError(f"timestamp_utc is not a real date/time: {self.timestamp_utc!r}") from None
-        _check_seed(self.seed)
+        object.__setattr__(self, "seed", _check_seed(self.seed))   # store what was checked
         _nonblank("code_version", self.code_version)
         _nonblank("python_version", self.python_version)
         if self.toy_only is not True:
@@ -162,6 +199,12 @@ class MetricValue:
     Absence is a distinct state (value=None plus a reason), never 0.0: a missing
     measurement must not be readable as a genuine zero. Use `MetricValue.measured`
     / `MetricValue.unmeasured`. Only `float` values are accepted (no int/bool coercion).
+
+    A `float` SUBCLASS is accepted (it IS a float) but is NOT stored: `__post_init__` stores the plain
+    double the object holds, so no override on the instance can make the value stored, serialized or
+    compared differ from the value validated. What this does NOT do is make a `MetricValue` tamper-proof:
+    `object.__setattr__(mv, "value", <anything>)` still replaces the field after construction, which is
+    why `toy.benchmark._metric_read` exists and why no consumer may read `.value` for itself.
     """
     value: Optional[float]
     reason: Optional[str] = None
@@ -174,8 +217,30 @@ class MetricValue:
                 raise ValueError(f"metric value must be a float, got {type(self.value).__name__}")
             if not math.isfinite(self.value):
                 raise ValueError("metric value must be finite (no NaN/inf)")
-            if self.value == 0.0:
-                object.__setattr__(self, "value", 0.0)  # normalise -0.0 so equal values hash equally
+            # STORE WHAT WAS CHECKED, and the reason this is the root of the whole checked-reader
+            # architecture rather than a tidy-up. `isinstance(self.value, float)` admits a float
+            # SUBCLASS and `math.isfinite` reads the double the object STORES, which the subclass need
+            # not lie about -- but `self.value == 0.0` was `type(self.value).__eq__`, an OVERRIDABLE
+            # operation deciding whether to overwrite the stored number. MEASURED, through the public
+            # API with no `object.__setattr__` anywhere:
+            #     class EqZero(float):
+            #         def __eq__(self, o):  return True
+            #         def __hash__(self):   return 0
+            #     MetricValue.measured(EqZero(7.0)).value   ->  0.0
+            # i.e. the schema's own validator SUBSTITUTED the stored measurement. End to end through
+            # SeedScores -> analyze_scores -> to_experiment_records -> verdict_from_records, an honest
+            # L of 7.00..7.29 against delta_R=0.05 turned H2 UNSUPPORTED -> SUPPORTED and
+            # JOINT_UNSUPPORTED -> JOINT_SUPPORTED with `reasons = ()` and an unchanged `config_hash`
+            # -- the signature of a clean recompute -- and in the other direction a SUPPORTED S became
+            # UNSUPPORTED. `float.__float__` reads that same stored double (a `__float__` override is
+            # not consulted second; it is not consulted at all), so the number checked above, the
+            # number stored here, the number serialized by `to_dict` and the number every consumer
+            # compares are one number. The -0.0 normalisation that this line is FOR is then a
+            # comparison between two plain floats. Same inspect-before-normalise pattern, and the same
+            # fix, as `toy.benchmark._plain_number` and `toy.robustness._plain_summary_fields`; this is
+            # the point UPSTREAM of both of them, so every module that stores a metric inherits it.
+            v = float.__float__(self.value)
+            object.__setattr__(self, "value", 0.0 if v == 0.0 else v)
             if self.reason is not None:
                 raise ValueError("a measured metric must not carry an unmeasured reason")
 

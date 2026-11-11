@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-from toy.schema import (EvidenceClass, ExperimentRecord, MetricValue, RunProvenance,
+from toy.schema import (SCHEMA_VERSION, EvidenceClass, ExperimentRecord, MetricValue, RunProvenance,
                         current_python_version, derive_seed, make_rng)
 
 H = "a" * 64
@@ -321,6 +321,247 @@ class Determinism(unittest.TestCase):
                 derive_seed(bad, "a")
         with self.assertRaises(ValueError):
             derive_seed(1, " ")
+
+
+class AMetricStoresTheNumberItChecked(unittest.TestCase):
+    """F1, THE ROOT DEFECT OF THIS ROUND, pinned where it lives.
+
+    `MetricValue.__post_init__` validated `self.value` with `isinstance` and `math.isfinite` -- neither
+    of which a `float` SUBCLASS can lie to -- and then ended with a -0.0 normalisation written as
+    `self.value == 0.0`, which is `type(self.value).__eq__` and IS overridable. So the last act of the
+    schema's own validator was to decide, by asking the value itself, whether to REPLACE the value:
+
+        class EqZero(float):
+            def __eq__(self, o):  return True
+            def __hash__(self):   return 0
+        MetricValue.measured(EqZero(7.0)).value   ->   0.0
+
+    No `object.__setattr__`, no tampering primitive, one public classmethod. Every module in this kit
+    stores measurements as `MetricValue`s, so this was upstream of `toy.benchmark._metric_read`,
+    `_plain_number` and `toy.robustness._plain_summary_fields` -- all three of which exist for this
+    exact pattern and none of which could help, because the substitution had already happened at
+    construction. The fix is `float.__float__`, which reads the double the object STORES: the number
+    checked, the number stored, the number serialized and the number compared are then one number.
+    NOT reachable by deserialisation -- `from_dict` yields plain floats out of JSON -- so the route is
+    an in-process `float` subclass, which is exactly what a producer module hands to
+    `MetricValue.measured(...)`."""
+
+    class EqZero(float):
+        def __eq__(self, o):
+            return True
+
+        def __ne__(self, o):
+            return False
+
+        def __hash__(self):
+            return 0
+
+    class Lying(float):
+        """Lies about everything a conversion or a comparison could consult."""
+        def __eq__(self, o):
+            return True
+
+        def __ne__(self, o):
+            return False
+
+        def __float__(self):
+            return 1e308
+
+        def __abs__(self):
+            return 0.0
+
+        def __gt__(self, o):
+            return True
+
+        def __lt__(self, o):
+            return False
+
+        def __repr__(self):
+            return "0.0"
+
+        def __hash__(self):
+            return 0
+
+    def test_a_float_subclass_cannot_replace_the_stored_value(self):
+        for cls in (self.EqZero, self.Lying):
+            for stored in (7.0, -7.0, 0.25, 1e-300, 1e300, 5e-324):
+                with self.subTest(sneak=cls.__name__, stored=stored):
+                    mv = MetricValue.measured(cls(stored))
+                    self.assertIs(type(mv.value), float, "the subclass instance is still stored")
+                    self.assertEqual(mv.value, stored)
+                    # and the stored number is what every consumer sees, however it reads it
+                    self.assertEqual(mv.to_dict()["value"], stored)
+                    self.assertEqual(json.loads(json.dumps(mv.to_dict()))["value"], stored)
+                    self.assertEqual(mv.render(), repr(stored))
+                    self.assertTrue(mv.is_measured)
+
+    def test_the_minus_zero_normalisation_this_line_is_for_still_works(self):
+        """The fix must not cost the property the line exists for: -0.0 -> 0.0 so equal values hash
+        equally. Asserted on the plain floats AND through a subclass holding -0.0."""
+        for z in (-0.0, self.EqZero(-0.0), self.Lying(-0.0)):
+            mv = MetricValue.measured(z)
+            self.assertEqual(math.copysign(1.0, mv.value), 1.0, repr(type(z)))
+            self.assertIs(type(mv.value), float)
+            self.assertNotIn("-0.0", record(metrics={"m": mv}).to_json())
+        self.assertEqual(record(metrics={"m": MetricValue.measured(0.0)}).content_hash(),
+                         record(metrics={"m": MetricValue.measured(-0.0)}).content_hash())
+
+    def test_the_serialisation_contract_is_unchanged_for_honest_values(self):
+        """SCHEMA_VERSION and every stored `content_hash` are a contract: the fix must be invisible to
+        an honest record. The baseline hash below was computed from `HEAD:src/toy/schema.py` -- the
+        version BEFORE the fix -- on this same `record()` fixture, and it is pinned BY VALUE so that a
+        future change to `MetricValue.to_dict`, `TOY_LABEL` or the canonical JSON cannot pass
+        unnoticed. SCHEMA_VERSION did NOT move: nothing an honest record serialises changed."""
+        self.assertEqual(SCHEMA_VERSION, "2")
+        self.assertEqual(record().content_hash(),
+                         "09aa84a200ffc456a472aa4cbadf5dec1396b21bbe2867afda4b898ac230f283")
+        self.assertEqual(MetricValue.measured(0.25).to_dict(), {"value": 0.25, "reason": None})
+        r = record()
+        self.assertEqual(ExperimentRecord.from_json(r.to_json()).content_hash(), r.content_hash())
+        # identity, not merely equality: an honest float is stored unchanged, so nothing is copied
+        v = 0.3 + 0.4
+        self.assertIs(MetricValue.measured(v).value, v)
+
+    def test_the_type_rules_are_not_weakened_by_the_normalisation(self):
+        """`float.__float__` must not become a coercion: an int, a bool and a non-finite are still
+        refused, and a subclass whose STORED double is non-finite is refused for its stored value."""
+        for bad in (1, True, False, "0.0", None, [0.0]):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                MetricValue.measured(bad)
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                MetricValue.measured(self.EqZero(bad))
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                MetricValue.measured(self.Lying(bad))
+        with self.assertRaises(ValueError):
+            MetricValue(self.EqZero(1.0), "reason")      # measured + reason still refused
+
+
+class TheKeySetCheckComparesPlainKeys(unittest.TestCase):
+    """The last instance the operator sweep turned up, reported as the minor thing it is.
+
+    `_check_keys` compares key SETS, so it runs on `__hash__` and `__eq__`. A `str` subclass whose hash
+    equals a real key's and whose `__eq__` always returns True is accepted as that key. MEASURED on both
+    routes, because they differ and only one is a defect:
+      * top level: it was HARMLESS, and that is stated as a measurement rather than assumed.
+        `ExperimentRecord.from_dict` reads its fields by explicit `data["name"]` lookups, which the same
+        lying `__eq__` resolves to the same values, so the record built was BYTE-IDENTICAL to the honest
+        one (measured before the fix). A provenance argument would have said "a caller who can build the
+        dict could just use the right key"; the validity argument is the byte-identical record.
+      * nested: a real, if small, defect. `RunProvenance.from_dict` uses `cls(**data)`, so a mislabelled
+        key reached the constructor as a keyword and escaped as `TypeError: got multiple values for
+        argument ...`, outside this module's stated `ValueError` contract.
+    Normalising the key set closes the nested escape and, as a side effect, gives the top-level case a
+    diagnostic instead of a silent resolution. The gain is the DIAGNOSTIC and the error contract, not
+    secrecy: a caller who builds the dict always controlled its contents."""
+
+    @staticmethod
+    def liar(target):
+        class K(str):
+            def __hash__(self):
+                return hash(target)
+
+            def __eq__(self, o):
+                return True
+        return K
+
+    def test_a_mislabelled_nested_key_is_a_valueerror_not_a_typeerror(self):
+        d = record().to_dict()
+        p = dict(d["provenance"])
+        p[self.liar("run_id")("bogus")] = p.pop("run_id")
+        d["provenance"] = p
+        with self.assertRaises(ValueError) as cm:
+            ExperimentRecord.from_dict(d)
+        self.assertIn("bogus", str(cm.exception))      # the key is NAMED, not swallowed
+        try:
+            ExperimentRecord.from_dict(d)
+        except TypeError:                              # pragma: no cover - the defect, if it returns
+            self.fail("TypeError escaped from_dict, outside the stated ValueError contract")
+        except ValueError:
+            pass
+
+    def test_a_top_level_mislabelled_key_is_named_too(self):
+        d = record().to_dict()
+        d[self.liar("name")("nonsense")] = d.pop("name")
+        with self.assertRaisesRegex(ValueError, r"unknown keys \['nonsense'\]"):
+            ExperimentRecord.from_dict(d)
+
+    def test_honest_key_sets_are_unaffected(self):
+        for path in ([], ["provenance"], ["metrics", "loss"]):
+            d = json.loads(record().to_json())
+            t = d
+            for k in path:
+                t = t[k]
+            t["extra"] = 1
+            with self.assertRaisesRegex(ValueError, "unknown keys", msg=str(path)):
+                ExperimentRecord.from_json(json.dumps(d))
+        d = json.loads(record().to_json())
+        del d["provenance"]["seed"]
+        with self.assertRaisesRegex(ValueError, "missing keys"):
+            ExperimentRecord.from_json(json.dumps(d))
+        self.assertEqual(ExperimentRecord.from_json(record().to_json()).content_hash(),
+                         record().content_hash())
+
+
+class ASeedIsNormalisedBeforeItIsCompared(unittest.TestCase):
+    """F2b: `_check_seed` inspected the caller's object and discarded the result.
+
+    `seed < 0` and `seed > MAX_SEED` are overridable comparisons, and `derive_seed` FORMATS the seed
+    into the string it hashes (`__format__` / `__str__`, also overridable). The sharp consequence is
+    not the range check: it is that two seeds a duplicate check sees as DISTINCT could derive the SAME
+    sub-run seed, and therefore the same fixture, so `toy.robustness`'s "n distinct seeds" could be one
+    example n times with no repeated value anywhere in the card."""
+
+    class LtSeed(int):
+        def __lt__(self, o):
+            return False
+
+        def __gt__(self, o):
+            return False
+
+        def __le__(self, o):
+            return False
+
+        def __ge__(self, o):
+            return False
+
+    class StrSeed(int):
+        def __str__(self):
+            return "7"
+
+        def __format__(self, spec):
+            return "7"
+
+    def test_an_out_of_range_seed_subclass_is_refused_for_its_stored_value(self):
+        for bad in (-1, -5, 2 ** 64, 2 ** 200):
+            with self.subTest(stored=bad):
+                with self.assertRaises(ValueError):
+                    make_rng(self.LtSeed(bad))
+                with self.assertRaises(ValueError):
+                    derive_seed(self.LtSeed(bad), "a")
+                with self.assertRaises(ValueError):
+                    prov(seed=self.LtSeed(bad))
+        for good in (0, 7, 2 ** 64 - 1):
+            self.assertEqual(derive_seed(self.LtSeed(good), "a"), derive_seed(good, "a"))
+
+    def test_two_distinct_seeds_cannot_derive_one_fixture(self):
+        self.assertNotEqual(derive_seed(self.StrSeed(9), "a"), derive_seed(7, "a"))
+        self.assertEqual(derive_seed(self.StrSeed(9), "a"), derive_seed(9, "a"))
+        # and the generator is seeded with the stored value, not with whatever __str__ says
+        self.assertEqual([make_rng(self.StrSeed(9)).random() for _ in range(3)],
+                         [make_rng(9).random() for _ in range(3)])
+        self.assertNotEqual(make_rng(self.StrSeed(9)).random(), make_rng(7).random())
+
+    def test_a_provenance_record_stores_the_plain_seed(self):
+        p = prov(seed=self.StrSeed(9))
+        self.assertIs(type(p.seed), int)
+        self.assertEqual(p.seed, 9)
+        self.assertEqual(p.to_dict()["seed"], 9)
+        self.assertEqual(json.loads(json.dumps(p.to_dict()))["seed"], 9)
+        # ... so two records differing only in the seed's TYPE are byte-identical
+        self.assertEqual(record(provenance=prov(seed=self.StrSeed(9))).content_hash(),
+                         record(provenance=prov(seed=9)).content_hash())
+        self.assertEqual(len({p.seed} & {9}), 1)       # a set built from it behaves
 
 
 if __name__ == "__main__":

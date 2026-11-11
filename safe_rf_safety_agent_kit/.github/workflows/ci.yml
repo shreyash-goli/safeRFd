@@ -18,6 +18,10 @@
 # no package, so BOTH jobs below would have gone red on every push: core-no-deps with POLICY:NONE_REASON and
 # optional-deps with POLICY:TORCH_MODE_MISSING. The defect was invisible on any machine that had ruff. If you add a
 # linter to either job, expect that skip to disappear and the behavioural test to run; nothing else changes.
+# `ruff` is the only name on the `TOOLS` allowlist in scripts/run_tests.sh, and that allowlist is the fifth
+# round's fix: a test gated on any OTHER absent tool must declare its name there (the suite's own
+# test_the_TOOLS_allowlist_is_exactly_the_tools_this_suite_gates_on derives the set from the skip sites and goes
+# red otherwise), because an undeclared name is POLICY:TOOL_UNDECLARED in every mode, `--expect any` included.
 name: ci
 on:
   push:

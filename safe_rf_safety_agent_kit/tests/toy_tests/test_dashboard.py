@@ -455,14 +455,20 @@ def measured_n(j):
 
 
 def recompute(c, margins, j):
-    """`db._recompute` with the second source taken from the result the component came from."""
-    return db._recompute(c, margins, db._measured_seeds(j))
+    """`db._recompute` with BOTH second sources taken from the result the component came from: the
+    measured-seed count (round 5) and the per-seed series behind each interval (round 6)."""
+    return db._recompute(c, margins, db._measured_seeds(j), db._measured_series(j))
 
 
 def pair_ok(j, pair=None, c=None):
-    """`db._pair_numbers_ok` for one pair of `j`, with `min_n` and the second source read off `j`."""
+    """`db._pair_numbers_ok` for one pair of `j`, with `min_n` and both second sources read off `j`.
+
+    The series is looked up by `c.metric`, so a test that passes `pair=` a pair from a DIFFERENT
+    component must pass the matching `c=` too, or it is asking the interval cross-check to compare one
+    metric's interval against another metric's data."""
     c = j.h1.components[0] if c is None else c
-    return db._pair_numbers_ok(c.pair if pair is None else pair, c.min_n, db._measured_seeds(j))
+    return db._pair_numbers_ok(c.pair if pair is None else pair, c.min_n, db._measured_seeds(j),
+                               db._series_of(db._measured_series(j), getattr(c, "metric", None)))
 
 
 def joint_cell(h):
@@ -1058,16 +1064,49 @@ class VerdictCoreSurvivors(unittest.TestCase):
             self.assertFalse(db._component_sets_ok(h3))
         self.assertFalse(db._component_sets_ok(object()))
 
-    def test_documented_limit_same_name_forged_pair_is_a_residual(self):
-        # Honest boundary (C1): names are checked, intervals are producer-asserted. A same-name component carrying
-        # a self-consistent strong pair is NOT detectable. Pinned so the docstring stays truthful.
+    def test_the_transplanted_pair_residual_now_costs_the_whole_series(self):
+        """ROUND-6 NARROWING OF A DOCUMENTED RESIDUAL, with its new cost measured rather than asserted.
+
+        This test was called `test_documented_limit_same_name_forged_pair_is_a_residual` and it pinned
+        the OPPOSITE outcome: transplanting a strong H3 component (and its converged pair) from one
+        study into a weak one, under the correct metric name, rendered H3 SUPPORTED with no alarm, on the
+        stated grounds that "intervals are producer-asserted". They are; but the per-seed values the
+        interval was computed from are in the SAME result, so the transplant contradicts them.
+
+        MEASURED, both halves:
+          transplant alone      -> H3 INCONCLUSIVE, named: stored mean 1.000511355280501 vs the 30
+                                   per-seed values' 0.100511355280501
+          transplant + the series for those metrics copied over too (30 more forged MetricValues per
+          metric) -> H3 SUPPORTED, no alarm
+        So the residual is NOT gone, and the half that is gone is the cheap half. What is left needs the
+        forger to restate the per-seed data as well, which is the `_recompute` residual as written."""
         weak = joint(expect=None, dms=bm.Margins().delta_sel)
         strong = joint()
         j = weak
         object.__setattr__(j.h3, "components", (j.h3.components[0], strong.h3.components[1]))
         object.__setattr__(j.h3, "converged_components", strong.h3.converged_components)
         object.__setattr__(j.h3, "verdict", bm.Verdict.SUPPORTED)
-        self.assertEqual(hyp_cells(db.render_scorecard(j))["H3"], "SUPPORTED")
+        h = db.render_scorecard(j)
+        self.assertEqual(hyp_cells(h)["H3"], "INCONCLUSIVE")
+        self.assertIn("INTERVAL CONTRADICTED", h)
+        self.assertIn("H3/delta_minus_shuf", h)
+        self.assertNotIn("JOINT_SUPPORTED", joint_cell(h))
+        # THE RESIDUAL, PERFORMED: restate the per-seed series for the transplanted metrics as well.
+        weak, strong = joint(expect=None, dms=bm.Margins().delta_sel), joint()
+        k = weak
+        object.__setattr__(k.h3, "components", (k.h3.components[0], strong.h3.components[1]))
+        object.__setattr__(k.h3, "converged_components", strong.h3.converged_components)
+        object.__setattr__(k.h3, "verdict", bm.Verdict.SUPPORTED)
+        forged = 0
+        for sw, ss in zip(k.seed_scores, strong.seed_scores):
+            for metric in ("delta_minus_shuf", "delta_minus_shuf_conv", "delta_conv"):
+                sw.metrics[metric] = ss.metrics[metric]     # the metrics mapping is a plain dict
+                forged += 1
+        self.assertEqual(forged, 90)
+        h = db.render_scorecard(k)
+        self.assertEqual(hyp_cells(h)["H3"], "SUPPORTED")
+        self.assertNotIn("INTERVAL CONTRADICTED", h)
+        self.assertNotIn("NOT shown", h)
         self.assertIn("producer-asserted", db._component_sets_ok.__doc__)
         self.assertIn("producer-asserted", db._recompute.__doc__)
         self.assertNotIn("is not a residual", db._recompute.__doc__)
@@ -1480,7 +1519,7 @@ class ProtocolParametersFailClosed(unittest.TestCase):
         self.assertIsNone(recompute(Stand(), j.margins, j))
         self.assertIsNone(recompute(Stand(), None, j))
         # and a stand-in with no `pair` at all is 'could not recompute', not an exception
-        self.assertIsNone(db._recompute(object(), None, 30))
+        self.assertIsNone(db._recompute(object(), None, 30, db._measured_series(j)))
 
     def test_forged_min_n_cannot_launder_a_genuine_below_minimum_run(self):
         """The laundering route, with the gate NAME SET left intact so only this cross-check can catch it:
@@ -2192,16 +2231,38 @@ class MetricValueConsumersShareOneCheck(unittest.TestCase):
             self.assertEqual(set(hyp_cells(h).values()), {"INCONCLUSIVE"}, repr(bad))
             self.assertNotIn("vd-supported", h, repr(bad))
             self.assertIn("NOT shown", h, repr(bad))
-        # `value = None` is a legitimately UNMEASURED bound, so it is not a fail-closed case here: the
-        # scorer itself returns INCONCLUSIVE ("interval not computable") for it. Still never decisive.
+        # `value = None` IS the legitimately UNMEASURED state, and ROUND 6 SPLITS THIS CASE IN TWO,
+        # which is the cleanest demonstration in this file of the difference between a bound that has a
+        # second source and one that does not. On a 30-seed study:
+        #   * the two BOOTSTRAP bounds forged to None stay "a legitimately unmeasured bound": there is
+        #     no second source for them (n_boot and base_seed are not in JointResult), so the renderer
+        #     has nothing to contradict it with and the scorer's own INCONCLUSIVE stands;
+        #   * the two T bounds forged to None are a CONTRADICTION: the 30 per-seed values this result
+        #     carries do give a t-interval, so "unmeasured" is false of this pair and fails closed.
+        # The comment this replaces said `value = None` "is not a fail-closed case here", flat, which
+        # was true of the bootstrap pair and false of the t pair.
         j = joint()
         for h_ in (j.h1, j.h2, j.h3):
             for c in (*h_.components, *(h_.converged_components or ())):
-                forge_bounds(c.pair, None)
+                forge_bounds(c.pair, None, ("boot_lo", "boot_hi"))
         self.assertIs(recompute(j.h1.components[0], j.margins, j), bm.Verdict.INCONCLUSIVE)
         h = db.render_scorecard(j)
         self.assertEqual(set(hyp_cells(h).values()), {"INCONCLUSIVE"})
         self.assertNotIn("vd-supported", h)
+        self.assertNotIn("INTERVAL CONTRADICTED", h)
+        j = joint()
+        for h_ in (j.h1, j.h2, j.h3):
+            for c in (*h_.components, *(h_.converged_components or ())):
+                forge_bounds(c.pair, None, ("t_lo", "t_hi"))
+        self.assertIsNone(recompute(j.h1.components[0], j.margins, j))
+        h = db.render_scorecard(j)
+        self.assertEqual(set(hyp_cells(h).values()), {"INCONCLUSIVE"})
+        self.assertNotIn("vd-supported", h)
+        self.assertIn("INTERVAL CONTRADICTED", h)
+        # and genuinely unmeasured t bounds on a 1-seed study are still fine (no false fire)
+        one = joint(expect=None, seeds=FZ.seeds[:1])
+        self.assertIsNone(one.h1.components[0].pair.t_lo.value)
+        self.assertIsNotNone(recompute(one.h1.components[0], one.margins, one))
 
     def test_pair_numbers_ok_fails_closed_unmasked_and_never_false_fires(self):
         """Direct unit test: `_recompute` has several other ways to return None, so no other layer may
@@ -2219,7 +2280,7 @@ class MetricValueConsumersShareOneCheck(unittest.TestCase):
             object.__setattr__(k.h1.components[0].pair, field, 1.0)
             self.assertFalse(pair_ok(k), field)
         for junk in (None, object(), "pair", 0):
-            self.assertFalse(db._pair_numbers_ok(junk, 30, 30), repr(junk))
+            self.assertFalse(db._pair_numbers_ok(junk, 30, 30, [1.0, 2.0]), repr(junk))
         # NO FALSE FIRE: a genuinely unmeasured bound (n < 2) satisfies MetricValue's invariant
         k = joint(expect=None, seeds=FZ.seeds[:1])
         self.assertTrue(pair_ok(k))
@@ -2474,6 +2535,23 @@ SECOND_SOURCE = {
     ("Margins", "delta_S"): "the H1 component's own `margin` field (db._declared)",
     ("Margins", "delta_R"): "the H2 component's own `margin` field (db._declared)",
     ("Margins", "delta_sel"): "the H3 components' own `margin` fields (db._declared)",
+    # ROUND 6: these four were in NO_SECOND_SOURCE and the content of those entries was FALSE. An exact
+    # second source was already in the same JointResult and this module already read it -- the per-seed
+    # series rebuilt from joint.seed_scores (db._seed_series, read by db._measured_seeds since round 5).
+    ("IntervalPair", "mean"):
+        "bm.mean(the per-seed series rebuilt from joint.seed_scores for this component's metric) -- "
+        "benchmark.summarize computes the stored value as exactly that, so it reproduces BIT-EXACTLY "
+        "(measured: 324 of 324 component-field comparisons over 18 honest shapes)",
+    ("IntervalPair", "t_lo"): "bm.t_interval(that same series, pair.level)[0], bit-exactly",
+    ("IntervalPair", "t_hi"): "bm.t_interval(that same series, pair.level)[1], bit-exactly",
+    ("IntervalPair", "level"):
+        "the stored t-interval together with that same series: t_interval(series, level) is strictly "
+        "monotone in `level`, so the stored bounds pin it. This is NOT the bm.bonferroni_level() figure "
+        "in the family line, which is still deliberately NOT compared (BenchmarkConfig.alpha is "
+        "settable and JointResult carries only an opaque config_hash, so that comparison would "
+        "false-fire on every honest non-default-alpha study). The t-interval equation needs no alpha. "
+        "LIMIT, stated: on a pair with fewer than two values the t-interval is honestly unmeasured and "
+        "the level is unconstrained -- a weaker check on those pairs, not a skipped one.",
 }
 # A legal-but-wrong value here cannot be REFUSED, because an honest producer may emit it: these are
 # protocol parameters the component merely asserts, and a weaker-than-protocol value is produced by an
@@ -2487,23 +2565,42 @@ NEUTRALISED_BY_A_FLOOR = {
 }
 # RESIDUALS, stated rather than quietly absent. Each is already documented in dashboard.py; this table
 # exists so that "no second source" is a recorded decision per field instead of an omission per field.
+#
+# THE ROUND-6 DEFECT WAS THE CONTENT OF THIS DICT, not its absence: the three dicts partitioned
+# db.STORED_NUMBERS correctly (7 + 2 + 6 = 15, pairwise disjoint, the test below green) and SIX of this
+# dict's entries said "the interval itself is producer-asserted" while an EXACT second source for four of
+# them sat in the same JointResult and this module already read it. A performed classification is not a
+# true one: the machine checks that every declared number is in exactly one dict, and nothing in a test
+# suite can check that the REASON written in it is true. Hence the two rules now applied here:
+#   (1) an entry must name the second source it DOES NOT have and why it cannot be had -- not restate
+#       that the field is producer-asserted, which is true of every field in every one of the dicts;
+#   (2) each surviving reason is pinned by a test that would fail if the missing source appeared
+#       (`test_the_two_bootstrap_bounds_have_no_recoverable_second_source`).
 NO_SECOND_SOURCE = {
-    ("IntervalPair", "mean"): "the interval itself is producer-asserted; a self-consistent forged pair "
-                              "under a correctly named component is the residual documented at _recompute",
-    ("IntervalPair", "boot_lo"): "as `mean`", ("IntervalPair", "boot_hi"): "as `mean`",
-    ("IntervalPair", "t_lo"): "as `mean`", ("IntervalPair", "t_hi"): "as `mean`",
-    ("IntervalPair", "level"): "a second source IS on the page (bm.bonferroni_level in the family line) "
-                               "and is deliberately not used: an honest pair's level is "
-                               "bonferroni_level(cfg.alpha, N_PRIMARY), BenchmarkConfig.alpha is settable "
-                               "and JointResult carries only an opaque config_hash, so comparing them "
-                               "would false-fire on every honest non-default-alpha study -- the same "
-                               "undecidability as min_n. `level` also reaches no verdict at all.",
+    ("IntervalPair", "boot_lo"):
+        "the bootstrap resample is not reproducible from the result. benchmark.summarize computes it as "
+        "bootstrap_ci(vals, level, n_boot, make_rng(derive_seed(base_seed, 'bootstrap:' + name))) and "
+        "NEITHER n_boot NOR base_seed is a field of JointResult (confirmed from dataclasses.fields: it "
+        "carries an opaque config_hash and a seed_list_digest, and freeze_seed_list derives the seeds by "
+        "derive_seed(base_seed, 'replicate:k'), a hash that cannot be inverted). Unlike `mean` and the "
+        "t-interval, which are closed-form functions of the per-seed series, there is no second source "
+        "to read -- only a seed to guess. Residual: a self-consistent forged bootstrap pair under a "
+        "correctly named component, which is the residual documented at db._recompute.",
+    ("IntervalPair", "boot_hi"): "as `boot_lo`: the same unrecoverable n_boot and base_seed",
 }
 # Values of the RIGHT TYPE that an honest producer of this field cannot emit on the fixture named in the
 # sweep. `None` means "use the default 30-seed fixture"; `pair.n` additionally gets the 29-seed fixture
 # of the reported defect, in test_G3.
 LEGAL_BUT_WRONG = {
     ("IntervalPair", "n"): (31, 50, 1000),             # a 30-seed study has no 31-seed component
+    # ROUND 6. Forged INSIDE the MetricValue (kind "mv"), so each is a finite float that `_mv_intact`
+    # must admit -- an honest producer simply cannot emit it for THIS series. 0.5 and 1.5 are far from
+    # the fixture's ~1.0 mean; the third is the sibling bound's own value, which is the cheapest forgery
+    # of all (it makes the t-interval agree with the bootstrap interval, defeating protocol 6.3).
+    ("IntervalPair", "mean"): (0.5, 1.5, -2.25),
+    ("IntervalPair", "t_lo"): (0.5, 0.95, -2.25),
+    ("IntervalPair", "t_hi"): (1.5, 1.05, 2.25),
+    ("IntervalPair", "level"): (0.95, 0.99, 0.5),      # all valid levels, none this study's 0.9875
     ("JointResult", "n_attempted"): (29, 31, 100, 0),  # contradicts len(seed_scores) == 30
     ("JointResult", "n_failed"): (1, 5, 30),           # contradicts "no entry of seed_scores is not-ok"
     ("ComponentResult", "margin"): (0.0, 0.2, 1.0, -1.0),   # != Margins() delta_S 0.10 / R 0.05 / sel 0.10
@@ -3202,8 +3299,14 @@ class TypeIsNotTheWholeOfAdmission(FailsClosedAssertions, unittest.TestCase):
             k = joint()
             object.__setattr__(k, "seed_scores", junk)
             self.assertIsNone(db._measured_seeds(k), repr(junk))
-        # RESIDUAL, stated: a tamperer who rebuilds `seed_scores` consistently still gets through. This
-        # raises the cost of the forgery from one integer to 30 fabricated objects; it does not remove it.
+        # THE RESIDUAL, RE-MEASURED. This comment used to say the anchor "raises the cost of the forgery
+        # from one integer to 30 fabricated objects". MEASURED: the cost was 0 fabricated objects -- see
+        # `test_the_measured_cost_of_the_anchors_residual` below, which performs the cheap variant and
+        # the corrected figures rather than asserting them in prose. What is kept here is the part that
+        # is still true of `_measured_seeds` ALONE, with the one fabricated object the variant below
+        # needs: the two seed-count equalities cannot see an extra consistent entry. The INTERVAL
+        # cross-check can, and does; that is asserted in the test below, not here, so this assertion
+        # keeps measuring `_measured_seeds` unmasked.
         k = laundered_below_minimum(n=30)
         object.__setattr__(k, "seed_scores", (*k.seed_scores, make_scores([999])[0]))
         object.__setattr__(k, "n_attempted", 30)
@@ -3337,7 +3440,11 @@ NO_SECOND_SOURCE with the reason -- the third is a residual and is allowed, but 
             # vacuity that let three rounds' "the enumeration is complete" claims stand
             self.assertGreaterEqual(len(vals), 3, f"{key}: too few legal-but-wrong values to be a sweep")
             for v in vals:                       # each must be ADMITTED by its kind: that is the point
-                self.assertIsNotNone(db._NUM_KINDS[kind](v), (key, v))
+                if kind == "mv":                 # an "mv" value is forged INSIDE the MetricValue
+                    self.assertIsNotNone(
+                        db._mv_intact(forge_mv(MetricValue.measured(1.0), v)), (key, v))
+                else:
+                    self.assertIsNotNone(db._NUM_KINDS[kind](v), (key, v))
                 # ... and must not already be in the TYPE table. Compared by repr, not by `in`: `0` and
                 # `0.0` are `==` in Python while being a legal count and an ill-typed one respectively,
                 # which is the same int/float confusion the kind functions exist to refuse.
@@ -3431,6 +3538,563 @@ NO_SECOND_SOURCE with the reason -- the third is a residual and is allowed, but 
         k = laundered_below_minimum(n=30)
         object.__setattr__(k.h1.components[0], "metric", "S<script>x</script>")
         self.assertNotIn("<script>", db.render_scorecard(k))
+
+
+# ---------------------------------------------------------------------------------------------------------
+# SR-13 ROUND 6: the interval's own second source.
+# ---------------------------------------------------------------------------------------------------------
+def heavy_tailed(idx=0, factor=50.0):
+    """An HONEST 30-seed study whose H1 is INCONCLUSIVE because of PROTOCOL 6.3 ALONE.
+
+    One seed's S is multiplied by `factor`, which is a legitimate heavy-tailed sample: every gate passes,
+    `pair.n` is a genuine 30, nothing is forged. The bootstrap interval sits entirely above the margin
+    while the t-interval (which is not resistant to the outlier) straddles it, so `intervals_disagree`
+    fires and `_verdict_from_bounds` returns INCONCLUSIVE with "bootstrap/t disagreement".
+
+    This fixture exists because it is the only shape in this file where the T-INTERVAL, and nothing else,
+    decides the verdict -- which is what makes `t_lo`/`t_hi` verdict-bearing and is why admitting them by
+    type alone was the round-6 defect. It goes through `make_scores`, so the FIXTURE CONTRACT still holds.
+    """
+    scores = make_scores(FZ.seeds)
+    m = dict(scores[idx].metrics)
+    big = MetricValue.measured(m["S"].value * factor)
+    m["S"], m["S_U"] = big, big
+    scores[idx] = dataclasses.replace(scores[idx], metrics=m)
+    return bm.analyze_scores(scores, frozen=FZ, registered_digest=FZ.digest, subject="synthetic", cfg=SMALL)
+
+
+def forge_t_inward(j):
+    """Make every t-interval equal its own bootstrap interval: same bounds, so identical width and the
+    same side of every margin. Protocol 6.3 then cannot fire. Two `object.__setattr__` per component,
+    inside existing `MetricValue`s -- no new object, and both values are legal finite floats."""
+    for c in all_components(j):
+        p = c.pair
+        if p.boot_lo.value is None:
+            continue
+        forge_mv(p.t_lo, p.boot_lo.value)
+        forge_mv(p.t_hi, p.boot_hi.value)
+    return j
+
+
+class TheIntervalHasASecondSourceInTheSameResult(FailsClosedAssertions, unittest.TestCase):
+    """SR-13 ROUND 6. The item failed a FIFTH time, and -- like round 5 -- not because a consumer was
+    missed. `mean`, `t_lo` and `t_hi` were declared, routed through `_mv_intact`, swept with hostile
+    types, and CLASSIFIED: `NO_SECOND_SOURCE`, "the interval itself is producer-asserted". The three
+    classification dicts partitioned `db.STORED_NUMBERS` exactly and the test that performs the
+    partition was green. THE DEFECT WAS THE CONTENT OF THE CLASSIFICATION. An exact second source was in
+    the same `JointResult` and this module already read it: the per-seed series rebuilt from
+    `joint.seed_scores` (read by `_measured_seeds` since round 5) plus the admitted `pair.level`.
+    `benchmark.summarize` sets `mean = _mv(mean(vals))` and `(t_lo, t_hi) = t_interval(vals, level)`, so
+    `bm.mean` and `bm.t_interval` reproduce all three BIT-EXACTLY -- measured, 324 of 324
+    component-field comparisons over all 18 honest shapes, 0 mismatched.
+
+    MEASURED AT HEAD on `heavy_tailed()`, an HONEST study that protocol 6.3 refuses a verdict:
+        untouched                              -> H1 INCONCLUSIVE, JOINT_INCONCLUSIVE   (correct)
+        t_lo/t_hi forged to the bootstrap pair  -> H1 SUPPORTED, JOINT_SUPPORTED, NO ALARM
+    and on the default fixture, `mean` forged to 0.5 on every component -> `0.5` rendered in `.measured`
+    monospace beside a decisive JOINT_SUPPORTED with no alarm. Two `object.__setattr__` inside two
+    `MetricValue`s bought a decisive success from a run that had not earned one.
+
+    WHAT THIS CLASS IS FOR, beyond the two pins: a classification dict is checked by machine for being a
+    PARTITION and cannot be checked for being TRUE. So every reason left in `NO_SECOND_SOURCE` is now
+    pinned by a test that would fail if the missing source turned out to exist
+    (`test_the_two_bootstrap_bounds_have_no_recoverable_second_source`)."""
+
+    def test_the_fixture_is_an_honest_study_the_protocol_refuses(self):
+        """NOT VACUOUS, asserted before anything is forged: the laundering below has to start from a
+        run that is honestly INCONCLUSIVE, and for the 6.3 reason specifically rather than because a
+        gate failed or `n` was short -- or "forging t bought a verdict" would be unfalsifiable."""
+        j = heavy_tailed()
+        c = j.h1.components[0]
+        self.assertEqual(c.pair.n, 30)                           # a genuine, full-size sample
+        self.assertTrue(all(g.passed for g in j.gates))          # every validity gate passes
+        self.assertEqual(db._measured_seeds(j), 30)
+        bad, why = bm.intervals_disagree(c.pair.boot(), c.pair.tint(), c.margin, c.width_tol)
+        self.assertTrue(bad)
+        self.assertIn("different sides of margin", why)
+        self.assertIs(c.verdict, bm.Verdict.INCONCLUSIVE)
+        self.assertIs(j.verdict, bm.JointVerdict.JOINT_INCONCLUSIVE)
+        h = db.render_scorecard(j)                               # and the honest page is clean
+        self.assertEqual(hyp_cells(h)["H1"], "INCONCLUSIVE")
+        self.assertNotIn("NOT shown", h)
+        self.assertNotIn("INTERVAL CONTRADICTED", h)
+        self.assertNotIn("JOINT_SUPPORTED", joint_cell(h))
+
+    def test_G4_a_forged_t_interval_cannot_launder_a_6_3_disagreement(self):
+        """THE ROUND-6 PIN. Asserts the VERDICT and the ALARM, not the figure cell."""
+        k = forge_t_inward(heavy_tailed())
+        forge_all_verdicts_supported(k)
+        self.assertIs(k.verdict, bm.JointVerdict.JOINT_SUPPORTED)   # the page IS asked to show SUPPORTED
+        self.assertTrue(db._gate_set_ok(k.gates))                   # not the gate-set check
+        self.assertEqual(db._measured_seeds(k), 30)                 # not the round-5 cross-check either
+        self.assertIsNone(db._n_problem(k.h1.components[0].pair, 30, 30, 30))
+        h = db.render_scorecard(k)
+        self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), "t forged inward")
+        self.assertIn("INTERVAL CONTRADICTED", h)
+        self.assertIn("H1/S", h)
+        self.assertIsNone(recompute(k.h1.components[0], k.margins, k))
+        self.assertFalse(pair_ok(k))
+        # the forged bound is still PRINTED, like a contradicted `n`: the page shows the number it
+        # refuses and says it is contradicted, rather than hiding it behind UNKNOWN.
+        self.assertIn('<span class="measured">[', comp_row(h, "S"))
+
+    def test_a_forged_mean_is_alarmed_even_though_it_reaches_no_verdict(self):
+        """`mean` is this module's `level` case: `interval_verdict` never reads it, and an edited figure
+        is still unalarmed tampering. Measured at HEAD: `0.5` in `.measured` monospace beside a decisive
+        JOINT_SUPPORTED with no alarm."""
+        for bad in (0.5, 1.5, -2.25):
+            j = joint()
+            for c in all_components(j):
+                forge_mv(c.pair.mean, bad)
+            h = db.render_scorecard(j)
+            self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), f"mean={bad!r}")
+            self.assertIn("INTERVAL CONTRADICTED", h)
+            self.assertIn(f"stored mean is {bad!r}", h)          # both numbers named
+            self.assertIn("per-seed value(s) this study records", h)
+        self.assertNotIn("INTERVAL CONTRADICTED", db.render_scorecard(joint()))
+
+    def test_a_forged_level_is_now_cross_checked_by_the_t_interval(self):
+        """The withdrawn half of `level`'s old entry. It said "`level` also reaches no verdict at all,
+        so there is nothing a forged level could buy that the type check does not already refuse"; it is
+        now an INPUT to the t-interval cross-check, so a forged level changes a recomputation.
+
+        MEASURED AT HEAD, all six values below, each forged on every pair: the level cell rendered the
+        forged number in `.measured` monospace, `_pair_numbers_ok` returned True, and the page displayed
+        JOINT_SUPPORTED with no alarm -- INCLUDING `5.0`, `-1.0` and `0.0`, which are not confidence
+        levels at all and which `bm._check_level` refuses outright. `_finite_float` admits them because
+        they are finite floats, which is the whole point: a type predicate cannot refuse a legal float.
+        Both failure modes are therefore covered here: a VALID level that is not this study's, and a
+        finite float outside (0, 1)."""
+        for bad in (0.95, 0.99, 0.5, 5.0, -1.0, 0.0):
+            j = forge_declared(joint(), "IntervalPair", "level", bad)
+            h = db.render_scorecard(j)
+            self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), f"level={bad!r}")
+            self.assertIn("INTERVAL CONTRADICTED", h)
+            self.assertFalse(pair_ok(j), repr(bad))
+        # the UNDECIDABLE comparison is still declined: an honest non-default alpha raises no alarm
+        k = bm.analyze_scores(make_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
+                              subject="synthetic", cfg=bm.BenchmarkConfig(n_boot=500, alpha=0.01))
+        self.assertNotEqual(k.h1.components[0].pair.level, bm.bonferroni_level())
+        h = db.render_scorecard(k)
+        self.assertNotIn("INTERVAL CONTRADICTED", h)
+        self.assertNotIn("NOT shown", h)
+
+    def test_an_unusable_second_source_fails_closed_and_is_never_skipped(self):
+        """MUTANT D5's LESSON FROM LAST ROUND, applied to the new source before it can be repeated: an
+        unreadable second source must fail closed, NOT skip the check. Every way the series can be
+        unusable is driven, and each one is asserted DIRECTLY on `_interval_problem` (so no later layer
+        can mask a fail-open) and THROUGH a render (so the page really does alarm)."""
+        self.assertEqual(db._interval_problem({"level": 0.9875}, None), db.NO_INTERVAL_SOURCE_MSG)
+        nums = db._admitted(joint().h1.components[0].pair, "IntervalPair")
+        self.assertEqual(db._interval_problem(nums, None), db.NO_INTERVAL_SOURCE_MSG)
+        # (a) seed_scores itself unreadable
+        for junk in (None, object(), 0, "scores", ()):
+            k = joint()
+            object.__setattr__(k, "seed_scores", junk)
+            self.assertFailsClosedWithAnAlarm(db.render_scorecard(k), ("H1", "H2", "H3"), repr(junk))
+            self.assertIsNone(recompute(k.h1.components[0], k.margins, k), repr(junk))
+        # (b) one per-seed metric forged, so the series would otherwise be silently SHORTENED. The two
+        # cases are different and both are driven, because `SeedScores.ok` is derived from the PRIMARY
+        # metrics only (`benchmark._PRIMARY_SERIES`):
+        #   * a NON-primary metric (delta_conv) leaves `ok` True, so the entry is still in the series and
+        #     `_mv_intact` is the only thing standing between a forged value and a shortened series;
+        #   * a PRIMARY metric (S) flips `ok` to False, so the entry drops out before the metric is read
+        #     -- and the round-5 anchor catches THAT, because the stored `n_failed` no longer matches.
+        for bad in BREAKS_MV_INVARIANT:
+            k = joint()
+            forge_mv(k.seed_scores[0].metrics["delta_conv"], bad)
+            self.assertIs(k.seed_scores[0].ok, True, repr(bad))          # still an OK seed
+            self.assertIsNone(db._seed_series(tuple(k.seed_scores), "delta_conv"), repr(bad))
+            h = db.render_scorecard(k)
+            self.assertFailsClosedWithAnAlarm(h, ("H3",), repr(bad))
+            self.assertIn("INTERVAL CONTRADICTED", h, repr(bad))
+            m = joint()
+            forge_mv(m.seed_scores[0].metrics["S"], bad)
+            self.assertIs(m.seed_scores[0].ok, False, repr(bad))         # no longer an OK seed
+            self.assertEqual(len(db._seed_series(tuple(m.seed_scores), "S")), 29, repr(bad))
+            self.assertIsNone(db._measured_seeds(m), repr(bad))          # the round-5 anchor fires
+            h = db.render_scorecard(m)
+            self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), repr(bad))
+            self.assertIn("not readable", h, repr(bad))
+            self.assertIn("INTERVAL CONTRADICTED", h, repr(bad))
+        # (c) a seed-score entry with no `metrics` at all, and a `metrics` that is not a mapping
+        for junk in (None, 0, "m", object()):
+            k = joint()
+            object.__setattr__(k.seed_scores[0], "metrics", junk)
+            self.assertIsNone(db._seed_series(tuple(k.seed_scores), "S"), repr(junk))
+        # (d) a component whose metric name is not in the protocol tables has no series to compare
+        self.assertIsNone(db._series_of(db._measured_series(joint()), "not_a_metric"))
+        self.assertIsNone(db._series_of({}, "S"))
+        self.assertIsNone(db._series_of(None, "S"))
+        self.assertIsNone(db._series_of({"S": [1.0]}, []))        # unhashable key: not an exception
+        # (e) and an honestly unmeasured metric on one seed is NOT a rejection: it is skipped, which is
+        # the `delta_conv unmeasured on 5 ok seeds` shape and a legitimate study.
+        k = joint()
+        sw = k.seed_scores[0]
+        sw.metrics["delta_conv"] = MetricValue.unmeasured("not supplied")
+        self.assertEqual(len(db._seed_series(tuple(k.seed_scores), "delta_conv")), 29)
+        self.assertEqual(len(db._seed_series(tuple(k.seed_scores), "S")), 30)
+
+    def test_the_cross_check_is_exact_and_never_false_fires(self):
+        """OVER-REFUSAL CHECK over every honest shape, and the measurement the whole fix rests on: the
+        recomputation is BIT-EXACT, not approximate, so no tolerance has to be chosen and no tolerance
+        can be widened into a fail-open. A cross-check that false-fires is a defect."""
+        comparable = exact = 0
+        shapes = honest_shapes()
+        self.assertGreaterEqual(len(shapes), 18)
+        for label, j in shapes:
+            series = db._measured_series(j)
+            for c in all_components(j):
+                nums = db._admitted(c.pair, "IntervalPair")
+                self.assertIsNotNone(nums, f"{label}/{c.metric}")
+                ser = db._series_of(series, c.metric)
+                self.assertIsNotNone(ser, f"{label}/{c.metric}")
+                self.assertIsNone(db._interval_problem(nums, ser), f"{label}/{c.metric}")
+                for attr in ("mean", "t_lo", "t_hi"):
+                    comparable += 1
+                    exact += db._interval_problem(nums, ser) is None
+                # the recomputation really is performed on this component, not skipped
+                if len(ser) >= 2:
+                    self.assertEqual(bm.mean(ser), c.pair.mean.value, f"{label}/{c.metric}")
+                    self.assertEqual(bm.t_interval(ser, c.pair.level),
+                                     (c.pair.t_lo.value, c.pair.t_hi.value), f"{label}/{c.metric}")
+            self.assertEqual(db._interval_sources_disagree(j, series), [], label)
+        self.assertEqual((comparable, exact), (324, 324))
+        for label, j in shapes:
+            self.assertNotIn("INTERVAL CONTRADICTED", db.render_scorecard(j), label)
+
+    def test_no_false_fire_on_the_six_shapes_the_reviewer_built(self):
+        """OVER-REFUSAL CHECK over the six study shapes the round-5 reviewer built by hand, beyond the
+        18 `honest_shapes()` holds. They were verified then against the `n` cross-check; the interval
+        cross-check is new and owes them the same measurement, because a cross-check that false-fires is
+        a defect and these are the shapes chosen to stress the edges (a non-default alpha, almost every
+        seed failed, a metric unmeasured on every seed, a PRIMARY metric unmeasured on some seeds, a
+        minimum nobody can meet, and a sample too small for a t-interval)."""
+        def study(scores, **cfgkw):
+            return bm.analyze_scores(scores, frozen=FZ, registered_digest=FZ.digest,
+                                     subject="synthetic", cfg=bm.BenchmarkConfig(n_boot=500, **cfgkw))
+        shapes = [("alpha=0.01", study(make_scores(FZ.seeds), alpha=0.01)),
+                  ("min_seeds=100", study(make_scores(FZ.seeds), min_seeds=100)),
+                  ("2 seeds", study(make_scores(FZ.seeds[:2]))),
+                  ("both converged metrics unmeasured on all 30",
+                   study(make_scores(FZ.seeds, conv=False)))]
+        s = make_scores(FZ.seeds)                 # 29 of 30 failed
+        for i in range(29):
+            s[i] = bm.SeedScores.failed(FZ.seeds[i], "synthetic failure")
+        shapes.append(("29 of 30 failed", study(s)))
+        s = make_scores(FZ.seeds)                 # a PRIMARY metric unmeasured on 7 seeds
+        for i in range(7):
+            m = dict(s[i].metrics)
+            m["delta"] = MetricValue.unmeasured("not supplied")
+            s[i] = dataclasses.replace(s[i], metrics=m)
+        shapes.append(("primary `delta` unmeasured on 7 seeds", study(s)))
+        self.assertEqual(len(shapes), 6)
+        for label, j in shapes:
+            m = db._measured_seeds(j)
+            self.assertIsNotNone(m, label)
+            self.assertEqual(j.n_attempted - j.n_failed, m, label)
+            series = db._measured_series(j)
+            for c in all_components(j):
+                nums = db._admitted(c.pair, "IntervalPair")
+                self.assertIsNotNone(nums, f"{label}/{c.metric}")
+                self.assertIsNone(db._interval_problem(nums, db._series_of(series, c.metric)),
+                                  f"{label}/{c.metric}")
+                self.assertIsNotNone(recompute(c, j.margins, j), f"{label}/{c.metric}")
+            self.assertEqual(db._interval_sources_disagree(j, series), [], label)
+            self.assertEqual(db._n_sources_disagree(j, m), [], label)
+            h = db.render_scorecard(j)
+            self.assertNotIn("INTERVAL CONTRADICTED", h, label)
+            self.assertNotIn("SAMPLE SIZE CONTRADICTED", h, label)
+            self.assertNotIn("not readable", h, label)
+
+    def test_the_n_lt_2_shapes_are_required_not_tolerated(self):
+        """`summarize` returns all-unmeasured for n == 0 and an unmeasured t-interval for n == 1. Those
+        are what the cross-check REQUIRES there -- a MEASURED mean or t-bound on a 0/1-value series is a
+        contradiction, not a free pass -- which is the branch a lazier implementation would make
+        permissive and no honest fixture would notice."""
+        one = joint(expect=None, seeds=FZ.seeds[:1])              # n == 1: mean measured, t unmeasured
+        c = one.h1.components[0]
+        self.assertEqual((c.pair.n, c.pair.t_lo.value), (1, None))
+        self.assertTrue(pair_ok(one))
+        forge_mv(c.pair.t_lo, 0.5)                                # a t-bound a 1-value series cannot have
+        self.assertFalse(pair_ok(one))
+        self.assertIn("stored t_lo is 0.5", db.render_scorecard(one))
+        zero = joint(expect=None, conv=False)                     # n == 0 on the converged components
+        cc = zero.h3.converged_components[0]
+        self.assertEqual((cc.pair.n, cc.pair.mean.value), (0, None))
+        self.assertTrue(pair_ok(zero, c=cc))
+        forge_mv(cc.pair.mean, 0.25)
+        self.assertFalse(pair_ok(zero, c=cc))
+        self.assertFailsClosedWithAnAlarm(db.render_scorecard(zero), ("H3",), "n==0 mean forged")
+
+    def test_the_comparison_cannot_be_decided_by_an_overridable_dunder(self):
+        """`_same_number`, and why it is not `stored == want`. `MetricValue.__post_init__` tests
+        `isinstance(self.value, float)`, which a `float` SUBCLASS passes, and `math.isfinite` reads the
+        stored double -- so a lying `__eq__` is constructible through the PUBLIC api, with no
+        `object.__setattr__` anywhere. `benchmark._plain_number`'s rule, in this module's own lane."""
+        class Liar(float):
+            def __eq__(self, other):
+                return True
+
+            def __ne__(self, other):
+                return False
+
+            def __hash__(self):
+                return 0
+        self.assertTrue(Liar(0.5) == 1.0)                         # the lie works on `==`
+        self.assertFalse(db._same_number(Liar(0.5), 1.0))         # ... and not on the cross-check
+        self.assertTrue(db._same_number(Liar(0.5), 0.5))          # the STORED double still decides
+        self.assertTrue(db._same_number(0.5, 0.5))
+        self.assertFalse(db._same_number(0.5, 0.5000000000000001))
+        for junk in (None, "0.5", [], object(), float("nan"), float("inf"), True):
+            self.assertFalse(db._same_number(junk, 0.5), repr(junk))
+            self.assertFalse(db._same_number(0.5, junk), repr(junk))
+        # and end to end: a measured MetricValue holding one, built through the public API
+        j = joint()
+        c = j.h1.components[0]
+        object.__setattr__(c.pair, "mean", MetricValue.measured(Liar(0.5)))
+        self.assertFalse(pair_ok(j))
+        self.assertFailsClosedWithAnAlarm(db.render_scorecard(j), ("H1",), "lying __eq__")
+
+    def test_the_two_bootstrap_bounds_have_no_recoverable_second_source(self):
+        """THE SURVIVING `NO_SECOND_SOURCE` REASON, PINNED. Round 6's defect was a FALSE reason in a
+        dict whose PARTITION was machine-checked, so each remaining reason gets a test that fails if the
+        source it denies turns out to exist.
+
+        `summarize` computes the bootstrap pair from `n_boot` and `derive_seed(base_seed, 'bootstrap:' +
+        name)`. Neither `n_boot` nor `base_seed` is a field of `JointResult`, so neither is recoverable
+        from the result, and `freeze_seed_list` derives the seed list by hashing so the seeds do not
+        yield `base_seed` either. If a future `JointResult` gains one of them, this goes red and the
+        classification has to be argued again instead of inherited."""
+        fields = {f.name for f in dataclasses.fields(bm.JointResult)}
+        self.assertNotIn("base_seed", fields)
+        self.assertNotIn("n_boot", fields)
+        self.assertNotIn("cfg", fields)
+        self.assertNotIn("frozen", fields)
+        self.assertIn("config_hash", fields)                      # only the opaque hash is carried
+        self.assertIn("base_seed", {f.name for f in dataclasses.fields(bm.FrozenSeedList)})
+        self.assertIn("n_boot", {f.name for f in dataclasses.fields(bm.BenchmarkConfig)})
+        # ... so forging only the bootstrap pair is NOT caught by the interval cross-check, and that is
+        # the residual the page now states in as many words.
+        j = joint()
+        for c in all_components(j):
+            forge_mv(c.pair.boot_lo, c.pair.boot_lo.value)        # same value: a no-op forgery
+        self.assertTrue(pair_ok(j))
+        k = joint()
+        for c in all_components(k):
+            if c.pair.boot_lo.value is None:
+                continue
+            forge_mv(c.pair.boot_lo, c.pair.boot_lo.value - 0.001)
+        self.assertTrue(pair_ok(k), "the bootstrap bounds are not cross-checked: stated, not hidden")
+        h = db.render_scorecard(k)
+        self.assertNotIn("INTERVAL CONTRADICTED", h)
+        self.assertIn("BOOTSTRAP bounds are not cross-checked",
+                      db.render_scorecard(forge_t_inward(heavy_tailed())))
+
+    def test_the_page_states_the_interval_finding_without_asserting_tampering(self):
+        """The round-4 lesson about the weaker-than-protocol paragraph, applied to this paragraph too:
+        name the two contradicting numbers, say what was withheld (observable), assert neither "a field
+        was edited" nor "this is nothing"."""
+        k = forge_t_inward(heavy_tailed())
+        forge_all_verdicts_supported(k)
+        h = db.render_scorecard(k)
+        p = re.search(r'<p class="warn">INTERVAL CONTRADICTED.*?</p>', h).group(0)
+        self.assertIn("H1/S", p)                                  # which component
+        self.assertIn("the interval&#x27;s stored t_lo is", p)     # both numbers, named
+        self.assertIn("per-seed value(s) this study records", p)
+        self.assertIn("is withheld (INCONCLUSIVE shown)", p)
+        self.assertIn("CANNOT BE DETERMINED FROM THIS RESULT", p)
+        self.assertIn("asserts neither", p)
+        self.assertNotIn("tampered", p)
+        self.assertNotIn("forged", p)
+        # free text cannot reach this paragraph as markup
+        m = forge_t_inward(heavy_tailed())
+        object.__setattr__(m.h1.components[0], "metric", "S<script>x</script>")
+        self.assertNotIn("<script>", db.render_scorecard(m))
+
+    def test_the_prose_sibling_and_the_guard_share_one_implementation(self):
+        """`_interval_sources_disagree` exists only so the page can say WHICH finding it is; the GUARD
+        is `_recompute`'s. Both must call `_interval_problem`, or the paragraph and the withholding can
+        drift apart -- which is the whole subject of this module's scheme note."""
+        self.assertIn("_interval_problem", db._interval_sources_disagree.__code__.co_names)
+        self.assertIn("_interval_problem", db._pair_numbers_ok.__code__.co_names)
+        self.assertEqual(db._interval_sources_disagree(joint(), db._measured_series(joint())), [])
+        for junk in (None, object(), 0):
+            self.assertEqual(db._interval_sources_disagree(junk, {}), [], repr(junk))
+        # an ILL-TYPED bound is not reported as a contradiction: the kind functions alarm on that in
+        # their own words, exactly as `_n_sources_disagree` declines a non-count `n`.
+        k = forge_declared(joint(), "IntervalPair", "t_lo", float("nan"))
+        self.assertEqual(db._interval_sources_disagree(k, db._measured_series(k)), [])
+        self.assertFalse(pair_ok(k))
+        self.assertNotIn("INTERVAL CONTRADICTED", db.render_scorecard(k))
+        self.assertIn("NOT shown", db.render_scorecard(k))
+
+    def test_the_measured_cost_of_the_anchors_residual(self):
+        """D2: the stated residual was far cheaper than its comment claimed, and the comment is now the
+        measurement. It said the `seed_scores` anchor "raises the cost of the forgery from one integer to
+        30 fabricated objects". MEASURED at HEAD: ZERO objects fabricated.
+
+        On `laundered_below_minimum(n=30)` -- a GENUINE 29-seed run -- append one EXISTING reference
+        (`seed_scores[0]`), two `object.__setattr__` (`seed_scores`, `n_attempted`), clear six `flags`
+        tuples: `_measured_seeds` = 30, no alarm, JOINT_SUPPORTED, with `len(seed_scores) = 30` and 29
+        DISTINCT seeds. `benchmark.evaluate_gates` already applies `len(set(ids)) != len(ids)` to the
+        same list for `seed_list_frozen`; `_measured_seeds` did not."""
+        k = laundered_below_minimum(n=30)
+        k.__class__                                              # no object is fabricated below
+        object.__setattr__(k, "seed_scores", (*k.seed_scores, k.seed_scores[0]))
+        object.__setattr__(k, "n_attempted", 30)
+        for c in all_components(k):
+            object.__setattr__(c.pair, "flags", ())
+        self.assertEqual(len(k.seed_scores), 30)                 # the two seed-count equalities hold
+        self.assertEqual(len({s.seed for s in k.seed_scores}), 29)   # ... over 29 distinct seeds
+        self.assertIsNone(db._measured_seeds(k), "the distinctness equality must refuse this")
+        h = db.render_scorecard(k)
+        self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), "duplicated seed-score reference")
+        self.assertIn("not readable", h)
+        # BOTH of the two cheap variants are closed, and by TWO independent checks, so neither masks
+        # the other (the F-h lesson). The distinctness equality alone sees the duplicate; the interval
+        # cross-check alone sees both, because an appended entry changes the series every stored mean
+        # and t-interval was computed from.
+        for tag, extra in (("duplicate reference", "dup"), ("one fabricated seed", "new")):
+            m = laundered_below_minimum(n=30)
+            m_extra = m.seed_scores[0] if extra == "dup" else make_scores([999])[0]
+            object.__setattr__(m, "seed_scores", (*m.seed_scores, m_extra))
+            object.__setattr__(m, "n_attempted", 30)
+            for c in all_components(m):
+                object.__setattr__(c.pair, "flags", ())
+            ser = db._seed_series(tuple(m.seed_scores), "S")
+            self.assertEqual(len(ser), 30, tag)
+            self.assertNotEqual(bm.mean(ser), m.h1.components[0].pair.mean.value, tag)
+            nums = db._admitted(m.h1.components[0].pair, "IntervalPair")
+            self.assertIsNotNone(db._interval_problem(nums, ser), tag)
+            self.assertFailsClosedWithAnAlarm(db.render_scorecard(m), ("H1", "H2", "H3"), tag)
+        # NO FALSE FIRE: no honest shape repeats a seed id, and a study that honestly analysed one twice
+        # already fails `seed_list_frozen` (a global gate), so no verdict is lost that was not lost.
+        for label, j in honest_shapes():
+            ids = [s.seed for s in j.seed_scores]
+            self.assertEqual(len(set(ids)), len(ids), label)
+            self.assertIsNotNone(db._measured_seeds(j), label)
+        dup = make_scores(FZ.seeds[:29]) + [None]
+        dup[29] = dup[0]
+        d = bm.analyze_scores(dup, frozen=FZ, registered_digest=FZ.digest, subject="synthetic", cfg=SMALL)
+        self.assertFalse(next(g for g in d.gates if g.name == "seed_list_frozen").passed)
+        self.assertIs(d.verdict, bm.JointVerdict.JOINT_INCONCLUSIVE)
+
+    def test_the_corrected_comment_claims_are_performed_not_asserted(self):
+        """D4: four comments in these two files stated a guarantee, and a withdrawn guarantee has now
+        survived twice in this project because it lived where `__doc__` cannot reach. Each corrected
+        claim that is checkable is checked HERE, by machine, instead of being restated in prose.
+
+        (1) "there are exactly four predicates in this module that admit a stored number -- one per
+            kind". Counted, not asserted.
+        (2) "`_admitted` ... so each field is admitted exactly once" was FALSE; the replacement claim is
+            that all admissions of `pair.n` go through the SAME kind function, so they cannot disagree.
+            Performed with a recording wrapper around `_count`, which observes the real render.
+        (3) "the two second sources, read ONCE for the whole card". Performed by call count.
+        (4) the claims softened (the probe is not a completeness proof; the "cannot add an unchecked
+            consumer" sentence) are disclaimed in the text itself, which is asserted below so the
+            disclaimer cannot be deleted without this going red."""
+        # (1) exactly four kinds, exactly four predicates, one per kind
+        self.assertEqual(len(db._NUM_KINDS), 4)
+        self.assertEqual(set(db._NUM_KINDS), {"float", "num", "count", "mv"})
+        self.assertEqual(len(set(db._NUM_KINDS.values())), 4)
+        self.assertEqual({f.__name__ for f in db._NUM_KINDS.values()},
+                         {"_finite_float", "_finite_number", "_count", "_mv_intact"})
+        # (2) every admission of `pair.n` during a real render goes through `_count`, and there are
+        #     THREE of them per pair plus `bm.interval_verdict`'s own raw read of the attribute.
+        seen = []
+        real = db._count
+
+        def recording_count(x):
+            seen.append(x)
+            return real(x)
+        j = joint()
+        n = j.h1.components[0].pair.n
+        with mock.patch.object(db, "_count", recording_count), \
+                mock.patch.dict(db._NUM_KINDS, {"count": recording_count}):
+            h = db.render_scorecard(j)
+        self.assertNotIn("NOT shown", h)                 # an ordinary, decisive render
+        per_pair = seen.count(n) / len(all_components(j))
+        self.assertGreater(per_pair, 1.0, f"`n` was admitted {per_pair} times per pair: the claim that "
+                                          f"there is more than one admission is now false; fix the "
+                                          f"comment at STORED_NUMBERS item 2 rather than this number")
+        self.assertIn("pair.n", inspect.getsource(bm.interval_verdict))   # the fourth, unadmitted read
+        self.assertNotIn("_count", inspect.getsource(bm._verdict_from_bounds))
+        # (3) read once per card: one `_seed_series` call per protocol metric, not per component
+        metrics = {m for table in (*bm.PRIMARY.values(), bm.CONVERGED) for m, _d, _a in table}
+        calls = []
+        real_series = db._seed_series
+
+        def recording_series(scores, metric):
+            calls.append(metric)
+            return real_series(scores, metric)
+        with mock.patch.object(db, "_seed_series", recording_series):
+            db.render_scorecard(joint())
+        self.assertEqual(sorted(calls), sorted(metrics), "the series is re-derived per component")
+        self.assertGreater(len(all_components(joint())), 0)
+        # (4) THE SOFTENED CLAIMS KEEP THEIR DISCLAIMERS. Each withdrawn sentence may still appear --
+        # this file's house style is to quote what was wrong rather than delete it -- but it must appear
+        # EXACTLY ONCE and inside a passage that withdraws it. Checked this way round deliberately: a
+        # bare `assertNotIn` would pass if someone deleted the correction AND the quotation together,
+        # which is the silent-withdrawal failure D4 is about.
+        src = Path(inspect.getsourcefile(db)).read_text(encoding="utf-8")
+        for claim, marker in (
+                ("Proved complete by the recording-probe test", "THIS COMMENT USED TO SAY"),
+                ("A future reader cannot add an unchecked consumer without turning",
+                 "THIS COMMENT USED TO END"),
+                ("`_admitted` is the only reader and it returns the admitted", "THE SENTENCE THIS"),
+                ("STRICT in three of them", "The sentence this replaces said")):
+            self.assertEqual(src.count(claim), 1, claim)
+            i = src.index(claim)
+            self.assertIn(marker, src[max(0, i - 700):i], claim)
+        # the round-6 withdrawals, same rule. (Not checked over THIS file: the assertion would have to
+        # count its own literals. The classification dicts are checked by the partition test, and each
+        # surviving `NO_SECOND_SOURCE` reason by its own test, which is the stronger guard anyway.)
+        for claim, marker in (("the interval itself is producer-asserted", "WHY IT WAS FALSE"),
+                              ("so there is nothing a forged level could buy that the type check",
+                               "ONE CLAIM ABOUT `pair.level` IS WITHDRAWN")):
+            self.assertEqual(src.count(claim), 1, claim)
+            self.assertIn(marker, src[max(0, src.index(claim) - 1400):src.index(claim)], claim)
+
+    def test_D9_an_absent_ok_attribute_is_not_a_pass(self):
+        """D3: mutant `D9`, `getattr(s, "ok", None)` -> `getattr(s, "ok", True)` in `_measured_seeds`,
+        SURVIVED the previous suite. Measured: with `seed_scores` = 30 ATTRIBUTE-LESS objects and
+        `n_attempted=30, n_failed=0`, HEAD gives `_measured_seeds = None` and an alarm, while the mutant
+        computes `listed_failed = 0 == n_failed`, passes both equalities, and returns `measured_n = 30`
+        -- i.e. an object that says nothing about whether its seed succeeded is read as a success.
+
+        No test drove a seed-score list of attribute-less objects OF THE RIGHT LENGTH: the junk cases
+        were `None`/`object()`/`0`/`"joint"`/`()`, of which the last two ARE iterable but have the wrong
+        length, so the length equality caught them and the `ok` default was never reached.
+
+        THE STAND-INS CARRY DISTINCT `seed` VALUES, AND THAT IS NOT COSMETIC. The first draft of this
+        test used bare attribute-less objects and D9 SURVIVED IT: with no `seed` attribute all 30 ids
+        collapse onto the single `_MISSING` sentinel, so the round-6 DISTINCTNESS equality refused the
+        list before the `ok` default was ever reached, and the test was measuring the wrong guard. Each
+        guard has to be driven with the others satisfied or it is untested (the F-h lesson) -- which is
+        exactly how D9 survived in the first place."""
+        class Blank:
+            def __init__(self, seed):
+                self.seed = seed
+        k = joint()
+        object.__setattr__(k, "seed_scores", tuple(Blank(s) for s in FZ.seeds))
+        self.assertEqual((k.n_attempted, k.n_failed), (30, 0))   # the length equality is satisfied
+        self.assertEqual(len(k.seed_scores), k.n_attempted)
+        self.assertEqual(len({s.seed for s in k.seed_scores}), 30)   # ... and so is distinctness
+        self.assertFalse(any(hasattr(s, "ok") for s in k.seed_scores))
+        self.assertIsNone(db._measured_seeds(k), "an absent `ok` must not default to True")
+        self.assertFailsClosedWithAnAlarm(db.render_scorecard(k), ("H1", "H2", "H3"), "attribute-less")
+        self.assertIn("not readable", db.render_scorecard(k))
+        # the same for a list whose entries carry a NON-True `ok`, including truthy-but-not-True
+        for val in (1, "yes", object(), None, False):
+            class Duck:
+                def __init__(self, seed):
+                    self.seed, self.ok = seed, val
+            m = joint()
+            object.__setattr__(m, "seed_scores", tuple(Duck(s) for s in FZ.seeds))
+            self.assertIsNone(db._measured_seeds(m), repr(val))
+        # NOT VACUOUS: the real list, whose `ok` is a property, still reads 30
+        self.assertEqual(db._measured_seeds(joint()), 30)
 
 
 class RoundThreeSurvivorsPinned(unittest.TestCase):

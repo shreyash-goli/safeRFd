@@ -3521,6 +3521,321 @@ class TheCrossChecksFailClosedAndTheFlagsSurviveAsFarAsTheyCan(unittest.TestCase
             if wt == 0.0:
                 self.assertIsNot(rv.joint, J.JOINT_UNSUPPORTED, "width_tol=0 invented an UNSUPPORTED")
 
+    def unbalanced(self, n_total=32, n_conv=25, min_seeds=10):
+        """A study whose CONVERGED-budget series is measured on fewer seeds than the primary series.
+
+        `synth_scores` measures every series on every seed, which is why the sweep above cannot tell
+        `cfg.min_seeds` from the constant 30: with n == 30 everywhere, `min_seeds <= 30` is decisive and
+        `min_seeds > 30` fails the min-seeds GATE first, so the gate's state supplies the answer the
+        component floor was supposed to supply. Here the primary series have n=32 and the two
+        converged-budget series n=25, so the component floor is observable on its own."""
+        fz = bm.freeze_seed_list(7, n_total)
+        cfg = dataclasses.replace(SMALL, min_seeds=min_seeds)
+        r = random.Random(5)
+        g = lambda m, sd=0.05: m + r.gauss(0, sd)
+        scores = []
+        for i, s in enumerate(fz.seeds):
+            conv = i < n_conv
+            scores.append(bm.SeedScores.from_values(
+                s, g(1.0), g(-0.01, 0.005), g(1.0), g(1.0), A=g(0.5, 0.01), F=0.005, E_loss_ratio=0.01,
+                delta_conv=g(1.0) if conv else None,
+                delta_minus_shuf_conv=g(1.0) if conv else None,
+                conv_grad_ratio=1e-5, rowsets_disjoint=True, mask_ok=True))
+        res = bm.analyze_scores(scores, frozen=fz, registered_digest=fz.digest, subject="s", cfg=cfg,
+                                subject_kind="fixture", fixture_name="f")
+        return bm.to_experiment_records(res, study_id="x", base_seed=7, timestamp_utc=TS_PROBE), cfg, res
+
+    def test_the_component_floor_is_the_configured_minimum_not_a_constant_and_not_the_gate(self):
+        """THE FIXTURE THE SWEEP ABOVE WAS MISSING, and the reason it was worth building: hardcoding
+        `cfg.min_seeds -> 30` at `verdict_from_records`'s own recompute site SURVIVED the whole suite.
+        That was not an equivalence -- it was an unexercised input shape. Every fixture in the file
+        measures every series on all 30 seeds, so the sweep's `min_seeds` assertion was satisfied by the
+        stored `gate_min_seeds` state (min_seeds > 30 fails the GATE, which blocks all three hypotheses
+        before any component floor is consulted) rather than by the floor itself.
+        With an UNBALANCED study the two differ, and so do "the configured minimum" and "whatever the
+        gate said":
+          * min_seeds=10: the gate passes AND every component clears its floor -> JOINT_SUPPORTED.
+            Hardcoding 30 makes the two n=25 converged components INCONCLUSIVE -> JOINT_INCONCLUSIVE.
+          * min_seeds=26: the gate STILL PASSES (32 measured >= 26) and only the n=25 converged
+            components fall below -> JOINT_INCONCLUSIVE, h1/h2 still SUPPORTED. A recompute that read
+            the gate instead of the floor, or that used any constant, cannot produce this pattern.
+        Both directions assert the verdict, the three hypothesis verdicts and the reasons tuple."""
+        recs, cfg, res = self.unbalanced(min_seeds=10)
+        # the fixture really is unbalanced, and the shape is pinned so the test cannot go vacuous
+        by = {r.name.rsplit("/agg/", 1)[1]: r for r in recs if "/agg/" in r.name}
+        self.assertEqual(bm._pair_from_record(by["H1"]).n, 32)
+        self.assertEqual(bm._pair_from_record(by["H3a"]).n, 32)
+        self.assertEqual(bm._pair_from_record(by["H3a_conv"]).n, 25)
+        self.assertEqual(bm._pair_from_record(by["H3b_conv"]).n, 25)
+        self.assertEqual(bm._metric_count(by["JOINT"].metrics["n_seeds"], "n"), 32)
+        self.assertTrue(all(g.passed for g in res.gates), [g.name for g in res.gates if not g.passed])
+        rv = bm.verdict_from_records(recs, cfg)
+        self.assertEqual(rv.reasons, ())
+        self.assertEqual((rv.h1, rv.h2, rv.h3), (V.SUPPORTED,) * 3)
+        self.assertIs(rv.joint, J.JOINT_SUPPORTED)
+        # ... and 26 moves ONLY the converged components, with the gate still passing
+        recs26, cfg26, res26 = self.unbalanced(min_seeds=26)
+        self.assertTrue(all(g.passed for g in res26.gates),
+                        [g.name for g in res26.gates if not g.passed])
+        self.assertIn("min_seeds", [g.name for g in res26.gates if g.passed])
+        rv26 = bm.verdict_from_records(recs26, cfg26)
+        self.assertEqual(rv26.reasons, ())
+        self.assertEqual((rv26.h1, rv26.h2), (V.SUPPORTED, V.SUPPORTED))
+        self.assertIs(rv26.h3, V.INCONCLUSIVE)
+        self.assertIs(rv26.joint, J.JOINT_INCONCLUSIVE)
+        # the live result agrees with its own recompute, so this is a property of the floor, not of
+        # the records path alone
+        self.assertIs(res26.h3.verdict, V.INCONCLUSIVE)
+        # the primary components (n=32) stay SUPPORTED; it is the CONVERGED ones (n=25) that fall below,
+        # which is the shape no balanced fixture can produce
+        self.assertEqual([c.verdict for c in res26.h3.components], [V.SUPPORTED, V.SUPPORTED])
+        self.assertEqual([c.reason for c in res26.h3.converged_components],
+                         ["n=25 below protocol minimum 26: no verdict"] * 2)
+        self.assertIn("H3: finite-budget only", " ".join(res26.h3.reasons))
+
+
+class TheMinimumSeedsFloorHoldsForEveryValueTheFieldsCanHold(unittest.TestCase):
+    """F4: `IntervalPair` had NO `__post_init__`, and `ComponentResult` normalised `margin` while
+    leaving `min_n` and `width_tol` -- passed in the same call -- untouched.
+
+    Each of the three decides a component verdict through an overridable comparison:
+      * `IntervalPair.n`     -- `n < min_n` in `_verdict_from_bounds`; `n` is DATA (the number of seeds
+                                a series was measured on), not a protocol parameter;
+      * `ComponentResult.min_n`     -- the same comparison with the subclass as the RIGHT operand, so
+                                the REFLECTED `__gt__` decides;
+      * `ComponentResult.width_tol` -- `abs(wb - wt) / big > width_tol` in `intervals_disagree`,
+                                likewise reflected.
+    MEASURED before the fix, each with the field still rendering as an honest number: `n=NSub(1)` and
+    `min_n=MSub(30)` both returned SUPPORTED off a TWO-value series (record `n_seeds = 1.0`), and
+    `width_tol=WSub(0.25)` turned a genuine INCONCLUSIVE ("widths differ by more than 25%") into
+    SUPPORTED and JOINT_SUPPORTED. The module docstring's "no component verdict exists below the
+    minimum" was false in exactly that way, and a doc-only mutant weakening the sentence survived,
+    which is why the sentence is asserted here too."""
+
+    class NSub(int):
+        def __lt__(self, o):
+            return False
+
+        def __ge__(self, o):
+            return True
+
+    class MSub(int):
+        def __gt__(self, o):
+            return False
+
+        def __le__(self, o):
+            return True
+
+        def __int__(self):
+            return 10 ** 9
+
+        def __index__(self):
+            return 10 ** 9
+
+    class WSub(float):
+        def __lt__(self, o):
+            return False
+
+        def __gt__(self, o):
+            return False
+
+        def __float__(self):
+            return 10 ** 9
+
+    LVL = bm.bonferroni_level(0.05, 4)
+
+    def tiny(self):
+        """Two tied values: the intervals ARE computable and above the margin, so the ONLY thing
+        standing between this pair and a SUPPORTED is the minimum-n rule."""
+        return bm.summarize("S", [0.9, 0.9], self.LVL, 400, 7, min_n=30)
+
+    def widths_disagree(self):
+        """27.6% relative width difference: INCONCLUSIVE at width_tol=0.25, decisive above it."""
+        return bm.summarize("S", [0.5] * 27 + [0.5 + 0.0001 * i for i in range(3)], self.LVL, 400, 7,
+                            min_n=30)
+
+    def test_a_forged_n_cannot_clear_the_protocol_minimum(self):
+        pair = self.tiny()
+        self.assertEqual(bm.interval_verdict(pair, 0.1, "greater"),
+                         (V.INCONCLUSIVE, "n=2 below protocol minimum 30: no verdict"))
+        for stored in (1, 2, 29):
+            with self.subTest(stored=stored):
+                forged = dataclasses.replace(pair, n=self.NSub(stored))
+                self.assertIs(type(forged.n), int, "the subclass is still stored")
+                self.assertEqual(forged.n, stored)
+                self.assertEqual(bm.interval_verdict(forged, 0.1, "greater"),
+                                 (V.INCONCLUSIVE, f"n={stored} below protocol minimum 30: no verdict"))
+                c = bm.ComponentResult("S", "greater", 0.1, forged, 30, 0.25)
+                self.assertIs(c.verdict, V.INCONCLUSIVE)
+                h = bm.HypothesisResult("H1", (c,))
+                self.assertIs(h.verdict, V.INCONCLUSIVE)
+                self.assertEqual(h.reasons,
+                                 (f"S: n={stored} below protocol minimum 30: no verdict",))
+                self.assertIs(bm.combine_joint(h.verdict, V.SUPPORTED, V.SUPPORTED, True),
+                              J.JOINT_INCONCLUSIVE)
+                # the record stores the same n the verdict was refused for
+                self.assertEqual(bm._agg_metrics(forged, 0.1, 0, "fixture")["n_seeds"].value,
+                                 float(stored))
+        # the honest direction still works: a real 30-seed pair is still decisive
+        big = bm.summarize("S", [0.9 + 0.001 * i for i in range(30)], self.LVL, 400, 7, min_n=30)
+        self.assertIs(bm.interval_verdict(big, 0.1, "greater")[0], V.SUPPORTED)
+
+    def test_a_forged_min_n_cannot_waive_the_protocol_minimum(self):
+        pair = self.tiny()
+        for stored in (30, 31, 10 ** 6):
+            with self.subTest(stored=stored):
+                c = bm.ComponentResult("S", "greater", 0.1, pair, self.MSub(stored), 0.25)
+                self.assertIs(type(c.min_n), int)
+                self.assertEqual(c.min_n, stored)       # NOT 10**9 from __int__
+                self.assertIs(c.verdict, V.INCONCLUSIVE)
+                self.assertEqual(c.reason, f"n=2 below protocol minimum {stored}: no verdict")
+                self.assertEqual(bm.interval_verdict(pair, 0.1, "greater", min_n=self.MSub(stored)),
+                                 (V.INCONCLUSIVE, f"n=2 below protocol minimum {stored}: no verdict"))
+        # and a minimum the pair genuinely meets is still honoured, through the subclass
+        ok = bm.ComponentResult("S", "greater", 0.1, pair, self.MSub(2), 0.25)
+        self.assertIs(ok.verdict, V.SUPPORTED)
+
+    def test_a_forged_width_tol_cannot_silence_the_disagreement_rule(self):
+        pair = self.widths_disagree()
+        honest = bm.ComponentResult("S", "greater", 0.0, pair, 30, 0.25)
+        self.assertIs(honest.verdict, V.INCONCLUSIVE)
+        self.assertIn("widths differ by more than 25%", honest.reason)
+        c = bm.ComponentResult("S", "greater", 0.0, pair, 30, self.WSub(0.25))
+        self.assertIs(type(c.width_tol), float)
+        self.assertEqual(c.width_tol, 0.25)
+        self.assertIs(c.verdict, V.INCONCLUSIVE, c.reason)
+        self.assertEqual(c.reason, honest.reason)
+        h = bm.HypothesisResult("H1", (c,))
+        self.assertEqual(h.reasons, (f"S: {honest.reason}",))
+        self.assertIs(bm.combine_joint(h.verdict, V.SUPPORTED, V.SUPPORTED, True), J.JOINT_INCONCLUSIVE)
+        # a genuinely loose tolerance still admits the component, so the normalisation is not a veto
+        loose = bm.ComponentResult("S", "greater", 0.0, pair, 30, 0.5)
+        self.assertIs(loose.verdict, V.SUPPORTED)
+
+    def test_every_interval_pair_entry_point_agrees_with_the_plain_value(self):
+        """The property rather than the three sites: for each field, the answer on a hostile subclass
+        must equal the answer on the plain number it stores. `level` and `n_boot` are included because
+        they are recorded and cross-checked, not because a verdict reads them directly."""
+        pair = self.widths_disagree()
+        entries = {
+            "n": lambda v: bm.interval_verdict(dataclasses.replace(pair, n=v), 0.0, "greater"),
+            "n stored": lambda v: bm._agg_metrics(dataclasses.replace(pair, n=v), 0.0, 0,
+                                                  "fixture")["n_seeds"].value,
+            "level stored": lambda v: dataclasses.replace(pair, level=v).level,
+            "n_boot stored": lambda v: bm._agg_metrics(dataclasses.replace(pair, n_boot=v), 0.0, 0,
+                                                       "fixture")["n_boot"].value,
+            "min_n": lambda v: bm.ComponentResult("S", "greater", 0.0, pair, v, 0.25).verdict,
+            "min_n reason": lambda v: bm.ComponentResult("S", "greater", 0.0, pair, v, 0.25).reason,
+            "width_tol": lambda v: bm.ComponentResult("S", "greater", 0.0, pair, 30, v).verdict,
+            "width_tol reason": lambda v: bm.ComponentResult("S", "greater", 0.0, pair, 30, v).reason,
+        }
+        for name, fn in entries.items():
+            for sneak, stored in ((self.NSub, 2), (self.NSub, 30), (self.MSub, 2), (self.MSub, 30),
+                                  (self.WSub, 0.25), (self.WSub, 0.5)):
+                if issubclass(sneak, float) and "n" == name:
+                    continue
+                with self.subTest(entry=name, sneak=sneak.__name__, stored=stored):
+                    try:
+                        want, werr = fn(stored), None
+                    except Exception as e:                      # pragma: no cover - parity is the point
+                        want, werr = None, type(e)
+                    try:
+                        got, gerr = fn(sneak(stored)), None
+                    except Exception as e:                      # pragma: no cover
+                        got, gerr = None, type(e)
+                    self.assertEqual(gerr, werr, f"{name}: raised differently for the same number")
+                    self.assertEqual(got, want, f"{name}: answered differently for the same number")
+
+    def test_the_module_docstring_no_longer_claims_more_than_it_can(self):
+        doc = " ".join(bm.__doc__.split())
+        self.assertIn("THIS BULLET USED TO END \"no component verdict exists below the minimum\", "
+                      "FULL STOP, AND THAT WAS FALSE", doc)
+        self.assertIn("`IntervalPair` had no `__post_init__` at all", doc)
+        self.assertIn("normalised at construction now", doc)
+        reader = " ".join(bm._metric_read.__doc__.split())
+        self.assertIn("IT RETURNS A PLAIN `float`, NEVER THE STORED OBJECT", reader)
+        src = Path(bm.__file__).read_text()
+        self.assertIn("THIS COMMENT USED TO CONTINUE \"so a `MetricValue` built by the public API is "
+                      "sound\". THAT WAS FALSE", src)
+
+
+class TheSeedIsTheUnitOfReplication(unittest.TestCase):
+    """The SR-10 twin of `toy.robustness._check_seeds` (F2 there), found by sweeping `set(` / `hash()`
+    and worse here, because in SR-10 it buys a JOINT VERDICT.
+
+    `evaluate_gates` refuses a repeated seed with `len(set(ids)) != len(ids)` and requires
+    `set(ids) <= set(frozen.seeds)`; both are `__hash__` plus `__eq__` on whatever `SeedScores.seed`
+    holds, and `SeedScores` validated its metrics but never its seed. A LYING `__hash__` alone is
+    caught -- by the subset half, which then cannot find the seed in the frozen list -- so the attack
+    needs an honest hash and a TYPE-SELECTIVE `__eq__`: equal to a plain int of the same value (so the
+    subset check passes) and unequal to another instance of itself (so the duplicate check does not
+    collapse the list). MEASURED through the public `SeedScores.from_values` + `analyze_scores`, with
+    thirty copies of ONE seed: seed_list_frozen PASSED, min_seeds PASSED, JOINT_SUPPORTED, a recompute
+    of JOINT_SUPPORTED with `reasons = ()`, a stored `n_seeds` of 30.0, and thirty per-seed records --
+    for a study with one replicate. Design point 2 of the module docstring ("the seed is the unit of
+    replication") and protocol 6.1's minimum-n rule were both satisfied by one example."""
+
+    class SelSeed(int):
+        def __eq__(self, o):
+            return type(o) is int and int.__int__(self) == o
+
+        def __ne__(self, o):
+            return not self.__eq__(o)
+
+        __hash__ = int.__hash__
+
+    def dup(self, mk):
+        one = FZ.seeds[0]
+        return [bm.SeedScores.from_values(mk(one), 1.0, -0.01, 1.0, 1.0, A=0.5, F=0.005,
+                                          E_loss_ratio=0.01, delta_conv=1.0, delta_minus_shuf_conv=1.0,
+                                          conv_grad_ratio=1e-5, rowsets_disjoint=True, mask_ok=True)
+                for _ in range(30)]
+
+    def analyse(self, scores):
+        return bm.analyze_scores(scores, frozen=FZ, registered_digest=FZ.digest, subject="s",
+                                 cfg=SMALL, subject_kind="fixture", fixture_name="f")
+
+    def test_one_seed_thirty_times_cannot_pass_the_frozen_seed_list_gate(self):
+        self.assertTrue(self.SelSeed(FZ.seeds[0]) == FZ.seeds[0])          # the attack's premise ...
+        self.assertFalse(self.SelSeed(FZ.seeds[0]) == self.SelSeed(FZ.seeds[0]))   # ... in both halves
+        for nm, mk in (("plain int", int), ("int subclass", self.SelSeed)):
+            with self.subTest(route=nm):
+                res = self.analyse(self.dup(mk))
+                failed = [g.name for g in res.gates if not g.passed]
+                self.assertEqual(failed, ["seed_list_frozen"], nm)
+                self.assertIn("not a subset of the frozen list",
+                              [g.reason for g in res.gates if g.name == "seed_list_frozen"][0])
+                self.assertIs(res.verdict, J.JOINT_INCONCLUSIVE, nm)
+                self.assertEqual((res.h1.verdict, res.h2.verdict, res.h3.verdict),
+                                 (V.INCONCLUSIVE,) * 3, nm)
+                self.assertIn("gate failed: seed_list_frozen", res.h1.reasons[0], nm)
+                # and the stored seed is the plain value, so the record cannot read as 30 distinct ones
+                self.assertEqual(len({s.seed for s in res.seed_scores}), 1, nm)
+                self.assertEqual({type(s.seed) for s in res.seed_scores}, {int}, nm)
+
+    def test_an_honest_distinct_seed_list_still_passes_through_the_subclass(self):
+        scores = [bm.SeedScores.from_values(self.SelSeed(s), 1.0, -0.01, 1.0, 1.0, A=0.5, F=0.005,
+                                            E_loss_ratio=0.01, delta_conv=1.0,
+                                            delta_minus_shuf_conv=1.0, conv_grad_ratio=1e-5,
+                                            rowsets_disjoint=True, mask_ok=True) for s in FZ.seeds]
+        res = self.analyse(scores)
+        self.assertEqual([g.name for g in res.gates if not g.passed], [])
+        self.assertIs(res.verdict, J.JOINT_SUPPORTED)
+        recs = bm.to_experiment_records(res, study_id="x", base_seed=7, timestamp_utc=TS_PROBE)
+        self.assertEqual(bm.verdict_from_records(recs, SMALL).reasons, ())
+        self.assertEqual(len({r.provenance.seed for r in
+                              bm.seed_records(res, study_id="x", timestamp_utc=TS_PROBE)}), 30)
+
+    def test_a_seed_that_is_not_an_int_is_refused_at_construction(self):
+        for bad in (True, False, 7.0, "7", None, [7]):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                bm.SeedScores.from_values(bad, 1.0, -0.01, 1.0, 1.0)
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                bm.SeedScores.failed(bad, "why")
+        s = bm.SeedScores.from_values(self.SelSeed(9), 1.0, -0.01, 1.0, 1.0)
+        self.assertIs(type(s.seed), int)
+        self.assertEqual(s.seed, 9)
+
 
 class NoForgedStoredMetricBuysABetterVerdict(unittest.TestCase):
     """SR-15 D1-D5, pinned by ENUMERATING the metrics a record actually carries rather than listing the
@@ -3741,9 +4056,33 @@ class _SneakyMargin(float):
 
 
 class _SneakyBound(float):
-    """A stored metric that compares favourably whatever it holds. `__eq__` is deliberately NOT
+    """A stored metric that compares favourably whatever it holds.
+
+    `__eq__` is deliberately NOT overridden here, and WHY is now a finding rather than a note on a
+    fixture. THE SENTENCE THAT USED TO STAND IN THIS DOCSTRING: "`__eq__` is deliberately NOT
     overridden, because `MetricValue.__post_init__` normalises `value == 0.0` and would replace the
-    instance -- so a lying `__eq__` would make this test pass for the wrong reason."""
+    instance -- so a lying `__eq__` would make this test pass for the wrong reason."
+
+    THE LESSON, in this round's words, because that sentence cost five rounds. The author of it
+    found the mechanism, understood it precisely enough to write down that a lying `__eq__` REPLACES
+    THE STORED VALUE, and then filed it as a nuisance to be routed around in a test fixture instead of
+    as a hole in the validator. It was the most severe defect in the three modules: `MetricValue.
+    measured(EqZero(7.0)).value` was 0.0, so the schema's own validator substituted the measurement,
+    and an honest JOINT_UNSUPPORTED recomputed as JOINT_SUPPORTED with `reasons = ()`, an unchanged
+    `config_hash`, and the per-seed values still reading as honest numbers in every record.
+
+    THE RULE THIS BUYS, and it is cheap to apply: when you find yourself writing "I avoided X because
+    it would make my test pass for the wrong reason", X is a finding. A test is steered away from a
+    mechanism exactly when the mechanism does something the code under test should not do; the
+    workaround is the discovery, and leaving it in a fixture's docstring hides it in the one place a
+    reader of the module will never look. The same reasoning applies to "I had to use `object.
+    __setattr__` to reproduce this" (then the public route is worth re-checking) and to "the assertion
+    only holds for the default parameter" (then the parameter's range is unswept).
+
+    `__eq__` STAYS un-overridden, now for the opposite reason: the schema stores the plain double it
+    checked, so a lying `__eq__` no longer changes what is stored, and the four ORDER-comparison
+    overrides below are what this fixture is for. A lying `__eq__` is covered separately and directly,
+    at the root, by `test_schema.AMetricStoresTheNumberItChecked`."""
     def __gt__(self, other):
         return True
 
@@ -3862,21 +4201,38 @@ class NormaliseBeforeCheckingEverywhereANumberEnters(unittest.TestCase):
         margin, and asserted on the verdict at all three levels plus the reasons tuple."""
         honest = self.pair([-9.0] * 30)
         self.assertIs(bm.interval_verdict(honest, 0.1, "greater")[0], V.UNSUPPORTED)
+        # TWO LAYERS, asserted separately, because this test used to conflate them and the assertion
+        # that held them together ("the hostile object really is stored") was an assertion that the
+        # SCHEMA WAS BROKEN. Layer 1: the public constructor no longer stores the hostile object at all
+        # -- `MetricValue.__post_init__` keeps the plain double it validated (the F1 root fix).
+        built = MetricValue.measured(_SneakyBound(-9.0))
+        self.assertIs(type(built.value), float, "MetricValue stored a float subclass")
+        self.assertEqual(built.value, -9.0)
+        # Layer 2, which is what `_metric_read` is FOR and must keep holding independently: route (b)
+        # installs the hostile object after construction, past every constructor check.
         forged = dataclasses.replace(
-            honest, boot_lo=MetricValue.measured(_SneakyBound(-9.0)),
-            boot_hi=MetricValue.measured(_SneakyBound(-9.0)),
-            t_lo=MetricValue.measured(_SneakyBound(-9.0)), t_hi=MetricValue.measured(_SneakyBound(-9.0)))
+            honest, boot_lo=forge(MetricValue.measured(1.0), _SneakyBound(-9.0)),
+            boot_hi=forge(MetricValue.measured(1.0), _SneakyBound(-9.0)),
+            t_lo=forge(MetricValue.measured(1.0), _SneakyBound(-9.0)),
+            t_hi=forge(MetricValue.measured(1.0), _SneakyBound(-9.0)))
         self.assertIs(type(forged.boot_lo.value), _SneakyBound)     # the hostile object really is stored
         self.assertIs(type(bm._metric_read(forged.boot_lo)), float)  # ... and the reader plainifies it
         self.assertEqual(bm._metric_read(forged.boot_lo), -9.0)
-        v, why = bm.interval_verdict(forged, 0.1, "greater")
-        self.assertIs(v, V.UNSUPPORTED, why)
-        c = bm.ComponentResult("S", "greater", 0.1, forged, 30, 0.25)
-        self.assertIs(c.verdict, V.UNSUPPORTED)
-        h = bm.HypothesisResult("H1", (c,))
-        self.assertIs(h.verdict, V.UNSUPPORTED)
-        self.assertEqual(h.reasons, ("S: whole interval at or below margin",))
-        self.assertIs(bm.combine_joint(h.verdict, V.SUPPORTED, V.SUPPORTED, True), J.JOINT_UNSUPPORTED)
+        for nm, pair in (("route (b) forgery", forged),
+                         ("public constructor", dataclasses.replace(
+                             honest, boot_lo=built, boot_hi=MetricValue.measured(_SneakyBound(-9.0)),
+                             t_lo=MetricValue.measured(_SneakyBound(-9.0)),
+                             t_hi=MetricValue.measured(_SneakyBound(-9.0))))):
+            with self.subTest(route=nm):
+                v, why = bm.interval_verdict(pair, 0.1, "greater")
+                self.assertIs(v, V.UNSUPPORTED, why)
+                c = bm.ComponentResult("S", "greater", 0.1, pair, 30, 0.25)
+                self.assertIs(c.verdict, V.UNSUPPORTED)
+                h = bm.HypothesisResult("H1", (c,))
+                self.assertIs(h.verdict, V.UNSUPPORTED)
+                self.assertEqual(h.reasons, ("S: whole interval at or below margin",))
+                self.assertIs(bm.combine_joint(h.verdict, V.SUPPORTED, V.SUPPORTED, True),
+                              J.JOINT_UNSUPPORTED)
 
     def test_the_checked_reader_and_the_count_reader_return_plain_floats(self):
         for sneak in self.SNEAKS:

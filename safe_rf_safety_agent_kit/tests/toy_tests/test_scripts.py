@@ -85,6 +85,70 @@ def _policy_pkgs():
 
 POLICY_PKGS = _policy_pkgs()
 
+
+def _policy_tools():
+    """The `TOOLS` allowlist in `scripts/run_tests.sh`: the CLOSED set of developer-tool names whose absence may
+    claim the optional-developer-tool exemption. Parsed, like `PKGS`."""
+    text = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")
+    m = re.search(r"(?m)^TOOLS = (\(.*?\))\n", text, re.S)
+    if m is None:
+        raise AssertionError("scripts/run_tests.sh no longer defines TOOLS as a plain tuple literal; this file "
+                             "parses it (see _policy_tools) and must be updated together with it")
+    return tuple(ast.literal_eval(m.group(1)))
+
+
+POLICY_TOOLS = _policy_tools()
+
+
+def _tool_phrase_re():
+    """The runner's `TOOL` pattern, parsed out of `scripts/run_tests.sh`, with its name capture group.
+
+    Parsed rather than retyped for the same reason `_live_ruff_skip_reason` parses the decorator: the phrase and
+    the thing that judges the phrase were written in two places by two people once already."""
+    text = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")
+    m = re.search(r'(?m)^TOOL = re\.compile\((r"[^"]*")', text)
+    if m is None:
+        raise AssertionError("scripts/run_tests.sh no longer defines TOOL as re.compile(r\"...\"); this file "
+                             "parses the pattern (see _tool_phrase_re) and must be updated together with it")
+    pat = re.compile(ast.literal_eval(m.group(1)), re.I)
+    if pat.groups != 1:
+        raise AssertionError("the runner's TOOL pattern no longer captures the tool name in exactly one group; "
+                             "_suite_tool_gates reads group(1)")
+    return pat
+
+
+def _suite_tool_gates():
+    """(tool name -> [file:line, ...], number of literal skip reasons scanned) for every skip site in
+    tests/toy_tests/ whose reason is SHAPED like the runner's optional-developer-tool category.
+
+    This is the derivation the round-5 fix rests on: the allowlist in the script must be exactly the set of tools
+    this suite really gates a test on, and that set is read out of the live `@unittest.skipUnless(...)` /
+    `skipTest(...)` reasons rather than maintained beside them. Synthetic reasons built inside this file's
+    laundering tables are NOT skip sites (they are strings handed to helpers, or source text for a generated
+    module), so they are invisible here -- which is the point: the scan sees what the SUITE will emit.
+    """
+    pat = _tool_phrase_re()
+    gates, sites = {}, 0
+    for p in sorted((ROOT / "tests" / "toy_tests").glob("*.py")):
+        for node in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            if name not in ("skip", "skipIf", "skipUnless", "skipTest"):
+                continue
+            i = 0 if name in ("skip", "skipTest") else 1
+            if len(node.args) <= i:
+                continue
+            arg = node.args[i]
+            if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+                continue
+            sites += 1
+            m = pat.match(arg.value.strip())
+            if m:
+                gates.setdefault(m.group(1).lower(), []).append(f"{p.name}:{node.lineno}")
+    return gates, sites
+
 # One driving expression per patched entry point, keyed exactly as the guard names it ("socket." prefix = a
 # method on socket.socket). test_network_guard_blocks_every_patched_entry_point builds a synthetic suite out of
 # this table and asserts the keys are EXACTLY the parsed patch set, so a name cannot be added to the guard
@@ -432,6 +496,51 @@ class TestNoNetworkImports(unittest.TestCase):
         # README carries the one-line precondition and must not promise what the kit does not install
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertNotIn("ruff is not installed (optional linter)", readme)
+
+    def test_no_withdrawn_guarantee_is_restated_in_a_comment(self):
+        """THE CLASS THAT HAS NOW COST THREE ROUNDS: a guarantee this project withdrew, still asserted in a
+        COMMENT. A docstring assertion cannot reach a comment and neither can a doc grep, so the only thing that
+        can keep comments honest is a source-text test over the comment lines themselves.
+
+        The occasion was `tests/toy_tests/test_scripts.py`, which carried *"It says 'not on PATH' rather than
+        'not installed' on purpose: torch mode denies the latter on EVERY skip, tool skips included, so the
+        category cannot launder a missing package"* while `docs/CLEAN_CLONE.md` had explicitly retracted exactly
+        that reasoning (*"that is a courtesy to the reader and **not** the anti-laundering defence"*). The same
+        round found `scripts/run_tests.sh` defining soundness as *"an exemption is sound only while it cannot be
+        spent on hiding a package skip. One rule makes it sound"* -- false: any reason naming no package collects
+        the exemption, up to TOOL_CAP (4) and FS_CAP (8), so the caps and the baseline are the real bound.
+
+        Each needle below is a withdrawn claim. It may appear in a comment ONLY inside a window that marks it as
+        history, and it must still appear somewhere -- deleting the record is how the same sentence comes back.
+        """
+        MARK = re.compile(r"used to|was false|WHAT IS NOT TRUE|withdrawn|no longer|retract|NOT the anti|"
+                          r"it was false|FALSE for", re.I)
+        NEEDLES = {
+            "cannot launder": "the category's anti-laundering guarantee (withdrawn in docs/CLEAN_CLONE.md: the "
+                              "wording is a courtesy to the reader, not the defence)",
+            "hide a torch test": "the filesystem-case exclusion's claim that it cannot hide a torch test (an "
+                                 "exemption can; the bound is FS_CAP and the baseline)",
+            "cannot be spent on hiding a package skip": "the definition of a SOUND exemption as one no reason "
+                                                        "can spend (the caps are the bound, not the rule)",
+        }
+        hits = dict.fromkeys(NEEDLES, 0)
+        for rel in ("scripts/run_tests.sh", "tests/toy_tests/test_scripts.py"):
+            lines = (ROOT / rel).read_text(encoding="utf-8").splitlines()
+            for needle, why in NEEDLES.items():
+                for i, line in enumerate(lines):
+                    if needle in line and line.lstrip().startswith("#"):
+                        hits[needle] += 1
+                        window = " ".join(lines[max(0, i - 6):i + 7])
+                        self.assertRegex(window, MARK,
+                                         f"{rel}:{i + 1} asserts a WITHDRAWN guarantee in a comment as if it "
+                                         f"were current -- {why}. Mark it as history or delete it.")
+        # ...and the record of each must survive in at least ONE of the two files: the first needle was only
+        # ever asserted in this file and the second only in the runner, so the presence check is across both.
+        # Deleting a record is how the same sentence comes back a round later, and how this test goes vacuous.
+        for needle, n in hits.items():
+            self.assertGreaterEqual(n, 1, f"neither scripts/run_tests.sh nor this file records the withdrawn "
+                                          f"guarantee {needle!r} any more: {NEEDLES[needle]}. It was deleted "
+                                          f"rather than marked as history, and this check now proves nothing.")
 
     def test_docs_disclose_the_lint_names_closed_without_being_scored(self):
         """Closed cheaply, and the document must not read as if that made the blocklist complete: the three names
@@ -1405,8 +1514,8 @@ class TestRunTestsMechanics(_SyntheticBase):
         tokens = sorted(set(re.findall(r"POLICY:([A-Z_]+)(?=\s)", script)))
         # ANTI-VACUITY, in two parts, because the one part it had was off by one: `>= 24` against a script that
         # emits 25, so a token could be deleted and the floor still passed. The floor is now the real count
-        # (raise it when a token is added; it must never be lowered)...
-        self.assertGreaterEqual(len(tokens), 25, tokens)
+        # (raise it when a token is added; it must never be lowered). 25 -> 26 with POLICY:TOOL_UNDECLARED...
+        self.assertGreaterEqual(len(tokens), 26, tokens)
         # ...and, derived rather than typed, EVERY `POLICY:` occurrence in the script is accounted for: each is
         # either an emission the strict regex above found, or one of the two documented non-emissions -- the
         # header's `POLICY:<NAME>` placeholder and a comment's `POLICY:BASELINE_*` wildcard. This is the half the
@@ -1559,10 +1668,30 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
         # and the phrase is structured, not a password: prose that merely sounds like it gets no exemption, and
         # prose that CARRIES it gets none either -- `TOOL` was an unanchored `.search()`, so a reason that merely
         # CONTAINED the phrase collected the exemption (the last two were measured passing with `--expect none`).
+        #
+        # THE LAST TWO CASES ARE THE ANCHOR, and they are here because the six candidates above DO NOT TEST IT.
+        # Every one of those is rejected by something else: four never contain the phrase at all, and the two
+        # `PATHological` ones are rejected by the trailing `\b`, with or without an anchor. The table had no case
+        # with LEADING PROSE and a clean `is not on PATH` ending, so nothing exercised the anchor. These two do,
+        # and they name a DECLARED tool (`ruff`) so that the TOOLS allowlist cannot be what rejects them either.
+        #
+        # MEASURED, and it corrects the mutant the defect report named. The anchor is written twice (`\A` in the
+        # runner's `TOOL` pattern and `.match` at the call site) and the two terms are MUTUALLY REDUNDANT: `\A`
+        # matches only at position 0, so `.search` on an `\A` pattern IS `.match`, and `.match` on a pattern
+        # without `\A` is anchored by the method. So
+        #   S3   drop `\A`, keep `.match`                 -> EQUIVALENT mutant, SURVIVED (proves nothing)
+        #   S3b  keep `\A`, `.match` -> `.search`         -> EQUIVALENT mutant, SURVIVED (proves nothing)
+        #   S3c  BOTH, i.e. the round-4 hole verbatim     -> KILLED by the two cases below
+        #   S3c with these two cases deleted              -> SURVIVED
+        # The last line is the masking that was reported, and it was real; the single-term mutants were not
+        # evidence of it, because neither changes any verdict. A control run (the two cases deleted, the script
+        # unmutated) passes, so the SURVIVED verdict belongs to the mutant and not to the edit.
         r = self.rejects_each(["optional developer tool is not on PATH", "ruff is not installed (optional linter)",
                                "optional linter absent", "developer tool `ruff` missing",
                                "an optional developer tool `ruff` is not on PATHological systems",
-                               "optional developer tool `ruff` is not on PATHological systems"], expect="none")
+                               "optional developer tool `ruff` is not on PATHological systems",
+                               "note: optional developer tool `ruff` is not on PATH",
+                               "the suite reports: " + self.TOOL_REASON], expect="none")
         self.assertIn("POLICY:NONE_REASON", r.stdout)
 
     def test_no_environment_exemption_may_name_a_package_the_kit_MEASURES(self):
@@ -1590,7 +1719,138 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
             for tail in (f"; {pkg} unavailable", f"; {pkg} is not available", f"; {pkg} absent",
                          f" ({pkg} could not be imported)", f"; no {pkg} here"):
                 tails += [self.TOOL_REASON + tail, self.FS_REASON + tail]
+        # ...and (3) the WORD BOUNDARY in `PKG` is evadable, so the tail check is a PREFIX test (`PKG_EXEMPT`):
+        # `\btorch\b` does not match `torchrun`, which is PyTorch's own console script, nor `torchvision`,
+        # `numpy2` or `pytestx`. Measured: `the live ruff reason + "; torchrun is gone"` and
+        # `case-sensitive filesystem ...; torch2 is gone` BOTH collected the exemption in `--expect none` and
+        # `--expect torch` before `PKG_EXEMPT` existed. Derived from the same tuple, so a package added to the
+        # script is laundered past the suffixes too, not just past the bare word.
+        for pkg in POLICY_PKGS:
+            for suffixed in (f"{pkg}run", f"{pkg}2", f"{pkg}vision", f"py{pkg}x", f"{pkg}_geometric"):
+                tails += [self.TOOL_REASON + f"; {suffixed} is gone", self.FS_REASON + f"; {suffixed} is gone"]
         self.rejects_each(tails, expect="torch")
+
+    def test_the_TOOLS_allowlist_is_exactly_the_tools_this_suite_gates_on(self):
+        """THE FIFTH SR-15 FAIL: `PKG` is a spelling rule, and its word boundaries are evadable.
+
+        As the only gate on the tool exemption, `\\b(?:py)?(?:torch|numpy|yaml|pytest)\\b` is an OPEN set --
+        every name that is not one of those four words collected the exemption. Measured on the LIVE script,
+        EXEMPT in `--expect none` AND `--expect torch`:
+
+            optional developer tool `torchrun` is not on PATH     <- PyTorch's own console script
+            optional developer tool `libtorch` is not on PATH     <- its C++ distribution
+            ... and torchvision, torchaudio, torch_geometric, torch2, _torch, numpy2, pytestx, mypy, black,
+                yamllint, ruff.exe, ruff-0.4
+
+        Round 4's defect was ``optional developer tool `torch` is not on PATH`` -- ONE SUFFIX from the first two.
+        A negative rule ("does this name look like a package?") cannot close an open set; a positive one can,
+        because the tools this suite really gates a test on are a closed set of size one.
+
+        THIS TEST IS THE DERIVATION. The allowlist is declared in exactly one place (`TOOLS` in
+        scripts/run_tests.sh, which the policy reads) and is required here to EQUAL the set of tool-gated skip
+        sites parsed out of the live decorators and `skipTest` calls in tests/toy_tests/. So:
+          * a NEW tool-gated test fails here, naming the tool and the tuple to declare it in -- and fails at
+            runtime as POLICY:TOOL_UNDECLARED in every mode, never a silent exemption;
+          * a name left in the tuple after its test is deleted fails here too, so the allowlist cannot grow
+            stale permissions.
+        """
+        gates, sites = _suite_tool_gates()
+        self.assertGreaterEqual(sites, 10, "the skip-site scan found almost no literal skip reasons: "
+                                           "_suite_tool_gates has stopped looking (a renamed skip helper, or "
+                                           "reasons that are no longer literals) and this check is vacuous")
+        self.assertIn("ruff", gates, "the suite's one real tool gate -- the behavioural half of the fatal-ruff "
+                                     "guarantee -- is no longer found by the scan")
+        self.assertEqual(sorted(gates), sorted({t.lower() for t in POLICY_TOOLS}),
+                         f"the TOOLS allowlist in scripts/run_tests.sh is {sorted(POLICY_TOOLS)} while this "
+                         f"suite gates tests on {dict(gates)}. DECLARE the tool in that tuple (with a test that "
+                         f"drives it), or delete a name whose test is gone. Do NOT widen the phrase: an "
+                         f"undeclared name is POLICY:TOOL_UNDECLARED at runtime, which is the loud failure this "
+                         f"equality exists to produce.")
+        # the allowlist is a set of NAMES, not of patterns: a regex-looking entry would reopen the open set
+        for t in POLICY_TOOLS:
+            self.assertRegex(t, r"\A[\w.+-]+\Z", f"TOOLS entry {t!r} is not a plain tool name")
+
+    def test_an_undeclared_tool_name_gets_no_exemption_and_fails_loudly_in_every_mode(self):
+        """The runtime half of the allowlist, driven in all three documented modes.
+
+        `--expect any` matters most here and is the reason this is a cap-style check rather than a reason check:
+        `any` applies NO skip-reason check at all (every one of them sits inside `if mode == "none"` /
+        `elif mode == "torch"`), so before POLICY:TOOL_UNDECLARED an undeclared tool name was accepted there in
+        silence. The declared name in the same shape still passes in every mode --
+        test_the_live_ruff_skip_reason_is_accepted_in_every_documented_mode -- so this is not a blanket refusal
+        of the category.
+        """
+        und = "optional developer tool `torchrun` is not on PATH"
+        for mode, extra in (("none", _mixed_none(50)), ("torch", _skip_module(1, "CUDA not available: x")),
+                            ("any", _pass_module(1))):
+            with self.subTest(mode=mode):
+                r = self.rt({"test_a.py": extra,
+                             "test_t.py": _skip_module(1, und, cls="T", prefix="test_t")}, expect=mode)
+                self.bad(r, "POLICY:TOOL_UNDECLARED")
+                self.assertIn("TOOLS allowlist", r.stdout)       # the message says what to do about it
+                self.assertIn("torchrun", r.stdout)              # ...and which name is undeclared
+                self.assertNotIn("skip(s) for an absent optional developer tool", r.stdout)   # no exemption
+
+    def test_every_name_that_laundered_past_the_word_boundary_is_rejected_now(self):
+        """The measured laundering table of the fifth FAIL, as a test, plus names nobody had listed.
+
+        All of these were EXEMPT in `--expect none` and `--expect torch` before the allowlist. `pytest-cov`,
+        `numpy-stubs`, `py-torch`, `torch-cpu`, `TORCH` and `pytorch` were NOT -- the hyphen and the case folding
+        put them inside `PKG`'s word boundaries -- which is exactly how narrow the old rule's reach was.
+        """
+        names = ["torchrun", "libtorch", "torch2", "_torch", "pytestx", "torchvision", "torchaudio", "numpy2",
+                 "yamllint", "mypy", "black", "torch_geometric", "ruff.exe", "ruff-0.4", "RUFFIAN"]
+        shaped = [f"optional developer tool `{n}` is not on PATH" for n in names]
+        r = self.rejects_each(shaped, expect="torch")
+        self.assertIn("POLICY:TOOL_UNDECLARED", r.stdout)
+        r = self.rejects_each(shaped, expect="none")
+        self.assertIn("POLICY:TOOL_UNDECLARED", r.stdout)
+        # a tail may not introduce a second, undeclared BACKTICKED name either: the check is over every
+        # backticked name in the reason, not only the one in the phrase
+        self.rejects_each([self.TOOL_REASON + "; `torchrun` is gone",
+                           self.TOOL_REASON + "; `mypy` would have run it",
+                           self.TOOL_REASON + "; also optional developer tool `black` is not on PATH"],
+                          expect="none")
+        # and a name the PHRASE cannot hold is rejected by the shape before the allowlist is reached: the name
+        # class is [\w.+-]+, so a backtick inside the name means it is not tool-shaped at all
+        self.rejects_each(["optional developer tool `ru`ff` is not on PATH"], expect="none")
+        # The same for a name carrying a NEWLINE or a ZERO-WIDTH SPACE -- a name that looks like `ruff` in a
+        # terminal. Driven one at a time rather than through `rejects_each`, because the runner prints the
+        # reason with repr(): `\n` and `​` come out ESCAPED, so a candidate holding the raw character can
+        # never be found inside a line of output by a substring match. (Measured: that is a limitation of the
+        # table's attribution, not of the policy -- both are rejected.)
+        for label, name in (("newline", "ru\nff"), ("zero-width", "ruff​")):
+            with self.subTest(name=label):
+                r = self.rt({"test_a.py": _mixed_none(50),
+                             "test_b.py": _skip_module(1, f"optional developer tool `{name}` is not on PATH",
+                                                       cls="N", prefix="test_n")}, expect="none")
+                self.bad(r, "POLICY:NONE_REASON")
+                self.assertNotIn("skip(s) for an absent optional developer tool", r.stdout)
+
+    def test_the_baseline_pyyaml_exclusion_is_built_from_PKGS_and_says_so_loudly(self):
+        """D4: `PKGS`'s comment claimed it was the tuple "from which `NONE_OK`, the baseline exclusion and the
+        exemption rule are all built", and the baseline exclusion was an INDEPENDENTLY typed
+        `PYYAML = re.compile(r"\\b(?:py)?yaml\\b")` thirty lines below it. A third of the sentence was false --
+        the same shape as the defect `PKGS` was created to end.
+
+        It is built from the tuple now, and the degenerate case is loud rather than silent: this drives a COPY of
+        the live script whose `PKGS` has lost `yaml`, and requires `POLICY:INTERNAL` instead of a pattern that
+        goes on excluding a package the policy no longer measures. The control run of the unmodified copy is
+        what keeps this from passing for the wrong reason.
+        """
+        body = _pass_module(1)
+        root = self.synth_root(body)
+        self.ok(self.run_default(root))                                  # control: the copy is green as copied
+        script = root / "scripts" / "run_tests.sh"
+        text = script.read_text(encoding="utf-8")
+        old = 'PKGS = ("torch", "numpy", "yaml", "pytest")'
+        self.assertEqual(text.count(old), 1, "scripts/run_tests.sh no longer spells PKGS as this test expects; "
+                                             "update the mutation below with it")
+        script.write_text(text.replace(old, 'PKGS = ("torch", "numpy", "pytest")'), encoding="utf-8")
+        r = self.run_default(root)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("POLICY:INTERNAL", r.stdout)
+        self.assertIn("yaml", r.stdout)
 
     def test_live_torch_mode_skip_reasons_stay_accepted(self):
         """WHY the torch-mode DENY list is NOT widened to the other spellings of "is missing" that `--expect none`
@@ -1826,8 +2086,20 @@ class TestLintPolicy(unittest.TestCase):
     # second environment-skip category (the first is the filesystem-case one), and it is handled exactly like it:
     # accepted in every mode, capped at 4 (POLICY:TOOL_CAP), and excluded from the bare-mode skip floor, the torch
     # cap and the baseline -- generation included, so the recorded skip column does not depend on whether the
-    # machine has ruff. It says "not on PATH" rather than "not installed" on purpose: torch mode denies the latter
-    # on EVERY skip, tool skips included, so the category cannot launder a missing package.
+    # machine has ruff. `ruff` must be on the `TOOLS` allowlist in that script, and it is: the equality is
+    # DERIVED FROM THIS DECORATOR by test_the_TOOLS_allowlist_is_exactly_the_tools_this_suite_gates_on, so
+    # renaming the tool here without declaring it there is a red suite, not a silent exemption.
+    #
+    # WHAT THIS COMMENT USED TO END WITH, and it was a guarantee this project had already WITHDRAWN in
+    # docs/CLEAN_CLONE.md ("that is a courtesy to the reader and **not** the anti-laundering defence"):
+    #     "It says 'not on PATH' rather than 'not installed' on purpose: torch mode denies the latter on EVERY
+    #      skip, tool skips included, so the category cannot launder a missing package."
+    # The retraction never reached the comment -- the third time in this project that a withdrawn guarantee
+    # outlived its withdrawal in a comment, which is why there is now a source-text test for it
+    # (test_no_withdrawn_guarantee_is_restated_in_a_comment): a docstring assertion cannot reach a comment.
+    # The wording IS a courtesy to the reader, and nothing more. What bounds the category: the TOOLS allowlist,
+    # the package rules (PKG / PKG_EXEMPT), POLICY:TOOL_CAP of 4 -- and, for a RE-PARKED existing skip, the
+    # per-module baseline column. Those caps are the real bound, not any rule about wording.
     @unittest.skipUnless(shutil.which("ruff"),
                          "optional developer tool `ruff` is not on PATH; nothing in this kit installs it, so only "
                          "the behavioural half of the fatal-ruff guarantee is skipped (the structural half runs "

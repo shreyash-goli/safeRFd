@@ -8,7 +8,12 @@
 #                   (with a reason naming the missing package); a silent pass is a failure.
 #   --expect torch  torch+numpy installed: no test may be skipped for "not installed"; only device-specific
 #                   skips (CUDA / MPS / the "torch present" wiring test) are allowed.
-#   --expect any    (default) only consistency checks; counts are printed.
+#   --expect any    (default) only consistency checks; counts are printed. NO skip-REASON check runs in this mode:
+#                   every reason rule sits inside `if mode == "none"` / `elif mode == "torch"` with no else, so a
+#                   reason either of those would reject is accepted here, and the per-module BASELINE SKIP column
+#                   is not compared either (that comparison is inside `elif mode == "none"`). What does apply in
+#                   every mode: FS_CAP, TOOL_CAP, TOOL_UNDECLARED, EMPTY_REASON, RECORDER, the per-module
+#                   TEST-count baseline, and every shell-side check.
 #   --twice         run the unittest suite a second time and require identical per-module counts and an
 #                   identical skip list (determinism check).
 #   --no-pytest     do not run pytest even if installed (used by the script's own tests for speed).
@@ -26,7 +31,8 @@
 #                   place by the shell only if the WHOLE run ends RESULT: OK -- see "WHY the baseline is staged".
 #
 # Every policy failure line carries a stable token `POLICY:<NAME>`; tests match the token, not the prose.
-# SKIP POLICY (case-insensitive; reasons are the only defence against a torch test passing silently):
+# SKIP POLICY (case-insensitive; reason checks are the FIRST defence against a torch test passing silently --
+# the per-module baseline's skip column is the other, and it is the one that catches a RE-PARKED skip):
 #   none:  EVERY skip reason must name torch/numpy/pyyaml/pytest and say "not installed", "missing",
 #          "unavailable" or "not available"; at least MIN_NONE_SKIPS (default 50) skips; at least one torch and
 #          one numpy reason; no reason may say "torch present".
@@ -40,15 +46,29 @@
 #   the package-skip floor, the torch cap and the baseline -- in baseline GENERATION as well as comparison, so the
 #   recorded skip column cannot differ between a machine that has the tool and one that does not. They exist for a
 #   test whose BEHAVIOURAL half needs a linter that nothing in this kit installs (ruff); naming no package is
-#   correct for them, because no package is missing.
-#   BOTH of those categories are EXEMPTIONS from the floor, the cap and the baseline, and an exemption is sound
-#   only while it cannot be spent on hiding a package skip. One rule makes it sound, and it is deliberately about
-#   NAMES rather than spellings: A REASON THAT NAMES ANY PACKAGE THIS KIT MEASURES GETS NO EXEMPTION -- it is
-#   judged as a package skip in whatever mode is running. The package list is the `PKGS` tuple in the policy
-#   below and every rule here is built from it, because the previous version of this rule was a list of
-#   missing-phrase SPELLINGS kept by hand in three places, and the three disagreed: measured, before the rule
-#   existed, `optional developer tool `torch` is not on PATH` passed `--expect torch`, and spent one of the 50
-#   skips `--expect none` requires; so did `case-sensitive filesystem; torch unavailable`.
+#   correct for them, because no package is missing. The `<name>` must be on the `TOOLS` ALLOWLIST in the policy
+#   below; any other name is POLICY:TOOL_UNDECLARED -- a loud failure in EVERY mode, never a silent exemption.
+#   BOTH of those categories are EXEMPTIONS from the floor, the cap and the baseline. TWO rules bound them and
+#   neither is a bound by itself:
+#     (1) A REASON THAT NAMES ANY PACKAGE THIS KIT MEASURES GETS NO EXEMPTION, as a WORD (`PKG`: torch, pyyaml)
+#         or as a PREFIX (`PKG_EXEMPT`: torchrun, numpy2, torchvision) -- it is judged as a package skip
+#         in the mode that is running (`--expect any` applies no reason check at all, so there it is judged by
+#         nothing; see the note on that mode under `--expect any` above). The package list is the `PKGS` tuple in
+#         the policy below and every rule built on it derives from it, because the previous version of this rule
+#         was a list of missing-phrase SPELLINGS kept by hand in three places, and the three disagreed: measured,
+#         before the rule existed, `optional developer tool `torch` is not on PATH` passed `--expect torch`, and
+#         spent one of the 50 skips `--expect none` requires; so did `case-sensitive filesystem; torch unavailable`.
+#     (2) The tool name must be DECLARED (`TOOLS`), and the filesystem-case phrase has no name in it at all.
+#   WHAT IS NOT TRUE, and was asserted here for a round: that rule (1) alone makes an exemption "sound ... only
+#   while it cannot be spent on hiding a package skip". It cannot, on its own: it is a word-boundary test for
+#   four spellings, so EVERY reason that names no package collects the exemption, and before rule (2) existed
+#   that included `torchrun` (PyTorch's own console script), `libtorch` (its C++ distribution), `torchvision`,
+#   `torchaudio`, `torch_geometric`, `torch2`, `_torch`, `numpy2`, `pytestx`, `mypy`, `black` and `yamllint` --
+#   all measured EXEMPT in `--expect none` AND `--expect torch` on the live script. THE REAL BOUND IS THE CAPS
+#   AND THE BASELINE, not the naming rule: at most TOOL_CAP (4, one in use) + FS_CAP (8) skips can be exempt at
+#   all, and re-parking an EXISTING package skip into either category lowers that module's recorded bare-skip
+#   column and fails POLICY:BASELINE_SKIPS. What an exemption buys is therefore bounded by those numbers; the
+#   naming rules only keep an honest reason from being read as a dishonest one.
 #   Skips are recorded exactly (test id + reason) by a hook in the sitecustomize shim that runs inside the
 #   unittest process only (the env var is popped, so child processes do not log), not by scraping output.
 #
@@ -204,7 +224,10 @@ def _blocked(*a, **k):
 #   (1) EVERY member of socket's connection/name-resolution family, enumerated from the live `socket` module,
 #       is named in exactly one of them -- so a name that is neither patched nor disclosed fails the suite; and
 #   (2) every patched name has a test that drives it through this script with the guard on and off.
-# docs/CLEAN_CLONE.md points at these tuples instead of restating them, so the disclosure cannot go stale.
+# docs/CLEAN_CLONE.md points at these tuples instead of restating the PATCHED lists, so the count there cannot go
+# stale (it said "five patched" against seven). It DOES spell out the _NOT_BLOCKED names, deliberately -- a reader
+# needs the known-bypass list -- and that copy is kept in step by
+# test_the_documentation_names_every_disclosed_unpatched_entry_point rather than by not existing.
 _BLOCK_MODULE = ("create_connection", "create_server", "getaddrinfo", "getfqdn", "gethostbyaddr",
                  "gethostbyname", "gethostbyname_ex", "getnameinfo")
 _BLOCK_SOCKET = ("connect", "connect_ex", "bind", "listen", "sendto", "sendmsg")
@@ -300,19 +323,48 @@ for e in skips:
     if not e["reason"].strip(): bad.append("POLICY:EMPTY_REASON empty skip reason: " + e["id"])
 # Environment skips unrelated to optional packages: the filesystem is case-sensitive (Linux, case-sensitive APFS), so
 # tests of case-variant paths cannot run. Allowed in every mode, but capped and never counted toward the floors, so
-# they cannot pad the bare-mode skip count or hide a torch test.
+# they cannot pad the bare-mode skip count.
+# WHAT THIS COMMENT USED TO ADD, and it was false: "or hide a torch test". An exempt reason CAN hide one -- that
+# is what an exemption is -- and the bound is FS_CAP (8) plus the per-module baseline, which catches a RE-PARKED
+# existing skip because the module's recorded bare-skip column drops. Not the exclusion, and not the naming rule.
 FS = re.compile(r"case[- ]sensitive", re.I)
 # The SECOND environment category that legitimately names no package: an optional DEVELOPER TOOL that nothing in
-# this kit installs is absent, so a test whose behavioural half needs it cannot run. The phrase is ANCHORED at
-# the start of the reason (\A) and ends on a word boundary, so prose cannot carry it: `an optional developer tool
-# `ruff` is not on PATHological systems` collected the exemption while TOOL was an unanchored `.search()`.
-TOOL = re.compile(r"\Aoptional developer tool `[\w.+-]+` is not on PATH\b", re.I)
-# THE packages this kit measures -- ONE tuple, from which NONE_OK, the baseline exclusion and the exemption rule
-# are all built. They used to be three hand-written lists of spellings in three places and they disagreed: see
-# PKG below and the SKIP POLICY note in the header.
+# this kit installs is absent, so a test whose behavioural half needs it cannot run. The phrase is matched with
+# `.match`, so it is ANCHORED: prose cannot carry it. `an optional developer tool `ruff` is not on PATHological
+# systems` and `the suite reports: optional developer tool `ruff` is not on PATH` both collected the exemption
+# while TOOL was an unanchored `.search()`. THE ANCHOR IS WRITTEN TWICE ON PURPOSE (`\A` in the pattern and
+# `.match` at the call) and the two are MUTUALLY REDUNDANT, which is measurable: of the four combinations only
+# `search` + no `\A` is a hole, because `\A` can match at position 0 alone, so `search` on an `\A` pattern IS
+# `match`, and `match` on a pattern without `\A` is anchored by the method. A mutant that drops ONE of the two
+# terms is therefore an EQUIVALENT mutant (measured: both survive, and surviving proves nothing); the mutant
+# worth running is the two-term one, which is killed by the prose cases in
+# test_tool_reason_cannot_launder_a_missing_package_or_torch_present. The trailing `\b` is a third, independent
+# guard: it is what rejects `...is not on PATHological systems`.
+TOOL = re.compile(r"\Aoptional developer tool `([\w.+-]+)` is not on PATH\b", re.I)
+# THE packages this kit measures -- ONE tuple, from which FOUR things are built and no longer merely described as
+# built: NONE_OK (bare-mode reason check), PKG (the exemption's name test), PKG_EXEMPT (its prefix test) and
+# PYYAML (the baseline exclusion, which was an independently typed `\b(?:py)?yaml\b` while this comment already
+# claimed it came from here). They used to be three hand-written lists of spellings in three places and they
+# disagreed: see PKG below and the SKIP POLICY note in the header. tests/toy_tests/test_scripts.py parses this
+# tuple and derives its laundering cases from it.
 PKGS = ("torch", "numpy", "yaml", "pytest")
 PKG = re.compile(r"\b(?:py)?(?:" + "|".join(PKGS) + r")\b", re.I)
-# THE EXEMPTION RULE, and the whole of it: a reason that names any measured package gets no exemption, whatever
+# ...and the same tuple as a PREFIX test, used ONLY to deny the two environment exemptions. `PKG` ends on a word
+# boundary, and the word boundary is EVADABLE: `torchrun` (PyTorch's own console script), `libtorch`, `torchvision`,
+# `numpy2` and `pytestx` are not `\btorch\b`/`\bnumpy\b`/`\bpytest\b`, so as a TAIL on an exempt reason they all
+# collected the exemption (measured, in `--expect none` and `--expect torch`). The two patterns are deliberately
+# NOT merged:
+#   * NONE_OK (what counts as an honest "a package is missing" reason in bare mode) must stay the WORD test. With
+#     the prefix test, `optional developer tool `torchrun` is not on PATH; it is missing` would be ACCEPTED as an
+#     honest package skip and would count toward the 50 -- the wrong direction.
+#   * the baseline's PyYAML exclusion must stay the WORD test too, or a reason merely mentioning `yamllint` would
+#     drop out of a module's recorded bare-skip column, which is the floor that catches re-parked skips.
+# Denying an exemption is the safe direction for a loose match: the reason is then judged by the mode it runs in
+# and counted in the baseline, never silently excused.
+PKG_EXEMPT = re.compile(r"\b(?:py)?(?:" + "|".join(PKGS) + r")[\w.+-]*", re.I)
+# THE FIRST OF THE TWO EXEMPTION RULES (the second is the TOOLS allowlist below; neither is sufficient alone, and
+# the real bound on what an exemption buys is TOOL_CAP/FS_CAP plus the baseline -- see the header):
+# a reason that names any measured package gets no exemption, whatever
 # else it says and however it spells it. It is a NAME test rather than a phrase test on purpose. The previous
 # rule tried to catch the laundering by its wording -- torch mode denied "not installed|missing|numpy" on every
 # skip, tool skips included -- and `unavailable`, which `--expect none` itself accepts as a package-missing
@@ -320,17 +372,61 @@ PKG = re.compile(r"\b(?:py)?(?:" + "|".join(PKGS) + r")\b", re.I)
 # ``optional developer tool `ruff` is not on PATH` (torch unavailable)`` both passed `--expect torch`, and
 # `case-sensitive filesystem; torch unavailable` passed it too. A category that admits "a test cannot run here"
 # has no business naming a package whose absence is the thing being measured, so it may not.
+# THE TOOLS THE EXEMPTION EXISTS FOR -- a CLOSED ALLOWLIST of names, which is the ROUND-5 fix. `PKG` above is a
+# word-boundary test for four package SPELLINGS, and as the only gate on the tool category it was an OPEN set:
+# every name that is not one of those four words collected the exemption in `--expect none` AND `--expect torch`.
+# Measured on the live script before this tuple existed, all EXEMPT in both modes:
+#   torchrun (PyTorch's own console script), libtorch (its C++ distribution), torchvision, torchaudio,
+#   torch_geometric, torch2, _torch, numpy2, pytestx, mypy, black, yamllint
+# -- and round 4's actual defect was ``optional developer tool `torch` is not on PATH``, one suffix away from the
+# first two. A negative rule ("does it look like a package?") cannot close that; a positive one can, because the
+# tools this suite really gates a test on are a CLOSED set of size 1.
+# DERIVED, not hand-maintained: tests/toy_tests/test_scripts.py parses this tuple out of this file AND parses
+# every tool-gated skip site out of tests/toy_tests/*.py (the `@unittest.skipUnless(...)` / `skipTest(...)`
+# reasons that match TOOL above), and requires the two sets to be EQUAL. So a NEW tool-gated test is a RED SUITE
+# with a message naming the tool and this tuple, never a silent exemption -- and so is a name left here after the
+# test that needed it is gone. A reason shaped like the category whose name is not here is POLICY:TOOL_UNDECLARED
+# in EVERY mode, including `--expect any`, where no reason check runs at all.
+TOOLS = ("ruff",)
+TOOLS_OK = {t.lower() for t in TOOLS}
+BACKTICKED = re.compile(r"`([^`]*)`")
+def tool_name(reason):
+    m = TOOL.match(reason.strip())
+    return m.group(1).lower() if m else None
+def tool_undeclared(reason):
+    """The undeclared names in a reason SHAPED like the tool category, or None if there are none.
+
+    Every backticked name in such a reason must be a declared tool, not just the one in the phrase, so a tail
+    cannot introduce a second tool nobody declared. This is ADDITIVE to the package rule rather than ordered
+    against it: ``optional developer tool `torch` is not on PATH`` is both an undeclared tool AND a reason that
+    names a measured package, and it is reported as both -- the package tokens (POLICY:NONE_REASON /
+    POLICY:TORCH_MODE_MISSING / POLICY:TORCH_MODE_UNEXPLAINED) are what round 4 pinned and they still fire,
+    while TOOL_UNDECLARED is what makes it loud in `--expect any`, where no reason check runs at all."""
+    n = tool_name(reason)
+    if n is None:
+        return None
+    names = [n] + [b.lower() for b in BACKTICKED.findall(reason)]
+    return sorted({b for b in names if b not in TOOLS_OK}) or None
 def fs_skip(reason):
-    return bool(FS.search(reason)) and not PKG.search(reason)
+    return bool(FS.search(reason)) and not PKG_EXEMPT.search(reason)
 def tool_skip(reason):
-    return bool(TOOL.match(reason.strip())) and not PKG.search(reason)
+    return tool_name(reason) is not None and not PKG_EXEMPT.search(reason) and tool_undeclared(reason) is None
 # Skips excluded from the per-module baseline. ONE predicate, used by the generation branch AND the comparison
 # branch below, because two copies of this list are exactly how `test_scripts <n> 4` would become
 # machine-dependent -- 4 on a machine with ruff, 5 without it -- and a machine-dependent baseline is worse than
 # none. PyYAML is excluded because it is the one optional package a developer may have without the others;
 # matched as a WORD ((py)yaml) rather than as the bare substring "yaml", which also excluded any reason that
 # merely contained those four letters.
-PYYAML = re.compile(r"\b(?:py)?yaml\b", re.I)
+# The spelling is taken FROM PKGS rather than retyped. It used to be an independent `\b(?:py)?yaml\b` while the
+# comment on PKGS claimed PKGS was the tuple "from which NONE_OK, the baseline exclusion and the exemption rule
+# are all built" -- a third of that sentence was false, which is the exact shape of the defect PKGS was created
+# to end. A `yaml` dropped from PKGS now fails loudly as POLICY:INTERNAL instead of leaving this pattern
+# silently naming a package the policy no longer measures.
+_YAML = [p for p in PKGS if "yaml" in p]
+if not _YAML:
+    bad.append("POLICY:INTERNAL the PKGS tuple no longer names a yaml spelling, and the baseline's PyYAML "
+               "exclusion is built from it; add it back or rewrite the exclusion deliberately")
+PYYAML = re.compile(r"\b(?:py)?(?:" + "|".join(_YAML or ["yaml"]) + r")\b", re.I)
 def base_excl(reason):
     return bool(PYYAML.search(reason)) or fs_skip(reason) or tool_skip(reason)
 fs = [e for e in skips if fs_skip(e["reason"])]
@@ -338,6 +434,16 @@ tool = [e for e in skips if tool_skip(e["reason"]) and not fs_skip(e["reason"])]
 pkg = [e for e in skips if not fs_skip(e["reason"]) and not tool_skip(e["reason"])]
 if len(fs) > 8: bad.append(f"POLICY:FS_CAP {len(fs)} filesystem-case skips; at most 8 are expected (found on a case-sensitive filesystem)")
 if len(tool) > 4: bad.append(f"POLICY:TOOL_CAP {len(tool)} optional-developer-tool skips; at most 4 are expected (a growing count means tests are being parked behind tools nothing installs)")
+# An UNDECLARED tool: loud, in every mode, and never an exemption. A new tool-gated test therefore lands HERE
+# rather than in the exemption, and the message says what to do about it. (It is additive: in `none` mode such a
+# reason is ALSO a non-exempt skip and so is judged by POLICY:NONE_REASON as well, and in `torch` mode by
+# POLICY:TORCH_MODE_MISSING or POLICY:TORCH_MODE_UNEXPLAINED; in `any` mode, where no reason check runs at
+# all, this is the whole of it.)
+for e in skips:
+    _und = tool_undeclared(e["reason"])
+    if _und: bad.append(f"POLICY:TOOL_UNDECLARED skip claims an absent optional developer tool but {', '.join(_und)} "
+                        f"is not in the TOOLS allowlist in scripts/run_tests.sh (declare the tool there, with a "
+                        f"test; do not widen the phrase): {e['id']} :: {e['reason']!r}")
 if fs: print(f"note: {len(fs)} skip(s) for a case-sensitive filesystem (expected on Linux); not counted toward package skips")
 if tool: print(f"note: {len(tool)} skip(s) for an absent optional developer tool; not counted toward package skips")
 if mode == "none":

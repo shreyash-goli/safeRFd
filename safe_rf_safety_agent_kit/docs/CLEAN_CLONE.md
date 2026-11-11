@@ -38,8 +38,9 @@ for m in torch numpy pytest yaml; do python3 -c "import $m" 2>/dev/null && echo 
 # (a) BARE interpreter -- the clean-clone case:
 ./scripts/run_tests.sh --expect none --twice
 
-# (b) the loop above printed something, and you want to use this interpreter anyway. `--expect any` keeps every
-#     consistency, determinism and baseline check and drops only the "nothing is installed" assertion:
+# (b) the loop above printed something, and you want to use this interpreter anyway. `--expect any` keeps the
+#     consistency, determinism, cap and per-module TEST-count checks and drops EVERY skip-REASON check plus the
+#     baseline's SKIP-column comparison (both of those live inside `if mode == "none"` / `elif mode == "torch"`):
 ./scripts/run_tests.sh --expect any --twice
 
 # (c) the loop printed something, and you want the clean-clone assertion anyway: make a bare interpreter.
@@ -239,18 +240,31 @@ process rather than scraped from output):
   filesystem (three `need_ci` tests in `test_dashboard`, one in `test_scripts`), whose reasons name no package.
   Four is the figure to expect on Linux; see "Filesystem-case skips: **4** on Linux" above for why the
   case-sensitive-APFS stand-in rows show 1.
-- **Optional-developer-tool skips** (reason **begins with** ``optional developer tool `<name>` is not on PATH``):
-  the second category that legitimately names no package, treated exactly like the first — allowed in every mode,
-  at most 4 (`POLICY:TOOL_CAP`), and excluded from the package-skip floor, the torch cap and the baseline in
-  **generation as well as comparison**. **One** test skips this way: the behavioural half of the fatal-`ruff`
-  guarantee (`test_ruff_correctness_findings_are_fatal_not_advisory`). See "The documented steps used to fail
-  without `ruff`" below for why the category exists and what the wording is load-bearing for.
-- **The rule that makes those two exemptions sound**, and all of it: **a reason that names any package this kit
-  measures gets no exemption.** It is judged as a package skip instead, in whatever mode is running. The package
-  list is the single `PKGS` tuple in `scripts/run_tests.sh`, which the none-mode reason check and the baseline
-  exclusion are also built from; the tests derive their cases from it too, so a package added there is a package
-  the suite immediately tries to launder past both categories. The rule is about *names* rather than *wordings*
-  because the wording version of it failed: see "An exemption that could be laundered" below.
+- **Optional-developer-tool skips** (reason **begins with** ``optional developer tool `<name>` is not on PATH``,
+  and `<name>` is on the `TOOLS` allowlist): the second category that legitimately names no package, treated
+  exactly like the first — allowed in every mode, at most 4 (`POLICY:TOOL_CAP`), and excluded from the
+  package-skip floor, the torch cap and the baseline in **generation as well as comparison**. **One** test skips
+  this way: the behavioural half of the fatal-`ruff` guarantee
+  (`test_ruff_correctness_findings_are_fatal_not_advisory`). Any other `<name>` is **`POLICY:TOOL_UNDECLARED`**,
+  a failure in **every** mode including `--expect any`. See "The documented steps used to fail without `ruff`"
+  below for why the category exists and what the wording is load-bearing for.
+- **What bounds those two exemptions.** Two rules, neither sufficient alone, and **the caps are the real bound**:
+  1. **A reason that names any package this kit measures gets no exemption** — it is judged as a package skip
+     instead, in the mode that is running (and `--expect any` runs no reason check, so there it is judged by
+     nothing; that is the honest statement of it). The package list is the single `PKGS` tuple in
+     `scripts/run_tests.sh`, from which the none-mode reason check, **both** package patterns and the baseline's
+     PyYAML exclusion are now all built — the exclusion used to be an independently typed `\b(?:py)?yaml\b`
+     beside a comment claiming it came from `PKGS`. The tests derive their cases from the tuple too. The rule
+     matches a package name **as a word and as a prefix**: `\btorch\b` does not match `torchrun`, which is
+     PyTorch's own console script, so the word form alone let a tail like `; torchrun is gone` through.
+  2. **The tool name must be DECLARED** in the `TOOLS` allowlist, which is a closed set (currently just `ruff`)
+     **derived from the suite's own skip sites** — not a judgement about which names look like packages. See
+     "A spelling rule with evadable word boundaries" below.
+- **Neither rule makes an exemption "sound"**, and this document and the script both said so for a round. An
+  exemption *can* hide a skip — that is what an exemption is. What limits the damage is arithmetic: at most
+  `TOOL_CAP` (4, one in use) + `FS_CAP` (8) skips can be exempt at all, and **re-parking an existing skip into
+  either category lowers that module's recorded bare-skip column and fails `POLICY:BASELINE_SKIPS`**. So the
+  exposure is a handful of *new* tests parked behind an environment claim, not an open door.
 
 These rules are themselves tested with synthetic suites in `tests/toy_tests/test_scripts.py`, including the exact
 boundaries (50 passes / 49 fails, 12 / 13, 8 / 9 filesystem-case, 4 / 5 optional-tool, `MIN_TESTS` inclusive).
@@ -297,10 +311,29 @@ same exclusions. Three things about it are load-bearing:
   **begin** with the phrase, so prose that merely sounds like it ("optional linter absent") gets no exemption —
   and neither does prose that *carries* it. For one round `TOOL` was an unanchored substring search, and
   ``an optional developer tool `ruff` is not on PATHological systems`` collected the exemption; measured.
+  The anchor is written twice (`\A` in the pattern, `.match` at the call) and **the two terms are mutually
+  redundant**: `\A` can match only at position 0, so `.search` on an `\A` pattern *is* `.match`, and `.match` on
+  a pattern without `\A` is anchored by the method. Measured consequence for anyone mutation-testing this: a
+  mutant that drops either term alone is an **equivalent mutant** and its survival says nothing; the hole needs
+  both. The two-term mutant is killed by two cases in
+  `test_tool_reason_cannot_launder_a_missing_package_or_torch_present` (leading prose, clean
+  `is not on PATH` ending, a *declared* tool name) — added in the fifth round, because the six prose candidates
+  that were there before were all rejected by the trailing `\b` or by never containing the phrase, so **the
+  table did not exercise the anchor at all**: with those two cases deleted, the two-term mutant survives.
 - It says **"is not on PATH", not "is not installed"**, which keeps the category's own wording honest — but that
   is a courtesy to the reader and **not** the anti-laundering defence, which is the rule in the skip-policy list
   above: the reason may not name `torch`, `numpy`, `pyyaml` or `pytest` at all. This bullet used to claim that
   torch mode's three deny spellings were the defence, and they were not: see the next section.
+  **The retraction did not reach the code comment**, which went on asserting the withdrawn reasoning
+  (*"torch mode denies the latter on EVERY skip, tool skips included, so the category cannot launder a missing
+  package"*) in `tests/toy_tests/test_scripts.py` for two further rounds — the third time in this project that a
+  withdrawn guarantee outlived its withdrawal in a comment. A docstring assertion cannot reach a comment and
+  neither can a doc grep, so there is now a source-text test over the comment lines of the script and that file
+  (`test_no_withdrawn_guarantee_is_restated_in_a_comment`): each withdrawn claim may appear only inside a window
+  that marks it as history, and must still appear *somewhere*, because deleting the record is how the sentence
+  comes back. The same sweep found `scripts/run_tests.sh` defining a sound exemption as one that "cannot be
+  spent on hiding a package skip" (false — see the bound above) and the filesystem-case exclusion claiming it
+  "cannot ... hide a torch test" (false in the same way). Both are corrected in place.
 - The baseline exclusion applies to **generation**, not only comparison. `scripts/test_baseline.txt` records a
   bare-skip column per module; without the generation-side exclusion a machine without `ruff` would record one
   more skip for `toy_tests.test_scripts` than a machine with it, and the committed file would depend on whose
@@ -322,11 +355,11 @@ Everything else worked. Measured, by driving the live script on synthetic suites
 
 | skip reason | mode | before | now |
 |---|---|---|---|
-| ``optional developer tool `torch` is not on PATH`` | `torch` | **RESULT: OK** | `POLICY:TORCH_MODE_UNEXPLAINED` |
-| the same with `pytest`, `pyyaml` or any other measured package as the tool name | `torch` | **RESULT: OK** | `POLICY:TORCH_MODE_UNEXPLAINED` |
+| ``optional developer tool `torch` is not on PATH`` | `torch` | **RESULT: OK** | `POLICY:TORCH_MODE_UNEXPLAINED` + `POLICY:TOOL_UNDECLARED` |
+| the same with `pytest`, `pyyaml` or any other measured package as the tool name | `torch` | **RESULT: OK** | `POLICY:TORCH_MODE_UNEXPLAINED` + `POLICY:TOOL_UNDECLARED` |
 | the live `ruff` reason with `(torch unavailable)` appended | `torch` | **RESULT: OK** | `POLICY:TORCH_MODE_UNEXPLAINED` |
 | ``an optional developer tool `ruff` is not on PATHological systems`` | `none` | **RESULT: OK** | `POLICY:NONE_REASON` |
-| ``optional developer tool `torch` is not on PATH`` | `none` | **RESULT: OK** (and it spent one of the 50 skips) | `POLICY:NONE_REASON` |
+| ``optional developer tool `torch` is not on PATH`` | `none` | **RESULT: OK** (and it spent one of the 50 skips) | `POLICY:NONE_REASON` + `POLICY:TOOL_UNDECLARED` |
 | `case-sensitive filesystem; torch unavailable` | `torch` | **RESULT: OK** | `POLICY:TORCH_MODE_UNEXPLAINED` |
 
 Two things that review had not seen. First, `unavailable` is a spelling `--expect none` *itself* accepts as "a
@@ -349,6 +382,47 @@ reasons are now driven through `--expect torch` by `test_live_torch_mode_skip_re
 proposal fails a test instead of a CI job. The residue of not widening it: a reason naming a package in one of
 those spellings is reported as `POLICY:TORCH_MODE_UNEXPLAINED` rather than `POLICY:TORCH_MODE_MISSING` — a less
 precise token for a run that is red either way.
+
+### A spelling rule with evadable word boundaries: the allowlist that replaced it
+
+The rule above (`PKG = \b(?:py)?(?:torch|numpy|yaml|pytest)\b`) **is** a list of spellings, and a record that
+said otherwise was wrong. As the only gate on the tool category it was an **open set**: every name that is not
+one of those four words collected the exemption. Measured by driving the live script on synthetic suites, each of
+these was **EXEMPT in `--expect none` AND `--expect torch`**, and round 4's actual defect
+(``optional developer tool `torch` is not on PATH``) is **one suffix** from the first two:
+
+| skip reason | before | now |
+|---|---|---|
+| ``optional developer tool `torchrun` is not on PATH`` (PyTorch's own console script) | **EXEMPT, RESULT: OK** | `POLICY:TOOL_UNDECLARED` |
+| ``optional developer tool `libtorch` is not on PATH`` (its C++ distribution) | **EXEMPT, RESULT: OK** | `POLICY:TOOL_UNDECLARED` |
+| the same with `torchvision`, `torchaudio`, `torch_geometric`, `torch2`, `_torch`, `numpy2`, `pytestx`, `mypy`, `black`, `yamllint` | **EXEMPT, RESULT: OK** | `POLICY:TOOL_UNDECLARED` |
+| the live `ruff` reason + `; torchrun is gone` | **EXEMPT, RESULT: OK** | not exempt (`PKG_EXEMPT` prefix rule) |
+| `case-sensitive filesystem …; torch2 is gone` | **EXEMPT, RESULT: OK** | not exempt (same) |
+| the live `ruff` reason + ``; `mypy` would have run it`` | **EXEMPT, RESULT: OK** | `POLICY:TOOL_UNDECLARED` (every backticked name must be declared) |
+| ``optional developer tool `pytest-cov` is not on PATH``, `torch-cpu`, `TORCH`, `pytorch`, `py-torch`, `numpy-stubs` | already rejected | unchanged |
+
+**The fix is a positive allowlist, and the allowlist is derived, not hand-maintained.** `TOOLS` in
+`scripts/run_tests.sh` is the one declaration the policy reads;
+`test_the_TOOLS_allowlist_is_exactly_the_tools_this_suite_gates_on` parses that tuple **and** parses every
+tool-gated skip site out of `tests/toy_tests/` (the `@unittest.skipUnless(...)` / `skipTest(...)` reasons that
+match the runner's own `TOOL` pattern, itself parsed from the script) and requires the two sets to be **equal**.
+So a **new** tool-gated test is a red suite naming the tool and the tuple to declare it in — and
+`POLICY:TOOL_UNDECLARED` at runtime in every mode — never a silent exemption; and a name left in the tuple after
+its test is deleted fails the same test. The word-boundary problem is closed twice over: by the allowlist on the
+name, and by `PKG_EXEMPT` (the same `PKGS` tuple as a *prefix* test) on the rest of the reason. `PKG_EXEMPT` is
+used **only** to deny an exemption, never to accept a reason: as the bare-mode accept rule it would read
+``optional developer tool `torchrun` is not on PATH; it is missing`` as an honest package skip, and as the
+baseline exclusion it would drop any reason mentioning `yamllint` out of a module's recorded skip column.
+
+**What is still exempt, stated plainly.** A *declared* tool's reason (or a filesystem-case reason) with a prose
+tail that names no measured package and backticks no other name — ``optional developer tool `ruff` is not on
+PATH; mypy is gone`` — is still exempt, because no regex can tell a true claim from a false one. The bound is
+the one stated under the skip policy: `TOOL_CAP` 4 (one in use) + `FS_CAP` 8, and the baseline catches any
+*re-parked* existing skip. Two more measured residues: a tool name containing a newline or a zero-width space is
+rejected by the phrase's name class (`[\w.+-]+`) rather than by the allowlist, so it lands on
+`POLICY:NONE_REASON` instead of `POLICY:TOOL_UNDECLARED`; and `--expect any` applies no reason check, so a
+*package-naming* exempt-shaped reason is accepted there (it buys nothing — that mode has no skip floor and
+compares no skip column).
 
 ## Interpreting skips
 
@@ -653,14 +727,23 @@ This is hygiene, not a sandbox; the runtime socket guard is a second, partial la
   `any` cannot reach them; the baseline *test-count* comparison, which does apply in every mode, compares counts
   that do not depend on which packages are installed (a skipped test still starts, so it is still counted). The
   mode's behaviour is exercised by the synthetic-suite tests, not by a full real-suite run in this environment.
+  **The same sentence read "keeps every consistency, determinism and baseline check" in step (b) above, which
+  was loose in exactly the direction that matters:** `any` keeps no *reason* check at all and does not compare
+  the baseline's skip column. Measured: six exempt-shaped reasons that each name a measured package give
+  `rc=0` under `--expect any`. The two statements now agree, and the only skip-reason policy that does apply in
+  that mode is `POLICY:TOOL_UNDECLARED` (plus `EMPTY_REASON` and the two caps).
 - The script tests (see test collection for the count; `scripts/test_baseline.txt` records 13 modules) take one
   to two minutes because they run the scripts on synthetic suites and trees — **112 s for the 128 tests of
   `tests/toy_tests/test_scripts.py`** on the host interpreter, and **117 s for the same 128 on a bare
   `venv --without-pip` 3.12.4**, both measured serially at the commit that closed the third SR-15 FAIL, and
   longer under any concurrent load. (The previous figure here, "92 s for the 110 tests", was hedged against a
   live count of 111; the count is read off a run now rather than typed.) Do not read a figure here as current;
-  the point is the order of magnitude and that it grows with the module. The module is **132 tests** at the
-  commit that closed the fourth FAIL, and the four new ones cost about 6 s between them: the laundering tables
+  the point is the order of magnitude and that it grows with the module. The module is **137 tests** at the
+  commit that closed the fifth FAIL (132 at the fourth) and takes **142 s** serially on the host interpreter;
+  the five added for the fifth cost about 30 s between them, three of them because they drive the script once
+  per mode or once per laundering table. The suite is **1165 tests** at that commit, and
+  `scripts/test_baseline.txt` still records `toy_tests.test_scripts 132 4`, so that row carries five tests of
+  slack until it is regenerated — green by design, because the column is a floor. At the fourth FAIL, the four new ones cost about 6 s between them: the laundering tables
   they drive are long, so each is driven as ONE run of the script carrying every candidate reason as its own
   skip, and attributed by test id — 48 separate runs of the same table cost 57 s for no more information.
   That bare, no-`ruff` run gives **6 skips in this module**: 4 need pytest, 1 needs PyYAML, 1 is the
@@ -677,13 +760,18 @@ This is hygiene, not a sandbox; the runtime socket guard is a second, partial la
   not named in a non-docstring string literal of `tests/toy_tests/test_scripts.py`, so the next one cannot be
   added unasserted. It is a staleness tripwire, not a measurement: it cannot show that the assertion drives the
   branch, only that somebody reached for the token.
-  The live count is **25** tokens, all 25 asserted, 0 unasserted. (`POLICY:` appears 27 times in the script by a
-  looser regex; the two extras are the header's `POLICY:<NAME>` placeholder and a comment's `POLICY:BASELINE_*`
-  wildcard, and neither is an emission. Any record saying 26 is counting one of those.) **The check's own
-  anti-vacuity floor was `>= 24` against 25**, so one token could have been deleted without it firing; it is now
-  the real count, and alongside it every `POLICY:` occurrence in the script must be accounted for as either an
-  emission the token regex found or one of those two non-emissions — which is the hazard the floor was standing
-  in for (a token count that moves is not a bug; a token regex that silently stops matching is).
+  The live count is **26** tokens (25 before `POLICY:TOOL_UNDECLARED` was added), all 26 asserted, 0
+  unasserted. **Three counts get confused here, so all three:** 26 distinct *emission* tokens; **28 distinct
+  names** matched by the looser regex (the 26 plus two non-emissions — the header's `POLICY:<NAME>` placeholder
+  and a comment's `POLICY:BASELINE_*` wildcard); and **45 loose *occurrences*** in the file, because nine of
+  those names are written more than once. A record saying "`POLICY:` appears 27 times by a looser regex" was
+  mixing the second count with the third: at that commit the figures were 25 / 27 / 33, so 27 was the
+  distinct-name count and never the occurrence count. Only the first two are worth recording — the occurrence
+  count moves whenever a comment mentions a token, which is why the test asserts the distinct sets and not it. **The check's own anti-vacuity floor was `>= 24` against 25**, so one token
+  could have been deleted without it firing; it is now the real count, and alongside it every `POLICY:`
+  occurrence in the script must be accounted for as either an emission the token regex found or one of those two
+  non-emissions — which is the hazard the floor was standing in for (a token count that moves is not a bug; a
+  token regex that silently stops matching is).
 
 ## A re-opened write defect: the staged baseline and a directory destination
 

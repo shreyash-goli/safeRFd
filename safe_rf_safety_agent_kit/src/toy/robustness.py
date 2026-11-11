@@ -24,6 +24,16 @@ Structural rule against single-example claims (checked at construction, not mere
   `SEED_FLOOR`. `summarize_seeds` and `SeedSummary.from_values` see values, not seeds, so they CANNOT
   detect one example repeated: `summarize_seeds([mv] * 10)` returns a summary. Duplicate SEEDS are
   rejected only on the probe path (`_check_seeds`, used by every probe and by `build_scorecard`).
+  THAT SENTENCE NAMES THE ONLY DEFENCE, AND THE DEFENCE WAS DEFEATABLE: `_check_seeds` compares
+  `len(set(seeds)) != len(seeds)`, i.e. `__hash__` and `__eq__` on the caller's objects, so three
+  instances of an `int` subclass with `__hash__ = id` and identity `__eq__` -- stored value 7, three
+  times -- were ACCEPTED by every probe (status INVARIANCE_HOLDS, n=3, `violating_seeds=()`) while the
+  plain list `[7, 7, 7]` is refused. `SEED_FLOOR = 3` was satisfied by ONE seed. `_check_seeds` now
+  normalises to plain ints before the comparison and returns them, so the list compared is the list
+  stored, hashed into `seed_digest` and handed to the `outcome`/fixture callbacks; the related
+  `derive_seed` route (a seed whose `__str__` lied, making two DISTINCT seeds derive one fixture) is
+  closed in `toy.schema._check_seed`. Both are pinned by
+  `test_robustness.OneExampleCannotBeRepeatedPastTheSeedGuard`.
 * HOW MANY TIMES `SEED_FLOOR` IS DEFENDED, counted rather than remembered, because FIVE different
   numbers have been in circulation here (a test docstring said "three times over", `docs/PROGRESS.md`
   says "five independent points", a previous version of THIS paragraph said "four direct comparisons and
@@ -32,7 +42,12 @@ Structural rule against single-example claims (checked at construction, not mere
   `SeedSummary.__post_init__`, `SeedSummary.from_values` and `_recheck_summary` -- and EIGHT paths reach
   them: those four plus FOUR delegations, `_pcfg`'s `ProbeConfig()`, `summarize_seeds`'s
   `ProbeConfig(min_seeds)`, and `Scorecard.__post_init__`'s `ProbeConfig(self.min_seeds)` and
-  `_recheck_summary(self.summary)`. "SIX" WAS WRONG: it counted only the two delegations in `Scorecard`
+  `_recheck_summary(self.summary)`. ONE OF THE EIGHT USED TO DEFEND LESS THAN THE COUNT IMPLIED, and the
+  count was right about the PATH while being wrong about what it bought: `Scorecard.__post_init__`'s
+  `ProbeConfig(self.min_seeds)` DISCARDED its return value, so it enforced the absolute FLOOR (the
+  constructor still raises below 3) but NOT the configured minimum this docstring also claims it checks
+  -- the card's own `len(measured) < self.min_seeds` ran on the un-normalised field. The call now binds
+  its result, so all eight paths defend both. "SIX" WAS WRONG: it counted only the two delegations in `Scorecard`
   and silently dropped `_pcfg`'s and `summarize_seeds`'s, although `summarize_seeds`'s is the same kind of
   delegation as `Scorecard`'s and is the one
   `test_robustness.test_probe_config_defaults_are_constructed_per_call` relies on for its "absolute
@@ -45,7 +60,13 @@ Structural rule against single-example claims (checked at construction, not mere
 * `Scorecard.__post_init__` requires exactly one of {summary, insufficient}, checks the status, labels,
   counts and seed digest agree, and RE-VALIDATES the nested summary / insufficient object (exact type,
   recomputed statistics), so `dataclasses.replace` cannot launder a summary that was tampered with
-  after construction. A card carrying a summary of fewer than `SEED_FLOOR` values, or a subclass of
+  after construction. THE "COUNTS" HALF OF THAT SENTENCE WAS FALSE until the `ProbeConfig(self.min_seeds)`
+  call on its first lines stopped DISCARDING its result: `len(measured) < self.min_seeds` then ran on the
+  caller's own object, and `replace(card, min_seeds=Lo(10))` with a lying reflected `__gt__` produced an
+  accepted card reading `{"min_seeds": 10, "summary": {"n": 3}}`. The seed-digest and
+  `does_not_establish` halves were defeatable the same way through a `str` subclass (see `_plain_text`).
+  All three are normalised before comparison now and pinned by
+  `test_robustness.ACardCannotAssertAMinimumItDoesNotMeet`. A card carrying a summary of fewer than `SEED_FLOOR` values, or a subclass of
   `SeedSummary`, cannot be built through the public constructors, `dataclasses.replace`, or the builders.
 Honest limits: Python cannot make this impossible. `object.__setattr__`, `object.__new__`, and
 SUBCLASSING `SeedSummary` / `InsufficientEvidence` with a `__post_init__` that skips the checks all build
@@ -87,7 +108,8 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from toy import stability
-from toy.benchmark import _metric_ok, _metric_read, quantile, sample_sd, seed_list_digest
+from toy.benchmark import (_metric_ok, _metric_read, _plain_number, _plain_parameter, quantile,
+                           sample_sd, seed_list_digest)
 from toy.benchmark import mean as _mean
 from toy.schema import (SCHEMA_VERSION, TOY_LABEL, EvidenceClass, ExperimentRecord, MetricValue, RunProvenance,
                         canonical_json, current_python_version, derive_seed, make_rng)
@@ -202,6 +224,15 @@ class InsufficientEvidence:
     reason: str
 
     def __post_init__(self) -> None:
+        # NORMALISE BEFORE COMPARING, and store what was compared (see `ProbeConfig.__post_init__`):
+        # `n_measured >= n_required` is an overridable comparison on two fields a direct caller supplies,
+        # and `Scorecard.__post_init__` then compares `n_required` with its own `min_seeds`. No verdict
+        # or statistic depends on these (an INSUFFICIENT_EVIDENCE card has neither, by type), so this
+        # closes a wrong-counts-on-a-card route rather than a verdict route -- stated as what it is.
+        for k in ("n_measured", "n_required"):
+            v = getattr(self, k)
+            if isinstance(v, int) and not isinstance(v, bool) and type(v) is not int:
+                object.__setattr__(self, k, int.__int__(v))
         if self.n_measured >= self.n_required:
             raise ValueError("InsufficientEvidence requires n_measured < n_required")
         if not isinstance(self.reason, str) or not self.reason.strip():
@@ -323,6 +354,26 @@ def _plain_summary_fields(obj) -> tuple:
     return tuple(v if type(v) is float else float.__float__(v) for v in obj.values)
 
 
+def _plain_text(s: Any) -> Any:
+    """Collapse a `str` SUBCLASS to the plain text it STORES; anything else is returned unchanged.
+
+    The `str` sibling of `toy.benchmark._plain_number` / `_plain_parameter`, and it exists for the same
+    reason: a `str` subclass passes `isinstance(v, str)`, `v.strip()` and a regex, and can still override
+    `__eq__` / `__ne__` / `__hash__` -- which are the operators this module's text guards are written in.
+    `str.__str__` reads the characters the object actually holds (a `__str__` override is not consulted),
+    so the text checked is the text stored and serialized. MEASURED on two guards, through
+    `dataclasses.replace`, the same route this module's own tampering tests use:
+      * `does_not_establish`: `for std in STANDARD_NON_CLAIMS: if std not in dne` is `==` over the
+        tuple's elements, so a card whose non-claims were the single string "THIS IS A SAFETY FINDING."
+        satisfied "must include every STANDARD_NON_CLAIMS entry" and serialized that text as its
+        disclaimers -- the one thing every scorecard in this kit is required to carry.
+      * `seed_digest`: `self.seed_digest != seed_list_digest(seeds)` accepted a digest of "0"*64 over a
+        real seed list, and `scorecard_to_record` then wrote it into the record's
+        `input_hashes["seed_list"]`, i.e. into the provenance anchor a reader would check the seeds
+        against."""
+    return str.__str__(s) if isinstance(s, str) and type(s) is not str else s
+
+
 def _stats(vals: tuple) -> tuple:
     s = sorted(vals)
     q1, q3 = quantile(s, 0.25), quantile(s, 0.75)
@@ -383,15 +434,68 @@ def _recheck_insufficient(x) -> None:
 
 
 def _check_seeds(seeds: Sequence[int]) -> tuple:
+    """Validate a seed list and return it AS PLAIN INTS. The returned tuple is what every probe stores.
+
+    NORMALISE BEFORE COMPARING. `len(set(seeds)) != len(seeds)` is the module docstring's named defence
+    against one example repeated -- and `set()` is `__hash__` plus `__eq__`, both overridable on an `int`
+    SUBCLASS. MEASURED, with no `object.__setattr__` and through every public probe:
+
+        class Seed(int):
+            def __hash__(self):   return id(self)
+            def __eq__(self, o):  return self is o
+            def __ne__(self, o):  return self is not o
+        probe_shift(mse_fsum, shift_reorder_rows(), [Seed(7)] * 3, ProbeConfig(3))
+
+    was ACCEPTED with status INVARIANCE_HOLDS, n=3 and `violating_seeds=()`, while the plain list
+    `[7, 7, 7]` is correctly refused -- so `SEED_FLOOR = 3` was satisfied by ONE seed, which is SR-11's
+    acceptance criterion ("no claims based on single examples") breached directly. The `outcome` callback
+    really was called three times with 7, and `make_measure_fixture(Seed(7))` is the identical fixture.
+    The card was self-incriminating (it serialises `[7, 7, 7]` and its `seed_digest` matches that), but
+    the guard whose whole job is to refuse the list did not, and the decisive status was produced.
+    `int.__int__` reads the value the object STORES -- the same value `make_rng` validated and
+    `seed_list_digest` hashes -- so the comparison, the fixtures, the stored list and the digest are all
+    on one number. `make_rng` is kept as the validator (bool, range, type) and runs FIRST, because
+    `int.__int__` would happily normalise a value this module must refuse outright."""
     seeds = tuple(seeds)
     for s in seeds:
         make_rng(s)  # public validation: nonnegative int <= 2**64-1, bool rejected
+    seeds = tuple(int.__int__(s) for s in seeds)   # store what was checked; see above
     if len(set(seeds)) != len(seeds):
         raise ValueError("duplicate seeds are rejected: repeating one example does not add evidence")
     return seeds
 
 
+def _plain_measure(v: Any, what: str) -> float:
+    """A number a probe COMPUTES WITH (a measure's return, a declared expectation) as a plain `float`.
+
+    Raises `ValueError` -- inside every probe's own `except (ValueError, TypeError, ArithmeticError)`,
+    so the seed is recorded as unmeasured with a reason, never as a number. See `probe_shift` for the
+    measurement that made this necessary, and `toy.benchmark._plain_number` for the normaliser."""
+    f = _plain_number(v)
+    if f is None:
+        raise ValueError(f"{what} is not a finite real number: {v!r}")
+    return f
+
+
 def _to_metric(outcome: Callable[[int], float], seed: int) -> MetricValue:
+    """Record a user `outcome` callback's return as a MetricValue. Absence is explicit, never 0.0.
+
+    WHY THERE IS NO `float.__float__` HERE, decided and MEASURED rather than left to look like an
+    oversight (`SeedSummary.from_values`, 90 lines up, does cast, and the asymmetry is deliberate):
+    this function only ever CHECKS and STORES `v`; it never compares or computes with it. Both of its
+    checks read the double the object stores -- `isinstance` cannot be fooled by a float subclass and
+    `math.isfinite` consults no `__float__` override for a float instance -- and
+    `MetricValue.__post_init__` now stores that same double (see `toy/schema.py`), so the number
+    checked, stored, serialized and compared are one number without a cast here. This WAS a live hole,
+    and a worse-shaped one than the SR-10 entry point: the schema's `value == 0.0` normalisation
+    REPLACED the stored value, so a user `outcome` returning a float subclass with a lying `__eq__`
+    turned `seed_sensitivity_probe(outcome, range(1, 11))` from `mean=7.55 sd=0.303` into `mean=0.0
+    sd=0.0 zero_variance_warning=True` -- at a public probe's data-intake point. It was fixed at the
+    schema, not here, because this site stores and the schema is what stores; a cast here is measured
+    to be unobservable now (a mutant removing it survives every test), and `_pair_from_record`'s
+    comment states the rule: a guard whose removal changes no output is not a guard. Contrast
+    `probe_shift`, which DOES normalise at intake, because it subtracts and compares before any
+    MetricValue exists."""
     try:
         v = outcome(seed)
     except (ValueError, TypeError, ArithmeticError) as e:
@@ -469,10 +573,35 @@ class Scorecard:
             v = getattr(self, nm)
             if not isinstance(v, str) or not v.strip():
                 raise ValueError(f"{nm} must be a nonblank string")
+            # NOT normalised, and that is a decision rather than an omission: `probe_id` / `probe_kind`
+            # are compared with nothing (AST-checked: no `==`, `in` or dict-key use anywhere in this
+            # module or `toy.benchmark`) and `json.dumps` writes a `str` subclass's real characters, so
+            # a `_plain_text` call here would have no observable consequence -- unpinnable code dressed
+            # as a guard, which is what `toy.benchmark._pair_from_record`'s comment warns against. The
+            # two text fields that ARE compared (`seed_digest`, `does_not_establish`) are normalised
+            # below, each pinned by a consequence test.
         if not isinstance(self.status, ProbeStatus):
             raise ValueError("status must be a ProbeStatus")
-        ProbeConfig(self.min_seeds)
+        # USE THE RESULT. This was the ONLY `ProbeConfig(...)` in the module whose return value was
+        # discarded, so `min_seeds` kept the caller's object and the count check 16 lines below --
+        # `len(measured) < self.min_seeds` -- ran on it. The subclass is the RIGHT operand there, so the
+        # REFLECTED operator decides, which is the same variant already found and fixed in
+        # `summarize_seeds` (whose comment states the lesson this line did not apply: "The returned
+        # object is USED, not discarded"). MEASURED, via `dataclasses.replace` with no
+        # `object.__setattr__`:
+        #     class Lo(int):
+        #         def __gt__(self, o):  return False
+        #         def __ge__(self, o):  return False
+        #     replace(three_seed_card, min_seeds=10)      -> refused (3 measured < 10 required)
+        #     replace(three_seed_card, min_seeds=Lo(10))  -> ACCEPTED, status MEASURED, JSON
+        #                                                    {"min_seeds": 10, "summary": {"n": 3}}
+        # i.e. a card asserting a minimum of 10 while carrying a summary of 3. Secondary, now also
+        # closed by storing the normalised value: `scorecard_to_record` does
+        # `MetricValue.measured(float(sc.min_seeds))`, a second overridable conversion of a
+        # never-normalised field, so a card and its own record could disagree about `min_seeds`.
+        object.__setattr__(self, "min_seeds", ProbeConfig(self.min_seeds).min_seeds)
         seeds = _check_seeds(self.seeds)
+        object.__setattr__(self, "seed_digest", _plain_text(self.seed_digest))   # see `_plain_text`
         if self.seed_digest != seed_list_digest(seeds):
             raise ValueError("seed_digest does not match the seed list")
         per_seed = tuple(self.per_seed)
@@ -509,6 +638,7 @@ class Scorecard:
         dne = tuple(self.does_not_establish)
         if not dne or any(not isinstance(s, str) or not s.strip() for s in dne):
             raise ValueError("does_not_establish must be a nonempty tuple of nonblank strings")
+        dne = tuple(_plain_text(s) for s in dne)   # before the membership test below; see `_plain_text`
         for std in STANDARD_NON_CLAIMS:
             if std not in dne:
                 raise ValueError("does_not_establish must include every STANDARD_NON_CLAIMS entry")
@@ -891,10 +1021,24 @@ def probe_shift(measure: Measure, spec: ShiftSpec, seeds: Sequence[int], cfg: Op
     for s in seeds:
         try:
             fx = fixture_factory(s)
-            base = measure(fx.pred, fx.target, fx.mask)
+            # NORMALISE AT THE DATA-INTAKE POINT. `measure` is this probe's PUBLIC input -- the whole
+            # module exists to probe arbitrary measures -- and everything that decides the status is
+            # arithmetic ON ITS RETURN VALUE: `dev = abs(val - exp)` and `dev > bound`. A measure
+            # returning a `float` SUBCLASS therefore computes its own deviation. MEASURED, on a measure
+            # that genuinely violates permutation invariance (row-position weighting), with only
+            # `__sub__` / `__rsub__` overridden to return 0.0 and every comparison left honest:
+            #     honest -> INVARIANCE_DEFECT, n_violations=12, max_abs_dev=1.47e-02
+            #     lying  -> INVARIANCE_HOLDS,  n_violations=0,  max_abs_dev=0.0, n_bitwise_equal=12
+            # i.e. the measure under probe decided that it passes, and "one failing seed refutes an
+            # invariance" became unenforceable. `_plain_number` (`toy.benchmark`, the kit's single
+            # normaliser) returns the double the object STORES or None; None raises here, which the
+            # handler below records as an unmeasured seed with a reason -- the fail-closed outcome this
+            # probe already uses for a measure that rejects its input. Same reason
+            # `SeedSummary.from_values` casts with `float.__float__`.
+            base = _plain_measure(measure(fx.pred, fx.target, fx.mask), "base measure")
             fx2 = spec.transform(fx, make_rng(derive_seed(s, "robustness:shift:" + spec.name)))
-            val = measure(fx2.pred, fx2.target, fx2.mask)
-            exp = spec.expected(base)
+            val = _plain_measure(measure(fx2.pred, fx2.target, fx2.mask), "shifted measure")
+            exp = _plain_measure(spec.expected(base), "expected value")
             if not (math.isfinite(exp) and exp > 0):
                 raise ValueError("expected value is not positive; relative deviation undefined")
             dev = abs(val - exp)
@@ -1110,6 +1254,20 @@ def probe_precision(kind: str, param: float, seeds: Sequence[int], cfg: Optional
     cfg = _pcfg(cfg)
     if kind not in ("magnitude", "cancellation", "accumulation"):
         raise ValueError(f"unknown precision kind {kind!r}")
+    # NORMALISE BEFORE COMPARING, at this probe's two numeric entry points. `worst > tol` decides
+    # PRECISION_OK vs PRECISION_LOSS with `tol` as the RIGHT operand, so the reflected operator of a
+    # `float` subclass decides it. MEASURED: `tol=WTol(1e-20)` with `__lt__`/`__gt__` returning False
+    # reported PRECISION_OK on a worst relative error of 5.49e-17, while `details["tolerance"]`
+    # serialized the honest 1e-20 -- a card whose declared tolerance and whose status disagree.
+    # `param` is used as `int(param)` (the number of values accumulated) and recorded as
+    # `float(param)`: two independently overridable conversions, so `details["param"]` and `probe_id`
+    # said 3.0 while 400 values were actually summed.
+    # `_plain_parameter`, not `_plain_number`: it collapses a subclass to the value it stores while
+    # PRESERVING int-vs-float and leaving a non-number untouched, so this adds no refusal that did not
+    # already happen (an unusable `param` still fails per seed, recorded as unmeasured) and `probe_id`
+    # text is unchanged for an int `param`.
+    tol = _plain_parameter(tol)
+    param = _plain_parameter(param)
     seeds = _check_seeds(seeds)
     per_seed, rows = [], []
     for s in seeds:
