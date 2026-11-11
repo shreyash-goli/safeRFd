@@ -5245,3 +5245,124 @@ bounds** and that `test_dashboard.py` and `src/toy/*` were being rewritten under
 reasons the live tree can emit **by AST** and compared old against new classification on each —
 **0 verdict differences**, so the generated file is byte-identical, and regenerating now would bake in
 another owner's in-flight counts.
+
+---
+
+# Round 5: SR-04 UNMARKED. Verified count 10 → 9.
+
+**Date:** 2026-11-10. SR-10 **FAIL**, SR-11 **FAIL**, SR-13 **FAIL**, SR-14 **PASS** (4th), SR-15
+**FAIL**. And a defect was found inside **SR-04**, which was attested and marked, so **its checkbox is
+off**. That is the first time a marked task has been unmarked for a defect rather than for a
+bookkeeping error, and it is the honest call: SR-04 is "strict typed experiment schema … validation
+tests include invalid inputs", and a route by which the schema's own validator **substitutes the
+stored value** is inside that criterion.
+
+## F1 — the schema's validator overwrites a measured 7.0 with 0.0, through the public constructor
+`MetricValue.__post_init__` ends with a `-0.0` normalisation: `if self.value == 0.0: object.__setattr__(...)`.
+**`==` is overridable.** `float.__float__` and `math.isfinite` both see the real number; `==` decides
+whether to discard it.
+```python
+class EqZero(float):
+    def __eq__(self, o): return True
+    def __hash__(self): return 0
+MetricValue.measured(EqZero(7.0)).value   # -> 0.0
+```
+End to end, 30 seeds, honest `L` = 7.00…7.29 against margin 0.05:
+```
+HONEST  L=7.0+        H2=UNSUPPORTED  JOINT=JOINT_UNSUPPORTED  recompute reasons=()
+FORGED  EqZero(7.0+)  H2=SUPPORTED    JOINT=JOINT_SUPPORTED    recompute reasons=()
+```
+and symmetrically `JOINT_SUPPORTED → JOINT_UNSUPPORTED` in the other direction. `reasons=()`,
+`config_hash` unchanged — the signature of a clean recompute. **Not reachable by deserialisation**
+(`MetricValue.from_dict` yields plain floats from JSON); it needs an in-process `float` subclass.
+
+**How it survived five rounds is the most instructive thing in this journal.** The suite's own
+`_SneakyBound` docstring states the mechanism exactly:
+> *"`__eq__` is deliberately NOT overridden, because `MetricValue.__post_init__` normalises
+> `value == 0.0` and would replace the instance — so a lying `__eq__` would make this test pass for
+> the wrong reason."*
+
+**The overridable dunder was identified, its value-replacing effect understood, and the finding was
+filed as a reason to avoid an input.** `NoForgedStoredMetricBuysABetterVerdict` enumerates plain
+floats and `object.__setattr__` forgeries and contains **no `float` subclass at all.**
+**Standing rule, promoted: when you avoid an input because it would make your test pass for the wrong
+reason, that is a finding. Write it down as one.**
+F1 has a cleaner SR-11 entry point than the SR-10 one: `robustness._to_metric` does
+`isinstance(v, float)` + `isfinite` then `MetricValue.measured(v)` — the un-normalised object — at a
+**public probe's data-intake point**, ninety lines below `SeedSummary.from_values`, which uses
+`float.__float__(v)` for exactly this reason *and says so*. A user-supplied `outcome` callback, the
+intended extension point, is enough: `mean=7.55 sd=0.303` becomes `mean=0.0 sd=0.0`.
+
+## F2 — `_check_seeds` is defeated by `__hash__`/`__eq__`; SEED_FLOOR satisfied by ONE seed
+`len(set(seeds)) != len(seeds)`, with the module docstring naming it as *the* defence against one
+example repeated. An `int` subclass whose `__hash__` is `id(self)` and whose `__eq__` is identity
+gives `[Seed(7), Seed(7), Seed(7)]` → **accepted**, `INVARIANCE_HOLDS`, `n=3`, `violating_seeds=()`,
+with `outcome()` actually called three times on seed 7 and the same fixture each time. **SR-11's
+criterion — "no claims based on single examples" — breached at its own named guard.** Honest limit:
+the card is self-incriminating (`seeds` serialises `[7,7,7]`, matching `seed_digest`), so a reader who
+re-checks can detect it — but the guard whose job was to refuse it did not, and the decisive status
+was produced.
+
+## F3 — a `ProbeConfig` constructed and discarded
+`Scorecard.__post_init__` is **the only `ProbeConfig(...)` in the module whose result is thrown away**,
+while `summarize_seeds`' own comment states the lesson — *"The returned object is USED, not
+discarded"*. The live operator is the **reflected `__gt__`**, the same variant the suite found for
+`summarize_seeds` and fixed **there only**. `min_seeds=Lo(10)` with three seeds is accepted:
+`{"min_seeds": 10, "summary": {"n": 3}, "status": "INVARIANCE_HOLDS"}`. Secondary: a card and its own
+record disagree (`min_seeds` 10 vs a metric of 999.0).
+
+## F4 — three unnormalised fields; `IntervalPair` has no `__post_init__` at all
+`ComponentResult.__post_init__` normalises `margin` ("STORE WHAT WAS CHECKED") and leaves `min_n` and
+`width_tol`, passed in the same call. Suppressible: the protocol minimum-n floor (`n=NSub(1)` →
+SUPPORTED while rendering as 1), the declared `min_n`, and the bootstrap/t width veto. **`IntervalPair.n`
+is data, not a protocol parameter**, and the module docstring's *"no component verdict exists below the
+minimum"* is false.
+
+## The input-range sweep I praised is hand-picked, and partly vacuous
+Literal tuples, with "swept across its range" as prose. Worse: hardcoding `cfg.min_seeds → 30` at the
+recompute **survives**, because the sweep's assertion is satisfied by the stored `gate_min_seeds` state
+rather than by the component floor — and it is **not** an equivalence, since an unbalanced converged
+series with `min_seeds=10` gives a decisive component where a hardcoded 30 gives INCONCLUSIVE. No such
+fixture exists.
+
+## Overstated guarantees, including the premise of the whole architecture
+A **comment** at `benchmark.py:158-160`: *"`MetricValue.__post_init__` refuses a non-float, a bool and
+a non-finite float AT CONSTRUCTION, **so a `MetricValue` built by the public API is sound**"* — **false
+(F1), and it is the premise the checked-reader design rests on** ("only `object.__setattr__` can
+corrupt a stored metric, so defend the readers"). A doc-only mutant *removing* it survives; nothing
+reads it. Three docstrings likewise false and asserted by nothing. And the `SEED_FLOOR` count, though
+AST-measured and arithmetically right, counts `Scorecard.__post_init__`'s `ProbeConfig(...)` as a path
+**whose result is discarded** — it defends the floor, not the configured minimum the same docstring
+claims.
+
+## SR-15 fixed, with three corrections to me — one a reasoning error
+**`PKG` was a spelling rule and its word boundaries were evadable:** `torchrun` (PyTorch's own console
+script), `libtorch` (its C++ distribution), `torch2`, `_torch`, `pytestx`, `torchvision`, `torchaudio`,
+`numpy2`, `yamllint`, `mypy`, `black`, `torch_geometric` — all exempt in both reason-checking modes.
+Round 4's defect was `torch`; **one suffix away.** My journal's *"the rule is not a list of spellings
+at all"* was false.
+Fixed with a **closed allowlist** (`TOOLS = ("ruff",)`, undeclared names → `POLICY:TOOL_UNDECLARED` in
+**every** mode including `--expect any`) **plus** a `PKG_EXEMPT` prefix test used only to *deny*.
+Three corrections I earned:
+1. **The mutant I specified for the anchor was EQUIVALENT, so its survival proved nothing.** `\A`
+   matches only at offset 0, so `.search` on an `\A` pattern *is* `.match`. The masking conclusion was
+   right; my evidence for it was not. Proved properly with the **two-term** mutant (drop `\A` *and*
+   use `.search`): killed by the new cases, survives when those cases are deleted.
+2. **My proposed derivation was circular.** "Derivable from the live `skipUnless` decorator" — but
+   deriving the *permission* from the reason being judged means a reason naming `torchrun` declares
+   itself. The declaration must live in the script; the **derivation is a parsed cross-check test**.
+3. **The allowlist alone would not have closed the tails** (`live reason + "; torchrun is gone"`); it
+   needed the prefix rule too. *"I would have reported the fix as incomplete had I stopped at the
+   reviewer's recommendation."*
+Also: `pytest-cov`, `numpy-stubs`, `py-torch`, `torch-cpu` were **never** candidates (a hyphen is a
+non-word char, so `\bpytest\b` matches inside `pytest-cov`), and `numpy2` collected the exemption but
+torch mode still went red via `DENY`'s substring — so "launders in both modes" was not quite true of
+it. Token count is now **26** emissions / 28 distinct loose names / 45 loose occurrences, with the
+floor raised to 26 and the sets asserted rather than the occurrence count.
+
+## Method: the contamination discipline is now self-applied
+The SR-10 reviewer found **another owner's harness** overlapping its batch by checking PID+argv rather
+than `pgrep -f python3`, waited for it **by PID**, and then **re-measured the baseline and all five
+surviving mutants on a verified-quiet machine — every verdict identical.** It also noted that
+contention cannot manufacture an `rc=0 / OK` across 381 tests, so its findings were never at risk, and
+re-ran anyway. Nobody asked for that.
