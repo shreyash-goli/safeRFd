@@ -4993,3 +4993,117 @@ serially. The only disagreement between the contaminated and clean runs was one 
 **KILLED → SURVIVED**: precisely the phantom-failure mode this journal has recorded three times.
 **Standing rule: if you background anything, verify it is dead by PID, not by pattern** — and a
 measurement taken while anything else was running is not a measurement.
+
+---
+
+# Fourth attestation, part 2: SR-13 FAIL (4th), SR-14 PASS (3rd), SR-15 FAIL (narrow)
+
+**Date:** 2026-11-10.
+
+## SR-13: the defect is live at HEAD and needs no mutant
+A genuine 29-seed run, the `min_seeds` gate flipped to passed in place with its NAME intact, stored
+verdicts forged, and **`pair.n` forged to the legal int 30**:
+```
+n untouched (29)  joint=JOINT_INCONCLUSIVE alarm=True  warn=1 recompute=INCONCLUSIVE pair_numbers_ok=True
+n forged to 30    joint=JOINT_SUPPORTED    alarm=False warn=0 recompute=SUPPORTED    pair_numbers_ok=True
+n forged to nan   joint=JOINT_INCONCLUSIVE alarm=True  warn=1 recompute=None        pair_numbers_ok=False
+```
+Round 4 admitted `pair.n` by **type only**, so `nan` is refused and `30` is not. **Three independent
+sources of the true value sit on that same page or in that same object, and none is consulted:**
+the `min_seeds` gate row renders `PASS` beside its own detail text **"29 measured seeds vs minimum
+30"**; **`Attempted 29, failed 0`** prints above it, and *both those numbers are already declared in
+`STORED_NUMBERS`*; and `IntervalPair.flags` is `('n below protocol minimum',)` while `dashboard.py`
+contains **no reference to `flags`** at all.
+
+**`benchmark.py` had already solved this twice**, and said why a type check cannot: *"A forged
+`n_seeds` is a legal count, so `_metric_count` cannot catch it; the only defence is a second stored
+number to compare it against … n must be CHECKED against something, not trusted."* The dashboard
+renders both halves of that second source and uses neither.
+
+**The reviewer's framing, which is the finding:** *"Round 4 enumerated the consumers by machine and
+went back to enumerating the inputs by hand."* `HOSTILE_BY_KIND["count"]` holds fifteen values and
+**not one legal int**, under a comment claiming it is "everything an honest producer of a field of
+this kind cannot emit" — when an honest producer of `pair.n` on a 29-seed run cannot emit `30` either.
+This project's own standing rule, applied to one half and reversed on the other.
+
+## The probe is neither spelling-agnostic nor path-complete — and I had just routed it as both
+Measured against the dashboard's own `recording_subclass`:
+```
+p.n | getattr(p,"n"+"") | attrgetter("n")(p) | comprehension | lambda
+p.__getattribute__("n") | dataclasses.asdict(p)["n"]   -> SEEN
+vars(p)["n"] | p.__dict__["n"] | object.__getattribute__(p,"n")  -> BLIND
+```
+Plus two structural blind spots with behaviour changes demonstrated: a plain read behind a branch the
+probe's **single render** never takes (forge it → `JOINT_SUPPORTED`, no alarm), and a **duplicate**
+unadmitted read of an already-declared field, invisible because the probe compares attribute *sets*.
+`vars()`/`__dict__` reads are additionally **lint-clean by design**, since `CLEAN_CLONE.md`
+deliberately leaves mapping reflection uncovered — so a contributor could ship one through lint *and*
+the suite.
+
+**This is a correction against me, mid-flight.** Hours earlier I routed this probe into
+`benchmark.py`/`robustness.py` on the written claim that it *"hooks `__getattribute__` on the object
+and therefore sees the read however it is spelled"*, naming `x.__dict__["value"]` and
+`vars(x)["value"]` as the spellings the static rule had missed. **Those two evade the probe as well.**
+I sent the builder an urgent correction telling it to treat the probe as one layer of three, to state
+its real coverage in the docstring, and to put the weight on **behavioural coverage per read site** —
+the only layer indifferent to spelling — with an explicit invitation to tell me if the mechanism is
+the wrong investment. **That is twice in two rounds I have routed a mechanism on an overstated claim**,
+which is the exact failure mode this project keeps finding in other people's guards.
+The probe's own non-vacuity guard **does** work: an undeclared read by plain attribute on the
+exercised path is killed, by the `assertNotIn` that exists for it.
+
+## SR-15: criterion MET, failed on two false claims about the new mechanism
+**Every documented step passes from a pristine clone under `env -i` with a cleaned PATH, with and
+without ruff** — including `--expect torch` with no ruff, the exact configuration my defect broke, and
+`--expect any --twice`, which the document said had never been run against the full suite and now has.
+The baseline regenerates **byte-identical with and without ruff**. With no ruff, dropping `FAIL=1`
+from the ruff branch is killed by the **structural** test while the behavioural one skips, so "fails
+everywhere" holds. 20 of 24 mutants killed.
+
+**But the tool exemption can be laundered, which is the shape that round's own justification said it
+was avoiding** (*"had I bought the exemption instead, I would have opened a laundering channel to fix
+a wording bug"*):
+```
+OK  :: 'optional developer tool `torch` is not on PATH'   expect=torch
+OK  :: 'optional developer tool `pytest` is not on PATH'  expect=torch
+OK  :: TOOL + ' (torch unavailable)'                      expect=torch
+OK  :: 'an optional developer tool `ruff` is not on PATHological systems'  expect=none
+```
+`TOOL.search()` removes a skip from `pkg`, and `pkg` is the only list `NONE_REASON`,
+`TORCH_MODE_UNEXPLAINED` and `MIN_NONE_SKIPS` examine; `DENY` reads every skip but knows exactly three
+spellings (`not installed|missing|numpy`). So any package claim avoiding those three launders —
+**including `unavailable`, which none-mode itself accepts as a package-missing phrase and which the
+suite's own `test_unexplained_reason_fails` asserts must fail torch mode.** `TOOL.search` rather than
+`fullmatch` lets prose carry it. With `TOOL_CAP` at 4 and 40 of floor slack, **up to three further
+tests could be hidden with the suite green**, and the existing anti-laundering test passed throughout
+because it only tried two spellings.
+**Second false claim, inside the Steps block:** `CLEAN_CLONE.md:46-47` says only `.venv`/`venv` are
+pruned *"and ignored by git"*. `.gitignore` has `.venv/` only, while the script prunes both — so half
+the stated protection is absent, **in the direction the sentence exists to warn about**, and the Steps
+tell the reader to create exactly `venv/`.
+
+## SR-14 — PASS a third time, and re-measured rather than re-read
+500 transition combinations: **5 accepted, 0 illegal acceptances, 0 legal refusals**, no non-ledger
+exception. Immutability over **6 events × 14 fields × 9 values = 738 forgeries, 0 accepted**. The two
+apparent survivors were `evidence_refs: () → []`, which serialise identically — **content no-ops, not
+leaks**, the same artefact the previous reviewer self-corrected. Both documented residuals open and
+unchanged. `N1` (dropping `verify_events`' normalised-content comparison) survives, exactly as
+documented, **neither closed nor silently fixed**.
+
+## More figures of mine corrected — the count is now nine
+- **"all 26 policy tokens asserted" → 25.** The two extra matches are the header placeholder
+  `POLICY:<NAME>` and a comment wildcard `POLICY:BASELINE_*`. All 25 are asserted, 0 unasserted — but
+  **the anti-vacuity floor is `>= 24`, so one token could be deleted without it firing.**
+- **"all 14 fields × 3 indices"** — `_EVENT_KEYS` is 14, but the fixture has **6** events, not 3.
+- `CLEAN_CLONE.md:124`'s "three need pytest" is stale (4 do); `:127` states 90 under a no-ruff heading
+  when 90 is the *with*-ruff figure and no-ruff is 91, and an inserted paragraph **orphans the list**
+  that sentence belongs to; `:299-300` omits the tool skip from the torch-mode breakdown.
+
+## Four minor defects worth keeping on the record
+A test docstring claims the baseline records `test_scripts <n> 3` where the committed file says
+`128 4`. A `.replace("import unittest\\n", "")` with a **literal backslash-n** where its two siblings
+use a real newline — the de-duplication silently does nothing and the test still passes. `BASE_EXCL`
+excluding on the bare substring `"yaml"`, so any reason containing it anywhere leaves the baseline skip
+column. And the **module-family** side of the socket enumeration pinning 8 of 12 members by name while
+the 4 disclosed local lookups rest on a count — the same asymmetry the socket-*method* side was fixed
+for one round earlier.
