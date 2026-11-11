@@ -6121,3 +6121,58 @@ Caught and worked around by namespacing. **Standing rule: every owner writes to 
 subdirectory, named for the owner.** A measurement read from a file another process can overwrite is
 not a measurement. This is the same hazard class as the stale-`.pyc` and the concurrent-suite-run
 incidents, in a place nobody had looked.
+
+## First Linux measurement in this project's history (Modal, at `46bf2ee`). And what it does NOT attest.
+
+**Date:** 2026-11-11. Run on the user's instruction to put compute jobs on Modal. Two `debian_slim`
+containers, `Linux-4.19.0-gvisor-x86_64-with-glibc2.36`, glibc 2.36.
+
+| container | python | ran | skipped | failures | unittest | pytest |
+|---|---|---|---|---|---|---|
+| linux-py3.12 | **3.12.10** | **1242** | **91** | **0** | OK, rc=0 | 1151 passed, 91 skipped, 758 subtests passed |
+| linux-py3.13 | **3.13.3** | **1242** | **91** | **0** | OK, rc=0 | 1151 passed, 91 skipped, 758 subtests passed |
+
+**`socket.socket.sendmsg_afalg` → `True` on both.** This project has been reasoning about that name
+**from typeshed, never having executed it**, and it was in neither of the suite's socket tuples. Now
+observed. The two interpreters' **distinct skip-reason lists are identical** (9 reasons, compared as
+sets).
+
+**Two filesystem-case reasons actually fired** — the category that has been UNKNOWN/unobserved here
+since it was written:
+- *"case-sensitive filesystem: case variants are different directories here (the alias/identity tests
+  below still run)"*
+- *"filesystem is case-sensitive; case-varied path does not alias the repo"*
+
+### What this run does NOT establish, stated before anyone quotes the green
+
+1. **It did not run `scripts/run_tests.sh`.** The app invokes `unittest discover` and `pytest`
+   directly, deliberately, because that script's network guard and loopback canary are assertions about
+   the local machine and a green result inside a networked container would *look* like an offline
+   attestation without being one. **Consequence: the skip-policy machinery, the exemption categories
+   (including this round's F1/F3), `--twice` determinism, and — the big one — the comparison of the
+   macOS-generated `scripts/test_baseline.txt` against a Linux run are ALL STILL UNOBSERVED.**
+   `docs/CLEAN_CLONE.md` names that baseline comparison as the thing that makes the figures
+   machine-independent, and it has still never been witnessed. Both CI jobs run through
+   `run_tests.sh`, so **neither CI job is attested by this.**
+2. **It is not an offline attestation.** The container has network. Hermeticity is attested locally or
+   not at all.
+3. **It does not confirm the macOS baseline.** 91 Linux skips against 90 in the local bare venv and 2
+   in the local full run: three different environments, three different numbers, all correct. The
+   container has `pytest` but no `torch`/`numpy`/`yaml`/`ruff`, which is a fourth configuration not in
+   `CLEAN_CLONE.md`'s table.
+4. Container interpreters are **3.12.10 / 3.13.3**, not the local 3.12.4 / 3.13.5. Four interpreters
+   now in play, and per this round's standing rule each figure carries its own.
+
+### My error, recorded
+
+The **first** attempt uploaded only `src/`, `tests/`, `scripts/` and returned **1017 ran / 29
+failures**, which I could have mistaken for a Linux defect finding. It was mine: a large number of tests
+legitimately read `docs/` and `.github/`, and `test_dashboard` failed to import entirely
+(1242 − 226 = 1016, which is the 1017 that ran). Widening the upload to `docs/`, `.github/` and the
+root files took it to 1242/0. **Before widening I verified no email address appears anywhere in
+`docs/`, `.github/` or the root files; `.git` was excluded throughout**, since that is where author
+identity lives and a test suite does not need it.
+
+**Next Linux step, after the SR-15 fix lands:** run `scripts/run_tests.sh --expect none --twice` in a
+bare Linux container against the committed baseline. That — not this — is what would attest the CI path
+and the machine-independence of the baseline figures.
