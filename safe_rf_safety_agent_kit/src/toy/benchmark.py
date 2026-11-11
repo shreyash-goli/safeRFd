@@ -139,6 +139,7 @@ import json
 import math
 from datetime import datetime, timezone
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from toy.schema import (TOY_LABEL, EvidenceClass, ExperimentRecord, MetricValue, RunProvenance,
@@ -262,6 +263,147 @@ def _plain_parameter(v: Any) -> Any:
     if isinstance(v, int) and type(v) is not int:
         return int.__int__(v)
     return v
+
+
+# ---------------------------------------------------------------- the KEY lane and the ENUM lane
+# `_plain_number` / `_plain_parameter` / `_metric_read` are this module's admissions for a stored VALUE,
+# and they held under two full rounds of direct attack. The three below are the SAME argument for the two
+# other things a decision in this module is written in: the NAME a value is filed under, and the identity
+# of an Enum member. Round 6 normalised `input_hashes` VALUES in `toy.schema`; the same flip came back
+# through the KEYS, because `m.get("config")` is `__hash__` + `__eq__` ON THE STORED KEY, not on the
+# literal. One invariant covers all three lanes: EVERY DECISION READS THE CHARACTERS THE OBJECT STORES.
+def _stored_word(x: Any) -> Optional[str]:
+    """The plain `str` `x` STORES, or None when `x` is not a string at all.
+
+    `str.__str__(x)`, not `str(x)` and not `x`, for exactly the reason `_plain_number` returns
+    `float.__float__(v)`: a `str` SUBCLASS passes every `isinstance(x, str)` check and need not lie to a
+    regex or a format test, while `__eq__`, `__ne__`, `__hash__` and `__str__` are all overridable -- and
+    a vocabulary lookup is written in the first three of those. `str.__str__` is not overridable from a
+    subclass, so the characters compared are the characters stored. The twin of `toy.dashboard._word`;
+    it is NOT a vocabulary check and makes no claim to be, so every caller still tests what it requires."""
+    return str.__str__(x) if isinstance(x, str) else None
+
+
+def _word_keyed(m: Any) -> dict:
+    """THE ONE ADMISSION for the KEYS of a stored `Mapping` this module looks a word up in. A plain `dict`
+    keyed by the characters each key STORES.
+
+    WHY IT EXISTS, measured at the previous HEAD through `verdict_from_records`, each forgery being one
+    key removed and one sibling key answering as it while keeping its own value -- so the verdict is
+    decided by a number the record files under a DIFFERENT NAME, with the mapping itself the only record
+    of which. All four with `reasons = ()`, i.e. with the exact signature of a clean recompute:
+        input_hashes: 'seed_list_2' answers as 'config'   JOINT_INCONCLUSIVE -> JOINT_SUPPORTED
+            carrying `cfg.config_hash()` of the DEFAULT cfg, so the recompute binds to a configuration
+            NO RECORD EVER FILED A CONFIG HASH FOR (literal 'config' key filed by any record: False).
+            The study ran at width_tol=0.10 and the recompute ran at 0.25 with the refusal paragraph gone.
+            Planting the STUDY's own hash instead does NOT flip it -- the hash must be the one the
+            recompute itself will want, which is why a first attempt at this reads as closed.
+        metrics: 'loss_check_exempt' answers as 'gate_seed_list_frozen'  JOINT_INCONCLUSIVE -> SUPPORTED
+            a FAILED global gate (seed_list_frozen, stored 0.0) reads PASSED off the 1.0 filed as the
+            exemption flag. The `gate_*` lookup is an f-STRING key, so a sweep that collects only
+            `ast.Constant` subscripts does not see the site at all.
+        metrics: 'loss_check_exempt' answers as 'subject_kind_code'  kind fixture -> 'trained'
+            a declared scorer-validation fixture, whose JOINT_SUPPORTED means only "the scorer can say
+            yes when the answer is yes by construction", reported as a TRAINED subject.
+        metrics: exemption flag hidden behind a key answering as an unread word  RAISES -> SUPPORTED
+            the gate-11(c) forgery check ("records claim the exemption but subject_kind_code is not
+            'fixture'") is silenced: the record still stores 1.0 and `gm.get` no longer finds it.
+    TWO KEYS STORING ONE WORD FAIL CLOSED -- both are dropped and the name reads as ABSENT. This is the
+    OPPOSITE of `toy.dashboard._metric_table`, which deliberately does not collapse duplicates because
+    two metrics whose keys store the same word are two ROWS and deleting either loses a real measurement.
+    The choice differs because the consequence differs: here the name is read to BIND A VERDICT, and
+    "absent" is already fail-closed at every one of this module's lookups (an absent `config` hash gives
+    JOINT_INCONCLUSIVE with its reason, an absent metric raises), whereas on a display table "absent"
+    would be a silent deletion. Serving EITHER of two candidates under a contested name would be a
+    verdict bound to a configuration chosen by whichever key the dict probed first.
+    A HOSTILE `Mapping` whose `items()` raises returns `{}` rather than propagating: every lookup then
+    reads absent, which this module's callers already handle by raising a NAMED error or refusing to
+    recompute -- never by taking an unrelated exception out of the module's documented error contract."""
+    out: dict = {}
+    seen_twice = set()
+    try:
+        items = list(m.items())
+    except Exception:       # noqa: BLE001 - a hostile Mapping need not be iterable; refuse, never raise
+        return {}
+    for k, v in items:
+        w = _stored_word(k)
+        if w is None:
+            continue        # not a string: it names nothing this module looks up
+        if w in out:
+            seen_twice.add(w)
+        out[w] = v
+    for w in seen_twice:
+        del out[w]
+    return out
+
+
+def _enum_member(cls: Any, x: Any) -> Any:
+    """THE ONE ADMISSION for an Enum-valued field this module compares by IDENTITY. The genuine member of
+    `cls` whose value the object STORES, or None.
+
+    Round 10's SR-11 lesson in this module's own spellings: `Verdict`, `JointVerdict` and `EvidenceClass`
+    are `str` subclasses by construction (`toy.schema._plain_value` depends on it), so `x is
+    Verdict.SUPPORTED` is False for an `x` that `==` cannot distinguish from the member. MEASURED at the
+    previous HEAD, with `VL` a `str` subclass whose `__eq__` answers True to `Verdict.SUPPORTED`:
+        VL == Verdict.SUPPORTED  ->  True        VL is Verdict.SUPPORTED  ->  False
+    and the six identity sites in this module pointed in MIXED directions, which is why neither `is` nor
+    `==` is right everywhere and a blanket rewrite to `==` would have opened three sites to close one:
+        line 1717 `self.h3.verdict is Verdict.SUPPORTED`  -- FAIL OPEN. The class invariant "gate 12
+            (convergence) failed => H3 cannot be SUPPORTED" does not fire, and `combine_joint` then
+            coerces the same object with `Verdict(h3)` and reports JOINT_SUPPORTED.
+        lines 998 / 1079 / 1089 `v is Verdict.SUPPORTED`  -- fail CLOSED as written (the liar reads as
+            not-supported => INCONCLUSIVE); `==` would have made all three read SUPPORTED.
+        line 1713 `h.verdict is not Verdict.INCONCLUSIVE`  -- fail CLOSED as written; `!=` would have let
+            a decisive hypothesis past the failed-global-gate check.
+        line 1977 `r.evidence_class is not EvidenceClass.TOY_RESULT` -- fail CLOSED as written; `!=`
+            would ACCEPT a non-member that merely compares equal.
+    ADMITTING THE OPERAND closes both directions at once and leaves the direction argument unnecessary:
+    after this call the thing compared is a real member, so `is` means what it says. `isinstance(x, cls)`
+    is required FIRST and deliberately, so that a plain `str` "TOY_RESULT" is still not an
+    `EvidenceClass` -- the admission must not be weaker than the `is` it replaces at any site.
+    `cls(_stored_word(x))` resolves by the characters stored, which for every member of these three
+    classes is its own value (asserted by the test, not assumed here)."""
+    if not isinstance(x, cls):
+        return None
+    w = _stored_word(x)
+    if w is None:
+        return None
+    try:
+        return cls(w)
+    except ValueError:
+        return None
+
+
+# The admitting calls an identity comparison against a str-backed Enum member may stand behind. A
+# DECLARATION read by `test_benchmark`'s AST sweep, which enumerates those comparisons from this file and
+# fails on any whose operand is not one of these -- so a NEW identity site has to be admitted or
+# explicitly exempted, rather than noticed by a reviewer.
+ENUM_ADMISSIONS = ("_enum_member", "Verdict", "JointVerdict", "EvidenceClass")
+
+# Every place this module looks a WORD up in a mapping it reaches THROUGH A FIELD, rather than in a local
+# already admitted by `_word_keyed` or in one of its own constants. A DECLARATION, not a proof: what makes
+# it load-bearing is that `test_benchmark.TheKeyLaneSweepIsDerivedFromTheModuleNotFromAList` enumerates
+# these sites from this file's AST -- string-literal AND f-STRING keys, since the `gate_*` lookup is an
+# f-string and a Constant-only sweep does not see it at all -- and fails if the set it finds differs. A
+# NEW lookup through a field therefore has to be admitted or written down here with its reason, which is
+# the property no previous round's fix had: `input_hashes` was found in round 6, normalised on its VALUES,
+# and came back in round 12 through its KEYS because nothing enumerated the sites.
+KEY_LANE_ATTRIBUTE_LOOKUPS = MappingProxyType({
+    "s.metrics": "ADMITTED AT THE CLASS, not at the site: `SeedScores.__post_init__` runs `_word_keyed` "
+                 "over `metrics` before its exact-key-set check, so every `s.metrics[...]` in this module "
+                 "and every key `seed_records` copies into a record is the word the producer's key stored. "
+                 "One admission per object beats one per site here because `ok`, `evaluate_gates`, "
+                 "`joint_verdict` and `seed_records` all read the same mapping. The same field is also "
+                 "read as `self.metrics[k]` inside `SeedScores.ok`, with a VARIABLE key, which the AST "
+                 "sweep cannot see and the class admission covers anyway.",
+    "other.params": "NOT caller-reachable, measured rather than argued: `other` is "
+                    "`make_teacher(derive_seed(seed, 'rand_target'), cfg.width)` and `teacher` is "
+                    "`build_fixture(...).teacher`, both produced by `toy.teacher_student.make_teacher`, "
+                    "which writes the four keys as literals in this process. The branch is also in arm "
+                    "C_rand, which no study builds -- `run_study` instantiates only C_init, C0 and "
+                    "C_shuf -- so no stored record and no verdict reads it.",
+    "teacher.params": "the same construction and the same branch; see `other.params`.",
+})
 
 
 def _metric_read(x: Any) -> Optional[float]:
@@ -995,7 +1137,7 @@ def combine_joint(h1: Verdict, h2: Verdict, h3: Verdict, gates_ok: bool) -> Join
         return JointVerdict.JOINT_INCONCLUSIVE
     if Verdict.UNSUPPORTED in vs:
         return JointVerdict.JOINT_UNSUPPORTED
-    if all(v is Verdict.SUPPORTED for v in vs):
+    if all(_enum_member(Verdict, v) is Verdict.SUPPORTED for v in vs):
         return JointVerdict.JOINT_SUPPORTED
     return JointVerdict.JOINT_INCONCLUSIVE
 
@@ -1076,7 +1218,7 @@ class HypothesisResult:
             reasons = [f"gate failed: {g}" for g in self.blocking] + reasons
         elif Verdict.UNSUPPORTED in vs:
             verdict = Verdict.UNSUPPORTED
-        elif not all(v is Verdict.SUPPORTED for v in vs):
+        elif not all(_enum_member(Verdict, v) is Verdict.SUPPORTED for v in vs):
             verdict = Verdict.INCONCLUSIVE
         elif self.hid != "H3":
             verdict = Verdict.SUPPORTED
@@ -1086,7 +1228,8 @@ class HypothesisResult:
         elif len(self.converged_components) != len(CONVERGED):
             verdict = Verdict.INCONCLUSIVE
             reasons.append("converged-budget requirement (4.1) not evaluated")
-        elif not all(c.verdict is Verdict.SUPPORTED for c in self.converged_components):
+        elif not all(_enum_member(Verdict, c.verdict) is Verdict.SUPPORTED
+                     for c in self.converged_components):
             verdict = Verdict.INCONCLUSIVE
             reasons.append("H3: finite-budget only; attributed to partial convergence (not established)")
         else:
@@ -1459,6 +1602,16 @@ class SeedScores:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
             raise ValueError(f"seed must be an int, got {type(self.seed).__name__}")
         object.__setattr__(self, "seed", int.__int__(self.seed))
+        # NORMALISE THE KEYS, THEN CHECK THE KEY SET -- the ordering rule of `_plain_number`, one lane out.
+        # The exact-key-set test below is `__hash__`/`__eq__` on the caller's key objects, and it closes
+        # only the DISPLACING forgery: a key storing "S" that answers as "E_loss_ratio" leaves "S" absent
+        # and is refused. MEASURED, through this public constructor with no `object.__setattr__`, a key
+        # storing "junk" that answers as "E_loss_ratio" is ACCEPTED -- `set(self.metrics)` finds
+        # "E_loss_ratio" in it -- so gate 11(c) decided the E-loss check on a number the record then
+        # files under "junk", and `seed_records` writes that key into the record verbatim: the audit
+        # trail shows no E_loss_ratio at all. `_word_keyed` makes the key set the STORED words, and
+        # ambiguity is refused by this same test rather than silently collapsed.
+        object.__setattr__(self, "metrics", _word_keyed(self.metrics))
         if set(self.metrics) != set(SEED_METRICS):
             raise ValueError(f"metrics must have exactly keys {SEED_METRICS}")
         if not all(isinstance(v, MetricValue) for v in self.metrics.values()):
@@ -1698,6 +1851,19 @@ class JointResult:
         for h, hid in ((self.h1, "H1"), (self.h2, "H2"), (self.h3, "H3")):
             if not isinstance(h, HypothesisResult) or h.hid != hid:
                 raise ValueError(f"JointResult needs HypothesisResult {hid} in its slot")
+            # AN UNADMITTABLE VERDICT IS REFUSED HERE, NOT INTERPRETED BELOW. `HypothesisResult.verdict`
+            # is `init=False` and derived, so a non-member in it is a tampered object -- and the two gate
+            # invariants below read it in OPPOSITE directions, so no single default for "cannot tell what
+            # this is" is fail-closed at both: `is not Verdict.INCONCLUSIVE` counts None as decisive and
+            # raises, while `is Verdict.SUPPORTED` counts None as not-supported and lets the object
+            # through. MEASURED with the admission in place but without this refusal: a `str` subclass
+            # whose `__eq__` answers True to `Verdict.SUPPORTED` built a JointResult with the convergence
+            # gate FAILED and `verdict == JOINT_SUPPORTED`, because `combine_joint` coerces the same
+            # object with `Verdict(h3)` and gets the real member. Refusing the construction makes both
+            # invariants read a genuine member and neither of them carry the tamper case.
+            if _enum_member(Verdict, h.verdict) is None:
+                raise ValueError(f"JointResult slot {hid} holds a verdict that is not a Verdict member: "
+                                 f"{h.verdict!r} (verdicts are derived, never supplied)")
         if self.subject_kind not in SUBJECT_KINDS:
             raise ValueError(f"subject_kind must be one of {SUBJECT_KINDS}")
         if (self.subject_kind == "fixture") != (isinstance(self.fixture_name, str) and bool(self.fixture_name.strip())):
@@ -1710,11 +1876,12 @@ class JointResult:
         # Single-place invariant, independent of how the HypothesisResults were built (e.g. without `blocking`):
         failed = {g.name: g for g in self.gates if not g.passed}
         if any(GATE_SCOPES[n] == "all" for n in failed):
-            bad = [h.hid for h in (self.h1, self.h2, self.h3) if h.verdict is not Verdict.INCONCLUSIVE]
+            bad = [h.hid for h in (self.h1, self.h2, self.h3)
+                   if _enum_member(Verdict, h.verdict) is not Verdict.INCONCLUSIVE]
             if bad:
                 raise ValueError(f"a failed global gate {sorted(n for n in failed if GATE_SCOPES[n] == 'all')} "
                                  f"requires INCONCLUSIVE, but {bad} are decisive")
-        if "convergence" in failed and self.h3.verdict is Verdict.SUPPORTED:
+        if "convergence" in failed and _enum_member(Verdict, self.h3.verdict) is Verdict.SUPPORTED:
             raise ValueError("gate 12 (convergence) failed: H3 cannot be SUPPORTED")
 
     @property
@@ -1889,7 +2056,10 @@ def _pair_from_record(rec: ExperimentRecord, min_n: Optional[int] = None) -> Int
     and "heavy tail" is a formatted string whose number is stored (`max_over_median_abs`) but whose text is
     the producer's. Reconstructing prose is not carrying evidence. A roundtripped pair therefore has a
     flags tuple that is a SUBSET of the producer's, never a superset, and never a different one."""
-    m = rec.metrics
+    # The thirteen names below are looked up in a mapping whose KEYS are the producer's objects, so a
+    # key storing one word and answering as another would rebuild the interval out of the wrong
+    # numbers (a `min` served as `ci_boot_lo`) while the record files neither under the name used.
+    m = _word_keyed(rec.metrics)
     need = ("n_seeds", "ci_level", "n_boot", "mean", "sd", "iqr", "min", "max", "max_over_median_abs",
             "ci_boot_lo", "ci_boot_hi", "ci_t_lo", "ci_t_hi")
     absent = [k for k in need if k not in m]
@@ -1963,23 +2133,47 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: Optional[Benc
     the stored bounds and margin. Rewriting the config hash unlocks `min_seeds` / `width_tol` / `alpha`,
     which CAN invert a genuine UNSUPPORTED. The two are not equivalent and the stronger route must be
     stated as the stronger one. The binding defeats the ORDINARY-CALL defect above and an inconsistent or
-    absent hash; it is not an authentication of the records."""
+    absent hash; it is not an authentication of the records.
+    THE KEY LANE, added in round 12 because the sentence above was true of the VALUE and said nothing
+    about the NAME: `.get("config")` is `__hash__` + `__eq__` on the STORED KEY, so until every mapping
+    this function reads went through `_word_keyed` the binding was decided by whichever key answered to
+    the word, not by the key that stored it. A key storing "seed_list_2" and answering as "config",
+    carrying the hash THIS CALL will ask for, bound a width_tol=0.10 study to the default 0.25 and
+    returned JOINT_SUPPORTED with `reasons = ()`. Round 6 had closed the same flip on `input_hashes`
+    VALUES in `toy.schema`; it returned through the keys of the same lookup. Every mapping read here --
+    the JOINT record's metrics, each component record's metrics, each record's `input_hashes` -- and the
+    `by` tag cut out of `r.name` now read the characters the producer's object STORES. The public route
+    was closed throughout: `ExperimentRecord` and `RunProvenance` normalise both mapping fields' keys at
+    construction (re-verified, not assumed). `object.__setattr__` was one route; the other needed no
+    tampering primitive at all, because THIS FUNCTION ENFORCES NO INSTANCE CHECK -- a plain object with
+    `name`, `metrics`, `evidence_class` and `provenance` reaches every lookup, and did reach this one."""
     cfg = _cfg(cfg)
     by = {}
     for r in records:
-        if "/agg/" in r.name:
-            by[r.name.rsplit("/agg/", 1)[1]] = r
+        # THE TAG IS CUT OUT OF THE CHARACTERS THE NAME STORES. `"/agg/" in r.name` is
+        # `__contains__` and `r.name.rsplit(...)` is a METHOD, both overridable on a `str` subclass, and
+        # `by` is then keyed by whatever `rsplit` handed back -- so a name could file its record under
+        # another component's tag. Plain `str.rsplit` on a subclass returns plain `str` slices (measured),
+        # and with all seven tags required, moving one record always empties its own slot and raises
+        # `records missing for [...]`; so this site was fail-closed before and is now closed by reading
+        # rather than by that accident of the 1:1 record set.
+        nm = _stored_word(r.name)
+        if nm is not None and "/agg/" in nm:
+            by[nm.rsplit("/agg/", 1)[1]] = r
     need = ["H1", "H2", "H3a", "H3b", "H3a_conv", "H3b_conv", "JOINT"]
     missing = [k for k in need if k not in by]
     if missing:
         raise ValueError(f"records missing for {missing}")
     for r in by.values():
-        if r.evidence_class is not EvidenceClass.TOY_RESULT:
+        if _enum_member(EvidenceClass, r.evidence_class) is not EvidenceClass.TOY_RESULT:
             raise ValueError(f"{r.name}: only TOY_RESULT records can carry a recomputed verdict")
 
     # ---- subject-kind decode and exemption-forgery checks: no `cfg` is consulted, so they run first and a
     # ---- config mismatch can never mask a forgery.
-    gm = by["JOINT"].metrics
+    # `_word_keyed` ONCE, then every `gm.get(...)` / `gm[...]` below -- including the `gate_*` f-STRING
+    # lookup, which is the site a Constant-only AST sweep misses -- is on a plain `dict` with plain `str`
+    # keys. See `_word_keyed` for the four measured flips this closes.
+    gm = _word_keyed(by["JOINT"].metrics)
     code = _metric_read(gm.get("subject_kind_code"))
     kind = next((k for k, c in SUBJECT_KIND_CODE.items() if code is not None and code == c), "unknown")
     # `_metric_strict`, not `_metric_read`: for a cross-check field a MALFORMED value must raise rather than
@@ -1993,7 +2187,12 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: Optional[Benc
                          "(forged or deleted code)")
 
     # ---- BIND the recompute to the stored configuration before any cfg-derived parameter is used.
-    stored = {r.provenance.input_hashes.get("config") for r in by.values()}
+    # `_word_keyed` on the KEYS, because round 6 closed this same flip on the VALUES in `toy.schema` and
+    # it came back through the other field of the same lookup: `.get("config")` is `__hash__` + `__eq__`
+    # ON THE STORED KEY. A key storing "seed_list_2" that answers as "config", carrying the hash the
+    # recompute itself will want, bound a width_tol=0.10 study to the DEFAULT 0.25 and reported
+    # JOINT_SUPPORTED with `reasons = ()` -- for a configuration no record filed a config hash for.
+    stored = {_word_keyed(r.provenance.input_hashes).get("config") for r in by.values()}
     want_hash = cfg.config_hash()
     bound = next(iter(stored)) if len(stored) == 1 else None
     if None in stored:
@@ -2035,14 +2234,15 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: Optional[Benc
 
     def comp(tag, metric, direction):
         r = by[tag]
+        rm = _word_keyed(r.metrics)     # the margin and the level are read under the names they are FILED
         for k in ("margin", "ci_level"):
-            if k not in r.metrics:
+            if k not in rm:
                 raise ValueError(f"{tag}: record stores no {k} metric; cannot recompute a component verdict")
         # Both operands of `lo > margin` are now read the same way. The RIGHT one (`margin`) was the
         # half-fix of round 3: `_bound` closed the left and left this on `is_measured` alone, so a stored
         # `margin` of -1.7976931348623157e308 inverted a genuine UNSUPPORTED with `reasons = ()`.
-        mg = _metric_required(r.metrics["margin"], f"{tag}: margin")
-        lv = _metric_required(r.metrics["ci_level"], f"{tag}: ci_level")
+        mg = _metric_required(rm["margin"], f"{tag}: margin")
+        lv = _metric_required(rm["ci_level"], f"{tag}: ci_level")
         if abs(lv - want_level) > 1e-12:
             raise ValueError(f"{tag}: ci_level {lv!r} is not the adjusted level {want_level!r} (m={N_PRIMARY})")
         # `_pair_from_record(r)`, NOT `(r, cfg.min_seeds)`: the recomputed `flags` would be

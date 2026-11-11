@@ -5,6 +5,7 @@ construction (oracle / degrader / identity) or of hand-computed statistics. None
 method, and none says anything about RFdiffusion or any real model. The protocol's actual experiment (the
 erasure arm E scored as a study) is deliberately NOT run here."""
 import ast
+import collections.abc
 import copy
 import dataclasses
 import functools
@@ -20,6 +21,7 @@ import pickle
 import random
 import sys
 import unittest
+from enum import Enum
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -3155,11 +3157,15 @@ class TheStaticSpellingRuleIsATripwireNotAGuarantee(unittest.TestCase):
         """THE PIN'S OWN PROOF: both halves are run against deliberately mutated source text, so this
         class cannot be the kind of test that passes because it never looks at anything."""
         src = _SRC_FILES["benchmark"].read_text()
-        reinstated = src.replace("        mg = _metric_required(r.metrics[\"margin\"], f\"{tag}: margin\")",
-                                 "        mg = r.metrics[\"margin\"].value", 1)
+        # ANCHOR NOTE: the margin is read out of `rm`, the `_word_keyed`-admitted copy of
+        # `r.metrics`, not out of `r.metrics` directly -- see `benchmark._word_keyed`. The mutation
+        # is the same one (drop the checked reader, read `.value` off the stored object); only the
+        # mapping it is spelled against moved.
+        reinstated = src.replace("        mg = _metric_required(rm[\"margin\"], f\"{tag}: margin\")",
+                                 "        mg = rm[\"margin\"].value", 1)
         self.assertNotEqual(reinstated, src, "the anchor for the mutation is gone; update this test")
         ast.parse(reinstated)
-        self.assertEqual([t for _, t in _attribute_reads(reinstated)], ["r.metrics['margin'].value"])
+        self.assertEqual([t for _, t in _attribute_reads(reinstated)], ["rm['margin'].value"])
         dodged = src.replace("def _check_margin(v: Any, what: str) -> float:",
                              "def _sneak(m):\n    return getattr(m, 'value', None)\n\n\n"
                              "def _check_margin(v: Any, what: str) -> float:", 1)
@@ -4551,6 +4557,697 @@ class ConfigHashIsCanonicalNotMerelyCalledCanonical(unittest.TestCase):
         for needle in ("CANONICAL MEANS `sort_keys=True`, and that is load-bearing",
                        "9eaf4bfefc57 to 08d7772419c5", '"Repeatability" is the literal acceptance criterion'):
             self.assertIn(needle, ch)
+
+
+# ================================================================= the KEY lane (round 12)
+# SR-10 was UNMARKED for a flip that round 6 had already closed ONCE, on the other field of the same
+# lookup: `m.get("config")` is `__hash__` + `__eq__` ON THE STORED KEY, so normalising `input_hashes`
+# VALUES in `toy.schema` left the KEYS deciding which value every lookup in `verdict_from_records`
+# returned. What follows is NOT three patches with three tests. It is a generator derived from the
+# invariant -- EVERY DECISION READS THE CHARACTERS THE OBJECT STORES -- run over sites ENUMERATED from a
+# real payload and from the module's own AST, which is the shape that out-found targeted search 13 to 4
+# and then 7 to 1 in this project.
+def _key_liar(stores, answers):
+    """A `str` storing `stores` that HASHES and COMPARES as `answers`: the minimum object that makes a
+    mapping serve one name's value under another name. `__hash__` must agree or the lookup never probes
+    the right bucket, and `__eq__` is what CPython calls on the STORED key once it does (a `str` subclass
+    key makes it abandon `lookdict_unicode` for the general lookup)."""
+    class KeyLiar(str):
+        def __hash__(self):
+            return hash(answers)
+
+        def __eq__(self, other):
+            return other == answers if isinstance(other, str) else NotImplemented
+
+        def __ne__(self, other):
+            return not self.__eq__(other)
+    return KeyLiar(stores)
+
+
+def _honest_copy(recs):
+    """A fresh, independently mutable copy of a record list, rebuilt THROUGH the public constructors so
+    every copy starts normalised. `copy.deepcopy` cannot be used: `RunProvenance` stores a
+    `mappingproxy`, which does not pickle."""
+    out = []
+    for r in recs:
+        prov = dataclasses.replace(r.provenance, input_hashes=dict(r.provenance.input_hashes))
+        out.append(dataclasses.replace(r, provenance=prov, metrics=dict(r.metrics)))
+    return out
+
+
+def _recompute_outcome(recs, cfg):
+    """Everything a consumer of `verdict_from_records` can observe, as one comparable value: the four
+    verdicts, the decoded subject kind, the config hash the recompute bound to, the reasons tuple, or the
+    exception type and message. The REASONS are in it deliberately -- the defect's signature was
+    `reasons = ()`, a clean recompute, so a pin that compared only verdicts would have missed the
+    silencing of the refusal paragraph."""
+    try:
+        rv = bm.verdict_from_records(recs, cfg)
+    except Exception as exc:                                   # noqa: BLE001 - the error IS the outcome
+        return ("raised", type(exc).__name__, str(exc))
+    return ("ok", rv.joint, rv.h1, rv.h2, rv.h3, rv.subject_kind, rv.config_hash, rv.reasons)
+
+
+def _mapping_fields(rec):
+    """The mappings of one record whose KEYS this module looks words up in, by the route it reads them:
+    walked off the OBJECT, not listed, so a mapping a producer starts filing is swept the day it exists."""
+    return (("metrics", rec.metrics, lambda r, m: object.__setattr__(r, "metrics", m)),
+            ("provenance.input_hashes", rec.provenance.input_hashes,
+             lambda r, m: object.__setattr__(r.provenance, "input_hashes", m)))
+
+
+class TheConfigBindingReadsTheWordTheKeyStores(unittest.TestCase):
+    """ROUND 12 FINDING 1, and round 6's Finding 1 returning through the KEYS of the same lookup.
+
+    `stored = {r.provenance.input_hashes.get("config") for r in by.values()}` decided the binding on the
+    STORED key's `__hash__`/`__eq__`. A key storing "seed_list_2" that answers as "config", CARRYING THE
+    HASH THE RECOMPUTE ITSELF WILL WANT (`cfg.config_hash()` of the default cfg, since `cfg=None`), bound
+    a `width_tol=0.10` study to the default 0.25 and reported JOINT_SUPPORTED with the refusal paragraph
+    gone -- for a configuration NO RECORD EVER FILED A CONFIG HASH FOR.
+
+    MEASURED against the pre-fix module, 3.12.4, `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src`, cleared
+    `__pycache__`:
+        honest  JOINT_INCONCLUSIVE  bound 236b3ce79ebc  reasons ("cfg does not match the stored study
+                configuration (cfg 6089f9b81710 vs stored 236b3ce79ebc): refusing to recompute with a
+                different min_seeds/width_tol/alpha",)
+        forged  JOINT_SUPPORTED     bound 6089f9b81710  reasons ()
+    THE TRAP, recorded because the first attempt at this reads as closed: planting the STUDY's own hash
+    instead does NOT flip it. The hash has to be the one the recompute will ask for, which is why the
+    forgery is `want_hash = cfg.config_hash()` and not the stored value.
+    `object.__setattr__` IS needed on a real `ExperimentRecord` -- `schema._plain_value` collapses the key
+    on every public route, re-verified here -- but the function's own contract is not enforced, so the
+    same forgery also arrives through a DUCK-TYPED record with no tampering primitive at all
+    (`test_a_duck_typed_record_is_the_same_forgery_without_object_setattr`)."""
+    TS = "2025-01-02T03:04:05Z"
+    TIGHT = dataclasses.replace(SMALL, width_tol=0.10)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.res = bm.run_study(FZ, bm.fixture_oracle_gated, subject="oracle_gated",
+                               registered_digest=FZ.digest, cfg=cls.TIGHT)
+        cls.recs = bm.to_experiment_records(cls.res, study_id="f", base_seed=7, timestamp_utc=cls.TS)
+
+    def _forge(self, recs, planted):
+        for r in recs:
+            ih = {k: v for k, v in r.provenance.input_hashes.items() if k != "config"}
+            ih[_key_liar("seed_list_2", "config")] = planted
+            object.__setattr__(r.provenance, "input_hashes", ih)
+        return recs
+
+    def test_the_honest_recompute_refuses_the_mismatched_default_cfg(self):
+        """THE REFERENCE the forgery has to not improve on. Still fails closed after the key fix: the
+        round-7 behaviour (`cfg` omitted => refuse, never fall back to module defaults) is re-verified
+        here because the config binding is exactly what this round touched."""
+        rv = bm.verdict_from_records(self.recs)                 # no cfg argument at all
+        self.assertEqual(rv.joint, J.JOINT_INCONCLUSIVE)
+        self.assertEqual((rv.h1, rv.h2, rv.h3), (V.INCONCLUSIVE,) * 3)
+        self.assertEqual(rv.config_hash, self.res.config_hash)
+        self.assertEqual(len(rv.reasons), 1)
+        self.assertIn("refusing to recompute with a different min_seeds/width_tol/alpha", rv.reasons[0])
+        self.assertIn(bm.BenchmarkConfig().config_hash()[:12], rv.reasons[0])
+        self.assertIn(self.res.config_hash[:12], rv.reasons[0])
+
+    def test_a_key_answering_as_config_cannot_bind_the_recompute(self):
+        """THE FLIP, pinned. Pre-fix this returned JOINT_SUPPORTED with `reasons = ()`; the key now reads
+        as the word it stores, so no record files a `config` hash and the recompute refuses."""
+        want = bm.BenchmarkConfig().config_hash()               # the hash the recompute itself will want
+        recs = self._forge(_honest_copy(self.recs), want)
+        self.assertFalse(any("config" in {str.__str__(k) for k in r.provenance.input_hashes}
+                             for r in recs), "the premise: no record files a literal 'config' key")
+        rv = bm.verdict_from_records(recs)
+        self.assertEqual(rv.joint, J.JOINT_INCONCLUSIVE)
+        self.assertIsNone(rv.config_hash, "a forged key must not be reported as the hash it bound to")
+        self.assertEqual(len(rv.reasons), 1)
+        self.assertIn("no stored config hash on at least one record", rv.reasons[0])
+        self.assertNotEqual(rv.joint, J.JOINT_SUPPORTED)
+
+    def test_planting_the_studys_own_hash_never_flipped_it_and_still_does_not(self):
+        """THE TRAP, as a test so nobody re-runs it and concludes the site is closed."""
+        recs = self._forge(_honest_copy(self.recs), self.res.config_hash)
+        rv = bm.verdict_from_records(recs)
+        self.assertEqual(rv.joint, J.JOINT_INCONCLUSIVE)
+
+    def test_a_duck_typed_record_is_the_same_forgery_without_object_setattr(self):
+        """`verdict_from_records` is annotated `Sequence[ExperimentRecord]` and checks no instance, so the
+        key forgery also arrives on a plain object with four attributes. MEASURED pre-fix: JOINT_SUPPORTED,
+        bound 6089f9b81710, `reasons = ()`, with no `object.__setattr__` anywhere -- which is why the
+        'I needed a tampering primitive' reading of this finding was wrong."""
+        class FakeProvenance:
+            def __init__(self, hashes):
+                self.input_hashes = hashes
+
+        class FakeRecord:
+            def __init__(self, real, hashes):
+                self.name, self.metrics = real.name, real.metrics
+                self.evidence_class, self.notes = real.evidence_class, real.notes
+                self.provenance = FakeProvenance(hashes)
+
+        want = bm.BenchmarkConfig().config_hash()
+        fakes = []
+        for r in self.recs:
+            ih = {k: v for k, v in r.provenance.input_hashes.items() if k != "config"}
+            ih[_key_liar("seed_list_2", "config")] = want
+            fakes.append(FakeRecord(r, ih))
+        rv = bm.verdict_from_records(fakes)
+        self.assertEqual(rv.joint, J.JOINT_INCONCLUSIVE)
+        self.assertIn("no stored config hash", rv.reasons[0])
+
+    def test_the_public_route_is_closed_by_schema_and_that_is_re_verified_here(self):
+        """The 'I needed `object.__setattr__`' smell, checked rather than asserted. `_plain_value`
+        collapses a mapping KEY, so a liar handed to `RunProvenance` is stored as the characters it
+        holds -- and a dict LITERAL containing both a liar and a real `config` key has already collapsed
+        to one entry before `schema` sees it, which is a property of `dict`, not a guard."""
+        liar = _key_liar("seed_list_2", "config")
+        prov = RunProvenance(run_id="r", timestamp_utc=self.TS, seed=1, code_version="v",
+                             python_version="3", toy_only=True, input_hashes={liar: "a" * 64})
+        self.assertEqual([type(k) for k in prov.input_hashes], [str])
+        self.assertEqual(list(prov.input_hashes), ["seed_list_2"])
+        self.assertEqual(len({liar: "a" * 64, "config": "b" * 64}), 1)
+        record = ExperimentRecord(name="evalproto/x/agg/H1", provenance=prov,
+                                  metrics={_key_liar("junk", "margin"): MetricValue.measured(1.0)},
+                                  evidence_class=EvidenceClass.TOY_RESULT, notes="n")
+        self.assertEqual([type(k) for k in record.metrics], [str], "metrics keys too, not just hashes")
+        self.assertEqual(list(record.metrics), ["junk"])
+
+    def test_the_key_lane_is_stated_where_a_reader_looks_for_the_bindings_strength(self):
+        """The load-bearing sentence, pinned per CLAUDE.md's per-sentence rule rather than by a lexical
+        sweep: the `verdict_from_records` docstring is the one place a reader goes to learn how strong the
+        config binding is, and until this round it described the VALUE lane only and said nothing about
+        the NAME. A doc-only mutant that deletes the paragraph fails here."""
+        doc = " ".join(bm.verdict_from_records.__doc__.split())
+        for needle in ("THE KEY LANE, added in round 12 because the sentence above was true of the VALUE "
+                       "and said nothing about the NAME",
+                       "carrying the hash THIS CALL will ask for",
+                       "Round 6 had closed the same flip on `input_hashes` VALUES in `toy.schema`; it "
+                       "returned through the keys of the same lookup",
+                       "THIS FUNCTION ENFORCES NO INSTANCE CHECK"):
+            self.assertIn(needle, doc, needle)
+
+
+class EveryWordLookedUpInAStoredMappingIsSwept(unittest.TestCase):
+    """THE DERIVED SWEEP, and the deliverable of this round rather than the three patches above.
+
+    HOW THE SITES ARE ENUMERATED: by WALKING A REAL PAYLOAD, the way `toy.dashboard`'s `_word_keyed` sweep
+    walks the rendered payload rather than listing the page's lookups. For every record a study produces,
+    for every mapping field of that record (`_mapping_fields`, read off the OBJECT), and for every key in
+    that mapping, one forgery is built: the key is removed and a DERIVED donor -- the next key in sorted
+    order, cyclically, so every key appears once as a target and once as a donor -- answers as it while
+    keeping its own value. Nothing is listed in this file, so a metric a producer starts filing, or a new
+    provenance anchor, is swept the day it exists. The `gate_*` lookup is covered without being named,
+    which matters because its key is an f-STRING and a Constant-only AST sweep does not see the site.
+
+    WHAT IT ASSERTS, and why it is not 'the verdict must not change': the honest fixture is the WRONG
+    reference, because the forged mapping really is a different mapping. The reference is THE SAME MAPPING
+    WITH THAT KEY PLAINIFIED -- the donor's value under the donor's own name and the target name absent,
+    which is `base` minus the target key. So the assertion is exactly the round's invariant: the lookup
+    reads the characters the key stores. A site satisfying neither that nor "cannot decide anything" is a
+    complaint, and four were, all with `reasons = ()`:
+        input_hashes 'seed_list_2' -> 'config'                  JOINT_INCONCLUSIVE -> JOINT_SUPPORTED
+        metrics 'loss_check_exempt' -> 'gate_seed_list_frozen'   JOINT_INCONCLUSIVE -> JOINT_SUPPORTED
+        metrics 'loss_check_exempt' -> 'subject_kind_code'       subject_kind fixture -> 'trained'
+        metrics the exemption flag hidden behind an unread word  ValueError -> JOINT_SUPPORTED
+    SWEEP SIZE is asserted below rather than described, so the sweep cannot quietly shrink to nothing."""
+    TS = "2025-01-02T03:04:05Z"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.res = bm.run_study(FZ, bm.fixture_oracle_gated, subject="oracle_gated",
+                               registered_digest=FZ.digest, cfg=SMALL)
+        cls.recs = bm.to_experiment_records(cls.res, study_id="d", base_seed=7, timestamp_utc=cls.TS)
+
+    def _cases(self):
+        """Every (record index, field, target key, donor key) the payload yields. Derived, never typed."""
+        for i, rec in enumerate(self.recs):
+            for field, mapping, _ in _mapping_fields(rec):
+                keys = sorted(str.__str__(k) for k in mapping)
+                if len(keys) < 2:
+                    continue
+                for j, target in enumerate(keys):
+                    yield i, field, target, keys[(j + 1) % len(keys)]
+
+    def _build(self, index, field, target, donor, forge):
+        recs = _honest_copy(self.recs)
+        rec = recs[index]
+        setter = next(s for name, _, s in _mapping_fields(rec) if name == field)
+        base = next(m for name, m, _ in _mapping_fields(rec) if name == field)
+        out = {str.__str__(k): v for k, v in base.items() if str.__str__(k) != target}
+        if forge:
+            value = out.pop(donor)
+            out[_key_liar(donor, target)] = value
+        setter(rec, out)
+        return recs
+
+    def test_every_key_of_every_stored_mapping_reads_as_the_word_it_stores(self):
+        """EVERY complaint is collected before failing, deliberately: the first version stopped at the
+        first and reported ONE site where the pre-fix module has 116 -- and the count is what
+        distinguishes "the invariant is broken here" from "the invariant is broken module-wide".
+
+        MEASURED against the pre-fix module, all 129 cases classified (3.12.4, PYTHONPATH=src, cleared
+        `__pycache__`, nothing else running). 116 complaints, and they are NOT all the same severity --
+        the distinction is the point, because a longer finding list is worth less than a classified one:
+             13  agree: the lookup already read the word the key stored
+             73  both raise, and only the metric NAMED in the message differs. UNCOVERED, NOT
+                 CONSEQUENTIAL: the record is refused either way, and the harm is a misleading error
+                 string, not a verdict. These are what a raw count of 116 would overstate.
+             14  the forgery RAISES where the plainified mapping recomputes -- the fail-closed direction
+             12  CONSEQUENTIAL: the forgery RECOMPUTES where the plainified mapping RAISES, i.e. it buys
+                 a decisive verdict out of a record that is missing a metric
+             17  CONSEQUENTIAL: both recompute and the verdict, the subject kind or the reasons differ
+        So 29 of 129 forgeries move a verdict, a subject kind or a reasons tuple, and that is the number
+        this round is about. Post-fix: 129 agree, 0 complaints."""
+        swept = 0
+        complaints = []
+        for index, field, target, donor in self._cases():
+            swept += 1
+            forged = _recompute_outcome(self._build(index, field, target, donor, True), SMALL)
+            plain = _recompute_outcome(self._build(index, field, target, donor, False), SMALL)
+            if forged != plain:
+                complaints.append(f"record {index} {field}: a key storing {donor!r} that answers as "
+                                  f"{target!r} is not read as the word it stores.\n"
+                                  f"      forged: {forged}\n      plain : {plain}")
+        self.assertEqual(complaints, [], f"{len(complaints)} of {swept} swept (record, mapping, key) "
+                                         f"forgeries are decided by a word the key does not store:\n"
+                                         + "\n".join(complaints[:6]))
+        self.assertGreaterEqual(swept, 100, "the sweep collapsed; it is supposed to walk a real payload")
+        self.assertEqual(swept, len(list(self._cases())))
+
+    def test_the_sweep_is_not_vacuous_and_the_honest_study_is_decisive(self):
+        """NOT VACUOUS in the two ways a sweep like this fails silently: the reference outcome has to be
+        REACHED (a payload of zero mappings would pass every assertion), and the honest study has to be
+        DECISIVE, or every forgery would be compared against an INCONCLUSIVE that nothing can make worse."""
+        honest = _recompute_outcome(_honest_copy(self.recs), SMALL)
+        self.assertEqual(honest[0], "ok")
+        self.assertEqual(honest[1], J.JOINT_SUPPORTED)
+        self.assertEqual(honest[5], "fixture")
+        self.assertEqual(honest[7], ())
+        fields = {f for _, f, _, _ in self._cases()}
+        self.assertEqual(fields, {"metrics", "provenance.input_hashes"})
+        names = {t for _, f, t, _ in self._cases() if f == "metrics"}
+        for required in ("subject_kind_code", "loss_check_exempt", "margin", "ci_level", "n_seeds",
+                         "gate_seed_list_frozen", "gate_convergence", "ci_boot_lo", "ci_boot_hi"):
+            self.assertIn(required, names, "the payload walk stopped covering a decisive name")
+        self.assertIn("config", {t for _, f, t, _ in self._cases() if f == "provenance.input_hashes"})
+
+    def test_the_sweep_catches_the_four_flips_it_exists_for(self):
+        """THE EVIDENCE, as a test rather than as a claim in a report: each of the four complaints is
+        rebuilt here and asserted to fail closed. Pre-fix each returned a decisive, reason-free recompute.
+        These are the same cases the generator above produces; they are repeated by hand ONLY so that the
+        consequences are named where a reader looks for them."""
+        joint = [i for i, r in enumerate(self.recs) if str.__str__(r.name).endswith("/agg/JOINT")]
+        self.assertEqual(len(joint), 1)
+        at = joint[0]
+
+        # (a) a FAILED global gate reads PASSED off the 1.0 filed as the exemption flag
+        failed = bm.run_study(FZ, bm.fixture_oracle_gated, subject="oracle_gated",
+                              registered_digest="0" * 64, cfg=SMALL)
+        frecs = bm.to_experiment_records(failed, study_id="g", base_seed=7, timestamp_utc=self.TS)
+        self.assertEqual(frecs[at].metrics["gate_seed_list_frozen"].value, 0.0)
+        recs = _honest_copy(frecs)
+        m = dict(recs[at].metrics)
+        value = m.pop("loss_check_exempt")
+        m.pop("gate_seed_list_frozen")
+        m[_key_liar("loss_check_exempt", "gate_seed_list_frozen")] = value
+        object.__setattr__(recs[at], "metrics", m)
+        self.assertEqual(bm.verdict_from_records(recs, SMALL).joint, J.JOINT_INCONCLUSIVE)
+
+        # (b) a declared scorer-validation fixture reported as a TRAINED subject
+        recs = _honest_copy(self.recs)
+        m = dict(recs[at].metrics)
+        value = m.pop("loss_check_exempt")
+        m.pop("subject_kind_code")
+        m[_key_liar("loss_check_exempt", "subject_kind_code")] = value
+        object.__setattr__(recs[at], "metrics", m)
+        with self.assertRaises(ValueError) as caught:
+            bm.verdict_from_records(recs, SMALL)
+        self.assertIn("gate-11(c) exemption", str(caught.exception))
+
+        # (c) the gate-11(c) forgery alarm silenced by hiding the flag behind an unread word
+        recs = _honest_copy(self.recs)
+        m = dict(recs[at].metrics)
+        m["subject_kind_code"] = MetricValue.measured(bm.SUBJECT_KIND_CODE["trained"])
+        value = m.pop("loss_check_exempt")
+        m[_key_liar("loss_check_exempt", "zzz_never_read")] = value
+        object.__setattr__(recs[at], "metrics", m)
+        with self.assertRaises(ValueError) as caught:
+            bm.verdict_from_records(recs, SMALL)
+        self.assertIn("gate-11(c) exemption", str(caught.exception))
+
+        # (d) a component's margin taken from a number filed under another name
+        h1 = next(i for i, r in enumerate(self.recs) if str.__str__(r.name).endswith("/agg/H1"))
+        recs = _honest_copy(self.recs)
+        m = dict(recs[h1].metrics)
+        self.assertEqual(m["margin"].value, 0.1)
+        value = m["min"]
+        m.pop("margin")
+        m[_key_liar("min", "margin")] = value
+        object.__setattr__(recs[h1], "metrics", m)
+        with self.assertRaises(ValueError) as caught:
+            bm.verdict_from_records(recs, SMALL)
+        self.assertIn("stores no margin metric", str(caught.exception))
+
+    def test_two_keys_storing_one_word_fail_closed_for_a_verdict_binding(self):
+        """THE DELIBERATE CHOICE, and the OPPOSITE of `toy.dashboard._metric_table`, which does not
+        collapse duplicates because two metrics whose keys store the same word are two ROWS and deleting
+        either loses a real measurement. Here the name is read to BIND A VERDICT: serving either candidate
+        would bind the recompute to whichever configuration the dict probed first, and 'absent' is already
+        fail-closed at every lookup in this module (an absent config hash refuses, an absent metric
+        raises). So both are dropped and the name reads as absent."""
+        recs = _honest_copy(self.recs)
+        for r in recs:
+            ih = {k: v for k, v in r.provenance.input_hashes.items()}
+            ih[_key_liar("config", "a_second_config")] = "9" * 64      # stores 'config' too
+            object.__setattr__(r.provenance, "input_hashes", ih)
+            self.assertEqual(sorted(str.__str__(k) for k in ih).count("config"), 2)
+        rv = bm.verdict_from_records(recs, SMALL)
+        self.assertEqual(rv.joint, J.JOINT_INCONCLUSIVE)
+        self.assertIsNone(rv.config_hash)
+        self.assertIn("no stored config hash on at least one record", rv.reasons[0])
+        self.assertEqual(bm._word_keyed({"a": 1, _key_liar("a", "b"): 2}), {})
+        self.assertEqual(bm._word_keyed({"a": 1, "b": 2}), {"a": 1, "b": 2})
+
+    def test_a_non_string_key_names_nothing_and_a_hostile_mapping_is_refused(self):
+        """The other two fail-closed cases of the admission, which `toy.dashboard._word_keyed` settled for
+        the render lane: a key that is not a string names nothing this module looks up, and a `Mapping`
+        whose `items()` raises is REFUSED (every lookup reads absent, which this module's callers answer
+        with a named error) rather than taking an unrelated exception out of the error contract."""
+        self.assertEqual(bm._word_keyed({1: "x", None: "y", "ok": "z"}), {"ok": "z"})
+
+        class Hostile(collections.abc.Mapping):
+            def items(self):
+                raise RuntimeError("no")
+
+            def __getitem__(self, k):
+                raise KeyError(k)
+
+            def __iter__(self):
+                return iter(())
+
+            def __len__(self):
+                return 0
+
+        self.assertEqual(bm._word_keyed(Hostile()), {})
+        self.assertEqual(bm._word_keyed(object()), {})
+        self.assertEqual(bm._word_keyed(None), {})
+
+    def test_the_by_tag_is_cut_out_of_the_characters_the_record_name_stores(self):
+        """`by["JOINT"]`, the third name the brief listed, measured rather than fixed on suspicion.
+        `by`'s keys are NOT the caller's objects: `str.rsplit` on a subclass returns plain `str` slices
+        (asserted below), so a `str`-subclass name cannot re-point the slot by `__eq__` alone. The route
+        that exists is an OVERRIDDEN `rsplit`/`__contains__`, and MEASURED pre-fix it was already
+        fail-closed -- but by an ACCIDENT of the 1:1 record set, not by reading: all seven tags are
+        required, so moving one record into another's slot empties its own and raises `records missing
+        for [...]`. The tag is now cut out of `_stored_word(r.name)`, which closes it by construction and
+        leaves the accident doing no work."""
+        self.assertEqual([type(x) for x in str.rsplit(_key_liar("a/agg/H1", "zz"), "/agg/", 1)],
+                         [str, str])
+
+        liar_tag = _key_liar("H1", "JOINT")
+
+        class NameLiar(str):
+            def __contains__(self, other):
+                return True
+
+            def rsplit(self, *args, **kwargs):
+                return ["evalproto/d", liar_tag]
+
+        recs = _honest_copy(self.recs)
+        index = next(i for i, r in enumerate(recs) if str.__str__(r.name).endswith("/agg/H1"))
+        object.__setattr__(recs[index], "name", NameLiar(str.__str__(recs[index].name)))
+        self.assertEqual(_recompute_outcome(recs, SMALL), _recompute_outcome(_honest_copy(self.recs),
+                                                                            SMALL),
+                         "the tag must be the word the name stores, so the forgery is a no-op")
+
+    def test_the_seed_scores_key_set_check_only_closed_the_displacing_forgery(self):
+        """SeedScores, measured rather than assumed closed. `set(self.metrics) != set(SEED_METRICS)` is
+        itself `__hash__`/`__eq__` on the caller's keys, and it refuses a DISPLACING liar (a key storing
+        'S' that answers as 'E_loss_ratio' leaves 'S' absent). MEASURED pre-fix through this PUBLIC
+        constructor with no `object.__setattr__`: a key storing 'junk' that answers as 'E_loss_ratio' was
+        ACCEPTED, so gate 11(c) decided the E-loss check on a number the record then files under 'junk' --
+        `seed_records` copies the key verbatim, so the audit trail shows no E_loss_ratio at all."""
+        good = bm.MetricValue.measured(1.0)
+        base = {k: good for k in bm.SEED_METRICS}
+        displacing = dict(base)
+        displacing[_key_liar("S", "E_loss_ratio")] = displacing.pop("S")
+        with self.assertRaises(ValueError):
+            bm.SeedScores(1, displacing)
+        invented = dict(base)
+        invented.pop("E_loss_ratio")
+        invented[_key_liar("junk", "E_loss_ratio")] = good
+        with self.assertRaises(ValueError) as caught:
+            bm.SeedScores(1, invented)
+        self.assertIn("metrics must have exactly keys", str(caught.exception))
+        ok = bm.SeedScores(1, dict(base))
+        self.assertEqual({type(k) for k in ok.metrics}, {str})
+
+
+class TheKeyLaneSweepIsDerivedFromTheModuleNotFromAList(unittest.TestCase):
+    """THE AST TRIPWIRE behind the payload walk, and the reason `input_hashes` could come back at all:
+    round 6 normalised the values of the site it remembered, and nothing enumerated the sites.
+
+    Every place `benchmark.py` looks a WORD up in a mapping it reaches THROUGH A FIELD is collected from
+    the AST and checked against `bm.KEY_LANE_ATTRIBUTE_LOOKUPS`, which is declared IN THE MODULE so that
+    nothing is listed in this test file and a new lookup fails closed. F-STRING keys are collected as well
+    as literals, which is not decoration: `gm.get(f"gate_{n}")` is the site that turned a FAILED global
+    gate into a passing one, and the first sweep written for this round -- `ast.Constant` subscripts
+    only -- did not see it. MEASURED: 42 literal-key sites and one
+    f-string site, which is the one that turned the gate."""
+
+    @staticmethod
+    def _annotation_nodes(tree):
+        out = set()
+        for node in ast.walk(tree):
+            for field in ("annotation", "returns"):
+                sub = getattr(node, field, None)
+                if sub is not None:
+                    out.update(id(n) for n in ast.walk(sub))
+        return out
+
+    @classmethod
+    def _word_lookups(cls, source):
+        """(line, container source, key source, is_fstring) for every mapping lookup with a STRING or
+        F-STRING key, in all three spellings a module can write one: `m[k]`, `m.get(k)` and `k in m`.
+
+        `is_fstring` comes from the AST NODE TYPE, not from sniffing the unparsed key text -- the first
+        version of this test asked `"f'" in key` and the literal `'C_shuf'` matched it, which is the same
+        class of mistake as every lexical rule this project has retired.
+        OUT OF SCOPE, stated so the sweep does not read as larger than it is: a lookup whose key is a
+        VARIABLE (`self.metrics[k]`, `series[metric]`). No static rule resolves what word those hold, and
+        they are covered instead by the payload walk in `EveryWordLookedUpInAStoredMappingIsSwept`, which
+        sees the read however it is spelled because it hooks the mapping rather than the source text."""
+        tree = ast.parse(source)
+        skip = cls._annotation_nodes(tree)
+        found = []
+
+        def wordish(node):
+            return ((isinstance(node, ast.Constant) and isinstance(node.value, str))
+                    or isinstance(node, ast.JoinedStr))
+
+        def add(node, container, key):
+            if id(node) not in skip and wordish(key):
+                found.append((node.lineno, ast.unparse(container), ast.unparse(key),
+                              isinstance(key, ast.JoinedStr)))
+
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("get", "pop", "setdefault") and node.args):
+                add(node, node.func.value, node.args[0])
+            if isinstance(node, ast.Subscript):
+                add(node, node.value, node.slice)
+            if (isinstance(node, ast.Compare) and len(node.ops) == 1
+                    and isinstance(node.ops[0], (ast.In, ast.NotIn))):
+                add(node, node.comparators[0], node.left)
+        return found
+
+    def test_every_word_lookup_through_a_field_is_admitted_or_declared(self):
+        found = self._word_lookups(_SRC_FILES["benchmark"].read_text())
+        through_a_field = sorted({container for _, container, _, _ in found
+                                  if "." in container and "(" not in container})
+        self.assertEqual(through_a_field, sorted(bm.KEY_LANE_ATTRIBUTE_LOOKUPS),
+                         "a word is looked up in a mapping reached through a field that is neither "
+                         "admitted by `_word_keyed` nor declared in `KEY_LANE_ATTRIBUTE_LOOKUPS` with "
+                         "its reason. Admit it, or write down the measurement that makes it harmless.")
+        for container, why in bm.KEY_LANE_ATTRIBUTE_LOOKUPS.items():
+            self.assertTrue(why.strip() and len(why) > 40, container)
+
+    def test_the_sites_the_fix_moved_are_no_longer_read_through_a_field(self):
+        """The three lookups this round moved, pinned by ABSENCE, so reinstating any of them fails here
+        as well as in the payload walk."""
+        found = self._word_lookups(_SRC_FILES["benchmark"].read_text())
+        containers = {container for _, container, _, _ in found}
+        for gone in ("r.metrics", "rec.metrics", "r.provenance.input_hashes", "by['JOINT'].metrics"):
+            self.assertNotIn(gone, containers, f"{gone} is read with a word key again; wrap it in "
+                                               f"`_word_keyed` as `verdict_from_records` does")
+        self.assertIn(("_word_keyed(r.provenance.input_hashes)", "'config'"),
+                      {(c, k) for _, c, k, _ in found})
+
+    def test_the_f_string_key_site_is_collected_and_a_constant_only_sweep_misses_it(self):
+        """THE SWEEP'S OWN PROOF, and the measurement that justifies collecting `JoinedStr` at all."""
+        source = _SRC_FILES["benchmark"].read_text()
+        found = self._word_lookups(source)
+        fstrings = [(c, k) for _, c, k, is_f in found if is_f]
+        self.assertEqual(fstrings, [("gm", "f'gate_{n}'")])
+        literals = [f for f in found if not f[3]]
+        # 42, not the 44 a first count gave: that one also collected the two string FORWARD
+        # REFERENCES `Optional["BenchmarkConfig"]` and `Optional["Margins"]`, which are string
+        # Constants inside an annotation and not lookups at all. Annotation subtrees are excluded.
+        self.assertEqual(len(literals), 42)
+        self.assertNotIn("f'gate_{n}'", {k for _, _, k, _ in literals})
+
+    def test_the_tripwire_fails_on_a_reinstated_unadmitted_lookup(self):
+        """NOT VACUOUS: the pre-fix spelling of the defect, fed back in as source text, is reported."""
+        source = _SRC_FILES["benchmark"].read_text()
+        pre_fix = source.replace(
+            'stored = {_word_keyed(r.provenance.input_hashes).get("config") for r in by.values()}',
+            'stored = {r.provenance.input_hashes.get("config") for r in by.values()}', 1)
+        self.assertNotEqual(pre_fix, source, "the anchor for the mutation is gone; update this test")
+        ast.parse(pre_fix)
+        containers = {c for _, c, _, _ in self._word_lookups(pre_fix) if "." in c and "(" not in c}
+        self.assertIn("r.provenance.input_hashes", containers)
+        self.assertNotIn("r.provenance.input_hashes", set(bm.KEY_LANE_ATTRIBUTE_LOOKUPS))
+
+
+class NoIdentityComparisonAgainstAnEnumMemberStandsUnadmitted(unittest.TestCase):
+    """ROUND 10's SR-11 LESSON RUN ON THIS MODULE. `Verdict`, `JointVerdict` and `EvidenceClass` are `str`
+    subclasses by construction (`toy.schema._plain_value` depends on it), so `x is Verdict.SUPPORTED` is
+    False for an `x` that `==` cannot distinguish from the member. `toy.robustness` answered this with a
+    module-wide rewrite to `==`; MEASURED HERE, that answer would have been WRONG for this module, because
+    the six sites point in opposite directions and `==` opens three to close one:
+        1717 `self.h3.verdict is Verdict.SUPPORTED`      FAIL OPEN -- the gate-12 invariant does not fire
+        998 / 1079 / 1089 `v is Verdict.SUPPORTED`       fail CLOSED; `==` makes all three read SUPPORTED
+        1713 `h.verdict is not Verdict.INCONCLUSIVE`     fail CLOSED; `!=` lets a decisive hypothesis past
+        1977 `r.evidence_class is not EvidenceClass.TOY_RESULT`  fail CLOSED; `!=` accepts a non-member
+    So the OPERAND is admitted instead of the operator rewritten: after `_enum_member` the thing compared
+    is a real member, both directions are closed at once, and the direction argument -- which has to be
+    re-made for every new site -- is not load-bearing anywhere. What is pinned is the module-wide rule."""
+
+    @staticmethod
+    def _identity_sites(source):
+        enums = {n: c for n, c in vars(bm).items()
+                 if isinstance(c, type) and issubclass(c, Enum) and issubclass(c, (str, int))}
+        aliases = {n: v for n, v in vars(bm).items()
+                   if isinstance(v, Enum) and isinstance(v, (str, int))}
+
+        def member_of(side):
+            if (isinstance(side, ast.Attribute) and isinstance(side.value, ast.Name)
+                    and side.value.id in enums and side.attr in enums[side.value.id].__members__):
+                return f"{side.value.id}.{side.attr}"
+            if isinstance(side, ast.Name) and side.id in aliases:
+                return f"{side.id} (a module-level alias of {aliases[side.id]!r})"
+            return None
+
+        found = []
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Compare):
+                continue
+            for op, right in zip(node.ops, node.comparators):
+                if not isinstance(op, (ast.Is, ast.IsNot)):
+                    continue
+                for side, other in ((node.left, right), (right, node.left)):
+                    name = member_of(side)
+                    if name is None:
+                        continue
+                    admitted = (isinstance(other, ast.Call) and isinstance(other.func, ast.Name)
+                                and other.func.id in bm.ENUM_ADMISSIONS)
+                    found.append((side.lineno, name, admitted, ast.unparse(node)[:90]))
+        return sorted(found), sorted(enums)
+
+    def test_every_identity_comparison_stands_behind_a_declared_admission(self):
+        sites, enums = self._identity_sites(_SRC_FILES["benchmark"].read_text())
+        self.assertEqual(enums, ["EvidenceClass", "JointVerdict", "Verdict"])
+        for cls in (bm.Verdict, bm.JointVerdict, EvidenceClass):      # the premise of the whole rule
+            self.assertTrue(issubclass(cls, str), cls)
+            for member in cls:
+                self.assertIs(cls(str.__str__(member)), member, "the admission resolves by stored chars")
+        unadmitted = [s for s in sites if not s[2]]
+        self.assertEqual(unadmitted, [], "an identity comparison against a str-backed Enum member does "
+                                         "not admit its other operand: wrap it in `_enum_member`, or "
+                                         "state at the site why the object cannot be a non-member")
+        self.assertEqual(len(sites), 6, sites)
+
+    def test_the_sweep_sees_the_six_pre_fix_lines_it_exists_for(self):
+        """NOT VACUOUS: the six pre-fix spellings, fed back in as source, are all reported unadmitted."""
+        pre_fix = ("def f(self, vs, r, h):\n"
+                   "    if all(v is Verdict.SUPPORTED for v in vs):\n"
+                   "        pass\n"
+                   "    elif not all(v is Verdict.SUPPORTED for v in vs):\n"
+                   "        pass\n"
+                   "    elif not all(c.verdict is Verdict.SUPPORTED for c in self.converged):\n"
+                   "        pass\n"
+                   "    bad = [h.hid for h in vs if h.verdict is not Verdict.INCONCLUSIVE]\n"
+                   "    if self.h3.verdict is Verdict.SUPPORTED:\n"
+                   "        pass\n"
+                   "    if r.evidence_class is not EvidenceClass.TOY_RESULT:\n"
+                   "        pass\n")
+        sites, _ = self._identity_sites(pre_fix)
+        self.assertEqual(len(sites), 6, sites)
+        self.assertEqual([s for s in sites if s[2]], [], "none of the six admits its operand")
+        admitted = pre_fix.replace("v is Verdict.SUPPORTED",
+                                   "_enum_member(Verdict, v) is Verdict.SUPPORTED")
+        self.assertEqual([s for s in self._identity_sites(admitted)[0] if not s[2]][0][1],
+                         "Verdict.SUPPORTED")
+
+    def test_the_gate_12_invariant_refuses_an_unadmittable_verdict_rather_than_reading_it(self):
+        """THE FAIL-OPEN SITE, measured. A `str` subclass answering True to `Verdict.SUPPORTED` passed
+        `is Verdict.SUPPORTED` as False, so the invariant 'gate 12 (convergence) failed => H3 cannot be
+        SUPPORTED' did not fire -- and `combine_joint` then coerced the SAME object with `Verdict(h3)`
+        and reported JOINT_SUPPORTED. Admitting the operand alone is NOT enough here and that is the
+        point of the extra refusal: `_enum_member` returns None for the liar, and `None is
+        Verdict.SUPPORTED` is also False. The construction is refused instead."""
+        class VerdictLiar(str):
+            def __eq__(self, other):
+                return other == bm.Verdict.SUPPORTED.value or other is bm.Verdict.SUPPORTED
+
+            def __ne__(self, other):
+                return not self.__eq__(other)
+
+            def __hash__(self):
+                return hash(bm.Verdict.SUPPORTED.value)
+
+        liar = VerdictLiar("not-a-member")
+        self.assertTrue(liar == bm.Verdict.SUPPORTED)
+        self.assertIsNot(liar, bm.Verdict.SUPPORTED)
+        self.assertIsNone(bm._enum_member(bm.Verdict, liar))
+        self.assertIs(bm._enum_member(bm.Verdict, bm.Verdict.SUPPORTED), bm.Verdict.SUPPORTED)
+
+        res = bm.run_study(FZ, bm.fixture_oracle_gated, subject="oracle_gated",
+                           registered_digest=FZ.digest, cfg=SMALL)
+        gates = tuple(bm.GateResult(g.name, False if g.name == "convergence" else g.passed,
+                                    g.reason, exempt=g.exempt) for g in res.gates)
+        fields = (res.subject, res.h1, res.h2, res.h3, gates, res.seed_scores, res.ineligible,
+                  res.n_attempted, res.n_failed, res.seed_list_digest, res.registered_digest,
+                  res.config_hash, res.margins, res.subject_kind, res.fixture_name)
+        with self.assertRaises(ValueError) as caught:               # the honest reference: it fires
+            bm.JointResult(*fields)
+        self.assertIn("gate 12 (convergence) failed", str(caught.exception))
+        object.__setattr__(res.h3, "verdict", liar)
+        with self.assertRaises(ValueError) as caught:               # and the liar is refused, not read
+            bm.JointResult(*fields)
+        self.assertIn("is not a Verdict member", str(caught.exception))
+
+    def test_an_evidence_class_that_merely_compares_equal_is_still_refused(self):
+        """The admission must not be WEAKER than the `is not` it replaced: `isinstance(x, cls)` is
+        required first, so a plain `str` 'TOY_RESULT' and an `__eq__` forgery both read as None."""
+        class ClassLiar(str):
+            def __eq__(self, other):
+                return True
+
+            def __ne__(self, other):
+                return False
+
+            def __hash__(self):
+                return hash("TOY_RESULT")
+
+        self.assertIsNone(bm._enum_member(EvidenceClass, ClassLiar("TOY_RESULT")))
+        self.assertIsNone(bm._enum_member(EvidenceClass, "TOY_RESULT"))
+        self.assertIs(bm._enum_member(EvidenceClass, EvidenceClass.TOY_RESULT), EvidenceClass.TOY_RESULT)
+        res = bm.run_study(FZ, bm.fixture_oracle_gated, subject="oracle_gated",
+                           registered_digest=FZ.digest, cfg=SMALL)
+        recs = _honest_copy(bm.to_experiment_records(res, study_id="e", base_seed=7,
+                                                     timestamp_utc="2025-01-02T03:04:05Z"))
+        object.__setattr__(recs[0], "evidence_class", ClassLiar("TOY_RESULT"))
+        with self.assertRaises(ValueError) as caught:
+            bm.verdict_from_records(recs, SMALL)
+        self.assertIn("only TOY_RESULT records can carry a recomputed verdict", str(caught.exception))
 
 
 if __name__ == "__main__":

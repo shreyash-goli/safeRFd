@@ -8330,3 +8330,131 @@ move for a lying key and a lying value) rather than silently omitted. Two sweep 
 wall-clock trade **with the exhaustive figures recorded**. And **one deliberate behaviour change on
 malformed input, reported rather than hidden** — a non-string `fork_commits` element now reads UNKNOWN
 instead of its `repr` — with all six honest renders verified **byte-identical to HEAD's by sha256**.
+
+## SR-10 fix (round 12): the key lane closed by a derived sweep. The route was PUBLIC, not route (d).
+
+**Date:** 2026-11-11. `benchmark.py` +230, `test_benchmark.py` +703 (21 new tests).
+**`test_benchmark` 280 → 301 OK** on **3.12.4 and 3.13.5**; three modules **708 → 729 OK** on both.
+Implied baseline line `toy_tests.test_benchmark 301 0`. **No cross-owner request** —
+`schema.py` needs no change, re-verified for **both** mapping fields rather than taken on trust.
+
+**My arithmetic error, caught by the owner before it could propagate:** I briefed the three-module
+baseline as **807**; 280 + 247 + 181 = **708**, a digit transposition, and `scripts/test_baseline.txt`
+says so. *"I read the brief's 807 as a digit transposition of 708 and used 708."* Verified rather than
+trusted — which is the whole discipline, applied to me.
+
+### The route is public. `object.__setattr__` was never required.
+
+**`verdict_from_records` is annotated `Sequence[ExperimentRecord]` and performs no instance check**, so a
+plain object carrying `name`, `metrics`, `evidence_class` and `provenance` reaches **every** lookup.
+Measured pre-fix with duck-typed records and the key liar: **`JOINT_SUPPORTED`, `bound = 6089f9b81710`,
+`reasons = ()`, no tampering primitive anywhere.** *"The CLAUDE.md smell 'I needed `object.__setattr__`'
+was pointing at a real public route, just not the one I checked first."* **That makes the finding that
+unmarked SR-10 strictly more severe than I recorded it.**
+
+### The config binding, and a precise answer where mine was loose
+
+| | joint | `bound` | reasons |
+|---|---|---|---|
+| before, honest | JOINT_INCONCLUSIVE | `236b3ce79ebc` | 1 |
+| **before, forged** | **JOINT_SUPPORTED** | **`6089f9b81710`** | **0** |
+| after, honest | JOINT_INCONCLUSIVE | `236b3ce79ebc` | 1 |
+| after, forged | JOINT_INCONCLUSIVE | **`None`** | 1 |
+
+I asked whether the refusal paragraph returns. **The honest answer is not simply yes, and the owner
+said so:** the forged case does *not* get the original paragraph back **and should not** — once the key
+reads as the word it stores, **no record files a `config` hash at all**, so the correct refusal is the
+*stronger* one, *"no stored config hash on at least one record."* And `bound` now reports **`None`**
+instead of the recompute's **own default** hash — *"which matters on its own: pre-fix the function
+reported the recompute's own default hash in the field whose documented meaning is 'the STORED study
+config hash this recompute was bound to'."*
+
+**My trap is pinned** as `test_planting_the_studys_own_hash_never_flipped_it_and_still_does_not`, *"so
+nobody re-runs it and concludes the site is closed."*
+
+### A fourth site I did not name — and it is the round's own proof of the thesis
+
+**`gm.get(f"gate_{n}")`.** `loss_check_exempt` (value 1.0) answering as `gate_seed_list_frozen` (stored
+**0.0 — a FAILED global gate**) → **`JOINT_INCONCLUSIVE` → `JOINT_SUPPORTED`, `reasons = ()`.**
+
+*"My first AST sweep collected only `ast.Constant` subscripts and did not see it, because the key is an
+f-string. … That is the round's own instance of your thesis — the hand-written list would have been
+your three, and the fourth was the one that turned a global gate."*
+
+And a **fifth** lane: `comp()`'s `r.metrics["margin"]`/`["ci_level"]` plus thirteen names in
+`_pair_from_record`. A key storing `"min"` answering as `"margin"` made the component decide against
+**0.423** where the record files **0.1**, with no `margin` key on the record at all.
+
+The three I did name: `subject_kind_code` (a declared fixture reported as a **trained subject**, erasing
+the disclaimer the module header exists for), `loss_check_exempt` (the named forgery check **fully
+silenced** while the record still stores 1.0), and `by["JOINT"]` — which was **not re-pointable by
+`__eq__`** (`str.rsplit` returns plain slices) and was fail-closed **only by an accident of the 1:1
+record set**; fixed anyway *"so the accident does no work."*
+
+### The sweep: 129 cases, 116 complaints — then classified, because 116 overstates it
+
+Derived by **walking a real payload**, nothing listed in the test file, so a metric a producer starts
+filing is swept the day it exists. **129 cases** asserted exactly, with a floor so it cannot quietly
+collapse. Pre-fix **116 complaints**, and the owner then classified all 129 rather than reporting the
+raw number:
+
+```
+ 13  agree already
+ 73  both raise; only the metric NAMED in the error differs   <- uncovered, NOT consequential
+ 14  forgery raises where the plainified mapping recomputes    <- fail-closed direction
+ 12  CONSEQUENTIAL: forgery recomputes where plainified raises
+ 17  CONSEQUENTIAL: both recompute, verdict / kind / reasons differ
+```
+
+**29 of 129 move a verdict, a subject kind or a reasons tuple**; the other 73 are *"a misleading error
+string, not a verdict, and I say so rather than counting them as findings."* Post-fix: **129 agree, 0
+complaints.** The reference is the right one — *the same mapping with that key plainified*, not the
+honest fixture.
+
+### The enum sweep: running robustness.py's rule verbatim would have been WRONG, and that was measured
+
+**6 hits.** *"Running `robustness.py`'s rule verbatim — rewrite to `==` — would have been wrong here, and
+I measured that before concluding it."* The six point in **mixed** directions: **one fails open**, and
+**four fail closed where `==`/`!=` would open them.** So `==` would have opened three to close one.
+
+The fix **admits the operand** instead — `_enum_member(cls, x)` with `isinstance` required **first**,
+*"so the admission is never weaker than the `is` it replaces"* — and the module-wide rule is pinned by
+AST. **And the first fix was not enough, found only by measuring after it:** `_enum_member` returns
+`None` for the liar and `None is Verdict.SUPPORTED` is also False, so the gate-12 invariant **still did
+not fire**; a `JointResult` with the convergence gate **failed** was measured at `JOINT_SUPPORTED` *with
+the admission in place*. Closed properly by refusing a slot whose verdict is not an admissible member.
+
+### Duplicate-key collapse: fail closed — the opposite of the dashboard, for the right reason
+
+*"On a display table, 'absent' is a silent deletion … Here the name is read to bind a verdict, and
+'absent' is already fail-closed at every one of this module's lookups … Serving either candidate under a
+contested name would bind the recompute to whichever configuration the dict happened to probe first — **a
+verdict decided by hash-bucket ordering**."* And the deliberate difference from `schema._plain_value`,
+which **raises** on collision, is stated rather than reconciled away: schema is a *construction*
+boundary; this reads an already-stored object inside a documented error contract.
+
+### Two self-inflicted bugs recorded, both of a class this project keeps retiring
+
+*"I first asked `"f'" in key`, and the literal `'C_shuf'` matched it"* — `is_fstring` now comes from the
+AST node type. And a first count of 44 lookup sites included the two **string forward references** in
+annotations (`Optional["BenchmarkConfig"]`), which are string Constants inside annotations and not
+lookups; **42 literal + 1 f-string** is the measured figure.
+
+### An avoided-input finding, surfaced under CLAUDE.md's own rule
+
+**`SeedScores`'s `set(self.metrics) != set(SEED_METRICS)` check "looked like a closure and was not."** It
+refuses a *displacing* liar, but measured **through the public constructor with no `object.__setattr__`**,
+a key storing `"junk"` answering as `"E_loss_ratio"` was **accepted** — so **gate 11(c) decided the
+E-loss check on a number the record then files under `"junk"`**, and `seed_records` copies that key
+verbatim, *"leaving no `E_loss_ratio` in the audit trail at all."* Now normalised before the key-set
+check runs.
+
+### Reported, not acted on
+
+`verdict_from_records` enforces **no instance check**, so a duck-typed record bypasses every `schema`
+validator — hash format, evidence class, metric types. **The key lane is closed for it either way, which
+is measured**, but making the annotation load-bearing is a contract decision the owner declined to take
+unilaterally, *"partly because one of my own new tests uses a duck-typed record deliberately to document
+the route."* Also deliberately unfixed: `other.params`/`teacher.params` (not caller-reachable, and in
+arm **C_rand which no study builds** — three `ARM_FACTORIES` sites grepped, none `C_rand`), declared with
+that measurement.
