@@ -8458,3 +8458,133 @@ unilaterally, *"partly because one of my own new tests uses a duck-typed record 
 the route."* Also deliberately unfixed: `other.params`/`teacher.params` (not caller-reachable, and in
 arm **C_rand which no study builds** — three `ARM_FACTORIES` sites grepped, none `C_rand`), declared with
 that measurement.
+
+## SR-10 round-12 attestation: **FAIL**. The key lane is closed; the PROBE side is not.
+
+**Date:** 2026-11-11, HEAD `eb21eef`. **3.12.4**, `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src`, serial.
+All mutation on a `git archive HEAD` copy; the repository was never written to; final
+`git status --porcelain` **empty**.
+
+**The fix is sound and stands.** The key lane **is** closed — **129/129 agree, 0 complaints**, generator
+re-implemented from its stated rule importing nothing from the test file. **Nothing was weakened**,
+measured not argued: honest outcome byte-identical pre→post, `cfg=None` still refuses with its named
+reason instead of falling back to module defaults, every documented earlier-round refusal re-measured
+and holding (`n_seeds=1e9`, `margin=-1.8e308`, `ci_level=0.95`, canonical `config_hash`, **30/30**
+interval fields bit-identical, `evaluate_gates` 30-copies → `seed_list_frozen=False`), three-module
+count unchanged.
+
+### A correction to my own retelling
+
+The three-module total is **729**, measured twice. I had written **807** in one brief — simply wrong —
+and then retold the history as "807 was a transposition of 708" **without saying that 708 was the
+pre-fix figure** (280 + 247 + 181). Post-fix it is 301 + 247 + 181 = **729**, which is what I actually
+briefed as the baseline. The attester was right to flag the retelling: *"708 is also wrong; neither
+figure is the three-module total."* **A figure carries its moment as well as its interpreter.**
+
+### FINDING A (consequential) — `HypothesisResult` decides its own component count from the caller's `hid`
+
+`benchmark.py:1204,1206,1208,1223` and `:1852`. `PRIMARY[self.hid]` and `self.hid != "H3"` run on the
+caller's `__hash__`/`__eq__`. A `str` subclass storing `'H3'` that answers to both `'H3'` and `'H1'`
+makes `PRIMARY[liar]` return **one** component where H3 requires two — so **the selectivity component,
+the shuffled-control comparison, is dropped and never evaluated**, and `JointResult`'s own
+`h.hid != hid` check reads False so the construction is accepted.
+
+**`JOINT_UNSUPPORTED` → `JOINT_SUPPORTED`**, public constructors only, **no `object.__setattr__`**, and
+nothing in the output says the requirement was skipped. The honest short build raises
+`ValueError: wrong number of components for H3`.
+
+**What holds:** the stored-record lane is fail-closed — a recompute raises
+`records missing for ['H3a','H3b','H3a_conv','H3b_conv']`. The consequence is for a consumer reading
+`JointResult.verdict` or `run_study`'s return directly.
+
+### FINDING B (consequential) — the same flip the fix closed, reached from the PRODUCER side
+
+`benchmark.py:1867,1971,2020,2309`. `subject_kind not in SUBJECT_KINDS` and
+`SUBJECT_KIND_CODE[res.subject_kind]` both run on the caller's object. A liar storing `'fixture'` that
+also answers `'trained'` is **accepted**, renders as `'fixture'`, and the JOINT record stores
+`subject_kind_code = 1.0` — the **trained** code. The recompute then reports `subject_kind 'trained'`,
+`JOINT_SUPPORTED`.
+
+**This is exactly the flip the round-12 fix closed on the record side**, reached from the producer side,
+*"so `_word_keyed` has nothing to normalise: the record's key is honest and the forged value was already
+written."* **The recompute does not catch this one.** `JointResult`'s own
+`carries_exemption(gates) and self.subject_kind != "fixture"` invariant also reads False.
+
+**Both findings are PRE-EXISTING** — byte-identical behaviour measured at `HEAD~1`. Neither is a
+regression from the fix.
+
+### The structural gap: the probe, not the stored key
+
+**46 variable-key lookups** in the module (the attester's own count). The AST tripwire collects only
+string and f-string keys and declares variable keys *"covered instead by the payload walk"* — **but the
+walk only reaches record mappings.** So a **variable-key lookup into a module constant** is covered by
+**neither**, and there the lie is on the **probe**, which `_word_keyed` cannot help with because the
+stored keys are honest. CPython gives the reflected comparison priority when the probe is a `str`
+subclass, so a lying probe beats a plain stored key.
+
+**Mutant M9c — a new mapping field plus a verdict-deciding variable-key read of it — is unkilled** by
+all three modules (729 OK). **And two earlier attempts at it were killed incidentally**, which is credit
+worth recording: one by the `len(literals) == 42` pin (the patch introduced a new string-literal
+lookup), one by the normalise-before-checking sweep (it saw a new coercion site). *"The module's
+defence-in-depth is denser than the key-lane machinery alone."*
+
+### The classification, sharpened — and "29" is not the escalation count either
+
+The owner's five buckets **reproduce exactly** (13 / 73 / 14 / 12 / 17; 116 complaints; 129 post-fix
+agree). Re-ranked by **direction**, i.e. how much the forger gains:
+
+- **13 ESCALATIONS** — 12 turning a hard `ValueError` into `JOINT_SUPPORTED`, **1** moving
+  `JOINT_INCONCLUSIVE → JOINT_SUPPORTED`.
+- **21 DENIALS** — the forged outcome is **more conservative** than the reference. Not exploitable.
+- **9 LATERAL** — same rank, differing reason strings or component verdicts under an unchanged joint.
+- **73 both-raise** — and the description was understated: **48** differ only in the metric named,
+  **25** differ in *which refusal fires*. Severity label still right.
+
+*"Honest headline: **13 escalations of 129**, of which 1 moves the joint verdict … 29 is a defensible
+conservative bucket that errs toward over-reporting — the right direction for a safety audit — but it is
+not the escalation count. 116 is not usable."*
+
+### Three accounting errors found in the fix's own tests and prose
+
+**(1)** The sweep's docstring says four flips were produced by the generator and lists them; **only one
+is** — the other three are hand-built, and the sibling test's claim *"These are the same cases the
+generator above produces"* is **false for three of four** (measured: `'seed_list_2'` is not an
+`input_hashes` key at all, and the cyclic donor for `subject_kind_code` is `gate_control_adequacy`, not
+`loss_check_exempt`). Evidence real, attribution wrong. **(2)** `_mapping_fields` is a **hardcoded
+two-entry tuple**, and a test asserts that hardcoded set — contradicting its own docstring (*"walked off
+the OBJECT, not listed"*). Complete today, measured. **(3)** The enum table's `combine_joint` row is
+**false**: `vs = (Verdict(h1), Verdict(h2), Verdict(h3))` at `:1135` is itself a `_value2member_map_`
+probe the liar wins (`Verdict(liar) → SUPPORTED`), so that site was **already fail-open above the
+comparison**, `==` would have opened **two not three**, and the `_enum_member` wrap added at `:1140` is
+a **no-op**. The uniform rule is still right — *"the direction argument is per-site, has to be
+re-derived whenever a site is added, and goes stale silently"* — and the AST sweep enforces it even
+where it does nothing.
+
+Also: the `other.params` declaration's **inference** is wrong even though its count is right —
+`ARM_FACTORIES` is public and `run_study`'s `treatment` is caller-supplied, so `ARM_FACTORIES["C_rand"]`
+**can** be called; the in-process argument is what actually carries that one.
+
+### Judgments worth keeping
+
+**The three-way duplicate-key divergence is sound, and M2 turned a worry into a measurement**: with
+keep-last, the recompute reports **the attacker's `'9'*64`** as the configuration it bound to. And the
+reason the divergence from `schema` is *necessary* rather than merely acceptable, which the module does
+not state: `verdict_from_records` enforces no instance check, so its mappings may never have passed a
+construction boundary at all — there is nowhere to raise — and raising inside the recompute would
+downgrade "refuse with a named reason" to "throw", which is **weaker** for a consumer.
+
+**`GATE_SCOPES[self.name]` bounced, by reading rather than by accident**: `sorted` uses un-overridden
+`str.__lt__`, so a liar sorts by its **stored** characters and the elementwise `==` then requires it to
+answer its own stored word — which defeats the forgery.
+
+### Disposition: SR-10 stays UNMARKED. Verified remains 10 of 17.
+
+The attester flagged the scope call explicitly rather than hiding it: *"if the orchestrator judges the
+probe lane out of SR-10's scope, PASS is defensible."* **My call: it is in scope, so FAIL stands.**
+Finding B is *the same flip the fix was commissioned to close*, one side of the lookup over, and a
+declared scorer-validation fixture reporting as a trained subject is squarely within "statistical test
+**fixtures**". Finding A removes the selectivity requirement from H3 silently. Both are reachable
+without any tampering primitive.
+
+**The fix stands** — it closed what it set out to close and weakened nothing. The probe-side lane and
+both findings go to the residuals register as open, measured, and undeclared-until-now.
