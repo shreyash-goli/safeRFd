@@ -9,6 +9,12 @@ AF_UNIX socket. See "Connection attempts the suite itself makes" below; this use
 time" while four of those attempts went to a routable address on every run.
 `mse_naive` order-invariance in the robustness tests depends on CPython >= 3.12 compensated `sum()`; do not use
 an older interpreter (some assertions would go red; pre-3.12 is unsupported).
+"The standard library is enough" is a claim about whether the suite **passes**, and it was false for one round:
+a test gated on the optional linter `ruff` carried a skip reason the skip policy rejected, so the documented
+`--expect none` and `--expect torch` steps failed on any machine without `ruff` — which is every clean clone and
+both CI jobs. It is true again, and the thing that made it false is now a named, capped skip category. An absent
+optional developer tool changes **which tests run**, never whether the suite passes; see "The documented steps
+used to fail without `ruff`" below.
 
 ## Steps
 
@@ -116,6 +122,10 @@ Two things about this measurement, because it is the kind of figure this documen
    caught it: the two passes of the run above agree exactly.
 
 The 89 bare skips, by module, were: `test_tensor_ops` 82, `test_scripts` 4 (three need pytest, one needs PyYAML),
+*and that measurement was taken on a machine that happened to have `ruff`.* A bare machine **without** `ruff`
+has one more — the optional-developer-tool skip described under "The documented steps used to fail without
+`ruff`" — so expect `test_scripts` 5 and a total of 90 there. That extra skip does **not** move
+`scripts/test_baseline.txt`, by construction. Before the fix it did not add a skip at all: it failed the run.
 `test_failure_modes` 2, `test_stability` 1. Zero filesystem-case skips, because this machine's repo volume and
 `TMPDIR` are both case-insensitive — which is the whole subject of the next section.
 
@@ -195,11 +205,14 @@ PATH="${TMPDIR:-/tmp}/kit-bare/bin:$PATH" ./scripts/run_tests.sh --expect none -
 git diff -- scripts/test_baseline.txt      # the diff is the point: review it
 ```
 
-PyYAML and filesystem-case skips are excluded from the recorded skip figures, so a machine that has PyYAML, or a
-case-sensitive filesystem, does not shift the baseline. Regenerate **last**, after all test-adding work for a
-milestone has landed; a baseline regenerated mid-milestone is stale before it is committed, which is the defect
-this note exists to describe. A regeneration that *lowers* a module's figure is a real signal — check why that
-module shrank before accepting the diff.
+PyYAML, filesystem-case and optional-developer-tool skips are excluded from the recorded skip figures — in
+generation as well as in comparison, from one regex used by both — so a machine that has PyYAML, a case-sensitive
+filesystem, or `ruff`, does not shift the baseline. **`--baseline` must name a FILE**: a directory is rejected as
+a usage error at start-up, because `mv` into a directory succeeds and used to leave an untracked `base.staged`
+inside it while reporting `RESULT: OK` (see "A re-opened write defect" at the end of this document). Regenerate
+**last**, after all test-adding work for a milestone has landed; a baseline regenerated mid-milestone is stale
+before it is committed, which is the defect this note exists to describe. A regeneration that *lowers* a module's
+figure is a real signal — check why that module shrank before accepting the diff.
 
 Skip-reason policy (case-insensitive, applied to **every** skip, recorded exactly by a hook inside the unittest
 process rather than scraped from output):
@@ -214,9 +227,70 @@ process rather than scraped from output):
   filesystem (three `need_ci` tests in `test_dashboard`, one in `test_scripts`), whose reasons name no package.
   Four is the figure to expect on Linux; see "Filesystem-case skips: **4** on Linux" above for why the
   case-sensitive-APFS stand-in rows show 1.
+- **Optional-developer-tool skips** (reason matches ``optional developer tool `<name>` is not on PATH``): the
+  second category that legitimately names no package, treated exactly like the first — allowed in every mode, at
+  most 4 (`POLICY:TOOL_CAP`), and excluded from the package-skip floor, the torch cap and the baseline in
+  **generation as well as comparison**. **One** test skips this way: the behavioural half of the fatal-`ruff`
+  guarantee (`test_ruff_correctness_findings_are_fatal_not_advisory`). See "The documented steps used to fail
+  without `ruff`" below for why the category exists and what the wording is load-bearing for.
 
 These rules are themselves tested with synthetic suites in `tests/toy_tests/test_scripts.py`, including the exact
-boundaries (50 passes / 49 fails, 12 / 13, `MIN_TESTS` inclusive).
+boundaries (50 passes / 49 fails, 12 / 13, 8 / 9 filesystem-case, 4 / 5 optional-tool, `MIN_TESTS` inclusive).
+
+### The documented steps used to fail without `ruff`, and that is why there is a second skip category
+
+The steps above were **measured failing** on a machine with no `ruff`, which is the clean clone and the CI runner
+they are written for. A test of the fatal-`ruff` behaviour carried
+`@unittest.skipUnless(shutil.which("ruff"), "ruff is not installed (optional linter)")`, and that reason names no
+package, so:
+
+```
+$ ./scripts/run_tests.sh --expect none --twice               # steps (a) and (c)
+FAIL: POLICY:NONE_REASON skip reason does not say a package is missing:
+  toy_tests.test_scripts.TestLintPolicy.test_ruff_correctness_findings_are_fatal_not_advisory
+  :: 'ruff is not installed (optional linter)'
+RESULT: FAIL
+
+$ ./scripts/run_tests.sh --expect torch --twice              # step (d)
+FAIL: POLICY:TORCH_MODE_MISSING torch expected but skipped as missing: ... :: 'ruff is not installed ...'
+RESULT: FAIL
+```
+
+| documented step | clean machine, no `ruff` (before) |
+|---|---|
+| (a) `--expect none --twice` | **FAIL** `POLICY:NONE_REASON` |
+| (b) `--expect any --twice` | unaffected (`NONE_REASON` sits inside `if mode == "none":`) |
+| (c) bare venv + `--expect none` | **FAIL**, same path |
+| (d) `--expect torch --twice` | **FAIL** `POLICY:TORCH_MODE_MISSING` (the reason says "not installed"; `requirements-dev.txt` installs pytest and pyyaml, not `ruff`) |
+
+`ruff` is named in no requirements file, no `constraints.txt`, no CI step and no documented command; **nothing in
+this kit installs it.** The bareness probe in the Steps (`for m in torch numpy pytest yaml`) cannot see it either,
+and deliberately still does not: `ruff` is not an optional *dependency* of the kit, so its absence must not be
+something the reader has to check. The defect was therefore **invisible on any machine that had `ruff`**, which is
+why two independent measurements — including the one that introduced it — both read `OK (skipped=89)`. It
+falsified the first line of this document ("needs only Python 3.12 or newer") and `README.md`'s "use it only on a
+bare interpreter" in exactly the environments those sentences are about.
+
+**The policy was right; the reason was wrong.** The fix follows the filesystem-case precedent already in the
+script rather than inventing a parallel mechanism: a named category, with its own `POLICY:` token, a cap, and the
+same exclusions. Three things about it are load-bearing:
+
+- The phrase is **structured**, not a password: the tool is named in backticks and the whole phrase must match, so
+  prose that merely sounds like it ("optional linter absent") gets no exemption and still fails `POLICY:NONE_REASON`.
+- It says **"is not on PATH", not "is not installed"**. Torch mode's deny list reads *every* skip, tool skips
+  included, so a reason that also claims a package is missing is still rejected — the category cannot launder
+  `torch not installed` past `--expect torch`. That is the same rule the filesystem-case category has.
+- The baseline exclusion applies to **generation**, not only comparison. `scripts/test_baseline.txt` records a
+  bare-skip column per module; without the generation-side exclusion a machine without `ruff` would record one
+  more skip for `toy_tests.test_scripts` than a machine with it, and the committed file would depend on whose
+  laptop last ran `--update-baseline`.
+
+**What a skip here costs, stated plainly:** on a machine without `ruff` the *behavioural* half of the fatal-`ruff`
+guarantee is not measured — the run says so, by name, in the skip list. The *structural* half
+(`test_lint_script_makes_ruff_correctness_fatal_structurally`) never skips and fails everywhere if anyone removes
+`FAIL=1` from the `ruff` branch of `scripts/lint.sh`, which is the regression that let an undefined `Any` ship. A
+structural assertion cannot show that `ruff` runs, or that `E9,F63,F7,F82` are the right rules; that is what the
+skipped test is for, and declaring the gap is the point of the category.
 
 ## Interpreting skips
 
@@ -316,6 +390,26 @@ the host):
   `/etc/protocols` — which originate no traffic; `gethostbyname` and `getfqdn`, which do resolve, are patched,
   so `gethostbyname(gethostname())` is still blocked) and `send`, `sendall`, `sendfile`, `accept` (reachable
   only through a `connect`/`bind`/`listen` that is patched).
+  Plus one **Linux-only** name, `sendmsg_afalg`, which was a real hole in the family enumeration and is **not
+  a measured observation on Linux** — see the next bullet.
+- **`sendmsg_afalg`: found by reading, never executed here.** `socket.socket.sendmsg_afalg` exists only on Linux
+  (typeshed declares it under `if sys.platform == "linux"`), `socket.socket.__mro__` includes `_socket.socket`
+  so `dir()` reaches it, and the test's `send\w*` pattern matches it. So on Linux — and only there — it joined the
+  enumerated family while being in neither patch tuple nor the disclosure, and
+  `test_every_family_member_is_either_patched_or_disclosed` would have failed with
+  `unaccounted == ['sendmsg_afalg']`. On macOS the family has exactly 10 socket-method members and the test's
+  anti-vacuity floor is `>= 10`, so nothing here could see it. **This was reasoned from the source, not run: no
+  Linux was available** (see "Real Linux behaviour ... has never been observed"), and the floor is now also
+  backed by the four member names it used to pin only by count.
+  It is **disclosed rather than patched** because it is not an egress path: it is valid only on a socket in the
+  `AF_ALG` family — the Linux kernel *crypto* socket family, whose addresses are algorithm names such as
+  `("hash", "sha256")` rather than host/port pairs — and its extra arguments (`op`, `iv`, `assoclen`, `flags`)
+  are cipher parameters, not addressing. An `AF_ALG` socket has no network peer, no route and no interface; its
+  only correspondent is the local kernel. On an `AF_INET` socket it raises, and the `AF_INET` path is
+  `socket.sendmsg`, which **is** patched. Patching it would also mean `setattr`-ing a name onto `socket.socket`
+  that does not exist on macOS, putting a `_BLOCK_SOCKET` member outside the live family; and the enumeration is
+  deliberately **not** made platform-aware, because enumerating from the live module is the mechanism that
+  stopped this guard from being patched one reviewer-tested name at a time.
 - Anything that opens a socket without going through the patched `socket`-module functions and methods — the
   guard is a tripwire on names, not a sandbox.
 
@@ -386,7 +480,8 @@ any bare reference to `eval`/`exec` other than the two allow-listed literal call
 non-stdlib import; and any attribute named like `system`, `popen`, `fork`, `exec*`, `spawn*`, `posix_spawn*`,
 `import_module`, `resolve_name`, `runsource`, `run_module`, `run_path`, `load_module`, `exec_module`,
 `FunctionType`, `CodeType`, `addsitedir`, `getnode`, `uuid1`, `browse`, `listen`, `testmod`,
-`ProcessPoolExecutor`, `attrgetter`, `methodcaller`, `load_extension`, `check_output` — on any base object, so
+`ProcessPoolExecutor`, `attrgetter`, `methodcaller`, `load_extension`, `check_output`, `get_type_hints`,
+`getattr_static`, `breakpointhook` — plus the bare builtin `breakpoint` — on any base object, so
 `import os as o; o.system(...)`, `f = os.system` and `builtins.exec(...)` are caught — plus
 `from <anything> import <one of those names>` and `from x import *`.
 
@@ -422,7 +517,23 @@ closed too, because they are the same shape as `pkgutil.resolve_name` (a static 
 cost one name each. This class was reported as **not** part of the failing criterion, and was closed because it
 was cheap; chasing completeness is explicitly not the goal.
 
+**Three more were reported, agreed to be outside any failing criterion, and closed anyway because they cost one
+name each.** Each *executed a shell command* and linted with `0 error(s)`, and none of them uses
+`eval`/`exec`/`compile`/`getattr`/`__dict__`/`vars`/`getmembers`:
+- `typing.get_type_hints(f)` where `f`'s **return annotation is the string**
+  `"__import__('os').system('echo pwned')"` — a string literal **evaluated** with no `eval` token in the file;
+- `inspect.getattr_static(os, "system")("…")` — returns the function with no attribute access the blocklist can
+  see, the same shape and the same power as `pkgutil.resolve_name`;
+- `sys.breakpointhook("…")` with `PYTHONBREAKPOINT=os.system`, and the bare builtin `breakpoint()`, which reaches
+  `pdb` — a module named in the blocked `PROC` set — through **no import at all**.
+
+These are hygiene, closed because they were cheap. **Chasing completeness is explicitly not the goal, and the
+list below is not an enumeration of everything that still passes** — it is what was checked and left.
+
 **Still not covered** (checked, and left uncovered deliberately — extending a tripwire forever is not the goal):
+- **String annotations and every other place a name is spelled as data rather than as code.** `get_type_hints`
+  is now named, so the demonstrated form is caught, but the **class** is open: any other standard-library
+  function that evaluates a string it is handed is a fresh instance of it.
 - Reflection through a **mapping** rather than an attribute: `vars(os)["system"]`, `os.__dict__["system"]`,
   `dict(inspect.getmembers(os))["system"]`. All three pass, all three are a plain static call with a literal
   string, and all three are a different shape from the attribute blocklist. Left open on purpose: banning the
@@ -483,9 +594,55 @@ This is hygiene, not a sandbox; the runtime socket guard is a second, partial la
   that do not depend on which packages are installed (a skipped test still starts, so it is still counted). The
   mode's behaviour is exercised by the synthetic-suite tests, not by a full real-suite run in this environment.
 - The script tests (see test collection for the count; `scripts/test_baseline.txt` records 13 modules) take one
-  to two minutes because they run the scripts on synthetic suites and trees — 92 s for the 110 tests of
-  `tests/toy_tests/test_scripts.py` measured serially on this host, and longer under any concurrent load. Do
-  not read a figure here as current; the point is the order of magnitude and that it grows with the module.
+  to two minutes because they run the scripts on synthetic suites and trees — **112 s for the 128 tests of
+  `tests/toy_tests/test_scripts.py`** on the host interpreter, and **117 s for the same 128 on a bare
+  `venv --without-pip` 3.12.4**, both measured serially at the commit that closed the third SR-15 FAIL, and
+  longer under any concurrent load. (The previous figure here, "92 s for the 110 tests", was hedged against a
+  live count of 111; the count is read off a run now rather than typed.) Do not read a figure here as current;
+  the point is the order of magnitude and that it grows with the module.
+  That bare, no-`ruff` run gives **6 skips in this module**: 4 need pytest, 1 needs PyYAML, 1 is the
+  optional-developer-tool skip — so its **baseline skip column is 4**, which is the figure excluding PyYAML,
+  filesystem-case and tool skips, and it is the same number on a machine that has `ruff`.
+- **Four `POLICY:` tokens were emitted by `scripts/run_tests.sh` and asserted by no test at all** —
+  `BASELINE_WRITE`, `RECORDER`, `SKIP_RECORD` and `PYTEST_FAILED` — which is how the directory-destination write
+  above slipped past review: it fell into an unasserted branch. The first three were found by review; the fourth
+  was found by the coverage check below, and is the sharpest of them, because a run in which pytest goes red
+  while unittest stays green is exactly the case a reader would otherwise call a pass. Each now has a test that
+  drives the branch, the `BASELINE_WRITE` one by creating the directory *during* the run, which is the only
+  input the start-up check cannot see. A token-coverage check
+  (`test_every_policy_token_is_asserted_by_some_test`) now fails if any `POLICY:` token the script can print is
+  not named in a non-docstring string literal of `tests/toy_tests/test_scripts.py`, so the next one cannot be
+  added unasserted. It is a staleness tripwire, not a measurement: it cannot show that the assertion drives the
+  branch, only that somebody reached for the token.
+
+## A re-opened write defect: the staged baseline and a directory destination
+
+`--update-baseline` stages the new baseline and the shell moves it into place only if the whole run ends
+`RESULT: OK`. That design is sound and unchanged. What it did **not** check was that the destination is a file:
+
+```
+$ MIN_TESTS=1 MIN_NONE_SKIPS=1 ./scripts/run_tests.sh --expect none \
+      --tests-dir <synth> --baseline scripts --update-baseline
+baseline staged for .../scripts (1 modules); it is written only if this run ends RESULT: OK
+baseline written: .../scripts ( modules)
+RESULT: OK      exit=0
+$ git status --porcelain
+?? scripts/base.staged          # untracked, and not in .gitignore
+```
+
+`mv file dir` **succeeds** — it drops the file inside — so a user who asked for a baseline somewhere got an
+untracked junk file **inside the repository**, reported as `RESULT: OK`, in a kit whose `demo.py` carries an
+inode-identity guard precisely so that nothing can write there. The same shape as the `--baseline none` defect
+(D1). The only hint was the empty `( modules)`: the count came from `$(grep -cv '^#' "$BASELINE" || true)`, read
+*after* the move from a path that was not a file, and `|| true` discarded both grep's status and its
+"Is a directory" message. The comparison branch was broken by the same input differently —
+`os.path.exists(base)` is true for a directory, so `open(base)` raised `IsADirectoryError` and the run died with
+a traceback and no `POLICY:` token at all.
+
+Now: a directory destination is a **start-up usage error** (`exit 2`, before the suite runs, covering both
+branches); a directory that appears at that path *during* the run is caught at write time as
+`POLICY:BASELINE_WRITE` with the staged file left where it is; and the module count is taken from the staged file
+*before* the move, with an explicit `0` fallback instead of `|| true`, so the count can no longer be empty.
 
 ## What CI does
 

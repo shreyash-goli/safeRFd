@@ -4,8 +4,12 @@ TOY ONLY. Every number produced here is a property of the scorer on a fixture wh
 construction (oracle / degrader / identity) or of hand-computed statistics. None is a result about the toy
 method, and none says anything about RFdiffusion or any real model. The protocol's actual experiment (the
 erasure arm E scored as a study) is deliberately NOT run here."""
+import ast
 import dataclasses
+import hashlib
+import inspect
 import itertools
+import json
 import math
 import random
 import sys
@@ -2478,6 +2482,479 @@ class RecordsAndRecompute(unittest.TestCase):
                 bm.JointResult(**{**fields, "gates": gates})
         with self.assertRaises(TypeError):
             bm.HypothesisResult("H1", o.h1.components, verdict=V.SUPPORTED)   # verdicts are derived, not supplied
+
+
+# ====================================================================== SR-15 round 4
+# The three rounds this file now pins against, in order, because the SHAPE repeated and only the
+# location moved: (R2, dashboard) `_interval` gated on `is_measured` while `_metric_cell` checked
+# the value, fixed by a shared helper across a HAND-LISTED set of consumers; (R3, dashboard) two
+# consumers of `pair.n` disagreed and a forged `n` bought a decisive verdict -- the enumeration was
+# ASSERTED, not performed; (R3, benchmark) `IntervalPair._bound` closed the LEFT operand of
+# `lo > margin` and left the RIGHT one (the stored `margin`) on the identical `is_measured`-only
+# gate. Every one of the three was missed by a test that checked an INTERMEDIATE and never asked
+# what was concluded, so every forgery below asserts the verdict AND the reasons tuple.
+_SRC_FILES = {"benchmark": Path(bm.__file__), "robustness": Path(bm.__file__).with_name("robustness.py")}
+
+# The ONLY functions allowed to reach a `value` / `is_measured` field, by the `getattr`-with-a-string
+# form. This list names the READERS, not the reads -- the reads are derived from the source below, which
+# is the whole point. The test asserts each of these exists and actually contains such an access, so a
+# stale name here fails rather than silently widening the rule.
+_DECLARED_READERS = {"_metric_read", "_metric_declared_unmeasured", "_enum_value"}
+
+
+def _attribute_reads(src):
+    """Every `<expr>.value` / `<expr>.is_measured` attribute access in `src`, as (lineno, text)."""
+    return sorted((n.lineno, ast.unparse(n)) for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.Attribute) and n.attr in ("value", "is_measured"))
+
+
+def _getattr_reads(src):
+    """Every `getattr/setattr/vars(x, "value"|"is_measured", ...)` call, as (enclosing function, text).
+
+    Checked as well as the attribute form because otherwise the rule is trivially evaded by spelling
+    the same read through `getattr`, which is precisely how the three declared readers do it."""
+    tree = ast.parse(src)
+    owner = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for sub in ast.walk(fn):
+                owner.setdefault(id(sub), fn.name)
+    out = []
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id in ("getattr", "setattr", "vars", "__getattribute__")
+                and len(n.args) > 1 and isinstance(n.args[1], ast.Constant)
+                and n.args[1].value in ("value", "is_measured")):
+            out.append((owner.get(id(n), "<module>"), ast.unparse(n)))
+    return sorted(out)
+
+
+class TheCheckedReaderIsTheOnlyWayToReadAStoredMetric(unittest.TestCase):
+    """SR-15 round 4, and the answer to "how is a future reader PREVENTED from adding an unchecked read".
+
+    `MetricValue.is_measured` is only `value is not None`, so every consumer that gates on it accepts a
+    post-hoc forged `inf`, `nan`, `True`, `"0"` or `[]` as a number. Rounds 2 and 3 each fixed the
+    consumers they were looking at and kept a hand-maintained list of them; both lists were incomplete
+    within one round. This class replaces the list with a DERIVATION: it parses the two modules and
+    fails on the FIRST attribute access named `value` or `is_measured`, anywhere, with no allowlist of
+    consumers at all. The permitted spelling is `getattr` with a string literal, confined to the three
+    declared reader functions, so a new consumer physically cannot read a stored metric without going
+    through `_metric_read` and having the suite stay green."""
+
+    def test_no_attribute_access_named_value_or_is_measured_exists_in_either_module(self):
+        for name, path in _SRC_FILES.items():
+            found = _attribute_reads(path.read_text())
+            self.assertEqual(found, [], f"{name}.py has {len(found)} unchecked metric reads: {found}; "
+                                        "read stored metrics with _metric_read / _metric_ok / "
+                                        "_metric_required / _metric_count / _metric_strict, and an Enum "
+                                        "payload with robustness._enum_value")
+
+    def test_the_getattr_spelling_is_confined_to_the_three_declared_readers(self):
+        seen = set()
+        for name, path in _SRC_FILES.items():
+            for fn, text in _getattr_reads(path.read_text()):
+                self.assertIn(fn, _DECLARED_READERS, f"{name}.py: {text} in {fn}() evades the rule by "
+                                                     "spelling the read through getattr")
+                seen.add(fn)
+        self.assertEqual(seen, _DECLARED_READERS,
+                         "a declared reader no longer contains such an access: the list is stale, which "
+                         "would silently widen the rule")
+        self.assertEqual(len(_DECLARED_READERS), 3)
+        for fn in ("_metric_read", "_metric_declared_unmeasured"):
+            self.assertTrue(callable(getattr(bm, fn)), fn)
+        from toy import robustness as rb_
+        self.assertTrue(callable(rb_._enum_value))
+
+    def test_the_rule_can_fail_and_says_where(self):
+        """THE PIN'S OWN PROOF. Both checks are run against deliberately mutated source text, so this
+        class cannot be the kind of test that passes because it never looks at anything."""
+        src = _SRC_FILES["benchmark"].read_text()
+        reinstated = src.replace("        mg = _metric_required(r.metrics[\"margin\"], f\"{tag}: margin\")",
+                                 "        mg = r.metrics[\"margin\"].value", 1)
+        self.assertNotEqual(reinstated, src, "the anchor for the mutation is gone; update this test")
+        ast.parse(reinstated)
+        self.assertEqual([t for _, t in _attribute_reads(reinstated)], ["r.metrics['margin'].value"])
+        dodged = src.replace("def _check_margin(v: Any, what: str) -> float:",
+                             "def _sneak(m):\n    return getattr(m, 'value', None)\n\n\n"
+                             "def _check_margin(v: Any, what: str) -> float:", 1)
+        ast.parse(dodged)
+        self.assertIn(("_sneak", "getattr(m, 'value', None)"), _getattr_reads(dodged))
+        self.assertNotIn("_sneak", _DECLARED_READERS)
+
+    def test_the_readers_agree_with_metricvalues_own_construction_rule(self):
+        """Not vacuous, and not over-refusing: `_metric_read` accepts exactly what `MetricValue`
+        accepts at construction, and refuses exactly what only `object.__setattr__` can install."""
+        for good in (0.0, -0.0, 5e-324, -5e-324, 1.7976931348623157e308, -1.0, 0.1):
+            mv = MetricValue.measured(good)
+            self.assertEqual(bm._metric_read(mv), mv.value, repr(good))
+            self.assertTrue(bm._metric_ok(mv), repr(good))
+            self.assertEqual(bm._metric_required(mv, "x"), mv.value)
+        for bad in (math.inf, -math.inf, math.nan, 0, 1, -3, True, False, "0", "", "nan", [], [0.1], {},
+                    (), None, object(), 10**400, bytearray(b"1")):
+            mv = MetricValue.measured(1.0)
+            object.__setattr__(mv, "value", bad)
+            self.assertIsNone(bm._metric_read(mv), repr(bad))
+            self.assertFalse(bm._metric_ok(mv), repr(bad))
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                bm._metric_required(mv, "x")
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                bm._metric_count(mv, "x")
+            with self.assertRaises(ValueError, msg=repr(bad)):   # forged, not honestly absent
+                bm._metric_strict(mv, "x")
+        self.assertIsNone(bm._metric_read(None))
+        self.assertIsNone(bm._metric_read(object()))
+        # the honest-absence seam `_metric_strict` turns on
+        unm = MetricValue.unmeasured("why")
+        self.assertTrue(bm._metric_declared_unmeasured(unm))
+        self.assertIsNone(bm._metric_strict(unm, "x"))
+        self.assertIsNone(bm._metric_strict(None, "x"))
+        self.assertFalse(bm._metric_declared_unmeasured(None))
+        self.assertFalse(bm._metric_declared_unmeasured(MetricValue.measured(1.0)))
+        # counts: integral and nonnegative, and `True` is not 1
+        self.assertEqual(bm._metric_count(MetricValue.measured(30.0), "x"), 30)
+        for bad in (30.5, -1.0, -0.5):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                bm._metric_count(MetricValue.measured(bad), "x")
+
+    def test_enum_value_is_not_a_back_door_to_a_metric(self):
+        from toy import robustness as rb_
+        self.assertEqual(rb_._enum_value(bm.Verdict.SUPPORTED), "SUPPORTED")
+        for not_an_enum in (MetricValue.measured(1.0), MetricValue.unmeasured("x"), 1.0, None, object()):
+            with self.assertRaises(ValueError, msg=repr(not_an_enum)):
+                rb_._enum_value(not_an_enum)
+
+
+class NoForgedStoredMetricBuysABetterVerdict(unittest.TestCase):
+    """SR-15 D1-D5, pinned by ENUMERATING the metrics a record actually carries rather than listing the
+    ones we happened to think of. The honest study is the global degrader: a measured, correct
+    JOINT_UNSUPPORTED (h1 SUPPORTED, h2 UNSUPPORTED, h3 UNSUPPORTED). Mutant M31 -- deleting the
+    `margin` check outright -- survived all 313 tests before this class existed, because the only
+    margin-forgery test used `margin=9.0` and asserted the UNFAVOURABLE direction. Here every forged
+    value is driven in BOTH directions and the assertion is on the verdict and the reasons tuple."""
+    TS = "2025-01-02T03:04:05Z"
+    BIG = sys.float_info.max
+    # forged values reachable with no `object.__setattr__` at all (MetricValue accepts any finite float)
+    LEGAL = (BIG, -BIG, 1e300, -1e300, 1e9, -1e9, 0.0, 30.5)
+    # forged values needing `object.__setattr__`, i.e. route (b) of the module's own threat model
+    RAW = (math.inf, -math.inf, math.nan, True, False, 1, 0, "1.0", "", [1.0], {}, None, object())
+
+    @classmethod
+    def setUpClass(cls):
+        cls.res = bm.run_study(FZ, bm.fixture_global_degrader(0.5), subject="d",
+                               registered_digest=FZ.digest, cfg=SMALL)
+        cls.recs = bm.to_experiment_records(cls.res, study_id="f", base_seed=7, timestamp_utc=cls.TS)
+
+    def honest(self):
+        rv = bm.verdict_from_records(self.recs, SMALL)
+        self.assertEqual((rv.joint, rv.h1, rv.h2, rv.h3),
+                         (J.JOINT_UNSUPPORTED, V.SUPPORTED, V.UNSUPPORTED, V.UNSUPPORTED))
+        self.assertEqual(rv.reasons, ())
+        return rv
+
+    def _forged(self, tag, key, val, raw):
+        out = []
+        for r in self.recs:
+            if r.name.rsplit("/agg/", 1)[1] == tag:
+                if raw:
+                    mv = MetricValue.measured(1.0)
+                    object.__setattr__(mv, "value", val)
+                else:
+                    mv = MetricValue.measured(val)
+                r = dataclasses.replace(r, metrics={**r.metrics, key: mv})
+            out.append(r)
+        return out
+
+    def test_every_metric_every_record_carries_is_forged_and_none_buys_a_verdict(self):
+        """THE ENUMERATION IS PERFORMED, NOT ASSERTED: the key set comes from `rec.metrics` itself, so a
+        metric added to `_agg_metrics` later is covered automatically and an unchecked new consumer of it
+        fails here without anyone remembering to extend a list."""
+        self.honest()
+        tags = sorted(r.name.rsplit("/agg/", 1)[1] for r in self.recs)
+        self.assertEqual(tags, sorted(["H1", "H2", "H3a", "H3b", "H3a_conv", "H3b_conv", "JOINT"]))
+        n_cases, carved = 0, 0
+        for rec in self.recs:
+            tag = rec.name.rsplit("/agg/", 1)[1]
+            self.assertTrue(rec.metrics, tag)
+            for key in sorted(rec.metrics):
+                for val, raw in [(v, False) for v in self.LEGAL] + [(v, True) for v in self.RAW]:
+                    n_cases += 1
+                    if (key == "margin" and not raw and isinstance(val, float)
+                            and abs(val) <= bm.MARGIN_MAX):
+                        # THE ONE CARVE-OUT, and it is the documented honest limit rather than an
+                        # oversight: a WITHIN-BOUNDS margin is a legal protocol parameter, margins are
+                        # producer-asserted, and `_check_margin` bounds magnitude only -- so such a cell
+                        # is EXPECTED to be able to move a verdict. It is measured, in both directions,
+                        # by `AMarginIsBoundedWhereverOneEnters`. The count is pinned below so the
+                        # carve-out cannot silently grow to cover a future unchecked read.
+                        carved += 1
+                        continue
+                    recs = self._forged(tag, key, val, raw)
+                    why = f"{tag}.{key} := {val!r} (raw={raw})"
+                    try:
+                        rv = bm.verdict_from_records(recs, SMALL)
+                    except ValueError:
+                        continue            # refusing loudly is the fail-closed outcome
+                    # no forgery may reach a favourable joint verdict ...
+                    self.assertIsNot(rv.joint, J.JOINT_SUPPORTED, why)
+                    # ... nor turn either genuinely UNSUPPORTED hypothesis into SUPPORTED ...
+                    self.assertIsNot(rv.h2, V.SUPPORTED, why)
+                    self.assertIsNot(rv.h3, V.SUPPORTED, why)
+                    # ... and a verdict that moved at all must not look like a clean recompute
+                    if (rv.joint, rv.h1, rv.h2, rv.h3) != (J.JOINT_UNSUPPORTED, V.SUPPORTED,
+                                                           V.UNSUPPORTED, V.UNSUPPORTED):
+                        self.assertNotEqual(rv.joint, J.JOINT_SUPPORTED, why)
+        self.assertGreater(n_cases, 400, "the enumeration collapsed; it is no longer covering the metrics")
+        # 6 component records x 2 in-bounds float margins in LEGAL (0.0, 30.5); the JOINT record has no
+        # `margin` metric. If this number moves, a carve-out was widened and must be re-argued.
+        self.assertEqual(carved, 12, "the margin carve-out changed size")
+
+    def test_the_favourable_margin_direction_is_covered_in_both_signs(self):
+        """D1 PROPER. The sign that matters differs per component (`lo > margin` for H1/H3a/H3b and the
+        converged pair, `hi < margin` for H2), which is why a single-sign forgery -- the only kind the
+        pre-existing test did -- left the inverting direction untested. Signed per direction here."""
+        self.honest()
+        favourable = {"H1": -self.BIG, "H2": +self.BIG, "H3a": -self.BIG, "H3b": -self.BIG,
+                      "H3a_conv": -self.BIG, "H3b_conv": -self.BIG}
+        recs = self.recs
+        for tag, val in favourable.items():
+            recs = [dataclasses.replace(r, metrics={**r.metrics, "margin": MetricValue.measured(val)})
+                    if r.name.rsplit("/agg/", 1)[1] == tag else r for r in recs]
+        with self.assertRaisesRegex(ValueError, "MARGIN_MAX"):
+            bm.verdict_from_records(recs, SMALL)
+        # and the unfavourable direction still works as it always did (no over-refusal)
+        raised = [dataclasses.replace(r, metrics={**r.metrics, "margin": MetricValue.measured(9.0)})
+                  if r.name.endswith("/H1") else r for r in self.recs]
+        rv = bm.verdict_from_records(raised, SMALL)
+        self.assertEqual((rv.h1, rv.joint, rv.reasons), (V.UNSUPPORTED, J.JOINT_UNSUPPORTED, ()))
+
+    def test_a_forged_n_seeds_is_cross_checked_against_the_studys_own_count(self):
+        """D4. `_pair_from_record` had no check of ANY kind on `n_seeds`, and a forged count is a legal
+        float that no value test can catch -- it needs a second stored number. The JOINT record's
+        `n_seeds` is that number, and `component n <= joint n` holds by construction."""
+        self.honest()
+        for n in (1e9, 31.0, 1e300):
+            recs = self._forged("H1", "n_seeds", n, False)
+            with self.assertRaisesRegex(ValueError, "exceeds the study", msg=repr(n)):
+                bm.verdict_from_records(recs, SMALL)
+        # the error contract: nothing escapes as a raw int()/float() failure
+        for n, raw in ((math.nan, True), (None, True), (30.5, False), (-1.0, False)):
+            with self.assertRaises(ValueError, msg=repr(n)):
+                bm.verdict_from_records(self._forged("H1", "n_seeds", n, raw), SMALL)
+        # A LOWER count is honest-shaped (a series can be measured on fewer seeds than succeeded) and must
+        # stay allowed -- and must still be refused a verdict by protocol 6.1's minimum-n floor. The joint
+        # verdict stays JOINT_UNSUPPORTED because H2 and H3 are genuinely UNSUPPORTED and that outranks an
+        # INCONCLUSIVE H1; the point of the assertion is that H1 loses its verdict, not that the joint moves.
+        rv = bm.verdict_from_records(self._forged("H1", "n_seeds", 4.0, False), SMALL)
+        self.assertEqual((rv.h1, rv.joint, rv.reasons), (V.INCONCLUSIVE, J.JOINT_UNSUPPORTED, ()))
+        self.assertIsNot(rv.joint, J.JOINT_SUPPORTED)
+
+    def test_a_gate_metric_forged_to_the_bool_true_does_not_pass(self):
+        """D5. `v.value != 1.0` let `True` through, because `True == 1.0`. `GateResult.__post_init__`
+        is strict about bools; the records path was not. Pinned on a study whose gates GENUINELY fail,
+        so passing them is the thing that would change the verdict."""
+        scores = synth_scores(FZ.seeds, loss=0.9, gr=1.0)        # control_adequacy + convergence both fail
+        res = bm.analyze_scores(scores, frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+        recs = bm.to_experiment_records(res, study_id="f", base_seed=7, timestamp_utc=self.TS)
+        j = recs[-1]
+        self.assertEqual({k: v.value for k, v in j.metrics.items()
+                          if k in ("gate_control_adequacy", "gate_convergence")},
+                         {"gate_control_adequacy": 0.0, "gate_convergence": 0.0})
+        base = bm.verdict_from_records(recs, SMALL)
+        self.assertEqual((base.joint, base.h1, base.h2, base.h3),
+                         (J.JOINT_INCONCLUSIVE,) + (V.INCONCLUSIVE,) * 3)
+        for forged in (True, 1, "1", "1.0", math.inf):
+            m = dict(j.metrics)
+            for k in list(m):
+                if k.startswith("gate_"):
+                    mv = MetricValue.measured(1.0)
+                    object.__setattr__(mv, "value", forged)
+                    m[k] = mv
+            rv = bm.verdict_from_records(recs[:-1] + [dataclasses.replace(j, metrics=m)], SMALL)
+            self.assertEqual((rv.joint, rv.h1, rv.h2, rv.h3),
+                             (J.JOINT_INCONCLUSIVE,) + (V.INCONCLUSIVE,) * 3, repr(forged))
+        # the honest float 1.0 must still pass, or the fix is vacuous
+        ok = bm.to_experiment_records(oracle(), study_id="f", base_seed=7, timestamp_utc=self.TS)
+        self.assertEqual(bm.verdict_from_records(ok, SMALL).joint, J.JOINT_SUPPORTED)
+
+    def test_a_forged_ci_level_cannot_slip_past_the_alpha_cross_check(self):
+        """D2. `abs(lv.value - want_level) > 1e-12` is False for `nan`, so a forged `nan` silently
+        disabled the cross-check the docstring credits with pinning `alpha`."""
+        for bad in (math.nan, math.inf, -math.inf, True, "0.9875", None, []):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                bm.verdict_from_records(self._forged("H1", "ci_level", bad, True), SMALL)
+        self.assertEqual(bm.verdict_from_records(self.recs, SMALL).joint, J.JOINT_UNSUPPORTED)
+
+
+class ForgedGateInputsCannotTurnAFailedGateIntoAPass(unittest.TestCase):
+    """SR-15 D3. `evaluate_gates` read `s.metrics[...].value` into a list and gated on
+    `any(v is None)`, which is the `is_measured` test by another spelling. Honest
+    `E_loss_ratio = 0.9` fails gate 11(c) (`max(rs) > 1/loss_factor`) and honest
+    `conv_grad_ratio = 1.0` fails gate 12 (`max(grs) <= tau_conv`); a forged `-inf` made BOTH pass,
+    which took the whole study from JOINT_INCONCLUSIVE to JOINT_SUPPORTED."""
+
+    def _scores(self):
+        return synth_scores(FZ.seeds, loss=0.9, gr=1.0)
+
+    def test_the_honest_values_fail_both_gates(self):
+        g = {x.name: x.passed for x in bm.evaluate_gates(self._scores(), FZ, FZ.digest, SMALL)}
+        self.assertFalse(g["control_adequacy"])
+        self.assertFalse(g["convergence"])
+
+    def test_a_forged_gate_input_cannot_make_either_gate_pass(self):
+        for bad in (-math.inf, math.inf, math.nan, True, False, 0, 1, "0", [], None, object()):
+            scores = self._scores()
+            for s in scores:
+                for k in ("E_loss_ratio", "conv_grad_ratio", "A", "F"):
+                    object.__setattr__(s.metrics[k], "value", bad)
+            g = {x.name: x.passed for x in bm.evaluate_gates(scores, FZ, FZ.digest, SMALL)}
+            self.assertFalse(g["control_adequacy"], repr(bad))
+            self.assertFalse(g["convergence"], repr(bad))
+            # the conclusion, not just the intermediate: the study must not become favourable
+            res = bm.analyze_scores(scores, frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+            self.assertIs(res.verdict, J.JOINT_INCONCLUSIVE, repr(bad))
+            self.assertIsNot(res.h1.verdict, V.SUPPORTED, repr(bad))
+            recs = bm.to_experiment_records(res, study_id="f", base_seed=7, timestamp_utc="2025-01-02T03:04:05Z")
+            rv = bm.verdict_from_records(recs, SMALL)
+            self.assertIs(rv.joint, J.JOINT_INCONCLUSIVE, repr(bad))
+
+    def test_the_honest_passing_study_still_passes(self):
+        g = {x.name: x.passed for x in bm.evaluate_gates(synth_scores(FZ.seeds), FZ, FZ.digest, SMALL)}
+        self.assertTrue(g["control_adequacy"])
+        self.assertTrue(g["convergence"])
+
+
+class AMarginIsBoundedWhereverOneEnters(unittest.TestCase):
+    """SR-15: the `Margins` bounding decision, and the proof that the bound is applied at the single
+    point where a margin is USED rather than at a remembered set of call sites.
+
+    DECIDED: bound MAGNITUDE, not sign. The vacuous direction differs per field -- H1/H3 compare
+    `lo > margin` so a very negative margin is vacuous, H2 compares `hi < margin` so a very positive
+    one is -- and a negative `delta_R` ("the retention loss must be an improvement") is a legitimately
+    STRICTER test. `MARGIN_MAX` is arbitrary and is NOT a protocol parameter; see `_check_margin`.
+    STATED AS A LIMIT, NOT A CLOSURE: `Margins(-1e6, +1e6, -1e6)` is within bounds and still decides
+    every component before the data is seen, and the test below MEASURES that rather than hiding it."""
+
+    def test_margin_max_is_pinned_by_value_and_type(self):
+        self.assertEqual(bm.MARGIN_MAX, 1e6)
+        self.assertIsInstance(bm.MARGIN_MAX, float)
+        self.assertNotIn("MARGIN_MAX", {f.name for f in dataclasses.fields(bm.BenchmarkConfig)})
+
+    def test_every_entry_point_for_a_margin_applies_the_same_bound(self):
+        pair = bm.summarize("S", [0.5 + 0.01 * i for i in range(30)], bm.bonferroni_level(0.05, 4), 200, 7)
+        over = (sys.float_info.max, -sys.float_info.max, 1e6 + 1, -(1e6 + 1), math.inf, -math.inf,
+                math.nan, True, False, "0.1", None, [0.1])
+        for bad in over:
+            with self.assertRaises(ValueError, msg=f"Margins {bad!r}"):
+                bm.Margins(delta_S=bad)
+            with self.assertRaises(ValueError, msg=f"Margins delta_R {bad!r}"):
+                bm.Margins(delta_R=bad)
+            with self.assertRaises(ValueError, msg=f"Margins delta_sel {bad!r}"):
+                bm.Margins(delta_sel=bad)
+            with self.assertRaises(ValueError, msg=f"interval_verdict {bad!r}"):
+                bm.interval_verdict(pair, bad, "greater")
+            with self.assertRaises(ValueError, msg=f"_verdict_from_bounds {bad!r}"):
+                bm._verdict_from_bounds(30, (0.4, 0.6), (0.4, 0.6), bad, "greater", 30, 0.25)
+            with self.assertRaises(ValueError, msg=f"ComponentResult {bad!r}"):
+                bm.ComponentResult("S", "greater", bad, pair, 30, 0.25)
+        # and through the record path, where the margin is a stored metric
+        recs = bm.to_experiment_records(oracle(), study_id="f", base_seed=7, timestamp_utc="2025-01-02T03:04:05Z")
+        for bad in (sys.float_info.max, -sys.float_info.max, 1e6 + 1):
+            forged = [dataclasses.replace(r, metrics={**r.metrics, "margin": MetricValue.measured(bad)})
+                      if r.name.endswith("/H1") else r for r in recs]
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                bm.verdict_from_records(forged, SMALL)
+
+    def test_the_bound_does_not_over_refuse_a_legitimate_margin(self):
+        pair = bm.summarize("S", [0.5 + 0.01 * i for i in range(30)], bm.bonferroni_level(0.05, 4), 200, 7)
+        for good in (0.0, -0.0, 0.05, 0.1, 1, -1, 5.0, -5.0, 1e6, -1e6, 5e-324):
+            bm.Margins(delta_S=good, delta_R=good, delta_sel=good)
+            bm.interval_verdict(pair, good, "greater")
+            bm.ComponentResult("S", "greater", good, pair, 30, 0.25)
+        # an int margin still works (the dashboard pins this too) and sign is deliberately unbounded
+        self.assertEqual(bm.Margins(delta_S=1, delta_R=1, delta_sel=1).delta_S, 1)
+        self.assertEqual(bm.Margins(delta_R=-0.02).delta_R, -0.02)
+        self.assertIs(bm.interval_verdict(pair, 0.1, "greater")[0], V.SUPPORTED)
+
+    def test_the_within_bounds_vacuous_margin_is_measured_and_documented_not_claimed_closed(self):
+        """The honest limit. A legal `Margins(-1e6, +1e6, -1e6)` inverts a measured JOINT_UNSUPPORTED
+        with a BYTE-IDENTICAL config_hash and `reasons = ()`. The old illustration (`delta_S=5.0,
+        delta_R=-5.0`) only showed the SAFE direction, which understated the gap badly."""
+        honest = bm.run_study(FZ, bm.fixture_global_degrader(0.5), subject="d",
+                              registered_digest=FZ.digest, cfg=SMALL)
+        vacuous = bm.run_study(FZ, bm.fixture_global_degrader(0.5), subject="d",
+                               registered_digest=FZ.digest, cfg=SMALL,
+                               margins=bm.Margins(-1e6, 1e6, -1e6))
+        self.assertIs(honest.verdict, J.JOINT_UNSUPPORTED)
+        self.assertIs(vacuous.verdict, J.JOINT_SUPPORTED)
+        self.assertEqual(honest.config_hash, vacuous.config_hash)        # byte-identical provenance
+        rv = bm.verdict_from_records(bm.to_experiment_records(
+            vacuous, study_id="f", base_seed=7, timestamp_utc="2025-01-02T03:04:05Z"), SMALL)
+        self.assertIs(rv.joint, J.JOINT_SUPPORTED)
+        self.assertEqual(rv.reasons, ())                 # indistinguishable from a clean recompute
+        # the safe direction the superseded illustration showed, kept so the contrast is on the record
+        safe = bm.run_study(FZ, bm.fixture_global_degrader(0.5), subject="d", registered_digest=FZ.digest,
+                            cfg=SMALL, margins=bm.Margins(delta_S=5.0, delta_R=-5.0, delta_sel=5.0))
+        self.assertIs(safe.verdict, J.JOINT_UNSUPPORTED)
+
+    def test_the_three_falsified_statements_are_corrected_where_a_reader_looks(self):
+        mg = " ".join(bm.Margins.__doc__.split())
+        self.assertNotIn("So the margin a recompute uses is always the margin that produced the record", mg)
+        for needle in ('USED TO CLAIM "so the margin a recompute uses is always the margin that produced '
+                       'the record", which was FALSE',
+                       "a PROVENANCE argument offered as a VALIDITY argument",
+                       "`Margins(-1e6, +1e6, -1e6)`",
+                       "margins remain PRODUCER-ASSERTED"):
+            self.assertIn(needle, mg)
+        vd = " ".join(bm.verdict_from_records.__doc__.split())
+        self.assertNotIn("so no margin a recompute uses can come from the caller at all. ", vd + " ")
+        for needle in ("A PROVENANCE ARGUMENT OFFERED AS A VALIDITY ARGUMENT",
+                       'IT WAS ALSO CLAIMED TO "GRANT NOTHING OVER FORGING THE `gate_*` METRICS DIRECTLY", '
+                       "WHICH WAS FALSE",
+                       "it cannot make a component SUPPORTED",
+                       "The two are not equivalent"):
+            self.assertIn(needle, vd)
+        cm = " ".join(bm._check_margin.__doc__.split())
+        self.assertIn("It does NOT close, and cannot close, the legal-`Margins` route", cm)
+        self.assertIn("FOR ANY FINITE CAP", cm)
+        rd = " ".join(bm._metric_read.__doc__.split())
+        self.assertIn("`True` is an `int`", rd)
+
+
+class ConfigHashIsCanonicalNotMerelyCalledCanonical(unittest.TestCase):
+    """SR-15 D6. Mutant M19 -- dropping `sort_keys=True` from `config_hash` -- survived all 313 tests.
+    `sort_keys` is the whole content of the word "canonical": without it the hash is a function of
+    `dataclasses.asdict`'s iteration order, so a pure field REORDER (identical values) moves the hash
+    and silently breaks the `config` binding of every stored record. "Repeatability" is the literal
+    acceptance criterion for this module, so it is pinned by value here rather than by trust."""
+
+    def test_config_hash_is_invariant_under_field_reordering(self):
+        d = dataclasses.asdict(SMALL)
+        self.assertEqual(len(d), 18)
+        want = hashlib.sha256(json.dumps(d, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        self.assertEqual(SMALL.config_hash(), want)
+        for order in (list(reversed(list(d))), sorted(d, key=lambda k: (len(k), k)), sorted(d, reverse=True)):
+            shuffled = {k: d[k] for k in order}
+            self.assertEqual(set(shuffled), set(d))
+            self.assertEqual(SMALL.config_hash(), hashlib.sha256(
+                json.dumps(shuffled, sort_keys=True, separators=(",", ":")).encode()).hexdigest(), order[:2])
+
+    def test_dropping_sort_keys_really_would_change_the_hash(self):
+        """THE PIN'S OWN PROOF, so the assertion above is not satisfiable by a no-op: with `sort_keys`
+        removed, a reorder alone moves the hash. Measured 9eaf4bfefc57 -> 08d7772419c5."""
+        d = dataclasses.asdict(SMALL)
+        rev = {k: d[k] for k in reversed(list(d))}
+        unsorted_fwd = hashlib.sha256(json.dumps(d, separators=(",", ":")).encode()).hexdigest()
+        unsorted_rev = hashlib.sha256(json.dumps(rev, separators=(",", ":")).encode()).hexdigest()
+        self.assertNotEqual(unsorted_fwd, unsorted_rev)
+        self.assertEqual((unsorted_fwd[:12], unsorted_rev[:12]), ("9eaf4bfefc57", "08d7772419c5"))
+        self.assertEqual(SMALL.config_hash()[:12], "ce68ac811ac7")
+        self.assertIn("sort_keys=True", inspect.getsource(bm.BenchmarkConfig.config_hash))
+
+    def test_the_repeatability_requirement_is_stated_where_the_reader_looks(self):
+        ch = " ".join(bm.BenchmarkConfig.config_hash.__doc__.split())
+        for needle in ("CANONICAL MEANS `sort_keys=True`, and that is load-bearing",
+                       "9eaf4bfefc57 to 08d7772419c5", '"Repeatability" is the literal acceptance criterion'):
+            self.assertIn(needle, ch)
 
 
 if __name__ == "__main__":

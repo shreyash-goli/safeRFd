@@ -35,6 +35,13 @@
 #   Filesystem-case skips ("case-sensitive filesystem ...": Linux, case-sensitive APFS) are allowed in every mode, at
 #   most 8, and are not counted toward the package-skip floor, the torch cap or the baseline (they were the first
 #   observed failure of this script on a case-sensitive filesystem; see docs/CLEAN_CLONE.md).
+#   Optional-developer-tool skips ("optional developer tool `<name>` is not on PATH") are the SECOND such
+#   environment category and are treated exactly like the first: allowed in every mode, at most 4, excluded from
+#   the package-skip floor, the torch cap and the baseline -- in baseline GENERATION as well as comparison, so the
+#   recorded skip column cannot differ between a machine that has the tool and one that does not. They exist for a
+#   test whose BEHAVIOURAL half needs a linter that nothing in this kit installs (ruff); naming no package is
+#   correct for them, because no package is missing. A reason that ALSO names a package is still judged as a
+#   package skip, so the category cannot launder "torch not installed" past `--expect torch`.
 #   Skips are recorded exactly (test id + reason) by a hook in the sitecustomize shim that runs inside the
 #   unittest process only (the env var is popped, so child processes do not log), not by scraping output.
 #
@@ -108,6 +115,7 @@ if [ "$UPDATE" = 1 ] && [ "$BASELINE" = none ]; then
   echo "write a file literally named 'none' into the repository root. Pass --baseline <path>, or drop --update-baseline." >&2
   exit 2
 fi
+# (the directory check needs the RESOLVED path and so lives just after the resolution block below)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Paths are resolved HERE, after ROOT is known: the DEFAULT tests dir and baseline belong to the repo the script
@@ -120,6 +128,22 @@ if [ -z "$BASELINE" ]; then BASELINE="$ROOT/scripts/test_baseline.txt"
 elif [ "$BASELINE" != none ]; then case "$BASELINE" in /*) ;; *) BASELINE="$INVOKED_FROM/$BASELINE" ;; esac
 fi
 [ -d "$TESTS_DIR" ] || { echo "tests dir not found: $TESTS_DIR" >&2; exit 2; }
+# A DIRECTORY is not a baseline, and both branches mishandled one. `--update-baseline` ended in
+# `mv "$TMP/base.staged" "$BASELINE"`, which for a directory destination SUCCEEDS by dropping a file named
+# `base.staged` INSIDE it -- so `--baseline scripts --update-baseline` printed `RESULT: OK` and left an untracked,
+# un-gitignored `scripts/base.staged` in the repository, the D1 shape again (the only hint was an empty
+# `( modules)`, because the count came from `$(grep -cv '^#' "$BASELINE" || true)` and the `|| true` swallowed
+# grep's "Is a directory"). The comparison branch was no better: `os.path.exists(base)` is true for a directory,
+# so `open(base)` raised IsADirectoryError and the run died with a traceback and no POLICY token at all.
+# Checked HERE, before the suite runs, so neither branch is reached and the user is not made to wait for it.
+# The write-time POLICY:BASELINE_WRITE guard further down is still needed: a directory can appear at that path
+# DURING the run, which this check cannot see.
+if [ "$BASELINE" != none ] && [ -d "$BASELINE" ]; then
+  echo "--baseline must be a FILE: $BASELINE is a directory" >&2
+  echo "With --update-baseline the staged file would be moved INSIDE it as base.staged (an untracked file in your" >&2
+  echo "tree, reported as RESULT: OK); without it, the per-module comparison cannot read it. Pass a file path." >&2
+  exit 2
+fi
 cd "$ROOT" || exit 2
 
 export PYTHONDONTWRITEBYTECODE=1
@@ -182,9 +206,20 @@ _BLOCK_SOCKET = ("connect", "connect_ex", "bind", "listen", "sendto", "sendmsg")
 #     /etc/services, /etc/protocols); they originate no traffic. gethostbyname/getfqdn, which DO resolve, are
 #     patched, so gethostbyname(gethostname()) is still blocked.
 #   send, sendall, sendfile, accept -- reachable only through a connect/bind/listen that IS patched.
+#   sendmsg_afalg -- LINUX ONLY (typeshed declares it under `if sys.platform == "linux"`, and it is absent from
+#     socket.socket on macOS, so it is invisible to the family enumeration on this host and appears on Linux).
+#     It is not an egress path: it is valid only on a socket in the AF_ALG family, the kernel CRYPTO API socket
+#     family, whose addresses are algorithm names (e.g. ("hash", "sha256")) rather than host/port pairs. An AF_ALG
+#     socket has no network peer, no route and no interface -- its only correspondent is the local kernel -- and
+#     sendmsg_afalg's extra arguments (op, iv, assoclen, flags) are cipher parameters, not addressing. Calling it
+#     on an AF_INET socket raises; the AF_INET path is socket.sendmsg, which IS patched. DISCLOSED rather than
+#     patched because patching it would mean setattr-ing a name that does not exist on macOS, which would put a
+#     member in _BLOCK_SOCKET that is outside the live family on this platform; and the enumeration is
+#     deliberately NOT made platform-aware, because enumerating from the live module is the whole mechanism that
+#     stopped this guard from being patched one reviewer-tested name at a time.
 # This is still a Python-level tripwire, not a sandbox: see the NETWORK note in the header.
 _NOT_BLOCKED = ("gethostname", "getservbyname", "getservbyport", "getprotobyname",
-                "send", "sendall", "sendfile", "accept")
+                "send", "sendall", "sendfile", "accept", "sendmsg_afalg")
 for _n in _BLOCK_MODULE:
     setattr(_s, _n, _blocked)
 for _n in _BLOCK_SOCKET:
@@ -260,10 +295,25 @@ for e in skips:
 # tests of case-variant paths cannot run. Allowed in every mode, but capped and never counted toward the floors, so
 # they cannot pad the bare-mode skip count or hide a torch test.
 FS = re.compile(r"case[- ]sensitive", re.I)
+# The SECOND environment category that legitimately names no package: an optional DEVELOPER TOOL that nothing in
+# this kit installs is absent, so a test whose behavioural half needs it cannot run. The phrase is fixed and
+# structured (the tool is named in backticks) so that arbitrary prose cannot claim the exemption, and it
+# deliberately says "is not on PATH" rather than "is not installed": the torch-mode DENY check below looks at
+# EVERY skip, tool skips included, so a reason that says a package is missing must still be rejected there. That
+# is the same anti-laundering rule the filesystem-case category has, and it is pinned by
+# test_tool_reason_cannot_launder_a_missing_package_or_torch_present.
+TOOL = re.compile(r"optional developer tool `[\w.+-]+` is not on PATH", re.I)
+# Skips excluded from the per-module baseline. ONE regex, used by the generation branch AND the comparison branch
+# below, because two copies of this list are exactly how `test_scripts <n> 3` would become machine-dependent --
+# 3 on a machine with ruff, 4 without it -- and a machine-dependent baseline is worse than none.
+BASE_EXCL = re.compile("|".join(("yaml", FS.pattern, TOOL.pattern)), re.I)
 fs = [e for e in skips if FS.search(e["reason"])]
-pkg = [e for e in skips if not FS.search(e["reason"])]
+tool = [e for e in skips if TOOL.search(e["reason"]) and not FS.search(e["reason"])]
+pkg = [e for e in skips if not FS.search(e["reason"]) and not TOOL.search(e["reason"])]
 if len(fs) > 8: bad.append(f"POLICY:FS_CAP {len(fs)} filesystem-case skips; at most 8 are expected (found on a case-sensitive filesystem)")
+if len(tool) > 4: bad.append(f"POLICY:TOOL_CAP {len(tool)} optional-developer-tool skips; at most 4 are expected (a growing count means tests are being parked behind tools nothing installs)")
 if fs: print(f"note: {len(fs)} skip(s) for a case-sensitive filesystem (expected on Linux); not counted toward package skips")
+if tool: print(f"note: {len(tool)} skip(s) for an absent optional developer tool; not counted toward package skips")
 if mode == "none":
     NONE_OK = re.compile(r"(torch|numpy|pyyaml|pytest).*(not installed|missing|unavailable|not available)", re.I | re.S)
     for e in pkg:
@@ -306,7 +356,7 @@ if update and mode == "none":
         bad.append("POLICY:BASELINE_REFUSED --update-baseline refused and the baseline is UNCHANGED: "
                    + "; ".join(why) + ". Regenerate only on a quiet, green tree.")
     else:
-        rows = sorted((k, ran_mod[k], sum(1 for e in skips if mod(e["id"]) == k and not re.search("yaml|case[- ]sensitive", e["reason"], re.I))) for k in ran_mod)
+        rows = sorted((k, ran_mod[k], sum(1 for e in skips if mod(e["id"]) == k and not BASE_EXCL.search(e["reason"]))) for k in ran_mod)
         with open(stage, "w", encoding="utf-8") as f:
             f.write("# module  tests  bare-environment-skips   (generated: scripts/run_tests.sh --expect none --update-baseline)\n")
             f.write("# Fewer tests, or (bare mode) fewer skips, than recorded here fails the run. Raise only by regenerating.\n")
@@ -318,7 +368,7 @@ elif base != "none" and os.path.exists(base):
         k, r, s_ = line.split(); r, s_ = int(r), int(s_)
         if ran_mod.get(k, 0) < r: bad.append(f"POLICY:BASELINE_TESTS baseline: module {k} ran {ran_mod.get(k, 0)} tests, baseline {r} (tests deleted?)")
         elif mode == "none":
-            got = sum(1 for e in skips if mod(e["id"]) == k and not re.search("yaml|case[- ]sensitive", e["reason"], re.I))
+            got = sum(1 for e in skips if mod(e["id"]) == k and not BASE_EXCL.search(e["reason"]))
             if got < s_: bad.append(f"POLICY:BASELINE_SKIPS baseline: module {k} has {got} bare-environment skips, baseline {s_} (guarded tests now pass silently?)")
     known = {l.split()[0] for l in open(base, encoding="utf-8") if l.strip() and not l.startswith("#")}
     new = sorted(set(ran_mod) - known)
@@ -398,8 +448,24 @@ fi
 # PYTEST_COLLECTED, PYTEST_SKIPPED and NONDETERMINISTIC are all set out here and were invisible to the refusal.
 if [ "$UPDATE" = 1 ] && [ -f "$TMP/base.staged" ]; then
   if [ "$FAIL" -eq 0 ]; then
-    if mv "$TMP/base.staged" "$BASELINE"; then
-      echo "baseline written: $BASELINE ($(grep -cv '^#' "$BASELINE" || true) modules)"
+    # Counted from the STAGED file, BEFORE the move, and with an explicit fallback instead of `|| true`. It used
+    # to be `$(grep -cv '^#' "$BASELINE" || true)` -- read AFTER the move, from a path that might not be a file at
+    # all -- so when the destination was a directory grep failed, printed nothing, and the line read
+    # "baseline written: <dir> ( modules)": an empty count was the only hint that anything was wrong. `|| true`
+    # discarded both grep's exit status and its "Is a directory" message. (The file exists here, so a non-zero
+    # status now means only "no non-comment lines", i.e. zero modules, which prints as 0 rather than as nothing.)
+    STAGED_MODULES="$(grep -cv '^#' "$TMP/base.staged")" || STAGED_MODULES=0
+    if [ -d "$BASELINE" ]; then
+      # `mv file dir/` SUCCEEDS: it drops the file inside as $BASELINE/base.staged. That is how
+      # `--baseline scripts --update-baseline` printed RESULT: OK while leaving an untracked, un-gitignored
+      # scripts/base.staged in the repository -- the D1 shape, in a kit whose demo.py carries an inode-identity
+      # guard so that nothing can write there. The start-up check rejects a directory given on the command line;
+      # this one catches a directory that appeared at that path DURING the run, which is all that is left.
+      echo "FAIL: POLICY:BASELINE_WRITE the baseline path is a DIRECTORY, not a file: $BASELINE"
+      echo "      the staged baseline was NOT moved (mv would have left base.staged inside it); baseline UNCHANGED"
+      FAIL=1
+    elif mv "$TMP/base.staged" "$BASELINE"; then
+      echo "baseline written: $BASELINE ($STAGED_MODULES modules)"
     else
       echo "FAIL: POLICY:BASELINE_WRITE could not write the staged baseline to $BASELINE"; FAIL=1
     fi

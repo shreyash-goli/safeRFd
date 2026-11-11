@@ -134,8 +134,132 @@ DEFERRED_GATES = ("gate1_config_shift_sensitivity_arm", "gate2_error_register_cr
                   "amendment_log_hash")
 GATE_SCOPES = {"seed_list_frozen": "all", "min_seeds": "all", "failure_rate": "all", "rowsets_disjoint": "all",
                "mask_correct": "all", "control_adequacy": "all", "convergence": "H3"}
+MARGIN_MAX = 1e6            # see `_check_margin`: a SANITY bound on a margin's magnitude, not a protocol value
 Matrix = tuple
 Predictor = Callable[[Sequence[Sequence[float]]], Matrix]
+
+
+# ====================================================== THE checked metric reader
+# WHY THIS SECTION EXISTS AT ALL, and the rule it enforces, because three successive rounds of this audit
+# failed to the SAME defect and each fix closed only the consumer it was looking at:
+#   round 2 (dashboard): `_interval` gated on `MetricValue.is_measured` while `_metric_cell` checked the
+#     value properly -- fixed by a shared `_finite_float` across "all" consumers, a HAND-MAINTAINED set;
+#   round 3 (dashboard): `pair.n` had two consumers that disagreed, and a forged `n` bought a verdict;
+#   round 3 (here): `IntervalPair._bound` closed the LEFT operand of `lo > margin` while the RIGHT operand,
+#     one line away in the same call chain, still had the identical `is_measured`-only gate.
+# `MetricValue.is_measured` is ONLY `value is not None` (`toy/schema.py`). `MetricValue.__post_init__`
+# refuses a non-float, a bool and a non-finite float AT CONSTRUCTION, so a `MetricValue` built by the
+# public API is sound -- but `object.__setattr__(mv, "value", <anything>)` is route (b) of this module's
+# own threat model, and every stored metric reaching a recompute has been through serialisation. So NO
+# consumer may read `.value` or `.is_measured` for itself.
+#
+# THE RULE, which is checked and not merely stated: in this module and in `toy/robustness.py` there is NO
+# attribute access named `value` or `is_measured` ANYWHERE -- zero, with no allowlist of consumers to keep
+# up to date. Every read goes through `_metric_read` below (which reaches the field by `getattr` with a
+# string, so it contains no such access either); an `Enum` payload is read through `robustness._enum_value`
+# for the same reason. `tests/toy_tests/test_benchmark.py`'s
+# `TheCheckedReaderIsTheOnlyWayToReadAStoredMetric` walks both modules' ASTs and FAILS on the first
+# unchecked read, so a future reader cannot add one and have the suite stay green. That is the difference
+# from rounds 2 and 3: the set of reads is DERIVED FROM THE SOURCE, not listed by hand.
+def _metric_read(x: Any) -> Optional[float]:
+    """Read a stored `MetricValue` as a number. Returns a genuine finite `float`, or None.
+
+    None means exactly "no usable number here", which every caller in this module already handles as the
+    fail-closed case (unmeasured, no verdict). It covers all of: an honestly unmeasured metric; a forged
+    `nan`/`inf`/`-inf`; a forged `int`, `bool`, `str`, `list` or `None`; and an object that is not a
+    `MetricValue` at all. `isinstance(v, bool)` is checked FIRST because `True` is an `int` and
+    `True == 1.0`, which is how a forged gate metric read as PASSED (D5)."""
+    v = getattr(x, "value", None)
+    if isinstance(v, bool) or not isinstance(v, float) or not math.isfinite(v):
+        return None
+    return v
+
+
+def _metric_declared_unmeasured(x: Any) -> bool:
+    """True iff `x` is a `MetricValue` in the EXPLICIT unmeasured state (value None, WITH a reason).
+
+    Separates "honestly absent" from "forged garbage": both give `_metric_read(x) is None`, and for the
+    `loss_check_exempt` cross-check the difference decides between accepting and raising. The reason is
+    required because that is the state `MetricValue.unmeasured` actually produces -- `__post_init__`
+    refuses `value=None` without one -- so a value forged to `None` by `object.__setattr__` on a measured
+    metric leaves `reason` as None and is correctly classified as forged rather than as honestly absent."""
+    if not isinstance(x, MetricValue) or getattr(x, "value", None) is not None:
+        return False
+    why = getattr(x, "reason", None)
+    return isinstance(why, str) and bool(why.strip())
+
+
+def _metric_ok(x: Any) -> bool:
+    """The replacement for every `MetricValue.is_measured` read: measured AND readable as a number."""
+    return _metric_read(x) is not None
+
+
+def _metric_required(x: Any, what: str) -> float:
+    """A stored metric a verdict depends on. No fail-open: unreadable => ValueError naming the metric."""
+    v = _metric_read(x)
+    if v is None:
+        raise ValueError(f"{what}: stored metric is not a usable finite number ({x!r}); refusing to recompute")
+    return v
+
+
+def _metric_count(x: Any, what: str) -> int:
+    """A stored metric that is a COUNT (n_seeds, n_boot): required, integral and nonnegative.
+
+    THE DEFECT THIS CLOSES (D4): `_pair_from_record` did `int(m["n_seeds"].value)` with no check at all, so
+    a forged `n_seeds=1e9` was silently accepted and cleared the protocol's minimum-n floor, while a forged
+    `nan` escaped as a bare `ValueError: cannot convert float NaN to integer` and a forged `None` as a
+    `TypeError` -- both outside this module's stated error contract."""
+    v = _metric_required(x, what)
+    if v != int(v) or v < 0:
+        raise ValueError(f"{what}: stored count {v!r} is not a nonnegative whole number")
+    return int(v)
+
+
+def _metric_strict(x: Any, what: str) -> Optional[float]:
+    """A stored metric that may be honestly absent but must never be malformed.
+
+    Returns the number, or None if `x` is missing or EXPLICITLY unmeasured. Anything else -- a forged
+    non-finite, a bool, a string -- RAISES, because for a cross-check field "unreadable" is evidence of
+    tampering and must not be laundered into the same outcome as "not recorded"."""
+    if x is None:
+        return None
+    v = _metric_read(x)
+    if v is None and not _metric_declared_unmeasured(x):
+        raise ValueError(f"{what}: stored metric is neither a finite number nor explicitly unmeasured ({x!r})")
+    return v
+
+
+def _check_margin(v: Any, what: str) -> float:
+    """THE ONE validity test for a margin, wherever a margin enters the module. Returns it as a float.
+
+    A margin is a THRESHOLD on an effect size in G_s units, pre-registered before any arm is run. Two
+    things disqualify a value from being one, and both are checked here:
+      * it is not a finite real number (bool, str, None, nan, +-inf);
+      * its magnitude exceeds `MARGIN_MAX`. `MARGIN_MAX = 1e6` is ARBITRARY and is NOT a protocol
+        parameter -- it is a sanity bound, seven orders of magnitude above the proposed defaults
+        (0.05 / 0.10) and far outside any plausible G_s-scale threshold. Sign is NOT bounded, on purpose:
+        the vacuous direction differs per field (H1/H3 compare `lo > margin`, so a very NEGATIVE margin is
+        vacuous; H2 compares `hi < margin`, so a very POSITIVE one is), and a negative `delta_R` -- "the
+        retention loss must be an improvement" -- is a legitimately STRICTER test, not an invalid one.
+    WHAT THIS DOES AND DOES NOT BUY, stated because a bound of this shape invites overreading:
+      * It closes the forged-record route (D1): a stored `margin` metric of -1.7976931348623157e308 turned
+        a genuine JOINT_UNSUPPORTED into JOINT_SUPPORTED with `reasons = ()` and an unchanged
+        `config_hash` -- indistinguishable from a clean recompute. It now raises.
+      * It does NOT close, and cannot close, the legal-`Margins` route. `Margins(-1e6, +1e6, -1e6)` is
+        within bounds and still decides every component before any data is seen. FOR ANY FINITE CAP there
+        is a legal margin at the cap that is vacuous for a small-effect study, so no bound here can make a
+        margin trustworthy. Margins are producer-asserted and are NOT in `config_hash` (see `Margins`);
+        that remains a documented gap, and this bound narrows it rather than closing it.
+    It is applied at the single point where a margin is USED to decide (`_verdict_from_bounds`), so every
+    path -- `evaluate_primary` from a `Margins` object, `verdict_from_records` from a stored metric, a
+    hand-built `interval_verdict` or `ComponentResult` call -- is covered by construction. There is no set
+    of call sites to remember, which is the mistake that produced three rounds of half-fixes."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        raise ValueError(f"{what} must be a finite number, got {v!r}")
+    if abs(v) > MARGIN_MAX:
+        raise ValueError(f"{what} magnitude {v!r} exceeds MARGIN_MAX={MARGIN_MAX!r}: a threshold that large "
+                         f"decides the component without reference to the data (it is not a margin)")
+    return float(v)
 
 
 # =================================================================== enums
@@ -159,22 +283,33 @@ class Margins:
     NOT COVERED BY `BenchmarkConfig.config_hash()`, stated because it would otherwise be a silent gap:
     `Margins` is not a `BenchmarkConfig` field and is not written into `input_hashes`, so TWO STUDIES
     DIFFERING ONLY IN MARGINS PRODUCE BYTE-IDENTICAL `config_hash` -- and margins change verdicts.
-    Why that is nevertheless sufficient for recomputation, precisely: every component record stores its own
-    `margin` as a measured metric (`_agg_metrics`), and `verdict_from_records` reads the margin OUT OF THE
-    RECORD it is recomputing -- never from a caller's `cfg`, never from `config_hash`. So the margin a
-    recompute uses is always the margin that produced the record, and a changed margin shows up as a changed
-    `margin` metric rather than as a silently reused one.
-    What the gap DOES cost: `config_hash` alone is not a complete provenance key for a study. Do not quote it
-    as one; quote the per-component `margin` metrics (or `JointResult.margins`) alongside it."""
+    What recomputation does and does not get from the per-record `margin` metric, precisely (this paragraph
+    USED TO CLAIM "so the margin a recompute uses is always the margin that produced the record", which was
+    FALSE: nothing validated it, and the claim was a PROVENANCE argument offered as a VALIDITY argument):
+    every component record stores its own `margin` as a measured metric (`_agg_metrics`), and
+    `verdict_from_records` reads the margin OUT OF THE RECORD it is recomputing -- never from a caller's
+    `cfg`, never from `config_hash`. That means a margin a recompute uses cannot come from the CALLER. It
+    does NOT mean the margin is the one that produced the record: a stored `margin` metric rewritten to
+    -1.7976931348623157e308 (a finite float, which `MetricValue` therefore accepts) turned a measured
+    JOINT_UNSUPPORTED degrader study into JOINT_SUPPORTED with `reasons = ()` and the SAME `config_hash`
+    ce68ac811ac7 -- byte-identical to a clean recompute. `_check_margin` now bounds every margin, wherever
+    it enters, so that route raises instead; see `_check_margin` for what the bound does and does not buy.
+    MEASURED, AND SHARPER THAN THE `delta_S=5.0, delta_R=-5.0` ILLUSTRATION THAT USED TO STAND HERE (which
+    only showed the SAFE direction -- it drives the same study to JOINT_UNSUPPORTED): a WITHIN-BOUNDS, fully
+    legal `Margins(-1e6, +1e6, -1e6)` turns that study's JOINT_UNSUPPORTED into JOINT_SUPPORTED, with a
+    byte-identical `config_hash` and `reasons = ()`. No bound on this class can close that -- for any finite
+    cap, a margin at the cap is vacuous for a small-effect study -- so margins remain PRODUCER-ASSERTED.
+    What the gap DOES cost: `config_hash` alone is not a complete provenance key for a study, and a
+    favourable verdict is not evidence that the margins were registered rather than chosen. Do not quote
+    `config_hash` as a provenance key on its own; quote the per-component `margin` metrics (or
+    `JointResult.margins`) alongside it, and treat a margin near `MARGIN_MAX` as unregistered."""
     delta_S: float = 0.10
     delta_R: float = 0.05
     delta_sel: float = 0.10
 
     def __post_init__(self) -> None:
         for k in ("delta_S", "delta_R", "delta_sel"):
-            v = getattr(self, k)
-            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
-                raise ValueError(f"{k} must be a finite number")
+            _check_margin(getattr(self, k), k)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -218,6 +353,15 @@ class BenchmarkConfig:
 
     def config_hash(self) -> str:
         """sha256 over the canonical JSON of all 18 fields; every field changes it (no collisions found).
+        CANONICAL MEANS `sort_keys=True`, and that is load-bearing, not decoration: it is what makes the
+        hash a function of the field VALUES rather than of `dataclasses.asdict`'s iteration order.
+        MEASURED with `sort_keys` dropped: reordering the dict's keys alone, with every value identical,
+        moves the hash from 9eaf4bfefc57 to 08d7772419c5 -- so every stored record's `config` binding would
+        break on a field reorder and `verdict_from_records` would fail closed on correct records. With
+        `sort_keys=True` both orders give ce68ac811ac7. "Repeatability" is the literal acceptance criterion
+        for this module, so the invariance is pinned directly by
+        `test_config_hash_is_canonical_under_field_reordering` rather than left to a reader's trust in the
+        word "canonical" (a mutant that deleted `sort_keys` previously survived the whole suite).
         TWO DOCUMENTED GAPS: (1) `Margins` is NOT a field and is not hashed -- see `Margins` for why the
         per-record `margin` metric makes recomputation sound anyway, and for what the gap costs. (2)
         `json.dumps` distinguishes int from float, so `BenchmarkConfig(eta_star=1)` and `(eta_star=1.0)`
@@ -535,11 +679,15 @@ class IntervalPair:
         an `int`, a `str`, a `bool` or a list got the same treatment and were formatted as
         measurements downstream.
         Returning None means "interval not computable", which every caller already handles as the
-        fail-closed case, so a forged bound can no longer produce a verdict in either direction."""
-        v = getattr(m, "value", None)
-        if isinstance(v, bool) or not isinstance(v, float) or not math.isfinite(v):
-            return None
-        return v
+        fail-closed case, so a forged bound can no longer produce a verdict in either direction.
+        THAT FIX WAS HALF A FIX, and this is where it is recorded: it closed the LEFT operand of
+        `lo > margin` and left the RIGHT operand -- the stored `margin` metric, one line away in the same
+        call chain -- on the identical `is_measured`-only gate. `_bound` now DELEGATES to `_metric_read`,
+        the module's single checked reader, so there is one implementation of "is this a usable number"
+        rather than one per consumer; see the `_metric_read` section header for the rule that keeps it
+        that way. The 152-case table behind this method (19 forged value types x 4 bound fields x 2
+        directions) is unchanged by the delegation."""
+        return _metric_read(m)
 
     def boot(self) -> Optional[tuple[float, float]]:
         lo, hi = self._bound(self.boot_lo), self._bound(self.boot_hi)
@@ -593,6 +741,11 @@ def _verdict_from_bounds(n: int, boot: Optional[tuple], tint: Optional[tuple], m
                          min_n: int, width_tol: float) -> tuple:
     if direction not in ("greater", "less"):
         raise ValueError("direction must be 'greater' or 'less'")
+    # THE SINGLE POINT AT WHICH A MARGIN IS USED TO DECIDE, so the one place it has to be valid. Every path
+    # that can produce a component verdict passes through here -- `evaluate_primary` (margin from a
+    # `Margins` object), `verdict_from_records.comp` (margin from a stored metric), and any direct
+    # `interval_verdict` / `ComponentResult` call -- so `_check_margin` needs no list of call sites.
+    margin = _check_margin(margin, "margin")
     if n < min_n:   # protocol 6.1: no verdict below the minimum number of seeds, wherever the verdict is made
         return Verdict.INCONCLUSIVE, f"n={n} below protocol minimum {min_n}: no verdict"
     if boot is None or tint is None:
@@ -619,7 +772,10 @@ def interval_verdict(pair: IntervalPair, margin: float, direction: str, width_to
     """Protocol section 7 for one component. direction 'greater': SUPPORTED iff lower > margin,
     UNSUPPORTED iff upper <= margin. direction 'less': SUPPORTED iff upper < margin, UNSUPPORTED iff
     lower >= margin. The bootstrap interval decides; the t-interval can only veto via the disagreement rule.
-    n < min_n (default 30) is always INCONCLUSIVE."""
+    n < min_n (default 30) is always INCONCLUSIVE.
+    RAISES ValueError (rather than returning a verdict) for a `margin` that is not a finite number or whose
+    magnitude exceeds `MARGIN_MAX`: see `_check_margin`. No verdict is the fail-closed outcome, and it is
+    consistent with how this module already treats a forged record elsewhere."""
     return _verdict_from_bounds(pair.n, pair.boot(), pair.tint(), margin, direction, min_n, width_tol)
 
 
@@ -1066,7 +1222,7 @@ class SeedScores:
 
     @property
     def ok(self) -> bool:
-        return all(self.metrics[k].is_measured for k in _PRIMARY_SERIES)
+        return all(_metric_ok(self.metrics[k]) for k in _PRIMARY_SERIES)
 
     @classmethod
     def failed(cls, seed: int, reason: str, rowsets_disjoint=None, mask_ok=None, input_hashes=None) -> "SeedScores":
@@ -1117,8 +1273,8 @@ def _converged(fx: SeedFixture, treatment: PredictorFactory, cfg: BenchmarkConfi
     except ValueError as e:
         u = MetricValue.unmeasured(f"converged-budget run failed: {e}")
         return u, u, u
-    d = a.delta.value if a.delta.is_measured else None
-    ds = (a.delta.value - b.delta.value) if a.delta.is_measured and b.delta.is_measured else None
+    d, bd = _metric_read(a.delta), _metric_read(b.delta)
+    ds = (d - bd) if d is not None and bd is not None else None
     gr = max(ratios) if all(r is not None for r in ratios) else None
     return _mv(d, "converged contrast unmeasured"), _mv(ds, "converged contrast unmeasured"), \
         _mv(gr, "initial gradient is zero")
@@ -1147,7 +1303,8 @@ def score_seed(seed: int, treatment: PredictorFactory, cfg: BenchmarkConfig) -> 
         lr_ = _arm_fit(seed, trained_arm, cfg).loss_ratio if trained_arm else None
     except ValueError as e:   # train() divergence etc.: counted, never hidden
         return SeedScores.failed(seed, f"numerical failure: {e}", fx.disjoint, fx.mask_ok, hashes)
-    dms = (MetricValue.measured(a.delta.value - b.delta.value) if a.delta.is_measured and b.delta.is_measured
+    _ad, _bd = _metric_read(a.delta), _metric_read(b.delta)
+    dms = (MetricValue.measured(_ad - _bd) if _ad is not None and _bd is not None
            else MetricValue.unmeasured("treatment or C_shuf contrast unmeasured"))
     dc, dmsc, gr = _converged(fx, treatment, cfg, trained_arm)
     return SeedScores(seed, {"S": a.S, "L": a.L, "S_U": a.S_U, "delta": a.delta, "delta_minus_shuf": dms,
@@ -1233,7 +1390,7 @@ def evaluate_gates(scores: Sequence[SeedScores], frozen: FrozenSeedList, registe
     level, ok_scores = bonferroni_level(cfg.alpha, N_PRIMARY), [s for s in scores if s.ok]
     probs = []
     for key in ("A", "F"):
-        vals = [s.metrics[key].value for s in ok_scores]
+        vals = [_metric_read(s.metrics[key]) for s in ok_scores]
         if len(vals) < 2 or len(vals) != len(ok_scores) or any(v is None for v in vals):
             probs.append(f"{key} not measured on every seed")
             continue
@@ -1247,7 +1404,7 @@ def evaluate_gates(scores: Sequence[SeedScores], frozen: FrozenSeedList, registe
         raise ValueError(f"subject_kind must be one of {SUBJECT_KINDS}")
     exempt = subject_kind == "fixture"      # the ONLY exemption; default 'unknown' is NOT exempt
     if not exempt:
-        rs = [s.metrics["E_loss_ratio"].value for s in ok_scores]
+        rs = [_metric_read(s.metrics["E_loss_ratio"]) for s in ok_scores]
         if not rs or any(r is None for r in rs):
             probs.append("E_loss_ratio not measured on every seed")
         elif max(rs) > 1.0 / cfg.loss_factor:
@@ -1257,7 +1414,7 @@ def evaluate_gates(scores: Sequence[SeedScores], frozen: FrozenSeedList, registe
                                           "A, F ok; E-loss check exempt (declared scorer-validation fixture)"),
                             exempt=exempt))
     # gate 12: converged-budget gradient norm
-    grs = [s.metrics["conv_grad_ratio"].value for s in ok_scores]
+    grs = [_metric_read(s.metrics["conv_grad_ratio"]) for s in ok_scores]
     if not grs or any(g is None for g in grs):
         gates.append(GateResult("convergence", False, "converged-budget gradient ratio not measured on every seed"))
     else:
@@ -1346,7 +1503,8 @@ def analyze_scores(scores: Sequence[SeedScores], *, frozen: FrozenSeedList, regi
     glob = [f"{g.name} ({g.reason})" for g in gates if g.scope == "all" and not g.passed]
     g12 = [f"convergence ({by['convergence'].reason})"] if not by["convergence"].passed else []
     names = _PRIMARY_SERIES + ("delta_conv", "delta_minus_shuf_conv")
-    series = {k: [s.metrics[k].value for s in scores if s.ok and s.metrics[k].is_measured] for k in names}
+    series = {k: [v for v in (_metric_read(s.metrics[k]) for s in scores if s.ok) if v is not None]
+              for k in names}
     hs = [evaluate_primary("H1", series, margins, cfg, frozen.base_seed, glob),
           evaluate_primary("H2", series, margins, cfg, frozen.base_seed, glob),
           evaluate_primary("H3", series, margins, cfg, frozen.base_seed, glob, g12)]
@@ -1437,7 +1595,7 @@ def to_experiment_records(res: JointResult, *, study_id: str, base_seed: int, ti
         for conv, comps in ((False, h.components), (True, h.converged_components)):
             for c in comps:
                 tag = _tag(h.hid, c.metric.replace("_conv", ""), conv)
-                ec = EvidenceClass.TOY_RESULT if c.pair.mean.is_measured else EvidenceClass.UNKNOWN
+                ec = EvidenceClass.TOY_RESULT if _metric_ok(c.pair.mean) else EvidenceClass.UNKNOWN
                 recs.append(ExperimentRecord(
                     name=f"evalproto/{study_id}/agg/{tag}", provenance=prov(f"{study_id}-agg-{tag}", base_seed),
                     metrics=_agg_metrics(c.pair, c.margin, res.n_failed, res.subject_kind), evidence_class=ec,
@@ -1461,8 +1619,24 @@ def to_experiment_records(res: JointResult, *, study_id: str, base_seed: int, ti
 
 
 def _pair_from_record(rec: ExperimentRecord) -> IntervalPair:
+    """Rebuild an `IntervalPair` from a stored record. Every scalar is read through the checked reader and a
+    missing metric is a ValueError naming the record, so this function's ONLY failure mode is a ValueError
+    inside the module's stated error contract.
+    THE DEFECT THIS CLOSES (D4): `int(m["n_seeds"].value)`, `m["ci_level"].value` and `int(m["n_boot"].value)`
+    had NO check of any kind -- not even `is_measured`. A forged `n_seeds = 1e9` was accepted in silence and
+    cleared protocol 6.1's minimum-n floor (the floor that `_verdict_from_bounds` applies); a forged `nan`
+    escaped as a bare `ValueError: cannot convert float NaN to integer` and a forged `None` as a `TypeError`,
+    neither of which this module declares. The `MetricValue` fields (mean, sd, the four bounds) need no check
+    here because `IntervalPair._bound` reads them through the same reader at the point of use."""
     m = rec.metrics
-    return IntervalPair(rec.name, int(m["n_seeds"].value), m["ci_level"].value, int(m["n_boot"].value),
+    need = ("n_seeds", "ci_level", "n_boot", "mean", "sd", "iqr", "min", "max", "max_over_median_abs",
+            "ci_boot_lo", "ci_boot_hi", "ci_t_lo", "ci_t_hi")
+    absent = [k for k in need if k not in m]
+    if absent:
+        raise ValueError(f"{rec.name}: record is missing the metrics {absent}; cannot rebuild an interval")
+    return IntervalPair(rec.name, _metric_count(m["n_seeds"], f"{rec.name}: n_seeds"),
+                        _metric_required(m["ci_level"], f"{rec.name}: ci_level"),
+                        _metric_count(m["n_boot"], f"{rec.name}: n_boot"),
                         m["mean"], m["sd"], m["iqr"], m["min"], m["max"], m["max_over_median_abs"],
                         m["ci_boot_lo"], m["ci_boot_hi"], m["ci_t_lo"], m["ci_t_hi"])
 
@@ -1498,19 +1672,31 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: Optional[Benc
     study registered with `width_tol=0.10` recomputed to JOINT_SUPPORTED when called with no `cfg` argument
     (module default 0.25) while its own configuration gave JOINT_INCONCLUSIVE. `alpha` was already pinned by
     the `ci_level` cross-check and `min_seeds` partly by the min-seeds gate; `width_tol` was not.
-    NOT covered by the config hash: `Margins` is not a `BenchmarkConfig` field (see `Margins`). That is
-    sound here because the margin of every component is read OUT OF THE RECORD (`margin` metric), never from
-    `cfg` -- so no margin a recompute uses can come from the caller at all.
+    NOT covered by the config hash: `Margins` is not a `BenchmarkConfig` field (see `Margins`). The margin
+    of every component is read OUT OF THE RECORD (`margin` metric), never from `cfg`, so no margin a
+    recompute uses can come from the CALLER. THAT SENTENCE USED TO END "-- so that is sound", WHICH WAS A
+    PROVENANCE ARGUMENT OFFERED AS A VALIDITY ARGUMENT: where the margin comes from says nothing about what
+    it is allowed to be, and until `_check_margin` there was no bound on the value at all. A stored `margin`
+    rewritten to -1.7976931348623157e308 -- a finite float, so `MetricValue` accepts it with no
+    `object.__setattr__` needed -- turned a measured JOINT_UNSUPPORTED into JOINT_SUPPORTED with
+    `reasons = ()` and an unchanged `config_hash`, i.e. with the exact signature of a clean recompute.
+    Every stored scalar this function uses now goes through the module's single checked reader
+    (`_metric_read` and its three wrappers), and the margin additionally through `_check_margin`; what
+    remains open is a margin that is WITHIN bounds and still vacuous, which no bound can close
+    (see `Margins` and `_check_margin`).
     ORDER: the `loss_check_exempt` / `subject_kind_code` forgery checks run BEFORE the config check, so a
     config mismatch can never mask a forgery; `cfg` is not consulted by either of them.
     WHAT THE BINDING DOES NOT DO, stated because "BOUND TO THE CONFIGURATION THE STUDY RAN UNDER" above
     would otherwise overstate it: the stored `config` hash is itself a stored value, so **rewriting it in
     every record and passing the cfg that matches the rewrite reaches JOINT_SUPPORTED with no reason
-    recorded.** This is post-hoc tampering in the already-disclosed class -- it grants nothing over forging
-    the `gate_*` metrics directly, and requires write access to every record -- but it was not stated for the
-    config hash specifically, and this module's standard is that the routes are stated rather than left to be
-    discovered. The binding defeats the ORDINARY-CALL defect above and an inconsistent or absent hash; it is
-    not an authentication of the records."""
+    recorded.** This is post-hoc tampering in the already-disclosed class, and it requires write access to
+    every record. IT WAS ALSO CLAIMED TO "GRANT NOTHING OVER FORGING THE `gate_*` METRICS DIRECTLY", WHICH
+    WAS FALSE AND IS CORRECTED HERE: forging `gate_*` can only make gates pass, which at most lifts a
+    JOINT_INCONCLUSIVE; it cannot make a component SUPPORTED, because component verdicts are derived from
+    the stored bounds and margin. Rewriting the config hash unlocks `min_seeds` / `width_tol` / `alpha`,
+    which CAN invert a genuine UNSUPPORTED. The two are not equivalent and the stronger route must be
+    stated as the stronger one. The binding defeats the ORDINARY-CALL defect above and an inconsistent or
+    absent hash; it is not an authentication of the records."""
     cfg = _cfg(cfg)
     by = {}
     for r in records:
@@ -1527,12 +1713,15 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: Optional[Benc
     # ---- subject-kind decode and exemption-forgery checks: no `cfg` is consulted, so they run first and a
     # ---- config mismatch can never mask a forgery.
     gm = by["JOINT"].metrics
-    code = gm.get("subject_kind_code")
-    kind = next((k for k, c in SUBJECT_KIND_CODE.items() if code is not None and code.value == c), "unknown")
-    ex = gm.get("loss_check_exempt")
-    if ex is not None and ex.is_measured and ex.value not in (0.0, 1.0):
-        raise ValueError(f"loss_check_exempt must be 0.0 or 1.0, got {ex.value!r}")
-    if ex is not None and ex.is_measured and ex.value == 1.0 and kind != "fixture":
+    code = _metric_read(gm.get("subject_kind_code"))
+    kind = next((k for k, c in SUBJECT_KIND_CODE.items() if code is not None and code == c), "unknown")
+    # `_metric_strict`, not `_metric_read`: for a cross-check field a MALFORMED value must raise rather than
+    # be laundered into the same outcome as "not recorded". A forged `inf` here used to raise (via the
+    # `not in (0.0, 1.0)` branch) and must keep raising, while an honest `unmeasured` must keep being accepted.
+    exv = _metric_strict(gm.get("loss_check_exempt"), "loss_check_exempt")
+    if exv is not None and exv not in (0.0, 1.0):
+        raise ValueError(f"loss_check_exempt must be 0.0 or 1.0, got {exv!r}")
+    if exv == 1.0 and kind != "fixture":
         raise ValueError("records claim the gate-11(c) exemption but subject_kind_code is not 'fixture' "
                          "(forged or deleted code)")
 
@@ -1555,18 +1744,43 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: Optional[Benc
                                  Verdict.INCONCLUSIVE, kind, bound, (why,))
 
     want_level = bonferroni_level(cfg.alpha, N_PRIMARY)
+    # n CROSS-CHECK. A forged `n_seeds` is a legal count, so `_metric_count` cannot catch it; the only
+    # defence is a second stored number to compare it against. The JOINT record stores
+    # `n_seeds = n_attempted - n_failed` (the number of OK seeds), and a component's `pair.n` is the number
+    # of seeds on which THAT series was measured, which is a subset -- so `component n <= joint n` holds by
+    # construction for every honest record and a forged n_seeds=1e9 breaks it. Equality is NOT required:
+    # the converged-budget series can be measured on fewer seeds than are OK. This is the `pair.n` defect
+    # of round 3 in its records form: there, two consumers disagreed about n and a forged n bought a
+    # decisive verdict; the lesson applied here is that n must be CHECKED against something, not trusted.
+    joint_n = _metric_count(gm["n_seeds"], "JOINT: n_seeds") if "n_seeds" in gm else None
 
     def comp(tag, metric, direction):
         r = by[tag]
-        mg, lv = r.metrics["margin"], r.metrics["ci_level"]
-        if not mg.is_measured:
-            raise ValueError(f"{tag}: margin unmeasured")
-        if not lv.is_measured or abs(lv.value - want_level) > 1e-12:
-            raise ValueError(f"{tag}: ci_level {lv.value!r} is not the adjusted level {want_level!r} (m={N_PRIMARY})")
-        return ComponentResult(metric, direction, mg.value, _pair_from_record(r), cfg.min_seeds, cfg.width_tol)
+        for k in ("margin", "ci_level"):
+            if k not in r.metrics:
+                raise ValueError(f"{tag}: record stores no {k} metric; cannot recompute a component verdict")
+        # Both operands of `lo > margin` are now read the same way. The RIGHT one (`margin`) was the
+        # half-fix of round 3: `_bound` closed the left and left this on `is_measured` alone, so a stored
+        # `margin` of -1.7976931348623157e308 inverted a genuine UNSUPPORTED with `reasons = ()`.
+        mg = _metric_required(r.metrics["margin"], f"{tag}: margin")
+        lv = _metric_required(r.metrics["ci_level"], f"{tag}: ci_level")
+        if abs(lv - want_level) > 1e-12:
+            raise ValueError(f"{tag}: ci_level {lv!r} is not the adjusted level {want_level!r} (m={N_PRIMARY})")
+        pair = _pair_from_record(r)
+        if joint_n is not None and pair.n > joint_n:
+            raise ValueError(f"{tag}: stored n_seeds {pair.n} exceeds the study's {joint_n} measured seeds "
+                             f"(a component cannot be measured on more seeds than succeeded)")
+        # `_check_margin` runs again inside `_verdict_from_bounds`; calling it here only buys an error
+        # message that names the record. The bound itself lives at the point of use, not at this call site.
+        return ComponentResult(metric, direction, _check_margin(mg, f"{tag}: margin"), pair,
+                               cfg.min_seeds, cfg.width_tol)
 
     state = {n: gm.get(f"gate_{n}") for n in GATE_SCOPES}
-    failed = [n for n, v in state.items() if v is None or v.value != 1.0]
+    # A gate PASSES only on a stored value that reads as exactly the float 1.0. Anything else -- missing,
+    # unmeasured, 0.0, out of range, or (D5) the bool `True`, which the old `v.value != 1.0` test let
+    # through because `True == 1.0` -- counts as failed. `GateResult.__post_init__` is strict about bools;
+    # until now the records path was not.
+    failed = [n for n, v in state.items() if _metric_read(v) != 1.0]
     glob = [n for n in failed if GATE_SCOPES[n] == "all"]
     g12 = [n for n in failed if GATE_SCOPES[n] == "H3"]
     h1 = HypothesisResult("H1", (comp("H1", "S", "greater"),), blocking=tuple(glob))

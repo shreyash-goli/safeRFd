@@ -1,6 +1,8 @@
 """SR-13 tests for toy.dashboard. TOY ONLY: fixtures are synthetic; nothing here is a safety result."""
+import ast
 import dataclasses
 import inspect
+import io
 import itertools
 import os
 import random
@@ -8,6 +10,7 @@ import re
 import stat
 import sys
 import tempfile
+import tokenize
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -2314,6 +2317,632 @@ class SnapshotTotalsPinned(unittest.TestCase):
         self.assertIn("<th>10</th>", r)
         self.assertIn("<th>23</th>", r)
         self.assertNotIn("UNKNOWN", r)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# SR-13 round 4. This item has now FAILED THREE TIMES for one reason in three places, and round 3's fix
+# shipped a test class whose docstring ASSERTED that "all four cells and the recomputation now route
+# through" the shared check -- after which round 3 found a sixth and a seventh consumer. The enumeration
+# was never performed. Everything below exists to perform it. See the scheme note at the top of
+# dashboard.py for the three mechanisms; these are the two that are tests.
+# ---------------------------------------------------------------------------------------------------------
+SCORER_CLASSES = {"IntervalPair": bm.IntervalPair, "ComponentResult": bm.ComponentResult,
+                  "Margins": bm.Margins, "JointResult": bm.JointResult}
+
+# Hostile values per KIND. Each list is "everything an honest producer of a field of this kind cannot
+# emit", so the sweep below is the kind's own rejection set rather than one hand-picked per field.
+HOSTILE_BY_KIND = {
+    "mv": BREAKS_MV_INVARIANT,                              # forged into MetricValue.value
+    "float": (0, 1, 30, -1, "0.5", "", [], {}, (), object(), None, True, False,
+              float("nan"), float("inf"), float("-inf")),
+    "num": ("0.1", "", "nan", [], {}, (), object(), None, True, False,
+            float("nan"), float("inf"), float("-inf")),
+    "count": (0.0, 1.0, 30.0, "30", "", [], {}, (), object(), None, True, False,
+              float("nan"), float("inf"), float("-inf")),
+}
+# Which hypotheses read a given declared number. A pair/component number is forged on EVERY instance, so
+# all three are affected; a Margins field is read by exactly one hypothesis (benchmark.PRIMARY).
+HYPOTHESES_READING = {("Margins", "delta_S"): ("H1",), ("Margins", "delta_R"): ("H2",),
+                      ("Margins", "delta_sel"): ("H3",)}
+# The display cell each declared number appears in, so the sweep can assert the FIGURE as well as the
+# verdict. None means "this number has no cell of its own on the page".
+FIGURE_CAVEAT = {("IntervalPair", "mean"): "malformed measured value",
+                 ("IntervalPair", "boot_lo"): "interval not computable",
+                 ("IntervalPair", "boot_hi"): "interval not computable",
+                 ("IntervalPair", "t_lo"): "interval not computable",
+                 ("IntervalPair", "t_hi"): "interval not computable",
+                 ("IntervalPair", "n"): "n", ("IntervalPair", "level"): "level",
+                 ("ComponentResult", "margin"): "margin",
+                 ("ComponentResult", "min_n"): None, ("ComponentResult", "width_tol"): None,
+                 ("Margins", "delta_S"): "delta_S is not a finite number",
+                 ("Margins", "delta_R"): "delta_R is not a finite number",
+                 ("Margins", "delta_sel"): "delta_sel is not a finite number",
+                 ("JointResult", "n_attempted"): "not recorded",
+                 ("JointResult", "n_failed"): "not recorded"}
+
+
+def all_components(j):
+    return [c for h_ in (j.h1, j.h2, j.h3) for c in (*h_.components, *(h_.converged_components or ()))]
+
+
+def instances_of(j, cls_name):
+    """Every live instance of `cls_name` inside one JointResult."""
+    if cls_name == "IntervalPair":
+        return [c.pair for c in all_components(j)]
+    if cls_name == "ComponentResult":
+        return all_components(j)
+    if cls_name == "Margins":
+        return [j.margins]
+    return [j]
+
+
+def forge_declared(j, cls_name, attr, value):
+    """Forge one declared stored number on EVERY instance of its class inside `j`, the way
+    post-construction tampering does. A `mv` field is forged inside the MetricValue, not replaced."""
+    for obj in instances_of(j, cls_name):
+        if db.STORED_NUMBERS[cls_name][attr] == "mv":
+            forge_mv(getattr(obj, attr), value)
+        else:
+            object.__setattr__(obj, attr, value)
+    return j
+
+
+def recording_subclass(base, bucket):
+    """A subclass of a scorer dataclass that records every attribute name read off it.
+
+    `isinstance(x, base)` still holds, so `_joint_wellformed` still accepts the result and the render
+    takes its normal path -- which is the point: the probe observes the REAL render, not a model of it."""
+    class Rec(base):
+        def __getattribute__(self, name):
+            bucket.add(name)
+            return base.__getattribute__(self, name)
+    Rec.__name__ = "Recording" + base.__name__
+    return Rec
+
+
+def is_a_stored_number(v):
+    """What counts as a stored number: a `MetricValue`, or a real `int`/`float`. `bool` is excluded
+    because no field of these classes holds one (`complete_gate_coverage` is a derived flag, not a datum)."""
+    return isinstance(v, MetricValue) or (isinstance(v, (int, float)) and not isinstance(v, bool))
+
+
+def module_code_by_line(module):
+    """`module`'s source with COMMENTS and STRING/f-string literals removed, per line.
+
+    Tokenizing rather than regexing the raw text matters: every docstring in dashboard.py discusses the
+    very patterns the source test forbids ("a bare `float(code)`, which coerces"), so a text scan reports
+    the documentation as the offence. Dropping STRING tokens drops the docstrings exactly."""
+    src = Path(inspect.getsourcefile(module)).read_text(encoding="utf-8")
+    skip = {tokenize.COMMENT, tokenize.STRING, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT}
+    skip |= {getattr(tokenize, n) for n in ("FSTRING_MIDDLE",) if hasattr(tokenize, n)}
+    out = {}
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type in skip:
+            continue
+        out.setdefault(tok.start[0], []).append(tok.string)
+    return src, {ln: "".join(parts) for ln, parts in out.items()}
+
+
+def enclosing_functions(module):
+    """line number -> name of the innermost function that contains it."""
+    src = Path(inspect.getsourcefile(module)).read_text(encoding="utf-8")
+    owner = {}
+    for node in ast.walk(ast.parse(src)):               # ast.walk is breadth-first, so deeper wins
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for i in range(node.lineno, (node.end_lineno or node.lineno) + 1):
+                owner[i] = node.name
+    return owner
+
+
+NUMERIC_PREDICATE = re.compile(r"math\.isfinite|isinstance\([^)]*\b(?:int|float)\b|(?<![\w.])float\(")
+KIND_FUNCTIONS = {"_num", "_finite_float", "_finite_number", "_count"}
+
+
+class StoredNumbersAreEnumeratedNotAsserted(unittest.TestCase):
+    """THE ROUND-4 FIX, and the only part of it that is not a code change.
+
+    Rounds 2 and 3 both ended with a correct local fix and a test class that STATED how many consumers
+    of a stored number existed. Round 3's said "all four cells and the recomputation now route through"
+    `_finite_float`; round 3's review then found a sixth and a seventh, because nobody had made the
+    machine count them. Round 4 found an eighth (`pair.n`, which bought a decisive JOINT_SUPPORTED on a
+    genuinely below-minimum run with no alarm) and a ninth and tenth (`c.margin` and `Margins.<attr>`,
+    still `float()`-coerced inside the verdict path while both display cells checked properly).
+
+    The two tests below replace the counting-by-eye. Neither asserts a number of consumers:
+
+      * `test_the_enumeration_is_performed_by_probe_not_asserted` swaps each scorer class for a
+        subclass that records every attribute read off it, renders a whole dashboard, and compares the
+        attributes ACTUALLY READ -- by dashboard.py and by benchmark.py underneath it -- against
+        `db.STORED_NUMBERS`, in BOTH directions. Add a consumer of an undeclared number and it fails
+        naming the attribute; delete a consumer and leave the table behind and it fails too.
+      * `test_no_numeric_predicate_lives_outside_the_kind_functions` reads dashboard.py's own source and
+        fails if `math.isfinite`, `isinstance(..., int/float)` or `float(` appears in any function other
+        than the four kind functions. That is the rule the previous two rounds' fixes broke: each left a
+        "correct but separate" inline check behind, and a separate check is what drifts.
+
+    Together they mean a future reader cannot add an unchecked consumer of a stored number: either the
+    attribute is undeclared (probe fails) or the check is written inline (source test fails)."""
+
+    def probe(self, cls_name):
+        bucket = set()
+        j = joint()
+        rec_cls = recording_subclass(SCORER_CLASSES[cls_name], bucket)
+        for obj in instances_of(j, cls_name):
+            object.__setattr__(obj, "__class__", rec_cls)
+            self.assertIsInstance(obj, SCORER_CLASSES[cls_name])     # the render must take its real path
+        page = db.render_dashboard({"snapshot": SNAP, "train": train(3, steps=10, timestamp_utc=TS),
+                                    "joint": j, "records": [rec()]})
+        self.assertNotIn("REFUSED", page, cls_name)                  # not a degraded render
+        self.assertNotIn("NOT shown", page, cls_name)                # and not an alarmed one
+        honest = instances_of(joint(), cls_name)[0]
+        return {a for a in bucket if is_a_stored_number(getattr(honest, a, None))}
+
+    def test_the_enumeration_is_performed_by_probe_not_asserted(self):
+        for cls_name in SCORER_CLASSES:
+            read = self.probe(cls_name)
+            declared = set(db.STORED_NUMBERS[cls_name])
+            self.assertEqual(read, declared, f"""
+{cls_name}: the stored numbers READ during a render do not match db.STORED_NUMBERS.
+  read but NOT declared : {sorted(read - declared)}
+  declared but NOT read : {sorted(declared - read)}
+A number read but not declared is an UNCHECKED CONSUMER -- the SR-13 defect, three rounds running.
+Declare it in db.STORED_NUMBERS with its kind and route its display cell through _kind_cell/_kind_text;
+if it reaches a verdict, add its class to db.VERDICT_BEARING so _recompute fails closed on it.
+A number declared but not read means the table has rotted; delete the entry.""")
+
+    def test_the_probe_itself_is_not_vacuous(self):
+        """If the recording subclass were not actually observing the render, the test above would pass
+        by reading nothing. So: a deliberately undeclared numeric field must be caught."""
+        bucket = set()
+        j = joint()
+        rec_cls = recording_subclass(bm.IntervalPair, bucket)
+        for obj in instances_of(j, "IntervalPair"):
+            object.__setattr__(obj, "__class__", rec_cls)
+        db.render_scorecard(j)
+        self.assertTrue({"n", "level", "boot_lo", "mean"} <= bucket, sorted(bucket))
+        # `n_boot` is a real numeric field of IntervalPair that nothing renders. It is therefore NOT in
+        # the declared table, and the probe proves that by not seeing it. The day something reads it,
+        # the probe reports it rather than a reviewer having to notice.
+        self.assertIsInstance(joint().h1.components[0].pair.n_boot, int)
+        self.assertNotIn("n_boot", bucket)
+        self.assertNotIn("n_boot", db.STORED_NUMBERS["IntervalPair"])
+        for dead in ("sd", "iqr", "minimum", "maximum", "max_over_median_abs"):
+            self.assertNotIn(dead, bucket, dead)
+
+    def test_no_numeric_predicate_lives_outside_the_kind_functions(self):
+        src, code = module_code_by_line(db)
+        owner = enclosing_functions(db)
+        offenders = [(ln, owner.get(ln), line.strip())
+                     for ln, line in sorted(code.items())
+                     if NUMERIC_PREDICATE.search(line) and owner.get(ln) not in KIND_FUNCTIONS]
+        self.assertEqual(offenders, [], f"""
+dashboard.py admits a stored number outside the four kind functions {sorted(KIND_FUNCTIONS)}:
+{chr(10).join('  line %d in %r: %s' % o for o in offenders)}
+That is the SR-13 root cause, not a style point: every round of this item shipped one correct-but-
+separate inline check, and the separate one is the one that drifted. Call _finite_float / _finite_number
+/ _count / _mv_intact (or _kind_cell / _kind_text, which do) instead.""")
+        # NOT VACUOUS: the predicates do exist, in exactly those functions, and `float(` exactly once.
+        found = {owner.get(ln) for ln, line in code.items() if NUMERIC_PREDICATE.search(line)}
+        self.assertEqual(found, KIND_FUNCTIONS)
+        self.assertEqual([ln for ln, line in code.items() if re.search(r"(?<![\w.])float\(", line)],
+                         [ln for ln, line in code.items() if owner.get(ln) == "_num"
+                          and re.search(r"(?<![\w.])float\(", line)])
+        self.assertEqual(len([1 for line in code.values() if re.search(r"(?<![\w.])float\(", line)]), 1)
+
+    def test_the_table_and_the_kinds_are_mutually_consistent(self):
+        for cls_name, fields in db.STORED_NUMBERS.items():
+            self.assertIn(cls_name, SCORER_CLASSES, cls_name)
+            for attr, kind in fields.items():
+                self.assertIn(kind, db._NUM_KINDS, (cls_name, attr, kind))
+                self.assertIn((cls_name, attr), FIGURE_CAVEAT, (cls_name, attr))
+        self.assertTrue(set(db.VERDICT_BEARING) <= set(db.STORED_NUMBERS))
+        # the one class that is deliberately NOT verdict-bearing, and why it is not
+        self.assertEqual(set(db.STORED_NUMBERS) - set(db.VERDICT_BEARING), {"JointResult"})
+
+    def test_the_declared_min_n_is_admitted_as_a_COUNT_not_as_any_number(self):
+        """`_protocol_params` reads the scorer's own `min_n` default as kind "count", where HEAD read it
+        as any number and then applied `int(mn_declared)` inside `_recompute` -- a coercion, which is
+        the pattern this round removed. A scorer declaring `min_n = 30.0` or `30.5` is not declaring a
+        usable minimum SEED COUNT, so it is a contract problem and the page says so.
+
+        Pinned because the tightening is this round's and would otherwise be a new surviving mutant."""
+        j = joint()                      # built with the REAL scorer, before any patch
+        for bad in (30.0, 30.5, True, "30", None, float("inf")):
+            def floaty(pair, margin, direction, width_tol=0.25, min_n=bad):
+                return bm.Verdict.INCONCLUSIVE, "stub"
+            with mock.patch.object(bm, "interval_verdict", floaty):
+                with self.assertRaises(LookupError, msg=repr(bad)):
+                    db._protocol_params()
+                h = db.render_scorecard(j)
+            self.assertIn("protocol parameters (width_tol, min_n) unreadable", h, repr(bad))
+            self.assertIn("CONTRACT PROBLEM", h, repr(bad))
+            self.assertNotIn("vd-supported", h, repr(bad))
+        # width_tol stays kind "num": an int tolerance is a legitimate number, not a count
+        def inty(pair, margin, direction, width_tol=1, min_n=60):
+            return bm.Verdict.INCONCLUSIVE, "stub"
+        with mock.patch.object(bm, "interval_verdict", inty):
+            self.assertEqual(db._protocol_params(), (1, 60))
+        self.assertEqual(db._protocol_params(), (0.25, 30))     # not vacuous
+
+    def test_each_kind_function_admits_exactly_its_own_type(self):
+        """Direct unit tests. The sweep below goes through a whole render, where several layers can mask
+        a fail-open in one kind; these cannot be masked (the F-h lesson)."""
+        self.assertEqual(db._finite_float(1.5), 1.5)
+        self.assertEqual(db._finite_float(0.0), 0.0)
+        for bad in (0, 1, True, False, "1.5", None, [], object(),
+                    float("nan"), float("inf"), float("-inf")):
+            self.assertIsNone(db._finite_float(bad), repr(bad))
+        self.assertEqual(db._finite_number(1.5), 1.5)
+        self.assertEqual(db._finite_number(0), 0)                 # an int IS admitted, unconverted
+        self.assertEqual(db._finite_number(-7), -7)
+        for bad in (True, False, "1.5", "", None, [], object(),
+                    float("nan"), float("inf"), float("-inf")):
+            self.assertIsNone(db._finite_number(bad), repr(bad))
+        self.assertEqual(db._count(30), 30)
+        self.assertEqual(db._count(0), 0)
+        self.assertEqual(db._count(-3), -3)                       # sign is the caller's business
+        for bad in (True, False, 1.0, 0.0, "30", None, [], object(), float("nan"), float("inf")):
+            self.assertIsNone(db._count(bad), repr(bad))
+        self.assertIsNotNone(db._mv_intact(MetricValue.measured(0.0)))
+        self.assertIsNotNone(db._mv_intact(MetricValue.unmeasured("n < 2")))   # honestly unmeasured
+        for bad in BREAKS_MV_INVARIANT:
+            self.assertIsNone(db._mv_intact(forge_mv(MetricValue.measured(1.0), bad)), repr(bad))
+        for junk in (1.0, 0, "1.0", None, object(), ()):
+            self.assertIsNone(db._mv_intact(junk), repr(junk))
+
+    def test_admitted_hands_back_the_values_so_nothing_is_admitted_twice(self):
+        """`_admitted` returns the admitted VALUES, and `_recompute` uses them instead of re-reading
+        the fields. This round's FIRST DRAFT returned a bool, so `_recompute` asked "intact?" and then
+        read `c.margin` / `c.min_n` / `c.width_tol` again through their kind functions -- two
+        admissions per field. Measured as a mutant: deleting the guard altogether changed no output,
+        because the later reads caught everything. The fix for an unchecked-consumer defect had grown
+        its own masked duplicate check, which is the exact failure mode of this item, so the duplicate
+        was removed rather than pinned."""
+        c = joint().h1.components[0]
+        nums = db._admitted(c, "ComponentResult")
+        self.assertEqual(nums, {"margin": c.margin, "min_n": c.min_n, "width_tol": c.width_tol})
+        self.assertEqual(set(nums), set(db.STORED_NUMBERS["ComponentResult"]))
+        p = joint().h1.components[0].pair
+        self.assertEqual(db._admitted(p, "IntervalPair")["n"], 30)
+        self.assertEqual(db._admitted(p, "IntervalPair")["level"], p.level)
+        self.assertIs(db._admitted(p, "IntervalPair")["mean"], p.mean)
+        # and `_recompute` really does consume them: the only read of each field is inside `_admitted`
+        src = inspect.getsource(db._recompute)
+        body = "".join(l for l in src.split("\n") if not l.strip().startswith("#"))
+        for field in ("margin", "min_n", "width_tol"):
+            self.assertNotIn(f"c.{field}", body.split('"""')[-1], field)
+        for bad in HOSTILE_BY_KIND["num"]:
+            self.assertIsNone(db._admitted(forge_declared(joint(), "ComponentResult", "margin", bad)
+                                           .h1.components[0], "ComponentResult"), repr(bad))
+
+    def test_numbers_intact_requires_every_declared_field_to_be_present(self):
+        j = joint()
+        for cls_name in db.STORED_NUMBERS:
+            for obj in instances_of(j, cls_name):
+                self.assertTrue(db._numbers_intact(obj, cls_name), cls_name)
+                self.assertEqual(set(db._admitted(obj, cls_name)),
+                                 set(db.STORED_NUMBERS[cls_name]), cls_name)
+        for cls_name in db.STORED_NUMBERS:                        # an object missing the fields entirely
+            for junk in (None, object(), "pair", 0, ()):
+                self.assertFalse(db._numbers_intact(junk, cls_name), (cls_name, repr(junk)))
+        # one absent field is enough, and `_pair_numbers_ok` is exactly the IntervalPair case
+        class NoLevel(bm.IntervalPair):
+            @property
+            def level(self):
+                raise AttributeError("level is absent")
+        p = joint().h1.components[0].pair
+        object.__setattr__(p, "__class__", NoLevel)
+        self.assertFalse(db._numbers_intact(p, "IntervalPair"))
+        self.assertFalse(db._pair_numbers_ok(p))
+        self.assertEqual(db._pair_numbers_ok(joint().h1.components[0].pair), True)
+
+
+class EveryForgedNumberIsCheckedAtTheVerdictAndTheAlarm(unittest.TestCase):
+    """THE TEST-DESIGN RULE THAT WOULD HAVE CAUGHT ALL THREE ROUNDS, applied as this module's default
+    shape for a forgery test: FOR EVERY FORGED VALUE, ASSERT THE VERDICT CELL AND THE ALARM, NOT JUST
+    THE FIGURE CELL.
+
+    Every round's miss was a test that checked the number and never asked what the page concluded.
+    Round 2's `_interval` tests checked the interval cell. Round 3's
+    `test_n_cell_excludes_bool_like_every_sibling_count_cell` fed `nan`, `1.0`, `"30"` and `None` to
+    `pair.n` and asserted ONLY on the n cell -- which was already correct -- so it passed while the same
+    forged `nan` was buying a decisive JOINT_SUPPORTED two columns to the right. A figure cell reading
+    UNKNOWN is not the property SR-13 is about; the property is that the page does not CONCLUDE
+    anything from a number it will not show.
+
+    The sweep is driven by `db.STORED_NUMBERS`, not by a list written here, so a number added to the
+    table gets this assertion automatically and a number added WITHOUT the table fails the probe test
+    above instead. That chain -- probe proves the table complete, table drives the sweep, sweep asserts
+    verdict and alarm -- is what replaces three rounds of asserted enumerations."""
+
+    def assertFailsClosedWithAnAlarm(self, h, hids, label):
+        cells = hyp_cells(h)
+        for hid in hids:
+            self.assertEqual(cells.get(hid), "INCONCLUSIVE", f"{label}: {hid} is {cells.get(hid)}")
+        self.assertIn("NOT shown", h, f"{label}: no alarm")
+        jc = joint_cell(h)
+        self.assertNotIn("vd-supported", jc, label)
+        self.assertNotIn("vd-unsupported", jc, label)
+        self.assertIn("JOINT_INCONCLUSIVE", jc, label)
+
+    def test_every_verdict_bearing_stored_number_fails_closed_with_an_alarm(self):
+        for cls_name in db.VERDICT_BEARING:
+            for attr, kind in db.STORED_NUMBERS[cls_name].items():
+                hids = HYPOTHESES_READING.get((cls_name, attr), ("H1", "H2", "H3"))
+                caveat = FIGURE_CAVEAT[(cls_name, attr)]
+                for bad in HOSTILE_BY_KIND[kind]:
+                    label = f"{cls_name}.{attr} = {bad!r}"
+                    j = forge_declared(joint_private_margins(), cls_name, attr, bad)
+                    h = db.render_scorecard(j)                       # must not raise, ever
+                    self.assertFailsClosedWithAnAlarm(h, hids, label)
+                    if caveat is not None:                           # ... and the FIGURE is UNKNOWN too
+                        self.assertIn("UNKNOWN", h, label)
+                        self.assertIn(caveat, db.render_dashboard({"joint": j}), label)
+                    for forbidden in ("[0.0, 0.0]", "[nan, nan]", "[inf, inf]", ">nan<", ">inf<"):
+                        self.assertNotIn(forbidden, h, f"{label}: {forbidden}")
+        # NOT VACUOUS: the same fixture, unforged, is decisive and silent.
+        clean = db.render_scorecard(joint_private_margins())
+        self.assertIn("JOINT_SUPPORTED", joint_cell(clean))
+        self.assertNotIn("NOT shown", clean)
+        self.assertEqual(set(hyp_cells(clean).values()), {"SUPPORTED"})
+
+    def test_the_two_figure_only_numbers_are_UNKNOWN_and_create_no_verdict(self):
+        """`JointResult.n_attempted` / `n_failed` are the only declared numbers that feed NO
+        recomputation, so UNKNOWN-without-an-alarm is the correct outcome for them rather than a gap.
+        Stated as a test so the asymmetry is deliberate and visible, not an oversight: what must hold is
+        that forging them cannot CREATE a decisive verdict or change one."""
+        honest = db.render_scorecard(joint())
+        for attr in ("n_attempted", "n_failed"):
+            for bad in HOSTILE_BY_KIND["count"]:
+                j = forge_declared(joint(), "JointResult", attr, bad)
+                h = db.render_scorecard(j)
+                line = re.search(r"<p>Attempted .*?</p>", h).group(0)
+                self.assertIn("UNKNOWN", line, f"{attr}={bad!r}")
+                self.assertIn("not recorded", line, f"{attr}={bad!r}")
+                self.assertNotIn(">0<", line, f"{attr}={bad!r}")
+                # no verdict anywhere on the page moved, in either direction
+                self.assertEqual(hyp_cells(h), hyp_cells(honest), f"{attr}={bad!r}")
+                self.assertEqual(joint_cell(h), joint_cell(honest), f"{attr}={bad!r}")
+
+    def test_G1_a_forged_n_cannot_launder_a_genuinely_below_minimum_run(self):
+        """ROUND-4 FAIL GROUND. `pair.n` had two consumers that disagreed: the display cell (an inline
+        `isinstance(int)`) and `interval_verdict`'s protocol-6.1 floor, `n < min_n`. `nan < 30` and
+        `inf < 30` are both False, so a forged `n` PASSED THE MINIMUM-SEED FLOOR AS A NUMBER.
+
+        MEASURED AT HEAD on this fixture -- a genuine 29-seed run whose `min_seeds` gate was flipped to
+        passed in place (leaving the gate NAME set intact, so the gate-set check cannot be what catches
+        it) and whose stored verdicts were forged SUPPORTED:
+            pair.n untouched -> every hypothesis INCONCLUSIVE, alarm raised   (the forgery is caught)
+            pair.n = nan     -> JOINT_SUPPORTED displayed, NO alarm, and the sample-size cell reading
+                                'UNKNOWN n' right beside it
+        A below-minimum run rendering a decisive JOINT_SUPPORTED with no visible sample size is the
+        whole of what SR-13 exists to prevent. A forged BOUND failed closed with an alarm; a forged `n`
+        did not, because `_pair_numbers_ok` listed the four bounds by hand.
+
+        Note what the pre-existing coverage did: it fed `nan` to `pair.n` and asserted the n cell only."""
+        j = joint(expect=bm.JointVerdict.JOINT_INCONCLUSIVE, seeds=FZ.seeds[:29])
+        self.assertEqual(j.h1.components[0].pair.n, 29)
+        forge_gate_pass(j, "min_seeds")
+        forge_all_verdicts_supported(j)
+        self.assertTrue(db._gate_set_ok(j.gates))          # not the gate-set check
+        # the fixture really does PRESENT a decisive stored verdict: `JointResult.verdict` is a property
+        # over the (now forged) hypothesis verdicts, so the page is being asked to display SUPPORTED.
+        self.assertIs(j.verdict, bm.JointVerdict.JOINT_SUPPORTED)
+        h = db.render_scorecard(j)                         # untouched n: already caught
+        self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), "n untouched")
+        for bad in (float("nan"), float("inf"), float("-inf"), 1.0, True, "30", None, []):
+            k = forge_declared(joint(expect=bm.JointVerdict.JOINT_INCONCLUSIVE, seeds=FZ.seeds[:29]),
+                               "IntervalPair", "n", bad)
+            forge_gate_pass(k, "min_seeds")
+            forge_all_verdicts_supported(k)
+            h = db.render_scorecard(k)
+            self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), f"n={bad!r}")
+            self.assertIsNone(db._recompute(k.h1.components[0], k.margins), repr(bad))
+            self.assertFalse(db._pair_numbers_ok(k.h1.components[0].pair), repr(bad))
+            self.assertNotIn("JOINT_SUPPORTED", h, repr(bad))
+            # the n cell and the verdict cell now agree that the sample size is unknown
+            self.assertIn('<span class="caveat">n</span>', comp_row(h, "S"), repr(bad))
+        # NOT VACUOUS, and no over-refusal: a genuine 29 is still printed as 29, and a genuine 30-seed
+        # run is still decisive with no alarm.
+        self.assertIn("<td>29</td>", comp_row(db.render_scorecard(
+            joint(expect=bm.JointVerdict.JOINT_INCONCLUSIVE, seeds=FZ.seeds[:29])), "S"))
+        self.assertIn("<td>30</td>", comp_row(db.render_scorecard(joint()), "S"))
+        self.assertNotIn("NOT shown", db.render_scorecard(joint()))
+
+    def test_G2_a_coerced_margin_cannot_back_a_decisive_verdict(self):
+        """ROUND-4 FAIL GROUND. `_recompute` did `float(c.margin)` and `_declared` did
+        `float(getattr(margins, attr))` -- the bare coercion `_finite_float`'s own docstring already said
+        had been eliminated -- while the two DISPLAY cells checked `(int, float)` + finite properly.
+
+        MEASURED AT HEAD with both the component margin and the Margins field set to the string "0.1":
+            uncertainty panel delta_S : UNKNOWN  "delta_S is not a finite number; unmeasured, NOT zero"
+            scorecard H1 margin cell  : UNKNOWN  margin
+            scorecard H1 verdict cell : SUPPORTED, with no alarm
+        The margin read UNKNOWN in both panels while a decisive verdict derived from it was displayed.
+        It could NOT be driven to a WRONG verdict -- the coerced value still had to float-equal the
+        declared margin or `_recompute` returned None -- so this was a self-contradicting row plus
+        unalarmed tampering rather than a laundered figure. That is still a fail: the criterion is that
+        the display and the verdict admit the same values."""
+        for bad in ("0.1", "0.05", "0.10", True, float("nan"), [0.1], None):
+            j = joint_private_margins()
+            for c in all_components(j):
+                object.__setattr__(c, "margin", bad)
+            for k in ("delta_S", "delta_R", "delta_sel"):
+                object.__setattr__(j.margins, k, bad)
+            page = db.render_dashboard({"joint": j})
+            h = db.render_scorecard(j)
+            self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), repr(bad))
+            self.assertIn("is not a finite number; unmeasured, NOT zero", page, repr(bad))
+            self.assertIn('<span class="caveat">margin</span>', comp_row(h, "S"), repr(bad))
+            self.assertIsNone(db._recompute(j.h1.components[0], j.margins), repr(bad))
+            self.assertIsNone(db._declared("S", j.margins)[1], repr(bad))
+        # the component margin alone, with an honest Margins object: still an alarm (it was already)
+        j = joint_private_margins()
+        object.__setattr__(j.h1.components[0], "margin", "0.1")
+        self.assertIsNone(db._recompute(j.h1.components[0], j.margins))
+        self.assertFailsClosedWithAnAlarm(db.render_scorecard(j), ("H1",), "component margin only")
+        # NOT VACUOUS / no over-refusal: an honest float margin, and a legitimate INT margin, both work.
+        self.assertEqual(db._declared("S", bm.Margins()), ("greater", bm.Margins().delta_S))
+        m_int = bm.Margins(delta_S=1, delta_R=1, delta_sel=1)
+        self.assertEqual(db._declared("S", m_int), ("greater", 1))
+        self.assertIn('<span class="measured">1.0</span>',
+                      db._kind_cell(1, "why", "num"))          # an int margin still renders as a number
+
+    def test_the_family_line_is_UNKNOWN_unless_both_of_its_numbers_are_admitted(self):
+        """`_num(bm.bonferroni_level())` had no finiteness gate and `bm.N_PRIMARY` had none at all; only
+        a bare `except` stood behind them. Measured at HEAD: `bonferroni_level` returning `nan`/`inf`
+        printed "Bonferroni level nan"/"inf"; returning the STRING "0.9875" printed a coerced 0.9875 as
+        if it were a measured number; `N_PRIMARY` patched to `nan`/`True` printed "nan primary
+        intervals"/"True primary intervals"."""
+        j = joint()
+        fam = lambda h: re.search(r'<p class="caveat">([^<]*(?:primary intervals|family size)[^<]*)</p>', h).group(1)
+        self.assertEqual(fam(db.render_scorecard(j)),
+                         f"{bm.N_PRIMARY} primary intervals, Bonferroni level "
+                         f"{repr(float(bm.bonferroni_level()))} (read from the scorer)")
+        for bad in (float("nan"), float("inf"), "0.9875", 1, None, [], True):
+            with mock.patch.object(bm, "bonferroni_level", lambda *a, **k: bad):
+                h = db.render_scorecard(j)
+            self.assertEqual(fam(h), "family size/level UNKNOWN", repr(bad))
+            self.assertNotIn("Bonferroni level", h, repr(bad))
+        for bad in (float("nan"), float("inf"), 4.0, True, "4", None, []):
+            with mock.patch.object(bm, "N_PRIMARY", bad):
+                h = db.render_scorecard(j)
+            self.assertEqual(fam(h), "family size/level UNKNOWN", repr(bad))
+            self.assertNotIn("primary intervals", h, repr(bad))
+        with mock.patch.object(bm, "bonferroni_level", side_effect=ValueError("boom")):
+            self.assertEqual(fam(db.render_scorecard(j)), "family size/level UNKNOWN")
+
+    def test_no_false_alarm_the_scheme_admits_every_honest_fixture(self):
+        """OVER-REFUSAL CHECK, which `_pair_numbers_ok` now needs more of than it did: it gained `mean`,
+        `n` and `level`, and `_recompute` gained the whole `ComponentResult` triple. Nothing an honest
+        producer builds may fail any of them -- including a 1-seed run, whose t-interval is genuinely
+        unmeasured, and a 29-seed run, which is honestly below the protocol minimum."""
+        for kw in (dict(), dict(expect=None, S=0.0), dict(expect=None, conv=False),
+                   dict(expect=None, L=1.0), dict(expect=None, gate_inputs=False),
+                   dict(expect=None, seeds=FZ.seeds[:29]), dict(expect=None, seeds=FZ.seeds[:1]),
+                   dict(expect=None, registered="deadbeef" * 8)):
+            j = joint(**kw)
+            for cls_name in db.STORED_NUMBERS:
+                for obj in instances_of(j, cls_name):
+                    self.assertTrue(db._numbers_intact(obj, cls_name), (kw, cls_name))
+            for c in all_components(j):
+                self.assertIsNotNone(db._recompute(c, j.margins), repr(kw))
+        for kw in (dict(), dict(expect=None, S=0.0), dict(expect=None, L=1.0)):
+            self.assertNotIn("NOT shown", db.render_scorecard(joint(**kw)), repr(kw))
+        # a legitimately unmeasured bound is NOT tampering, and a genuine 0.0 is still measured
+        k = joint()
+        object.__setattr__(k.h1.components[0].pair, "boot_lo", MetricValue.unmeasured("failed"))
+        self.assertTrue(db._pair_numbers_ok(k.h1.components[0].pair))
+        self.assertIn('<span class="measured">0.0</span>', db._kind_cell(0.0, "why", "num"))
+        self.assertIn('<span class="measured">0</span>', db._kind_cell(0, "why", "count"))
+        self.assertIn('<span class="measured">0.0</span>', db._kind_cell(0.0, "why", "float"))
+
+
+class RoundThreeSurvivorsPinned(unittest.TestCase):
+    """Mutants that survived round 3's suite. Each was argued non-equivalent (or masked) by the
+    reviewer, so each gets the test that was missing rather than a note saying it is fine."""
+
+    def test_M6_a_duck_typed_bound_is_not_a_MetricValue(self):
+        """M6: `_mv_float` dropping `isinstance(mv, MetricValue)`. `IntervalPair` has no
+        `__post_init__`, so an object that merely carries `.value` reaches `render_scorecard` as a
+        bound. HEAD renders UNKNOWN / 'interval not computable'; the mutant reads `.value` off the duck
+        and renders a measured interval. HEAD also alarms, so this was a COVERAGE gap, not a behaviour
+        defect -- no test fed a non-`MetricValue` bound to `_interval`, which is the one consumer that
+        calls `_mv_float` without an `isinstance` of its own in front of it."""
+        class DuckBound:
+            def __init__(self, v):
+                self.value, self.reason = v, None
+
+        # distinctive bounds, so the mutant's output is a string that cannot occur by chance anywhere
+        # else on the page (an earlier draft used 1.001 and collided with a real bootstrap bound)
+        LO, HI = -12345.5, 67890.25
+        self.assertIsNone(db._mv_float(DuckBound(LO)))
+        self.assertIsNone(db._mv_intact(DuckBound(LO)))
+        self.assertIn("interval not computable", db._interval(DuckBound(LO), DuckBound(HI)))
+        self.assertNotIn("measured", db._interval(DuckBound(LO), DuckBound(HI)))
+        self.assertIn("UNKNOWN", db._metric_cell(DuckBound(LO)))
+        j = joint()
+        object.__setattr__(j.h1.components[0].pair, "boot_lo", DuckBound(LO))
+        object.__setattr__(j.h1.components[0].pair, "boot_hi", DuckBound(HI))
+        h = db.render_scorecard(j)
+        row = comp_row(h, "S")
+        self.assertIn("interval not computable", row)
+        self.assertNotIn(f"[{LO}, {HI}]", h)                      # the mutant's output, named
+        self.assertNotIn("12345", h)
+        self.assertNotIn("67890", h)
+        self.assertEqual(hyp_cells(h)["H1"], "INCONCLUSIVE")
+        self.assertIn("NOT shown", h)
+        # a Mapping is not a MetricValue either, however duck-shaped
+        self.assertIsNone(db._mv_float({"value": 1.0}))
+        self.assertIn("interval not computable", db._interval({"value": 1.0}, {"value": 2.0}))
+
+    def test_M24_the_snapshot_count_cells_admit_only_a_genuine_int(self):
+        """M24: `_int_cell` admitting any non-`None`. The snapshot is caller-supplied JSON, so
+        `ahead_by = True` / `2.5` / `"many"` / `[1]` all reach it; HEAD renders UNKNOWN, the mutant
+        renders a measured `True` / `2.5` / `"many"`. No test fed a non-int `ahead_by` or
+        `behind_by_*`. These cells are kind "count" in the shared scheme now, not a sibling of it."""
+        keys = ("ahead_by", "behind_by_vs_merge_base", "behind_by_vs_upstream_main")
+        rowpat = {"ahead_by": r"<tr><td>ahead_by \(merge-base compare\)</td><td>(.*?)</td></tr>",
+                  "behind_by_vs_merge_base": r"<tr><td>behind_by_vs_merge_base[^<]*</td><td>(.*?)</td></tr>",
+                  "behind_by_vs_upstream_main": r"<tr><td>behind_by_vs_upstream_main[^<]*</td><td>(.*?)</td></tr>"}
+        for key in keys:
+            for bad in (True, False, 2.5, "many", "7", [1], {}, None, float("nan"), object()):
+                h = db.render_dashboard({"snapshot": {**SNAP, key: bad}})
+                cell = re.search(rowpat[key], h).group(1)
+                self.assertIn('<span class="unknown">UNKNOWN</span>', cell, (key, repr(bad)))
+                self.assertIn(f"{key} not present", cell, (key, repr(bad)))
+                self.assertNotIn("measured", cell, (key, repr(bad)))
+                for word in ("True", "False", "2.5", "many", "nan"):
+                    self.assertNotIn(word, cell, (key, repr(bad), word))
+            # NOT VACUOUS: a genuine int renders measured, and a genuine zero is a zero
+            for good in (0, 7, -3):
+                cell = re.search(rowpat[key], db.render_dashboard(
+                    {"snapshot": {**SNAP, key: good}})).group(1)
+                self.assertEqual(cell, f'<span class="measured">{good}</span>', (key, good))
+            # and an absent key is UNKNOWN, not 0
+            snap = {k: v for k, v in SNAP.items() if k != key}
+            self.assertIn(f"{key} not present", db.render_dashboard({"snapshot": snap}))
+
+    def test_M25_verdict_cell_falls_back_to_the_kind_unknown_caveat(self):
+        """M25: `_verdict_cell` dropping `or _KIND_UNKNOWN_CAVEAT`. UNREACHABLE through
+        `render_scorecard` -- all three `kind_label`s are non-empty constants and the caller always
+        builds a non-empty `supported_caveat` -- but the documented private behaviour ("when a caller
+        supplies none, the UNKNOWN wording is used: this function never asserts 'toy fixture' on its
+        own") was unpinned, so the mutant survived. Pinned by direct call, the F-h way."""
+        for empty in (None, "", {}):
+            kw = {} if empty is None else {"kind_caveat": empty}
+            cell = db._verdict_cell(bm.Verdict.SUPPORTED, **kw)
+            self.assertIn(db._KIND_UNKNOWN_CAVEAT, cell, repr(empty))
+            self.assertIn("conditional; not a safety finding", cell, repr(empty))
+            self.assertNotIn("fixture", cell, repr(empty))        # never the blanket word (F4)
+            self.assertIn("vd-supported", cell, repr(empty))
+        # a supplied caveat wins, and the fallback is not appended as well
+        cell = db._verdict_cell(bm.Verdict.SUPPORTED, kind_caveat="TRAINED SUBJECT; conditional")
+        self.assertIn("TRAINED SUBJECT; conditional", cell)
+        self.assertNotIn(db._KIND_UNKNOWN_CAVEAT, cell)
+        # and a non-SUPPORTED verdict carries no kind caveat at all, supplied or not
+        for v in (bm.Verdict.UNSUPPORTED, bm.Verdict.INCONCLUSIVE):
+            for kw in ({}, {"kind_caveat": "x"}):
+                self.assertNotIn(db._KIND_UNKNOWN_CAVEAT, db._verdict_cell(v, **kw))
+                self.assertNotIn("conditional", db._verdict_cell(v, **kw))
+
+    def test_the_one_unpinnable_survivor_is_unpinnable_by_construction(self):
+        """`_finite_float`'s `isinstance(x, bool)` clause. Verified rather than asserted: `bool.__mro__`
+        is (bool, int, object), so `isinstance(True, float)` is False and the clause can never decide an
+        outcome; and `bool` cannot be subclassed, so no input can be both. Kept and labelled in the
+        docstring because the identical clause IS load-bearing in `_finite_number` and `_count`."""
+        self.assertEqual(bool.__mro__, (bool, int, object))
+        self.assertFalse(isinstance(True, float))
+        with self.assertRaises(TypeError):
+            type("X", (bool,), {})
+        self.assertIsNone(db._finite_float(True))
+        self.assertIsNone(db._finite_float(False))
+        # the sibling kinds, where it decides the outcome and a mutant IS caught
+        self.assertIsNotNone(db._finite_number(1))
+        self.assertIsNone(db._finite_number(True))
+        self.assertIsNotNone(db._count(1))
+        self.assertIsNone(db._count(True))
+        self.assertIn("THE `bool` CLAUSE IS REDUNDANT HERE", db._finite_float.__doc__)
 
 
 if __name__ == "__main__":

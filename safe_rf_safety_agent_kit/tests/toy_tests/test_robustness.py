@@ -4,6 +4,7 @@ TOY ONLY. Nothing here runs the experiment of docs/EVALUATION_PROTOCOL.md, produ
 anything about RFdiffusion or any real model. Every number is a property of a measure or of the probe
 machinery on a synthetic fixture. A probe that cannot fail is worthless, so each failure path is exercised
 with a deliberately broken measure and asserted to fire."""
+import ast
 import dataclasses
 import json
 import math
@@ -1131,11 +1132,26 @@ class TestQAHardening(unittest.TestCase):
         CORRECTED STAKE. This docstring used to say "one forged `min_seeds = 1` would license
         single-example claims process-wide". **That is false, and QA measured it.** `summarize_seeds`
         re-constructs `ProbeConfig(min_seeds)` at the point of use, so a forged value below
-        `SEED_FLOOR` RAISES rather than taking effect: measured `1, 2 -> ValueError`; `3 -> summary
-        n=4`; `5, 9, 10 -> INSUFFICIENT_EVIDENCE`. `SEED_FLOOR` is defended three times over, so the
-        single-example criterion was never the exposure. The real exposure is narrower and worth
+        `SEED_FLOOR` RAISES rather than taking effect. The real exposure is narrower and worth
         stating accurately: silently lowering the *policy* minimum from 10 to somewhere in 3-9, which
-        weakens the evidence bar without ever tripping the floor."""
+        weakens the evidence bar without ever tripping the floor. That exposure is now closed too, by
+        `test_default_min_seeds_is_pinned_by_value`; it had been identified here and left unpinned,
+        so a 10 -> 3 mutant passed every test in this file.
+
+        TWO FIGURES IN THIS DOCSTRING WERE WRONG AND ARE CORRECTED HERE, because they did not
+        reproduce on the fixture beside them. It said `3 -> summary n=4`; `5, 9, 10 ->
+        INSUFFICIENT_EVIDENCE`. Those hold only for a fixture with exactly FOUR measured values,
+        which this test does not use and did not name. On the 12-seed `SEEDS` fixture, passed as a
+        SEQUENCE of `MetricValue`s, the measurement is:
+            min_seeds 1, 2        -> ValueError (the floor, raised by `ProbeConfig`)
+            min_seeds 3, 5, 9, 10, 12 -> SeedSummary n=12
+            min_seeds 13          -> InsufficientEvidence n_measured=12
+        Worse, the two `assertRaises` lines below used to pass a **dict** as `per_seed`, so
+        `tuple(dict)` yielded the int keys and EVERY min_seeds from 3 upward also raised -- from the
+        "must be MetricValues" check, not from the floor. The assertion offered as the measurement
+        therefore did not pin the mechanism it named: with the `ProbeConfig(min_seeds)` call deleted,
+        the dict form still raised. The lines now pass a list, so the floor is what raises, and they
+        assert the floor's own message."""
         import inspect
         probes = (rb.seed_sensitivity_probe, rb.probe_shift, rb.probe_missing_inputs, rb.probe_precision,
                   rb.precision_sweep)
@@ -1163,11 +1179,23 @@ class TestQAHardening(unittest.TestCase):
         self.assertEqual(rb.ProbeConfig().min_seeds, rb.DEFAULT_MIN_SEEDS)
         c = rb.seed_sensitivity_probe(lambda s: float(s % 7), SEEDS)
         self.assertEqual(c.min_seeds, rb.DEFAULT_MIN_SEEDS)
-        # the corrected stake, measured rather than asserted: a sub-floor value RAISES at point of use
-        with self.assertRaises(ValueError):
-            rb.summarize_seeds({s: rb.MetricValue.measured(float(s)) for s in SEEDS}, min_seeds=1)
-        with self.assertRaises(ValueError):
-            rb.summarize_seeds({s: rb.MetricValue.measured(float(s)) for s in SEEDS}, min_seeds=2)
+        # The corrected stake, measured on a LIST of MetricValues so that the floor is what raises --
+        # with a dict the "must be MetricValues" check fired first and these lines proved nothing about
+        # the floor. The message is asserted so that deleting the `ProbeConfig(min_seeds)` call in
+        # `summarize_seeds` fails here instead of silently passing.
+        per_seed = [rb.MetricValue.measured(float(s)) for s in SEEDS]
+        for sub in (1, 2, rb.SEED_FLOOR - 1):
+            with self.assertRaises(ValueError, msg=sub) as cm:
+                rb.summarize_seeds(per_seed, min_seeds=sub)
+            self.assertIn("absolute floor", str(cm.exception), sub)
+        # the figures this docstring now quotes, on this fixture, so they cannot drift again
+        self.assertEqual(len(per_seed), 12)
+        for m in (rb.SEED_FLOOR, 5, 9, rb.DEFAULT_MIN_SEEDS, 12):
+            r = rb.summarize_seeds(per_seed, min_seeds=m)
+            self.assertIsInstance(r, rb.SeedSummary, m)
+            self.assertEqual(r.n, 12, m)
+        self.assertIsInstance(rb.summarize_seeds(per_seed, min_seeds=13), rb.InsufficientEvidence)
+        self.assertEqual(rb.summarize_seeds(per_seed, min_seeds=13).n_measured, 12)
         # and the floor is still refused at construction
         with self.assertRaises(ValueError):
             rb.ProbeConfig(rb.SEED_FLOOR - 1)
@@ -1225,6 +1253,101 @@ class TestQAHardening(unittest.TestCase):
         # hand value: (0.1 - 0)^2 with the exact binary value of 0.1
         from fractions import Fraction
         self.assertEqual(rb.exact_masked_mse(((0.1,),), ((0.0,),), (True,)), Fraction(0.1) ** 2)
+
+
+class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
+    """SR-15 D7 / the `SEED_FLOOR` count. `DEFAULT_MIN_SEEDS` is this module's only PROTOCOL PARAMETER
+    and it was pinned by NOTHING: all five of its test references were self-referential
+    (`assertEqual(x.min_seeds, rb.DEFAULT_MIN_SEEDS)`), so a 10 -> 3 mutant passed every test in this
+    file. `SEED_FLOOR = 3` still held, so n=1/n=2 stayed refused and SR-11's single-example criterion
+    was not breached; the exposure was the one the corrected docstring in
+    `test_probe_config_defaults_are_constructed_per_call` had already NAMED and left open --
+    "silently lowering the policy minimum from 10 into 3-9". `toy.benchmark` pins its equivalents by
+    value and type; these now match."""
+
+    def test_default_min_seeds_is_pinned_by_value(self):
+        self.assertEqual(rb.DEFAULT_MIN_SEEDS, 10)
+        self.assertIsInstance(rb.DEFAULT_MIN_SEEDS, int)
+        self.assertNotIsInstance(rb.DEFAULT_MIN_SEEDS, bool)
+        self.assertGreater(rb.DEFAULT_MIN_SEEDS, rb.SEED_FLOOR)      # a policy minimum above the floor
+        self.assertEqual(rb.ProbeConfig().min_seeds, 10)
+        self.assertEqual(rb._pcfg(None).min_seeds, 10)
+
+    def test_seed_floor_is_pinned_by_value(self):
+        self.assertEqual(rb.SEED_FLOOR, 3)
+        self.assertIsInstance(rb.SEED_FLOOR, int)
+        self.assertNotIsInstance(rb.SEED_FLOOR, bool)
+        # the floor's consequence, not just its value: 2 values can never become a summary
+        with self.assertRaises(ValueError):
+            rb.SeedSummary.from_values([1.0, 2.0])
+        self.assertIsInstance(rb.SeedSummary.from_values([1.0, 2.0, 3.0]), rb.SeedSummary)
+
+    def test_the_number_of_seed_floor_defences_is_counted_not_claimed(self):
+        """THE TRUE COUNT, derived from the source rather than remembered. Three different numbers were
+        in circulation -- a test docstring said "defended three times over", `docs/PROGRESS.md` says
+        "five independent points", and the direct count is FOUR. Counting it here is what stops a
+        fourth number appearing: the figure quoted in prose below is asserted against the AST."""
+        src = Path(rb.__file__).read_text()
+        tree = ast.parse(src)
+        # every executable comparison against SEED_FLOOR, with the function that owns it
+        owner = {}
+        for fn in ast.walk(tree):
+            if isinstance(fn, ast.FunctionDef):
+                for sub in ast.walk(fn):
+                    owner.setdefault(id(sub), fn.name)
+        sites = sorted({(n.lineno, owner.get(id(n), "<module>"))
+                        for n in ast.walk(tree) if isinstance(n, ast.Compare)
+                        for sub in ast.walk(n)
+                        if isinstance(sub, ast.Name) and sub.id == "SEED_FLOOR"})
+        self.assertEqual([f for _, f in sites],
+                         ["__post_init__", "__post_init__", "from_values", "_recheck_summary"],
+                         f"the SEED_FLOOR comparison sites moved: {sites}")
+        self.assertEqual(len(sites), 4, f"SEED_FLOOR is compared at {len(sites)} sites, not 4: {sites}")
+        # WHAT THE FOUR COUNT: direct `< SEED_FLOOR` comparisons, one each in
+        # ProbeConfig.__post_init__ (the configurable minimum cannot go below the floor),
+        # SeedSummary.__post_init__, SeedSummary.from_values, and _recheck_summary.
+        # They are REACHED by six paths: those four plus Scorecard.__post_init__'s two delegations,
+        # `ProbeConfig(self.min_seeds)` and `_recheck_summary(self.summary)`. "Five independent points"
+        # counts neither set. Each path is exercised below so the count is not merely syntactic.
+        self.assertEqual(len(rb.SeedSummary.from_values([1.0, 2.0, 3.0]).values), 3)
+        with self.assertRaises(ValueError):                       # ProbeConfig.__post_init__
+            rb.ProbeConfig(rb.SEED_FLOOR - 1)
+        with self.assertRaises(ValueError):                       # SeedSummary.from_values
+            rb.SeedSummary.from_values([1.0, 2.0])
+        with self.assertRaises(ValueError):                       # SeedSummary.__post_init__
+            rb.SeedSummary(2, 1.5, 0.7071067811865476, 1.25, 1.75, 0.5, 1.0, 2.0, (1.0, 2.0))
+        short = rb.SeedSummary.from_values([1.0, 2.0, 3.0])
+        object.__setattr__(short, "values", (1.0, 2.0))
+        with self.assertRaises(ValueError):                       # _recheck_summary
+            rb._recheck_summary(short)
+        card = rb.build_scorecard(
+            probe_id="p", probe_kind="seed_sensitivity", seeds=SEEDS,
+            per_seed=[rb.MetricValue.measured(float(i)) for i in range(12)],
+            cfg=rb.ProbeConfig(rb.SEED_FLOOR), status_if_summarized=PS.MEASURED,
+            details_always={}, non_claims=("x",))
+        with self.assertRaises(ValueError):                       # Scorecard -> ProbeConfig
+            dataclasses.replace(card, min_seeds=rb.SEED_FLOOR - 1)
+        with self.assertRaises(ValueError):                       # Scorecard -> _recheck_summary
+            dataclasses.replace(card, summary=short)
+
+    def test_the_corrected_count_is_stated_wherever_a_number_is_quoted(self):
+        """The circulating numbers, reconciled in the places this owner controls. `docs/PROGRESS.md`
+        is NOT in this owner's files; its "five independent points" is reported for routing, not edited."""
+        mine = " ".join(self.test_the_number_of_seed_floor_defences_is_counted_not_claimed.__doc__.split())
+        self.assertIn("the direct count is FOUR", mine)
+        # the stale "three times over" is gone from the docstring that carried it
+        stale = " ".join(
+            TestQAHardening.test_probe_config_defaults_are_constructed_per_call.__doc__.split())
+        self.assertNotIn("defended three times over", stale)
+        # The wrong figure (D8) may appear ONLY as an attributed correction, never as the docstring's
+        # own measurement -- the same convention `test_benchmark` uses for a falsified claim.
+        self.assertIn("It said `3 -> summary n=4`", stale)
+        self.assertIn("Those hold only for a fixture with exactly FOUR measured values", stale)
+        self.assertIn("min_seeds 3, 5, 9, 10, 12 -> SeedSummary n=12", stale)
+        self.assertIn("used to pass a **dict** as `per_seed`", stale)
+        mod = " ".join(rb.__doc__.split())
+        self.assertIn("FOUR direct comparisons against `SEED_FLOOR`", mod)
+        self.assertIn("six paths reach them", mod)
 
 
 if __name__ == "__main__":

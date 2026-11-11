@@ -3877,7 +3877,18 @@ among its four imported symbols, neither in a way its call sites can hit. Both c
 in code rather than documented — "immutable scorecards" survived eight mutants plus a recursive walk
 of every field finding **zero reachable mutable or opaque node**, and "no single examples" is enforced
 at five independent points with `SEED_FLOOR = 3`, including refusal of a *subclassed* `SeedSummary`
-that skips its own validation. Three small gaps: an undocumented `gc.get_referents` bypass of the
+that skips its own validation.
+> **CORRECTION.** "Five independent points" is wrong, and it was one of **three** different counts in
+> circulation — a test docstring said "three times over", this line said five, and the direct count is
+> **four**. Settled: **4 direct executable comparisons against `SEED_FLOOR`**
+> (`ProbeConfig.__post_init__`, `SeedSummary.__post_init__`, `SeedSummary.from_values`,
+> `_recheck_summary`), reached by **6 paths** — those four plus `Scorecard.__post_init__`'s two
+> *delegations* to them. Separately there are **2 policy-minimum checks** in `Scorecard.__post_init__`
+> that mention `min_seeds` but never `SEED_FLOOR`, which is what I had miscounted as floor defences.
+> The number is now **counted from the module's own AST** by
+> `test_the_number_of_seed_floor_defences_is_counted_not_claimed`, which asserts both the count and the
+> owning function names, so a fifth number cannot appear by drift.
+Three small gaps: an undocumented `gc.get_referents` bypass of the
 `MappingProxyType`, no pin on which numeric types `from_values` accepts (`Decimal` works today), and
 `from_values([True, False, True])` silently coercing booleans where `__post_init__` rejects them.
 

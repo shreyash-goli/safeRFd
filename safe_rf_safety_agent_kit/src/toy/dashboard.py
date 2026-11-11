@@ -151,27 +151,60 @@ def _panel(title: str, ec: EvidenceClass, body: str, problem: Optional[str] = No
             f'<div>{_badge(ec, problem)}{extras}</div>{body}</section>')
 
 
-# ------------------------------------------------------------------- metrics
+# ===================================================================================================
+# THE STORED-NUMBER SCHEME.  Read this before adding ANY consumer of a stored number.
+# ===================================================================================================
+# SR-13 failed three times for one reason, in three different places. Round 2: `_interval` gated on
+# `MetricValue.is_measured` (merely `value is not None`) while `_metric_cell` checked properly, so one
+# forged value rendered UNKNOWN in one cell of a row and a measured `[0.0, 0.0]` in the next. Round 3:
+# the fix introduced `_finite_float` and a test class asserting that "all four cells and the
+# recomputation now route through" it -- and round 3 found a SIXTH and SEVENTH consumer, because that
+# enumeration was ASSERTED, not PERFORMED. Round 4 (this one) found `pair.n` (display cell vs
+# `interval_verdict`'s `n < min_n` floor: a forged `nan` bought a decisive JOINT_SUPPORTED on a
+# genuinely below-minimum run with zero alarms) and `c.margin` / `Margins.<attr>` (still bare
+# `float(...)`, which coerces -- the exact pattern the previous round's docstring claimed was gone).
+#
+# So the fix is NOT "also check `pair.n`". It is this, in three parts, none of which is an assertion:
+#
+#   1. KINDS. There are exactly four predicates in this module that admit a stored number -- one per
+#      kind -- and no inline numeric test anywhere else. `_finite_float` ("float"), `_finite_number`
+#      ("num"), `_count` ("count"), `_mv_intact` ("mv"). `float()` appears exactly ONCE in this file,
+#      in `_num`, downstream of all four, because every coercion that ever existed here was a
+#      laundering step.
+#   2. A DECLARED TABLE. `STORED_NUMBERS` names every attribute of a scorer object that this renderer
+#      turns into a figure or feeds to a verdict, with its kind. `_admitted` is the only reader and it
+#      returns the admitted VALUES, so each field is admitted exactly once; `_recompute` uses those
+#      values and fails closed on any entry of a verdict-bearing class.
+#   3. THE ENUMERATION IS PERFORMED, NOT ASSERTED. Two tests do the work a reviewer kept doing by eye:
+#      `test_the_enumeration_is_performed_by_probe_not_asserted` swaps each scorer class for a
+#      recording subclass, renders a whole dashboard, and compares the attributes ACTUALLY READ (by
+#      this module AND by `benchmark` underneath it) against `STORED_NUMBERS` -- so a new consumer of
+#      an undeclared number fails the suite naming the attribute; and
+#      `test_no_numeric_predicate_lives_outside_the_kind_functions` reads this file's own source and
+#      fails if `isinstance(..., int/float)`, `math.isfinite` or `float(` appears outside the block
+#      below. A future reader cannot add an unchecked consumer without turning one of those red.
+#      Every entry of `STORED_NUMBERS` is then forged by a table-driven sweep that asserts the VERDICT
+#      CELL and the ALARM, not just the figure cell -- which is what all three rounds' tests omitted.
+#
+# WHAT IS DELIBERATELY NOT IN THE SCHEME is argued at `_valid_history` and `_protocol_params`.
 def _num(x: float) -> str:
+    """Render a number one of the four kind functions has ALREADY admitted.
+
+    THE ONLY `float()` IN THIS MODULE, and it is not a gate -- it is reached only downstream of one.
+    The coercions that used to sit in front of verdicts (`float(code)`, `float(c.margin)`,
+    `float(getattr(margins, attr))`) are gone; see the scheme note above."""
     return repr(float(x))
 
 
 def _finite_float(x: Any) -> Optional[float]:
-    """THE ONE PLACE a stored number is admitted as displayable. None means "render UNKNOWN", never 0.0.
+    """KIND "float": a genuine finite `float` and nothing else. None means "render UNKNOWN", never 0.0.
 
-    Accepts a genuine finite `float` and nothing else: not `int`, not `bool`, not a numeric string, not
-    NaN/inf. That is exactly the invariant `MetricValue.__post_init__` already enforces on a measured
-    value (schema.py: float-only, bool rejected, `math.isfinite`), so a value that fails HERE cannot have
-    come through the constructor -- it was forged with `object.__setattr__`, or the field's type drifted.
-
-    WHY THIS IS ONE FUNCTION AND NOT FOUR CHECKS (the SR-13 root cause). `_metric_cell` carried this test
-    inline while `_interval`, the `level` cell and the `SUBJECT_KIND_CODE` cell each gated on something
-    weaker: `MetricValue.is_measured`, which is only `value is not None`; `isinstance(..., float)`, which
-    admits NaN; and a bare `float(code)`, which coerces. The same forged `MetricValue` therefore rendered
-    UNKNOWN in one cell of a row and a measured `[0.0, 0.0]` in the next two, and `""`/`[]`/`{}` crashed
-    the whole render through `_num`'s `float()`. Three reviewers checked the forged cases against
-    `_metric_cell` ONLY and so missed `_interval`, which consumes the same type. Every consumer of a
-    stored number now routes through this function, so the next consumer cannot repeat the gap.
+    Not `int`, not `bool`, not a numeric string, not NaN/inf. That is exactly the invariant
+    `MetricValue.__post_init__` already enforces on a measured value (schema.py: float-only, bool
+    rejected, `math.isfinite`), so a value that fails HERE cannot have come through the constructor --
+    it was forged with `object.__setattr__`, or the field's type drifted. Used for `MetricValue.value`
+    (via `_mv_float`), `pair.level` and the `SUBJECT_KIND_CODE` encoding: fields whose only honest
+    producer emits a float.
 
     THE `bool` CLAUSE IS REDUNDANT HERE, and is labelled rather than left as a surviving mutant. Argued
     over the public API, not assumed: `bool` subclasses `int`, NOT `float` (`bool.__mro__` is
@@ -179,13 +212,107 @@ def _finite_float(x: Any) -> Optional[float]:
     True while `isinstance(x, float)` is. No `float` subclass can also be a `bool` either, because `bool`
     cannot be subclassed at all (`class X(bool)` raises TypeError: not an acceptable base type). The
     clause is therefore unreachable for EVERY possible input, dropping it changes no output, and no test
-    can pin it -- measured: that mutant survives all 170 tests, and it is the only one that does.
-    It is kept deliberately: the sibling count cells (`_int_cell`, `_int_or_unk`) test `int`, where the
-    identical clause IS load-bearing, and widening this test to `(int, float)` -- the obvious future
-    edit, since `Margins` fields and `c.margin` do accept int -- would make it load-bearing here too."""
+    can pin it -- measured: that mutant survives the whole suite, and it is the only one that does.
+    It is kept deliberately: in the sibling kinds `_finite_number` and `_count` the identical clause IS
+    load-bearing, and widening this test to `(int, float)` would make it load-bearing here too."""
     if isinstance(x, bool) or not isinstance(x, float) or not math.isfinite(x):
         return None
     return x
+
+
+def _finite_number(x: Any) -> Optional[Any]:
+    """KIND "num": a finite `int` or `float`, `bool` rejected. Returns the value UNCHANGED; None rejects.
+
+    This is the kind for a field whose honest producer may legitimately emit either -- `Margins.delta_*`
+    and `ComponentResult.margin` (`Margins.__post_init__` itself accepts `(int, float)`), the declared
+    `width_tol`, and the training-history numbers. It is exactly the test the two margin DISPLAY cells
+    already made inline; the round-4 defect was that the two margin VERDICT paths did `float(...)`
+    instead, so the string `"0.1"` read UNKNOWN in both panels while a decisive verdict derived from it
+    was displayed unalarmed. `bool` is load-bearing here, unlike in `_finite_float`.
+
+    It does NOT convert: an admitted `int` comes back an `int`, so the single `float()` in this module
+    stays in `_num` where rendering happens, and comparisons against the declared margin stay exact."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x):
+        return None
+    return x
+
+
+def _count(x: Any) -> Optional[int]:
+    """KIND "count": a genuine `int`, `bool` rejected. None rejects. Sign is NOT constrained here.
+
+    For `pair.n`, `ComponentResult.min_n`, `JointResult.n_attempted`/`n_failed` and the snapshot's
+    comparison counts. Sign stays with the caller on purpose: `_int_or_unk` must still print a negative
+    `behind_by` as a number (it is a real datum), while `_recompute` separately refuses a negative
+    `min_n` as a protocol parameter. Type is the shared part; domain is local and stated where it is."""
+    if isinstance(x, bool) or not isinstance(x, int):
+        return None
+    return x
+
+
+def _mv_intact(mv: Any) -> Optional[Any]:
+    """KIND "mv": a `MetricValue` that still satisfies its OWN constructor invariant -- properly
+    unmeasured (`value is None`) or a finite float. None rejects.
+
+    Distinct from `_mv_float` on purpose. `_mv_float` answers "is there a number to DISPLAY" (an
+    unmeasured bound has none); this answers "has this object been TAMPERED WITH" (an unmeasured bound
+    has not -- that is how an n < 2 interval is honestly built). Only post-construction tampering or a
+    type drift in `MetricValue` can fail it, so it cannot false-fire on anything constructible."""
+    if not isinstance(mv, MetricValue):
+        return None
+    return mv if (mv.value is None or _finite_float(mv.value) is not None) else None
+
+
+_NUM_KINDS = {"float": _finite_float, "num": _finite_number, "count": _count, "mv": _mv_intact}
+
+# EVERY stored number this renderer turns into a figure or feeds to a verdict, by the class that holds
+# it. Keyed by class NAME, not by the class, so this table does not add an import-time dependency on
+# `benchmark` beyond the one the module already declares (attributes are looked up at call time so API
+# drift is detected). Proved complete by the recording-probe test, not by anyone's reading.
+STORED_NUMBERS = {
+    "IntervalPair": {"mean": "mv", "boot_lo": "mv", "boot_hi": "mv", "t_lo": "mv", "t_hi": "mv",
+                     "n": "count", "level": "float"},
+    "ComponentResult": {"margin": "num", "min_n": "count", "width_tol": "num"},
+    "Margins": {"delta_S": "num", "delta_R": "num", "delta_sel": "num"},
+    "JointResult": {"n_attempted": "count", "n_failed": "count"},
+}
+# Classes whose numbers reach a VERDICT, so `_recompute` must fail closed on every one of them. The
+# distinction is stated rather than left implicit because it is the only reason an entry may legitimately
+# render UNKNOWN without an alarm: `JointResult.n_attempted`/`n_failed` are counted on the page and feed
+# no recomputation at all, so there is no verdict for them to fail closed on.
+VERDICT_BEARING = ("IntervalPair", "ComponentResult", "Margins")
+
+
+def _admitted(obj: Any, cls_name: str) -> Optional[dict]:
+    """{attr: admitted value} for every number `STORED_NUMBERS` declares for `cls_name`, or None if any
+    one of them is absent or rejected by its kind. An absent attribute is a rejection, so a stand-in
+    object missing a field fails closed.
+
+    IT RETURNS THE VALUES RATHER THAN A BOOL, and that is not a convenience. The first draft of this
+    round returned a bool, so `_recompute` asked "are this component's numbers intact?" and then read
+    `c.margin`, `c.min_n` and `c.width_tol` again through their kind functions -- two admissions per
+    field. Measured: deleting the guard entirely then changed no output at all (the later reads caught
+    everything), i.e. the round-4 fix had itself grown a masked duplicate of its own check, which is
+    the whole failure mode of this item. Handing back the admitted values leaves exactly ONE admission
+    per field and nothing to drift.
+
+    THE REMAINING `nums is None` GUARD IN `_recompute` IS PROVABLY EQUIVALENT TO NO GUARD, and is
+    labelled rather than left as an unexplained surviving mutant: if it were dropped, the very next
+    statement subscripts the result, `None["margin"]` raises TypeError, and `_recompute`'s `except`
+    returns None -- the same value, for the same reason. Measured as a mutant: it survives the suite,
+    and it is one of only two that do."""
+    out = {}
+    for attr, kind in STORED_NUMBERS[cls_name].items():
+        v = getattr(obj, attr, _MISSING)
+        a = None if v is _MISSING else _NUM_KINDS[kind](v)
+        if a is None:
+            return None
+        out[attr] = a
+    return out
+
+
+def _numbers_intact(obj: Any, cls_name: str) -> bool:
+    """`_admitted` as a predicate, for the callers that need only the yes/no."""
+    return _admitted(obj, cls_name) is not None
 
 
 def _mv_float(mv: Any) -> Optional[float]:
@@ -194,17 +321,29 @@ def _mv_float(mv: Any) -> Optional[float]:
     return _finite_float(mv.value) if isinstance(mv, MetricValue) else None
 
 
+def _kind_cell(x: Any, why: str, kind: str) -> str:
+    """Render a stored number admitted by `kind`, boxed as `.measured`, or UNKNOWN with `why`. Never 0."""
+    v = _NUM_KINDS[kind](x)
+    return f'<span class="measured">{_e(_num(v) if kind != "count" else v)}</span>' if v is not None \
+        else _unknown(why)
+
+
+def _kind_text(x: Any, why: str, kind: str) -> str:
+    """As `_kind_cell` but bare, for cells that are already inside a labelled phrase ("Attempted N",
+    "direction margin"). Same admission; only the markup differs."""
+    v = _NUM_KINDS[kind](x)
+    return _e(_num(v) if kind != "count" else v) if v is not None else _unknown(why)
+
+
 def _float_cell(x: Any, why: str) -> str:
-    """Render a plain stored number (not a `MetricValue`): measured, or UNKNOWN with `why`. Never 0."""
-    v = _finite_float(x)
-    return f'<span class="measured">{_e(_num(v))}</span>' if v is not None else _unknown(why)
+    return _kind_cell(x, why, "float")
 
 
 def _metric_cell(mv: Any) -> str:
     """Measured -> repr (0.0 stays 0.0). Unmeasured or absent or malformed -> UNKNOWN (+reason). Never 0.
 
-    The float-and-finite test lives in `_finite_float`, shared with `_interval`, the `level` cell and the
-    `SUBJECT_KIND_CODE` cell, so one value can never read UNKNOWN here and measured in the next cell."""
+    The float-and-finite test lives in `_finite_float`, shared with every other consumer of a stored
+    number, so one value can never read UNKNOWN here and measured in the next cell."""
     if isinstance(mv, MetricValue):
         if _mv_float(mv) is not None:
             return f'<span class="measured">{_e(_num(mv.value))}</span>'
@@ -232,10 +371,10 @@ def _unknown(why: str) -> str:
 
 
 def _int_cell(snap: Mapping, key: str) -> str:
-    v = snap.get(key)
-    if isinstance(v, int) and not isinstance(v, bool):
-        return f'<span class="measured">{_e(v)}</span>'
-    return _unknown(f"{key} not present")
+    """A snapshot comparison count. In the shared scheme (kind "count"), not a sibling implementation of
+    it: round 3's surviving mutant M24 was exactly this cell admitting any non-`None`, and the snapshot
+    is caller-supplied JSON, so `True`/`2.5`/`"many"`/`[1]` all reach it."""
+    return _kind_cell(snap.get(key), f"{key} not present", "count")
 
 
 def _defang(url: Any) -> str:
@@ -260,15 +399,14 @@ def _render_snapshot(snap: Any) -> str:
                 rows += f"<tr><td colspan=3>{_unknown('malformed entry')}</td></tr>"
                 ok_totals = False
                 continue
-            a, d = f.get("additions"), f.get("deletions")
-            good = all(isinstance(v, int) and not isinstance(v, bool) for v in (a, d))
-            if good:
+            a, d = _count(f.get("additions")), _count(f.get("deletions"))
+            if a is not None and d is not None:
                 tot_a, tot_d = tot_a + a, tot_d + d
             else:
                 ok_totals = False
             rows += (f"<tr><td>{_untrusted(f.get('filename', 'UNKNOWN'), 'path')}</td>"
-                     f"<td>{_e(a) if isinstance(a, int) and not isinstance(a, bool) else _unknown('additions')}</td>"
-                     f"<td>{_e(d) if isinstance(d, int) and not isinstance(d, bool) else _unknown('deletions')}</td></tr>")
+                     f"<td>{_kind_text(a, 'additions', 'count')}</td>"
+                     f"<td>{_kind_text(d, 'deletions', 'count')}</td></tr>")
         total = (f"<tr><th>total ({_e(len(files))} files)</th><th>{_e(tot_a)}</th><th>{_e(tot_d)}</th></tr>"
                  if ok_totals else f"<tr><th>total ({_e(len(files))} files)</th><td colspan=2>"
                  f"{_unknown('some counts missing')}</td></tr>")
@@ -301,19 +439,25 @@ def _render_snapshot(snap: Any) -> str:
 
 # ------------------------------------------------------------------ training
 def _valid_history(history: Any) -> tuple[list, int]:
+    """Training-curve rows. IN the shared scheme (kind "num"), and it is the one member of it that is NOT
+    a declared attribute of a scorer object: a history row is an untyped 3-tuple from a `TrainResult`,
+    so there is no field to put in `STORED_NUMBERS`. It is routed anyway rather than left as a fourth
+    correct-but-separate inline check, because "correct at HEAD but a separate implementation" is
+    precisely what the previous two rounds left behind and round 3 then found twice. The row-shape
+    check (arity, iterability) stays here: that is structure, not number admission."""
     good, bad = [], 0
     if not isinstance(history, (list, tuple)):
         return good, 0
     for row in history:
         try:
             s, l, g = row
-            ok = all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in (s, l, g))
+            nums = [_finite_number(v) for v in (s, l, g)]
         except (TypeError, ValueError):
-            ok = False
-        if ok:
-            good.append((float(s), float(l), float(g)))
-        else:
+            nums = [None]
+        if None in nums:
             bad += 1
+        else:
+            good.append(tuple(nums))
     return good, bad
 
 
@@ -549,11 +693,20 @@ def _contract_problems() -> list:
 
 
 def _declared(metric: Any, margins: Any) -> tuple:
-    """(direction, margin) the PROTOCOL tables declare for this metric, margin read from the result's Margins."""
+    """(direction, margin) the PROTOCOL tables declare for this metric, margin read from the result's
+    Margins. The margin is None if the Margins field is absent or is not a finite number.
+
+    ROUND-4 FAIL GROUND (G2). This was `float(getattr(margins, attr))` -- a bare coercion, the exact
+    pattern `_finite_float`'s own docstring already claimed had been eliminated. With `delta_S` set to
+    the string `"0.1"` the margin read UNKNOWN in BOTH display panels (they checked properly) while the
+    verdict derived from the coerced value was displayed as decisive with no alarm: a self-contradicting
+    row plus unalarmed tampering. It could not be driven to a WRONG verdict, because the coerced value
+    still had to float-equal the component's own margin, but "cannot be driven wrong" is not the
+    criterion -- the criterion is that the display and the verdict admit the same values."""
     for table in (*bm.PRIMARY.values(), bm.CONVERGED):
         for m, direction, attr in table:
             if m == metric:
-                return direction, float(getattr(margins, attr))
+                return direction, _finite_number(getattr(margins, attr, None))
     raise LookupError(f"metric {metric!r} not in the protocol tables")
 
 
@@ -563,37 +716,45 @@ def _protocol_params() -> tuple:
     rather than silently contradicted. Raises if either default is missing or not a usable number; the
     caller turns that into 'could not recompute', and `_contract_problems` calls this function and reports
     the failure on the page (it checks parameter NAMES, which a defaultless signature passes, so the name
-    check alone left an unreadable protocol parameter visible only as a generic verdict disagreement)."""
+    check alone left an unreadable protocol parameter visible only as a generic verdict disagreement).
+
+    IN the shared scheme by kind but NOT in `STORED_NUMBERS`, deliberately: these two are not stored
+    numbers of a RESULT, they are the scorer's own declared defaults read out of its signature, so there
+    is no object to put in the table and no forgery sweep to run over them. They are routed through the
+    kind functions anyway so that this module keeps exactly four numeric predicates. `min_n` is admitted
+    as kind "count" rather than "num": it is a seed COUNT, and admitting it as a count removes the
+    `int(mn_declared)` coercion `_recompute` used to apply to it."""
     params = inspect.signature(bm.interval_verdict).parameters
     out = []
-    for name in ("width_tol", "min_n"):
-        v = params[name].default
-        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+    for name, kind in (("width_tol", "num"), ("min_n", "count")):
+        v = _NUM_KINDS[kind](params[name].default)
+        if v is None:
             raise LookupError(f"interval_verdict declares no usable default for {name}")
         out.append(v)
     return tuple(out)
 
 
 def _pair_numbers_ok(pair: Any) -> bool:
-    """Every bound the recomputation reads off an `IntervalPair` must still satisfy `MetricValue`'s OWN
-    invariant: either properly unmeasured (`value is None`) or a finite float.
+    """EVERY number `STORED_NUMBERS` declares on an `IntervalPair` -- not just the four bounds -- must
+    still be admitted by its kind, or the recomputation fails closed.
 
-    NOT cosmetic, and not the same gap as `_interval`'s. `IntervalPair.boot()` / `tint()` (benchmark.py)
-    gate on `is_measured` alone, so a forged non-finite bound reaches `interval_verdict` AS A NUMBER:
-    measured, with `boot_lo.value = boot_hi.value = inf`, `lo > margin` is true and the component cell
-    renders a decisive `vd-supported` -- while `_metric_cell`/`_interval` on the same pair say UNKNOWN. A
-    row claiming SUPPORTED with no figures behind it is worse than the `[0.0, 0.0]` this fix started from,
-    so the recomputation fails closed ('could not recompute' -> INCONCLUSIVE + alarm) instead.
+    WHY IT IS THE WHOLE DECLARED SET AND NOT A HAND-WRITTEN LIST (the round-4 FAIL ground, G1). This
+    function used to list `boot_lo, boot_hi, t_lo, t_hi` inline and nothing else, and `pair.n` was
+    therefore checked by its display cell only. `interval_verdict` applies protocol 6.1's minimum-n floor
+    as `n < min_n`, and `nan < 30` and `inf < 30` are both False, so a forged `n` SAILED THROUGH THE
+    FLOOR AS A NUMBER: measured on a genuine 29-seed run with seven passing gates, forging `n` to `nan`
+    turned a stored JOINT_INCONCLUSIVE into a displayed, decisive JOINT_SUPPORTED with zero warning
+    paragraphs on the page and the sample-size cell reading UNKNOWN. A forged *bound* failed closed with
+    an alarm; a forged *n* did not, because a hand-written list is exactly the thing that goes stale.
+    `pair.level` is in the set for the same reason, though it reaches no verdict on its own: a pair whose
+    level was edited is not a pair whose interval can be read, and HEAD showed a forged level as UNKNOWN
+    with no alarm -- unalarmed tampering, the same shape as G2.
 
-    Cannot false-fire: nothing constructible through `MetricValue` fails this check, because its
-    constructor enforces exactly this. Only post-construction tampering reaches it."""
-    for name in ("boot_lo", "boot_hi", "t_lo", "t_hi"):
-        mv = getattr(pair, name, None)
-        if not isinstance(mv, MetricValue):
-            return False
-        if mv.value is not None and _finite_float(mv.value) is None:
-            return False
-    return True
+    Cannot false-fire: nothing an honest producer builds fails it. Each bound and `mean` must satisfy
+    `MetricValue`'s own constructor invariant (so a genuinely unmeasured n<2 bound is fine), `n` is
+    `len(values)` and `level` is `bonferroni_level()`. Only post-construction tampering reaches it, and
+    the no-false-alarm sweep below measures that over every honest fixture variation."""
+    return _numbers_intact(pair, "IntervalPair")
 
 
 def _recompute(c: Any, margins: Any = None) -> Optional[Verdict]:
@@ -628,22 +789,28 @@ def _recompute(c: Any, margins: Any = None) -> Optional[Verdict]:
     a same-name component with a self-consistent forged pair is a residual (only missing, extra or wrongly
     named components are alarmed, by `_component_sets_ok`). And a forged protocol parameter that is weaker
     than the floor but would not have changed this component's verdict anyway raises no alarm, because the
-    floor makes it unable to change what is displayed."""
+    floor makes it unable to change what is displayed.
+
+    EVERY NUMBER IT READS IS ADMITTED BY THE SHARED SCHEME FIRST, by class, from `STORED_NUMBERS` --
+    `VERDICT_BEARING` names the three classes and this is the function that owes them a fail-closed. The
+    bare `float(c.margin)` that used to stand here is G2 (see `_declared`); the missing `pair.n` is G1
+    (see `_pair_numbers_ok`). What stays local, because it is DOMAIN and not admission: a negative
+    `width_tol` or `min_n` is a nonsensical protocol parameter rather than a non-number, and the
+    one-sided floor itself."""
     try:
+        nums = _admitted(c, "ComponentResult")                  # the ONLY admission of these three
+        if nums is None or not _pair_numbers_ok(getattr(c, "pair", None)):
+            return None
+        margin, mn, wt = nums["margin"], nums["min_n"], nums["width_tol"]
         if margins is not None:
-            direction, margin = _declared(c.metric, margins)
-            if c.direction != direction or float(c.margin) != margin:
+            direction, declared = _declared(c.metric, margins)
+            if declared is None or c.direction != direction or margin != declared:
                 return None
-        if not _pair_numbers_ok(getattr(c, "pair", None)):
-            return None
         wt_declared, mn_declared = _protocol_params()
-        wt, mn = getattr(c, "width_tol", None), getattr(c, "min_n", None)
-        if isinstance(wt, bool) or not isinstance(wt, (int, float)) or not math.isfinite(wt) or wt < 0:
+        if wt < 0 or mn < 0:
             return None
-        if isinstance(mn, bool) or not isinstance(mn, int) or mn < 0:
-            return None
-        v, _ = bm.interval_verdict(c.pair, float(c.margin), c.direction,
-                                   min(float(wt), float(wt_declared)), max(mn, int(mn_declared)))
+        v, _ = bm.interval_verdict(c.pair, margin, c.direction,
+                                   min(wt, wt_declared), max(mn, mn_declared))
         return Verdict(v)
     except Exception:  # noqa: BLE001
         return None
@@ -726,12 +893,11 @@ def _weaker_than_protocol(joint: Any) -> list:
         except Exception:  # noqa: BLE001
             continue
         for c in comps:
-            mn, wt = getattr(c, "min_n", None), getattr(c, "width_tol", None)
-            if isinstance(mn, int) and not isinstance(mn, bool) and 0 <= mn < mn_declared:
+            mn, wt = _count(getattr(c, "min_n", None)), _finite_number(getattr(c, "width_tol", None))
+            if mn is not None and 0 <= mn < mn_declared:
                 out.append(f"{h.hid}/{_visible(str(c.metric))[:40]}: min_n={mn} is below the protocol "
                            f"minimum {mn_declared}")
-            if isinstance(wt, (int, float)) and not isinstance(wt, bool) and math.isfinite(wt) \
-                    and wt > wt_declared:
+            if wt is not None and wt > wt_declared:
                 out.append(f"{h.hid}/{_visible(str(c.metric))[:40]}: width_tol={_num(wt)} is wider than "
                            f"the protocol tolerance {_num(wt_declared)}")
     return out
@@ -887,16 +1053,16 @@ def render_scorecard(joint: Any) -> str:
                 ecv, cmm = _eff_component(c, any_failed, bad, joint.margins)
                 if cmm and h.hid not in mismatch:
                     mismatch.append(h.hid)
-                margin = c.margin if isinstance(c.margin, (int, float)) and not isinstance(c.margin, bool) \
-                    and math.isfinite(c.margin) else None
                 rows += (
                     f"<tr><td>{_e(h.hid)} {_e(_HNAMES[h.hid])}{_e(suffix)}</td><td>{_e(_visible(str(c.metric)))}</td>"
-                    f"<td>{_e(_visible(str(c.direction)))} {_e(_num(margin)) if margin is not None else _unknown('margin')}</td>"
+                    # margin: kind "num", the SAME admission `_declared`/`_recompute` now use. These two
+                    # disagreed at HEAD (display checked, verdict coerced): G2.
+                    f"<td>{_e(_visible(str(c.direction)))} {_kind_text(c.margin, 'margin', 'num')}</td>"
                     f"<td>{_metric_cell(pair.mean)}</td><td>{_interval(pair.boot_lo, pair.boot_hi)}</td>"
                     f"<td>{_interval(pair.t_lo, pair.t_hi)}</td>"
-                    # `not isinstance(..., bool)`: `pair.n = True` rendered the word "True" in a column of
-                    # counts, unlike every sibling cell (`_int_cell`, `_int_or_unk`) which already excluded it.
-                    f"<td>{_e(pair.n) if isinstance(pair.n, int) and not isinstance(pair.n, bool) else _unknown('n')}</td>"
+                    # n: kind "count", the SAME admission `_pair_numbers_ok` now uses. These two
+                    # disagreed at HEAD (display checked, the min-n floor took `nan` as a number): G1.
+                    f"<td>{_kind_text(pair.n, 'n', 'count')}</td>"
                     f"<td>{_float_cell(pair.level, 'level')}</td>"
                     f"<td>{_verdict_cell(ecv, kind_caveat=supported_caveat)}</td></tr>")
         rows += (f"<tr><th colspan=8>{_e(h.hid)} hypothesis verdict</th>"
@@ -924,10 +1090,17 @@ def render_scorecard(joint: Any) -> str:
     gate_rows = "".join(
         f"<tr><td>{_untrusted(g.name, 'gate')}</td><td>{'PASS' if g.passed is True else 'FAIL'}</td>"
         f"<td>{_e(_visible(str(g.reason))[:MAX_TEXT])}</td></tr>" for g in gates)
+    # Both numbers are read out of the scorer at render time and both are figures on the page, so both go
+    # through the scheme. Measured at HEAD, where only the `except` guarded them: `bonferroni_level`
+    # patched to return `nan`/`inf` printed "Bonferroni level nan"/"inf", patched to return the STRING
+    # "0.9875" printed a coerced `0.9875` as if it were a number (`_num` = `repr(float(x))`), and
+    # `N_PRIMARY` patched to `nan`/`True` printed "nan primary intervals"/"True primary intervals".
     try:
-        fam = f"{bm.N_PRIMARY} primary intervals, Bonferroni level {_num(bm.bonferroni_level())} (read from the scorer)"
+        m, lvl = _count(bm.N_PRIMARY), _finite_float(bm.bonferroni_level())
     except Exception:  # noqa: BLE001
-        fam = "family size/level UNKNOWN"
+        m = lvl = None
+    fam = (f"{m} primary intervals, Bonferroni level {_num(lvl)} (read from the scorer)"
+           if m is not None and lvl is not None else "family size/level UNKNOWN")
     body = ""
     if bad:
         body += ('<p class="warn">SCORER/RENDERER CONTRACT PROBLEM: ' + _e("; ".join(problems)) +
@@ -998,7 +1171,12 @@ def render_scorecard(joint: Any) -> str:
 
 
 def _int_or_unk(v: Any) -> str:
-    return _e(v) if isinstance(v, int) and not isinstance(v, bool) else _unknown("not recorded")
+    """`JointResult.n_attempted` / `n_failed`. Kind "count", and in `STORED_NUMBERS` -- but the only two
+    entries there that reach a FIGURE and no verdict (nothing recomputes from them), so they are the one
+    place where UNKNOWN without an alarm is the correct outcome rather than a gap. Stays bare text and
+    stays sign-free: it sits inside the sentence "Attempted N, failed N", and a negative count is a real
+    datum to print, not a non-number (see `_count`)."""
+    return _kind_text(v, "not recorded", "count")
 
 
 def _render_uncertainty(joint: Any) -> str:
@@ -1015,12 +1193,10 @@ def _render_uncertainty(joint: Any) -> str:
     marg = ""
     for k in ("delta_S", "delta_R", "delta_sel"):
         v = getattr(m, k, _MISSING)
-        if v is _MISSING:
-            cell = _unknown(f"{k} is absent from the Margins object; NOT zero")
-        elif isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
-            cell = _unknown(f"{k} is not a finite number; unmeasured, NOT zero")
-        else:
-            cell = _metric_cell(MetricValue.measured(float(v)))
+        # kind "num", the SAME admission `_declared` now uses -- and the reason the absent case is kept
+        # separate is only the wording, not a second check.
+        cell = _unknown(f"{k} is absent from the Margins object; NOT zero") if v is _MISSING else \
+            _kind_cell(v, f"{k} is not a finite number; unmeasured, NOT zero", "num")
         marg += f"<tr><td>{_e(k)}</td><td>{cell}</td></tr>"
     body = ("<p>Margins are proposed defaults with no empirical basis (HYPOTHESIS, not findings).</p>"
             f"<table><tr><th>margin</th><th>value</th></tr>{marg}</table>"

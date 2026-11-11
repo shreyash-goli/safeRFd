@@ -10,6 +10,14 @@
 # refused by the runner's own stack and no packet reaches an interface. They aimed at 192.0.2.1 (TEST-NET-1,
 # unroutable only by convention) until SR-15. See docs/CLEAN_CLONE.md, "Connection attempts the suite itself
 # makes". No egress allow-list is configured for the runner, so this is a property of the suite, not of CI.
+# NO LINTER IS INSTALLED BY EITHER JOB, DELIBERATELY, and that is load-bearing for the skip policy. scripts/lint.sh
+# treats ruff's correctness rules (E9,F63,F7,F82) as FATAL when ruff is present and never fails when it is absent,
+# so both jobs run its stdlib-only path. The test of the fatal-ruff behaviour therefore SKIPS here, with the reason
+# "optional developer tool `ruff` is not on PATH" -- the second environment-skip category in scripts/run_tests.sh
+# (capped, and excluded from the skip floors and the baseline). Until SR-15's third round that test's reason named
+# no package, so BOTH jobs below would have gone red on every push: core-no-deps with POLICY:NONE_REASON and
+# optional-deps with POLICY:TORCH_MODE_MISSING. The defect was invisible on any machine that had ruff. If you add a
+# linter to either job, expect that skip to disappear and the behavioural test to run; nothing else changes.
 name: ci
 on:
   push:

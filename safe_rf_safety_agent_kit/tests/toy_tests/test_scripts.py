@@ -383,6 +383,50 @@ class TestNoNetworkImports(unittest.TestCase):
         self.assertNotIn("dashboard tests were since changed", doc)     # the false cause is gone
         self.assertNotIn("only 1 remains", doc)
 
+    def test_docs_disclose_the_optional_developer_tool_skip_category_and_the_steps_it_broke(self):
+        """The third SR-15 FAIL. The documented steps failed on a machine with no `ruff` and the documents said
+        nothing about it, because the defect was invisible on every machine that had it. A reader of
+        CLEAN_CLONE.md must be able to find: that the category exists, what its cap and token are, that it is
+        excluded from the baseline in GENERATION (which is what keeps the committed skip column
+        machine-independent), that nothing in the kit installs `ruff`, and what a skip there costs."""
+        # the doc is hard-wrapped AND list-indented, so a needle must survive both: collapse all runs of
+        # whitespace rather than only newlines (matching on "\n" -> " " alone leaves the list indent behind)
+        doc = re.sub(r"\s+", " ", (ROOT / "docs" / "CLEAN_CLONE.md").read_text(encoding="utf-8"))
+        for needle in ("optional developer tool", "is not on PATH", "POLICY:TOOL_CAP", "at most 4",
+                       "nothing in this kit installs it", "generation as well as comparison",
+                       "cannot launder", "is not measured"):
+            self.assertIn(needle, doc, f"docs/CLEAN_CLONE.md must disclose: {needle}")
+        # The old, wrong reason may appear only as history. Checked over a three-line window because the document
+        # is hard-wrapped and because one occurrence is a quoted runner transcript whose own line is just the
+        # `:: '<reason>'` continuation -- the marker ("FAIL:") is two lines above it.
+        lines = (ROOT / "docs" / "CLEAN_CLONE.md").read_text(encoding="utf-8").splitlines()
+        hits = 0
+        for i, line in enumerate(lines):
+            if "ruff is not installed (optional linter)" in line:
+                hits += 1
+                window = " ".join(lines[max(0, i - 2):i + 1])
+                self.assertRegex(window, r"used to|before|FAIL|carried",
+                                 f"docs/CLEAN_CLONE.md:{i + 1} restates the reason that caused the FAIL as if it "
+                                 f"were current")
+        self.assertGreaterEqual(hits, 2, "the record of the reason that failed has been deleted rather than "
+                                         "marked as history")
+        # README carries the one-line precondition and must not promise what the kit does not install
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertNotIn("ruff is not installed (optional linter)", readme)
+
+    def test_docs_disclose_the_lint_names_closed_without_being_scored(self):
+        """Closed cheaply, and the document must not read as if that made the blocklist complete: the three names
+        are listed as what they are (one demonstrated form each), and the CLASS behind the first of them is
+        listed as still open."""
+        doc = re.sub(r"\s+", " ", (ROOT / "docs" / "CLEAN_CLONE.md").read_text(encoding="utf-8"))
+        for needle in ("get_type_hints", "getattr_static", "breakpointhook", "breakpoint()",
+                       "String annotations", "is not an enumeration of everything that still passes"):
+            self.assertIn(needle, doc, f"docs/CLEAN_CLONE.md must disclose: {needle}")
+        lint = LINT.read_text(encoding="utf-8")
+        for name in ("get_type_hints", "getattr_static", "breakpointhook"):
+            self.assertIn(f'"{name}"', lint, f"scripts/lint.sh no longer names {name}")
+        self.assertIn('"breakpoint"', lint)
+
     def test_docs_describe_the_lint_check_as_an_incomplete_blocklist(self):
         """F5: the "Not covered" list named only getattr-style tricks, runtime-built names, things outside src/ and
         third-party packages -- and none of the nineteen plain static attribute calls that passed fell into any of
@@ -452,6 +496,11 @@ class TestNetworkGuardSurfaceAndDisclosure(unittest.TestCase):
         # not vacuous: if the regexes stopped matching, the whole check would pass by matching nothing
         self.assertGreaterEqual(len(fam_mod), 12, sorted(fam_mod))
         self.assertGreaterEqual(len(fam_sock), 10, sorted(fam_sock))
+        # ...and the floors are backed BY NAME, because `>= 10` is met EXACTLY on macOS: a family that shrank by
+        # one would slip under it silently, and the floor is the only thing standing between a broken regex and a
+        # vacuous pass. `PATCHED_SOCKET <= fam_sock` already pins the six patched methods; these are the other
+        # four, which are disclosed rather than patched and so were pinned by the count alone.
+        self.assertLessEqual({"accept", "send", "sendall", "sendfile"}, fam_sock, sorted(fam_sock))
         self.assertLessEqual(PATCHED_MODULE, fam_mod, "a patched name is outside the enumerated family")
         self.assertLessEqual(PATCHED_SOCKET, fam_sock, "a patched method is outside the enumerated family")
         unaccounted = sorted((fam_mod | fam_sock) - PATCHED_MODULE - PATCHED_SOCKET - GUARD_DISCLOSED)
@@ -461,6 +510,32 @@ class TestNetworkGuardSurfaceAndDisclosure(unittest.TestCase):
         self.assertEqual(sorted(GUARD_DISCLOSED & (PATCHED_MODULE | PATCHED_SOCKET)), [])
         for n in ("gethostbyaddr", "getfqdn"):          # the two D3 names, now really in the patch set
             self.assertIn(n, PATCHED_MODULE, n)
+        # LINUX-ONLY member, disclosed rather than patched. `socket.socket.sendmsg_afalg` exists only on Linux
+        # (typeshed declares it under `if sys.platform == "linux"`), `socket.socket.__mro__` includes
+        # `_socket.socket` so `dir()` sees it there, and `send\\w*` matches it -- so on Linux, and ONLY on Linux,
+        # it joined `fam_sock` in neither patch tuple nor the disclosure and `unaccounted` was
+        # `['sendmsg_afalg']`. That is why this assertion is unconditional while the name is platform-specific:
+        # the enumeration is deliberately NOT platform-aware (enumerating from the live module is the mechanism
+        # that stopped this guard being patched one reviewer-tested name at a time), so the DISCLOSURE has to
+        # cover names this host cannot see. It is disclosed because AF_ALG is the kernel crypto socket family --
+        # addresses are algorithm names, not host/port pairs, and the only correspondent is the local kernel --
+        # and patching it would mean setattr-ing onto socket.socket a name that does not exist on macOS, which
+        # would then be a _BLOCK_SOCKET member outside the live family and fail the assertion above.
+        self.assertIn("sendmsg_afalg", GUARD_DISCLOSED,
+                      "socket.socket.sendmsg_afalg (Linux only) must stay disclosed in _NOT_BLOCKED: on Linux it "
+                      "is matched by SOCKET_FAMILY and would otherwise be unaccounted for")
+        if hasattr(socket.socket, "sendmsg_afalg"):      # true on Linux, false on this host
+            self.assertIn("sendmsg_afalg", fam_sock, "SOCKET_FAMILY no longer matches a live family member")
+
+    def test_the_documentation_names_every_disclosed_unpatched_entry_point(self):
+        """D4's remaining half. The document is told not to restate the PATCHED list and does not -- but it does
+        spell out the `_NOT_BLOCKED` names in its known-bypass section, and nothing checked that copy, so it could
+        go stale exactly the way the patched list did (it said "five" for seven). Adding `sendmsg_afalg` to the
+        tuple without documenting it would now fail here."""
+        doc = self.DOC.read_text(encoding="utf-8").replace("\n", " ")
+        for n in sorted(GUARD_DISCLOSED):
+            self.assertIn(n, doc, f"docs/CLEAN_CLONE.md does not name the disclosed-unpatched entry point {n}; "
+                                  f"the known-bypass list it gives readers is incomplete")
 
     def test_every_patched_entry_point_has_a_driving_call(self):
         """The guard and the drive table cannot diverge: this is what "do not just add two more names" means."""
@@ -877,6 +952,125 @@ class TestRunTestsFloorsAndBaseline(_SyntheticBase):
         self.assertIn(f"baseline written: {b}", r3.stdout)
         self.assertIn("test_a 5 3", b.read_text(encoding="utf-8").splitlines())
 
+    def test_baseline_path_that_is_a_directory_is_a_usage_error_and_drops_no_junk_in_the_repo(self):
+        """D1, re-opened by the staging write. `run_tests.sh` ended `--update-baseline` with
+        `mv "$TMP/base.staged" "$BASELINE"` and never checked that `$BASELINE` was a FILE. `mv file dir`
+        SUCCEEDS -- it drops the file inside -- so:
+
+            $ MIN_TESTS=1 MIN_NONE_SKIPS=1 ./scripts/run_tests.sh --expect none \\
+                  --tests-dir <synth> --baseline scripts --update-baseline
+            baseline staged for .../scripts (1 modules); it is written only if this run ends RESULT: OK
+            baseline written: .../scripts ( modules)
+            RESULT: OK      exit=0
+            $ git status --porcelain  ->  ?? scripts/base.staged      (untracked, not gitignored)
+
+        Exactly the D1 shape: a user who asked for a baseline somewhere gets an untracked junk file INSIDE the
+        repository, reported as RESULT: OK, in a kit whose demo.py carries an inode-identity guard precisely so
+        that nothing can write there. The only hint was the empty `( modules)` -- `$(grep -cv '^#' "$BASELINE"
+        || true)` run against a directory, with `|| true` swallowing grep's "Is a directory".
+
+        The comparison branch was broken by the same input in a different way: `os.path.exists(base)` is true for
+        a directory, so `open(base)` raised IsADirectoryError and the run died with a traceback and no POLICY
+        token. Both are now one start-up usage error, checked before the suite runs so nobody waits for it.
+        """
+        before = _listing()
+        r = self.rt({"test_a.py": self._suite3(3)}, "--update-baseline", expect="none", baseline="scripts",
+                    env={"MIN_NONE_SKIPS": "1"})
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("--baseline must be a FILE", r.stderr)
+        self.assertNotIn("baseline written", r.stdout)
+        self.assertNotIn("RESULT: OK", r.stdout)
+        self.assertFalse((SCRIPTS / "base.staged").exists(), "the staged baseline was moved into scripts/")
+        self.assertTrue(_same(before, _listing()), "the run changed files inside the repository")
+        # the plain comparison run is rejected by the same check, instead of dying with IsADirectoryError
+        r2 = self.rt({"test_a.py": _pass_module(2)}, baseline="scripts")
+        self.assertEqual(r2.returncode, 2, r2.stdout + r2.stderr)
+        self.assertIn("--baseline must be a FILE", r2.stderr)
+        self.assertNotIn("IsADirectoryError", r2.stdout + r2.stderr)
+        # ...and the same path as a FILE is of course still fine, so this is not a blanket refusal
+        ok = self.dir / "dir_check_baseline.txt"
+        self.ok(self.rt({"test_a.py": self._suite3(3)}, "--update-baseline", expect="none", baseline=str(ok),
+                        env={"MIN_NONE_SKIPS": "1"}))
+
+    def test_baseline_that_becomes_a_directory_during_the_run_is_POLICY_BASELINE_WRITE(self):
+        """POLICY:BASELINE_WRITE was emitted by the script and asserted by NO test, and it is the branch the
+        directory case slipped past. It is driven here by the one input the start-up check cannot see: a test in
+        the suite creates the directory WHILE the run is in progress, which is the race the write-time guard
+        exists for. Nothing may be written inside it, and the empty `( modules)` must be gone."""
+        b = self.dir / "becomes_a_directory"
+        sabotage = textwrap.dedent("""
+            import os, unittest
+            class W(unittest.TestCase):
+                def test_make_the_baseline_path_a_directory_mid_run(self):
+                    os.mkdir(os.environ["LATE_BASELINE"])   # the start-up check could not have seen this
+                    self.assertTrue(os.path.isdir(os.environ["LATE_BASELINE"]))
+        """)
+        r = self.rt({"test_a.py": self._suite3(3), "test_w.py": sabotage}, "--update-baseline", expect="none",
+                    baseline=str(b), env={"MIN_NONE_SKIPS": "1", "LATE_BASELINE": str(b)})
+        self.bad(r, "POLICY:BASELINE_WRITE")
+        self.assertIn("is a DIRECTORY", r.stdout)
+        self.assertIn("baseline UNCHANGED", r.stdout)
+        self.assertNotIn("baseline written", r.stdout)
+        self.assertNotIn("( modules)", r.stdout)            # the empty count that hid this
+        self.assertTrue(b.is_dir())
+        self.assertEqual(sorted(p.name for p in b.iterdir()), [], "the staged baseline was moved INTO the directory")
+
+    def test_the_written_baseline_line_carries_a_real_module_count(self):
+        """The `( modules)` half. The count came from `$(grep -cv '^#' "$BASELINE" || true)` AFTER the move, so a
+        failing grep printed nothing and `|| true` hid why; it is now counted from the staged file BEFORE the
+        move, with an explicit 0 fallback. An empty or non-numeric count fails this."""
+        b = self.dir / "count_baseline.txt"
+        r = self.rt({"test_a.py": self._suite3(3)}, "--update-baseline", expect="none", baseline=str(b),
+                    env={"MIN_NONE_SKIPS": "1"})
+        self.ok(r)
+        self.assertRegex(r.stdout, r"(?m)^baseline written: " + re.escape(str(b)) + r" \(1 modules\)$")
+
+    def test_a_recorder_that_misses_a_started_test_is_POLICY_RECORDER(self):
+        """POLICY:RECORDER was emitted and asserted by no test. The skip recorder is the whole evidential basis of
+        the skip policy -- reasons are recorded by a hook inside the unittest process rather than scraped from
+        output -- so "the recorder saw fewer tests than unittest ran" means every skip-reason verdict in the run
+        was computed from an incomplete record. It must be a red run, not a quieter one.
+
+        Driven by restoring a plain `TestResult.startTest` from inside the suite: unittest keeps counting the
+        tests that follow, the hook no longer logs them, and `len(starts) < ran_log`. `test_a` sorts before
+        `test_b`, so the unhook happens first.
+        """
+        unhook = textwrap.dedent("""
+            import unittest
+            class A(unittest.TestCase):
+                def test_a_unhook_the_recorder(self):
+                    def plain(self, test):      # counts, but does not log
+                        self.testsRun += 1
+                    unittest.TestResult.startTest = plain
+        """)
+        more = _pass_module(3, cls="B", prefix="test_b")
+        r = self.rt({"test_a.py": unhook, "test_b.py": more})
+        self.bad(r, "POLICY:RECORDER")
+        self.assertIn("recorder saw 1 tests but unittest ran 4", r.stdout)
+        self.assertNotIn("POLICY:SKIP_RECORD", r.stdout)        # this run drives RECORDER and nothing else
+        # not blanket: the same two modules without the sabotage pass
+        self.ok(self.rt({"test_a.py": _pass_module(1, cls="A", prefix="test_a"), "test_b.py": more}))
+
+    def test_a_skip_the_recorder_did_not_see_is_POLICY_SKIP_RECORD(self):
+        """POLICY:SKIP_RECORD was emitted and asserted by no test. It is the cross-check between the two
+        independent counts of the same thing -- unittest's own `skipped=N` and the hook's log -- and it is what
+        stops the skip policy from being judged on a short list. Driven the same way as RECORDER, by restoring a
+        plain `TestResult.addSkip`: unittest still reports the skip, the hook no longer records it."""
+        unhook = textwrap.dedent("""
+            import unittest
+            class A(unittest.TestCase):
+                def test_a_unhook_the_skip_recorder(self):
+                    def plain(self, test, reason):      # reported by unittest, not logged
+                        self.skipped.append((test, reason))
+                    unittest.TestResult.addSkip = plain
+        """)
+        skipper = _skip_module(2, "torch not installed", cls="B", prefix="test_b")
+        r = self.rt({"test_a.py": unhook, "test_b.py": skipper})
+        self.bad(r, "POLICY:SKIP_RECORD")
+        self.assertIn("recorded skips (0) != reported skips (2)", r.stdout)
+        self.assertNotIn("POLICY:RECORDER", r.stdout)           # this run drives SKIP_RECORD and nothing else
+        self.ok(self.rt({"test_a.py": _pass_module(1, cls="A", prefix="test_a"), "test_b.py": skipper}))
+
     def test_repo_baseline_exists_and_covers_every_test_module(self):
         lines = [l.split() for l in (SCRIPTS / "test_baseline.txt").read_text(encoding="utf-8").splitlines()
                  if l.strip() and not l.startswith("#")]
@@ -1107,12 +1301,176 @@ class TestRunTestsMechanics(_SyntheticBase):
     def test_pytest_skip_count_mismatch_is_compared(self):
         self.assertIn("pytest: passed=3 skipped=0", self.rt({"test_a.py": _pass_module(3)}, pytest=True).stdout)
 
+    @unittest.skipUnless(__import__("importlib.util").util.find_spec("pytest"), "pytest not installed (optional)")
+    def test_pytest_failing_while_unittest_passes_is_POLICY_PYTEST_FAILED(self):
+        """A FOURTH token that was emitted and asserted by no test (the review named three). Its two siblings
+        `PYTEST_COLLECTED` and `PYTEST_SKIPPED` were pinned and this one was not, which is the sharper gap of the
+        three: a run in which pytest goes red while unittest stays green is exactly the case where the unittest
+        result alone would have been read as a pass.
+
+        Driven by a test that can only fail under pytest (pytest imports itself into `sys.modules`; `python -m
+        unittest` does not), so `PT_RC != 0` while the unittest leg is clean, and the collected and skipped counts
+        still agree -- so ONLY the pytest exit-status check can fail.
+        """
+        body = textwrap.dedent("""
+            import sys, unittest
+            class T(unittest.TestCase):
+                def test_fails_under_pytest_only(self):
+                    self.assertNotIn("pytest", sys.modules, "deliberate: fails under pytest, passes under unittest")
+        """)
+        r = self.rt({"test_a.py": body}, pytest=True)
+        self.bad(r, "POLICY:PYTEST_FAILED")
+        self.assertIn("unittest: ran=1 skipped=0 failed=0 rc=0", r.stdout)   # the unittest leg really was green
+        self.assertNotIn("POLICY:UNITTEST_FAILED", r.stdout)
+        self.assertNotIn("POLICY:PYTEST_COLLECTED", r.stdout)                # counts agree; only the status fails
+        self.assertNotIn("POLICY:PYTEST_SKIPPED", r.stdout)
+        self.ok(self.rt({"test_a.py": _pass_module(3)}, pytest=True))
+
+    def test_every_policy_token_is_asserted_by_some_test(self):
+        """A STALENESS TRIPWIRE, not a measurement: `POLICY:BASELINE_WRITE`, `POLICY:RECORDER` and
+        `POLICY:SKIP_RECORD` were emitted by `scripts/run_tests.sh` and asserted by no test at all, and
+        `BASELINE_WRITE` is the branch the directory-destination write slipped past -- an unasserted branch is
+        where a defect goes to hide. `POLICY:PYTEST_FAILED` was a fourth, found by this check.
+
+        It requires each token to appear in a NON-DOCSTRING string literal of this file, i.e. as data an
+        assertion is made of, so quoting a token in prose does not satisfy it. It cannot prove the assertion
+        drives the branch -- only that nobody added a token without reaching for one.
+        """
+        script = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")
+        # An EMISSION is `POLICY:<NAME>` followed by whitespace and then the message. The `(?=\s)` is what keeps
+        # the script's own prose out: the header writes the placeholder `POLICY:<NAME>` and a comment writes the
+        # wildcard `POLICY:BASELINE_*`, and neither is a token. (Without it the wildcard read as `BASELINE`.)
+        tokens = sorted(set(re.findall(r"POLICY:([A-Z_]+)(?=\s)", script)))
+        self.assertGreaterEqual(len(tokens), 24, tokens)       # not vacuous if the regex stops matching
+        for t in ("BASELINE_WRITE", "RECORDER", "SKIP_RECORD", "PYTEST_FAILED"):   # the four that were unasserted
+            self.assertIn(t, tokens, t)
+        asserted = set()
+        for _lineno, s in _code_string_literals(Path(__file__)):
+            asserted |= set(re.findall(r"POLICY:([A-Z_]+)", s))
+        self.assertEqual([t for t in tokens if t not in asserted], [],
+                         "scripts/run_tests.sh can print these POLICY: tokens and no test in this file asserts "
+                         "any of them; drive the branch, or say in docs/CLEAN_CLONE.md why it cannot be driven")
+
+
+def _live_ruff_skip_reason():
+    """The skip reason the LIVE decorator on test_ruff_correctness_findings_are_fatal_not_advisory uses, read out
+    of this file's own source rather than retyped.
+
+    Retyping it is what the defect was made of: the reason and the policy that judges it were written in two
+    places by two people, and the mismatch (`ruff is not installed (optional linter)` against a policy that
+    requires a package name) was invisible on every machine that had ruff. Parsing means the tests below judge the
+    string the suite will really emit on a machine without ruff.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and node.name == "test_ruff_correctness_findings_are_fatal_not_advisory":
+            for d in node.decorator_list:
+                if isinstance(d, ast.Call) and getattr(d.func, "attr", None) == "skipUnless":
+                    return ast.literal_eval(d.args[1])
+    raise AssertionError("test_ruff_correctness_findings_are_fatal_not_advisory no longer carries a "
+                         "@unittest.skipUnless(..., <reason>) decorator; _live_ruff_skip_reason parses it")
+
 
 class TestRunTestsPolicyDetails(_SyntheticBase):
     FS_REASON = "case-sensitive filesystem: case variants are different directories here"
+    TOOL_REASON = _live_ruff_skip_reason()
 
     def _fs(self, n, cls="F", prefix="test_f"):
         return _skip_module(n, self.FS_REASON, cls=cls, prefix=prefix)
+
+    def _tool(self, n, cls="T", prefix="test_t"):
+        return _skip_module(n, self.TOOL_REASON, cls=cls, prefix=prefix)
+
+    # --- optional-developer-tool skips (THE SR-15 THIRD FAIL) ---
+    def test_the_live_ruff_skip_reason_is_accepted_in_every_documented_mode(self):
+        """THE FAIL. `@unittest.skipUnless(shutil.which("ruff"), "ruff is not installed (optional linter)")` named
+        no package, so on any machine without ruff the DOCUMENTED steps failed:
+
+            $ ./scripts/run_tests.sh --expect none --twice      # docs/CLEAN_CLONE.md steps (a) and (c)
+            FAIL: POLICY:NONE_REASON skip reason does not say a package is missing:
+              toy_tests.test_scripts.TestLintPolicy.test_ruff_correctness_findings_are_fatal_not_advisory
+              :: 'ruff is not installed (optional linter)'
+            RESULT: FAIL
+
+            $ ./scripts/run_tests.sh --expect torch --twice     # step (d)
+            FAIL: POLICY:TORCH_MODE_MISSING torch expected but skipped as missing: ... :: 'ruff is not installed ...'
+
+        `ruff` appears in no requirements file, no constraints file, no CI step and no documented command, and the
+        doc's own bareness probe (`for m in torch numpy pytest yaml`) cannot see it -- so the failure was
+        reachable only on a machine that did NOT have it, which is precisely the clean clone and the CI runner
+        that CLEAN_CLONE.md and README.md are about. It read `OK (skipped=89)` for everyone who had ruff.
+
+        The reason is parsed from the live decorator (see `_live_ruff_skip_reason`), so this drives the exact
+        string the suite emits, in each of the three modes the documented steps use.
+        """
+        for mode, extra in (("none", _mixed_none(50)), ("torch", _skip_module(1, "CUDA not available: x")),
+                            ("any", _pass_module(1))):
+            with self.subTest(mode=mode):
+                self.ok(self.rt({"test_a.py": extra, "test_t.py": self._tool(1)}, "--twice", expect=mode))
+        # ...and the runner says so, rather than silently folding it into the package skips
+        r = self.rt({"test_a.py": _mixed_none(50), "test_t.py": self._tool(1)}, expect="none")
+        self.assertIn("1 skip(s) for an absent optional developer tool", r.stdout)
+
+    def test_tool_skips_do_not_count_toward_the_bare_mode_floor_or_the_torch_cap(self):
+        """Same treatment as the filesystem-case category, and for the same reason: a category that could pad the
+        bare-mode skip count would let a torch test be parked behind a missing linter and disappear from the
+        floor that exists to catch exactly that."""
+        self.ok(self.rt({"test_a.py": _mixed_none(50), "test_t.py": self._tool(4)}, expect="none"))
+        self.bad(self.rt({"test_a.py": _mixed_none(49), "test_t.py": self._tool(4)}, expect="none"),
+                 "POLICY:MIN_NONE_SKIPS")
+        self.ok(self.rt({"test_a.py": _skip_module(12, "CUDA not available: x"), "test_t.py": self._tool(4)},
+                        expect="torch"))
+
+    def test_tool_skips_are_capped_at_4(self):
+        """A cap, like FS_CAP: the category is an admission that a test cannot run here, so a growing count is a
+        growing hole and must be noticed rather than accumulated."""
+        self.ok(self.rt({"test_a.py": _pass_module(1), "test_t.py": self._tool(4)}, expect="any"))
+        self.bad(self.rt({"test_a.py": _pass_module(1), "test_t.py": self._tool(5)}, expect="any"),
+                 "POLICY:TOOL_CAP")
+        self.bad(self.rt({"test_a.py": _mixed_none(50), "test_t.py": self._tool(5)}, expect="none"),
+                 "POLICY:TOOL_CAP")
+
+    def test_tool_reason_cannot_launder_a_missing_package_or_torch_present(self):
+        """The anti-laundering rule, identical to the filesystem-case one. This is why the reason says "is not on
+        PATH" instead of "is not installed": torch mode's DENY check reads EVERY skip, tool skips included, so a
+        reason that also claims a package is missing is still rejected -- the exemption buys the category
+        nothing."""
+        laundered = self.TOOL_REASON + "; torch not installed"
+        self.bad(self.rt({"test_a.py": _skip_module(1, laundered)}, expect="torch"), "POLICY:TORCH_MODE_MISSING")
+        self.bad(self.rt({"test_a.py": _mixed_none(50),
+                          "test_b.py": _skip_module(1, self.TOOL_REASON + "; torch present", cls="Q", prefix="test_q")},
+                         expect="none"), "POLICY:TORCH_PRESENT")
+        # and the phrase is structured, not a password: prose that merely sounds like it gets no exemption
+        for near_miss in ("optional developer tool is not on PATH", "ruff is not installed (optional linter)",
+                          "optional linter absent", "developer tool `ruff` missing"):
+            with self.subTest(near_miss=near_miss):
+                self.bad(self.rt({"test_a.py": _mixed_none(50),
+                                  "test_b.py": _skip_module(1, near_miss, cls="N", prefix="test_n")},
+                                 expect="none"), "POLICY:NONE_REASON")
+
+    def test_the_baseline_skip_column_is_the_same_with_and_without_the_tool(self):
+        """THE WRINKLE, and the reason the exclusion has to be in GENERATION as well as comparison.
+        `scripts/test_baseline.txt` records `toy_tests.test_scripts <n> 3`. Without the exclusion a no-ruff
+        machine would generate 4 there and a ruff machine 3, so the committed file would depend on whose laptop
+        ran `--update-baseline`, and a regeneration on the other kind of machine would look like a real change.
+        Both halves of the file are generated here from suites that differ ONLY in the tool skip."""
+        with_tool = {"test_a.py": _mixed_none(2) + self._tool(1, cls="T", prefix="test_t").replace("import unittest\n", "")
+                     + _pass_module(2, cls="H", prefix="test_h").replace("import unittest\n", "")}
+        without = {"test_a.py": _mixed_none(2)
+                   + _pass_module(3, cls="H", prefix="test_h").replace("import unittest\n", "")}
+        gen = []
+        for i, files in enumerate((with_tool, without)):
+            b = self.dir / f"tool_baseline{i}.txt"
+            self.ok(self.rt(files, "--update-baseline", expect="none", baseline=str(b), env={"MIN_NONE_SKIPS": "1"}))
+            gen.append(b.read_text(encoding="utf-8"))
+        self.assertEqual(gen[0], gen[1], "the baseline depends on whether the optional tool is present")
+        self.assertIn("test_a 5 2", gen[0].splitlines())
+        # ...and the comparison side agrees: the tool skip cannot be spent as a bare-environment skip
+        b = self.dir / "tool_cmp_baseline.txt"
+        b.write_text("test_a 5 3\n", encoding="utf-8")
+        self.bad(self.rt(with_tool, expect="none", baseline=str(b), env={"MIN_NONE_SKIPS": "1"}),
+                 "POLICY:BASELINE_SKIPS")
 
     # --- filesystem-case skips (first observed failure on a case-sensitive FS) ---
     def test_fs_case_skips_are_accepted_in_none_mode_but_do_not_count_toward_the_floor(self):
@@ -1206,9 +1564,34 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
         self.assertIn("rc=1", r.stdout)
 
 
+_TOOLFREE = []
+
+
+def _toolfree_bin():
+    """A PATH directory holding ONLY `python3` (a symlink to this interpreter), so a lint run under it genuinely
+    has no optional linter on PATH.
+
+    This used to be `str(Path(sys.executable).parent)`, whose comment claimed "PATH without ruff/pyflakes". That
+    was true only by ACCIDENT, and the accident depended on which interpreter ran the suite: the interpreter's own
+    `bin` directory is exactly where a linter installed into the same environment lives. On this host
+    `/Library/Frameworks/.../3.12/bin` has neither, but `/Users/shrey/miniconda3/bin` -- also a python3 on this
+    PATH -- holds both `ruff` and `pyflakes`, so under that interpreter every "no optional tool" lint test ran
+    WITH both tools present and measured the opposite branch from the one it names. A directory we construct
+    cannot drift that way.
+    """
+    if not _TOOLFREE:
+        d = Path(tempfile.mkdtemp(prefix="saferf_toolfree_"))
+        __import__("atexit").register(shutil.rmtree, str(d), True)
+        (d / "python3").symlink_to(sys.executable)
+        _TOOLFREE.append(str(d))
+    return _TOOLFREE[0]
+
+
 def _lint(root, extra_env=None):
-    # PATH without ruff/pyflakes keeps each synthetic lint run fast; the optional-tools test overrides nothing else.
-    e = _env(LINT_ROOT=str(root), PATH=str(Path(sys.executable).parent) + ":/usr/bin:/bin")
+    # A genuinely tool-free PATH (see _toolfree_bin): no optional linter, so each synthetic lint run stays fast AND
+    # the "a missing tool never fails lint" tests really measure the missing-tool branch. The ruff test puts ruff
+    # back explicitly, AFTER this directory, so python3 still resolves to THIS interpreter.
+    e = _env(LINT_ROOT=str(root), PATH=_toolfree_bin() + ":/usr/bin:/bin")
     e.pop("PYTHONPATH", None)
     e.update(extra_env or {})
     return subprocess.run([str(LINT)], capture_output=True, text=True, env=e, cwd=ROOT, timeout=120)
@@ -1239,20 +1622,36 @@ class TestLintPolicy(unittest.TestCase):
         if needle:
             self.assertIn(needle, r.stdout)
 
-    @unittest.skipUnless(shutil.which("ruff"), "ruff is not installed (optional linter)")
+    # SKIP REASON, deliberately worded: the `none`-mode policy requires every skip reason to name a missing
+    # PACKAGE, and `ruff is not installed (optional linter)` -- the previous reason -- named none, so the
+    # DOCUMENTED run `./scripts/run_tests.sh --expect none --twice` failed with POLICY:NONE_REASON on any machine
+    # without ruff, and `--expect torch --twice` failed with POLICY:TORCH_MODE_MISSING because the reason said
+    # "not installed". Both were invisible on a machine that HAS ruff, which is why two measurements read OK.
+    # `optional developer tool `<name>` is not on PATH` is the phrase scripts/run_tests.sh recognises as its
+    # second environment-skip category (the first is the filesystem-case one), and it is handled exactly like it:
+    # accepted in every mode, capped at 4 (POLICY:TOOL_CAP), and excluded from the bare-mode skip floor, the torch
+    # cap and the baseline -- generation included, so the recorded skip column does not depend on whether the
+    # machine has ruff. It says "not on PATH" rather than "not installed" on purpose: torch mode denies the latter
+    # on EVERY skip, tool skips included, so the category cannot launder a missing package.
+    @unittest.skipUnless(shutil.which("ruff"),
+                         "optional developer tool `ruff` is not on PATH; nothing in this kit installs it, so only "
+                         "the behavioural half of the fatal-ruff guarantee is skipped (the structural half runs "
+                         "unconditionally in test_lint_script_makes_ruff_correctness_fatal_structurally)")
     def test_ruff_correctness_findings_are_fatal_not_advisory(self):
         """An undefined name is correctness, not style. This was found the hard way: an undefined
         `Any` in a committed annotation in `src/toy/benchmark.py` survived because ruff reported it
         and `lint.sh` printed `LINT: OK` anyway -- `from __future__ import annotations` stops such a
         name from raising at runtime, so nothing else caught it either. A linter finding nobody has
         to act on is a finding nobody reads.
-        The companion guarantee, pinned in `test_lint_passes_with_nothing_installed`, is that a
+        The companion guarantee, pinned in `test_missing_optional_tools_never_fail`, is that a
         MISSING ruff still never fails the script -- so the bare-interpreter path is unchanged."""
-        # `_lint` strips ruff from PATH deliberately (synthetic runs stay fast), so this test must
-        # put it back -- otherwise it would assert the fatal path while measuring the skipped one,
-        # which is the masked-test shape this project has hit twelve times.
+        # `_lint` strips ruff from PATH deliberately (synthetic runs stay fast, and the missing-tool
+        # tests then really measure the missing-tool branch), so this test must put it back --
+        # otherwise it would assert the fatal path while measuring the skipped one, which is the
+        # masked-test shape this project has hit twelve times. The tool-free dir goes FIRST so that
+        # `python3` still resolves to this interpreter and not to whichever one ships beside ruff.
         ruff_dir = str(Path(shutil.which("ruff")).parent)
-        with_ruff = {"PATH": ruff_dir + ":" + str(Path(sys.executable).parent) + ":/usr/bin:/bin"}
+        with_ruff = {"PATH": _toolfree_bin() + ":" + ruff_dir + ":/usr/bin:/bin"}
         r = _lint(self.tree({"src/toy/undef.py": "def f() -> Any:\n    return 1\n"}), with_ruff)
         self.assertIn("ruff:", r.stdout, "ruff did not run; this test would prove nothing")
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
@@ -1266,6 +1665,37 @@ class TestLintPolicy(unittest.TestCase):
         # the header must not still describe these findings as advisory
         head = (SCRIPTS / "lint.sh").read_text(encoding="utf-8")
         self.assertIn("are FATAL when ruff is present", head)
+
+    def test_lint_script_makes_ruff_correctness_fatal_structurally(self):
+        """The always-on half of the fatal-ruff guarantee: it NEVER skips, so a machine without ruff -- a clean
+        clone, `core-no-deps` in CI -- is not left with zero coverage of it.
+
+        BE CLEAR ABOUT WHAT THIS IS: a STRUCTURAL assertion over the text of `scripts/lint.sh`, not a
+        measurement. It cannot prove that ruff runs, that `E9,F63,F7,F82` are the right rules, or that ruff's
+        exit status is read correctly; only the behavioural test above does that, and on a machine without ruff
+        that test honestly declares itself skipped instead of silently doing less work.
+        What it DOES prove, and the reason it is here rather than being folded into a skipped test: if anyone
+        makes ruff advisory again by deleting `FAIL=1` from the failure arm -- the exact regression that let an
+        undefined `Any` ship -- this goes red everywhere, with or without ruff installed. That mutant is what the
+        single assertRegex below is aimed at, and it kills it.
+        """
+        text = LINT.read_text(encoding="utf-8")
+        m = re.search(r"(?ms)^if command -v ruff >/dev/null 2>&1; then\n(.*?)^fi$", text)
+        self.assertIsNotNone(m, "scripts/lint.sh no longer gates ruff on `command -v ruff`; this test reads that "
+                                "branch by text and must be updated together with it")
+        branch = m.group(1)
+        # success -> "ruff: OK"; failure -> a FATAL message AND FAIL=1. Written as one regex over the whole
+        # if/else so that FAIL=1 cannot be satisfied by an occurrence somewhere else in the branch.
+        self.assertRegex(branch,
+                         r"if ruff check --no-cache --select E9,F63,F7,F82 src tests scripts; then echo \"ruff: OK\"\n"
+                         r"\s*else echo \"[^\"]*FATAL[^\"]*\"\n"
+                         r"\s*FAIL=1; fi",
+                         "the ruff branch of scripts/lint.sh no longer makes a correctness finding fatal:\n" + branch)
+        # ...and FAIL is what decides the exit status, so FAIL=1 is not decorative
+        self.assertIn('if [ "$FAIL" -ne 0 ]; then echo "LINT: FAIL"; exit 1; fi', text)
+        # the gate is `command -v`, i.e. a MISSING ruff cannot fail the script (pinned behaviourally in
+        # test_missing_optional_tools_never_fail)
+        self.assertNotIn("command -v ruff || exit", text)
 
     def test_clean_tree_passes(self):
         r = _lint(self.tree({}))
@@ -1456,7 +1886,57 @@ class TestLintPolicy(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_missing_optional_tools_never_fail(self):
-        r = _lint(self.tree({}), {"PATH": str(Path(sys.executable).parent) + ":/usr/bin:/bin"})
+        """The bare-interpreter guarantee from the header of `scripts/lint.sh`: "A MISSING tool never fails this
+        script, so the bare-interpreter path is unaffected."
+
+        This test MEASURED NOTHING before. It passed `extra_env={"PATH": str(Path(sys.executable).parent) +
+        ":/usr/bin:/bin"}`, which is byte-for-byte what `_lint` already set, and then asserted only `rc == 0` --
+        so it was an exact duplicate of `test_clean_tree_passes` and added no coverage at all. Worse, the PATH it
+        named was only accidentally tool-free (see `_toolfree_bin`): under an interpreter that ships beside ruff
+        and pyflakes it asserted the missing-tool guarantee while measuring the tools-present run.
+
+        It now asserts the branch it names: the script must report that it found no optional linter, and neither
+        linter may have run. A mutant that makes an absent tool fatal, or that drops the `RAN_ANY` report, fails
+        here; `rc == 0` alone would survive the second.
+        """
+        r = _lint(self.tree({}))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("LINT: OK", r.stdout)
+        self.assertIn("no optional linter (ruff/pyflakes) installed; skipped", r.stdout)
+        # ...and the run really was tool-free, so the assertion above is about the branch it claims
+        self.assertNotIn("ruff:", r.stdout)
+        self.assertNotIn("pyflakes:", r.stdout)
+
+    def test_string_annotation_static_getattr_and_breakpoint_executions_are_blocked_in_src(self):
+        """Reported, agreed to be outside the failing criterion (the documentation already concedes "any stdlib
+        code-execution or server entry point nobody has thought of yet"), and closed anyway because it cost three
+        names. Each of these DID execute a shell command and DID lint with `0 error(s)`, and none of them uses
+        eval/exec/compile/getattr/__dict__/vars/getmembers:
+
+        * `typing.get_type_hints(f)` where `f`'s return annotation is the STRING
+          `"__import__('os').system('echo pwned')"` -- the string is evaluated, with no `eval` token in the file;
+        * `inspect.getattr_static(os, "system")("...")` -- returns the function without an attribute access the
+          blocklist can see, the same shape as `pkgutil.resolve_name`;
+        * `sys.breakpointhook("...")` with `PYTHONBREAKPOINT=os.system`, and the bare builtin `breakpoint()`,
+          which reaches `pdb` -- a module named in PROC -- through no import at all.
+
+        This does NOT make the blocklist complete and is not claimed to: see docs/CLEAN_CLONE.md "Still not
+        covered", which keeps the mapping-reflection forms and the string-annotation CLASS listed as open.
+        """
+        self.batch({
+            "src/toy/gth.py": ("import typing\n"
+                               "def f() -> \"__import__('os').system('echo pwned')\":\n    return 1\n"
+                               "typing.get_type_hints(f)\n", ".get_type_hints"),
+            "src/toy/gth_from.py": ("from typing import get_type_hints\nprint(get_type_hints)\n",
+                                    "from typing import"),
+            "src/toy/gas.py": ("import inspect, os\ninspect.getattr_static(os, 'system')('echo pwned')\n",
+                               ".getattr_static"),
+            "src/toy/bph.py": ("import sys\nsys.breakpointhook('echo pwned')\n", ".breakpointhook"),
+            "src/toy/bp.py": ("breakpoint()\n", "breakpoint used in src/"),
+        })
+        # and the rule stays src/-only: tests/ and scripts/ legitimately introspect and debug
+        r = _lint(self.tree({"tests/test_bp.py": "import typing\nprint(typing.get_type_hints)\nbreakpoint\n",
+                             "scripts/bp.py": "import inspect\nprint(inspect.getattr_static)\n"}))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 

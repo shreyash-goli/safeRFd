@@ -24,6 +24,16 @@ Structural rule against single-example claims (checked at construction, not mere
   `SEED_FLOOR`. `summarize_seeds` and `SeedSummary.from_values` see values, not seeds, so they CANNOT
   detect one example repeated: `summarize_seeds([mv] * 10)` returns a summary. Duplicate SEEDS are
   rejected only on the probe path (`_check_seeds`, used by every probe and by `build_scorecard`).
+* HOW MANY TIMES `SEED_FLOOR` IS DEFENDED, counted rather than remembered, because three different
+  numbers were in circulation (a test docstring said "three times over", `docs/PROGRESS.md` says "five
+  independent points"): there are FOUR direct comparisons against `SEED_FLOOR` in this module --
+  `ProbeConfig.__post_init__`, `SeedSummary.__post_init__`, `SeedSummary.from_values` and
+  `_recheck_summary` -- and six paths reach them, those four plus `Scorecard.__post_init__`'s two
+  delegations (`ProbeConfig(self.min_seeds)` and `_recheck_summary(self.summary)`). The count is
+  asserted against this module's own AST by
+  `test_robustness.ThePolicyParametersAreThemselvesPinned.test_the_number_of_seed_floor_defences_is_counted_not_claimed`,
+  so a fifth number cannot appear by drift. `DEFAULT_MIN_SEEDS = 10` is a separate, weaker thing: a
+  POLICY minimum, not the floor, and it is pinned by value in the same class.
 * `Scorecard.__post_init__` requires exactly one of {summary, insufficient}, checks the status, labels,
   counts and seed digest agree, and RE-VALIDATES the nested summary / insufficient object (exact type,
   recomputed statistics), so `dataclasses.replace` cannot launder a summary that was tampered with
@@ -69,7 +79,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from toy import stability
-from toy.benchmark import quantile, sample_sd, seed_list_digest
+from toy.benchmark import _metric_ok, _metric_read, quantile, sample_sd, seed_list_digest
 from toy.benchmark import mean as _mean
 from toy.schema import (SCHEMA_VERSION, TOY_LABEL, EvidenceClass, ExperimentRecord, MetricValue, RunProvenance,
                         canonical_json, current_python_version, derive_seed, make_rng)
@@ -92,6 +102,24 @@ STANDARD_NON_CLAIMS = (
     "No claim from fewer seeds than the stated minimum; passes mean 'not refuted on these n fixtures'.",
     "On an INSUFFICIENT_EVIDENCE card per_seed holds raw observations only; they support no claim.",
 )
+
+
+def _enum_value(e: Enum) -> Any:
+    """Read an `Enum`'s payload.
+
+    This exists only so that the rule enforced on both this module and `toy.benchmark` -- NO attribute
+    access named `value` or `is_measured` anywhere, so that the set of stored-metric reads is derived from
+    the source instead of listed by a reader (see `toy.benchmark`'s `_metric_read` section header) -- needs
+    NO ALLOWLIST. `Enum.value` and `MetricValue.value` are indistinguishable by attribute name, so an
+    allowlist would have to be hand-maintained, which is exactly the failure mode of the previous two
+    fixes. Here an `Enum` payload is spelled `_enum_value(e)`, a stored metric `_metric_read(m)`, and a
+    bare `x.value` anywhere in either module fails
+    `test_benchmark.TheCheckedReaderIsTheOnlyWayToReadAStoredMetric`. The `isinstance` check is not
+    decoration: it is what stops this function being used as a way around the metric reader."""
+    if not isinstance(e, Enum):
+        raise ValueError(f"_enum_value expects an Enum, got {type(e).__name__} "
+                         "(a MetricValue is read with _metric_read, never here)")
+    return getattr(e, "value")
 
 
 class InsufficientEvidenceError(ValueError):
@@ -157,7 +185,7 @@ class InsufficientEvidence:
             raise ValueError("reason must be a nonblank string")
 
     def to_dict(self) -> dict:
-        return {"status": ProbeStatus.INSUFFICIENT_EVIDENCE.value, "n_measured": self.n_measured,
+        return {"status": _enum_value(ProbeStatus.INSUFFICIENT_EVIDENCE), "n_measured": self.n_measured,
                 "n_required": self.n_required, "reason": self.reason}
 
 
@@ -254,7 +282,7 @@ def summarize_seeds(per_seed: Sequence[MetricValue], min_seeds: int = DEFAULT_MI
     per_seed = tuple(per_seed)
     if not all(isinstance(m, MetricValue) for m in per_seed):
         raise ValueError("per_seed must be MetricValues (absence must be explicit, never a number)")
-    measured = [m.value for m in per_seed if m.is_measured]
+    measured = [v for v in (_metric_read(m) for m in per_seed) if v is not None]
     if len(measured) < min_seeds:
         return InsufficientEvidence(
             len(measured), min_seeds,
@@ -320,7 +348,7 @@ def deep_freeze(x: Any) -> Any:
     """Defensive deep copy into read-only containers: Mapping -> MappingProxyType (str keys, sorted),
     list/tuple -> tuple, scalars str/int/float(finite)/bool/None as-is, Enum -> value."""
     if isinstance(x, Enum):
-        return x.value
+        return _enum_value(x)
     if x is None or isinstance(x, (bool, int, str)):
         return x
     if isinstance(x, float):
@@ -392,7 +420,7 @@ class Scorecard:
             raise ValueError("per_seed must hold exactly one MetricValue per seed")
         if (self.summary is None) == (self.insufficient is None):
             raise ValueError("exactly one of summary / insufficient must be set")
-        measured = tuple(m.value for m in per_seed if m.is_measured)
+        measured = tuple(v for v in (_metric_read(m) for m in per_seed) if v is not None)
         if self.summary is not None:
             _recheck_summary(self.summary)
             if self.status is ProbeStatus.INSUFFICIENT_EVIDENCE:
@@ -407,7 +435,7 @@ class Scorecard:
                 raise ValueError("an insufficient scorecard must have INSUFFICIENT_EVIDENCE status")
             if self.insufficient.n_measured != len(measured) or self.insufficient.n_required != self.min_seeds:
                 raise ValueError("insufficient-evidence counts do not match per-seed values / min_seeds")
-        labels = tuple(sorted({EvidenceClass.parse(x) for x in self.evidence_labels}, key=lambda e: e.value))
+        labels = tuple(sorted({EvidenceClass.parse(x) for x in self.evidence_labels}, key=_enum_value))
         if EvidenceClass.SOURCE_OBSERVED in labels:
             raise ValueError("SOURCE_OBSERVED cannot label a probe scorecard")
         if EvidenceClass.NOT_VALIDATED not in labels:
@@ -416,7 +444,7 @@ class Scorecard:
             raise ValueError("TOY_RESULT label if and only if a summary exists")
         if self.summary is None and EvidenceClass.UNKNOWN not in labels:
             raise ValueError("an insufficient scorecard must carry UNKNOWN")
-        if any(not m.is_measured for m in per_seed) and EvidenceClass.UNKNOWN not in labels:
+        if any(not _metric_ok(m) for m in per_seed) and EvidenceClass.UNKNOWN not in labels:
             raise ValueError("a scorecard with unmeasured seeds must carry UNKNOWN")
         dne = tuple(self.does_not_establish)
         if not dne or any(not isinstance(s, str) or not s.strip() for s in dne):
@@ -434,11 +462,11 @@ class Scorecard:
         return {
             "schema_version": SCHEMA_VERSION, "label": TOY_LABEL, "kind": "robustness_scorecard",
             "code_version": CODE_VERSION, "probe_id": self.probe_id, "probe_kind": self.probe_kind,
-            "status": self.status.value, "min_seeds": self.min_seeds, "seeds": list(self.seeds),
+            "status": _enum_value(self.status), "min_seeds": self.min_seeds, "seeds": list(self.seeds),
             "seed_digest": self.seed_digest, "per_seed": [m.to_dict() for m in self.per_seed],
             "summary": self.summary.to_dict() if self.summary else None,
             "insufficient": self.insufficient.to_dict() if self.insufficient else None,
-            "evidence_labels": [e.value for e in self.evidence_labels],
+            "evidence_labels": [_enum_value(e) for e in self.evidence_labels],
             "details": thaw(self.details), "does_not_establish": list(self.does_not_establish),
         }
 
@@ -471,7 +499,7 @@ def build_scorecard(*, probe_id: str, probe_kind: str, seeds: Sequence[int], per
     per_seed = tuple(per_seed)
     result = summarize_seeds(per_seed, cfg.min_seeds)
     labels = {EvidenceClass.NOT_VALIDATED}
-    if any(not m.is_measured for m in per_seed):
+    if any(not _metric_ok(m) for m in per_seed):
         labels.add(EvidenceClass.UNKNOWN)
     if isinstance(result, SeedSummary):
         labels.add(EvidenceClass.TOY_RESULT)
@@ -494,7 +522,7 @@ def scorecard_to_record(sc: Scorecard, *, run_id: str, timestamp_utc: str, code_
     carries its content hash as an input hash and the notes string is NOT evidence and must not be parsed."""
     if not sc.seeds:
         raise ValueError("cannot make a run record from a scorecard with no seeds")
-    n_meas = float(sum(m.is_measured for m in sc.per_seed))
+    n_meas = float(sum(_metric_ok(m) for m in sc.per_seed))
     metrics = {"n_seeds": MetricValue.measured(float(len(sc.seeds))), "n_measured": MetricValue.measured(n_meas),
                "min_seeds_required": MetricValue.measured(float(sc.min_seeds))}
     s = sc.summary
@@ -508,7 +536,7 @@ def scorecard_to_record(sc: Scorecard, *, run_id: str, timestamp_utc: str, code_
     return ExperimentRecord(
         name=f"robustness:{sc.probe_id}", provenance=prov, metrics=metrics,
         evidence_class=EvidenceClass.TOY_RESULT if s else EvidenceClass.UNKNOWN,
-        notes=f"status={sc.status.value}; structured status is on the scorecard (hash in input_hashes); "
+        notes=f"status={_enum_value(sc.status)}; structured status is on the scorecard (hash in input_hashes); "
               "this string is not evidence and must not be parsed")
 
 
@@ -521,7 +549,7 @@ def seed_sensitivity_probe(outcome: Callable[[int], float], seeds: Sequence[int]
     cfg = _pcfg(cfg)
     seeds = _check_seeds(seeds)
     per_seed = tuple(_to_metric(outcome, s) for s in seeds)
-    vals = [m.value for m in per_seed if m.is_measured]
+    vals = [v for v in (_metric_read(m) for m in per_seed) if v is not None]
     return build_scorecard(
         probe_id=probe_id, probe_kind="seed_sensitivity", seeds=seeds, per_seed=per_seed, cfg=cfg,
         status_if_summarized=ProbeStatus.MEASURED,
@@ -540,9 +568,10 @@ def benchmark_outcome(factory: Callable, metric: str = "S", cfg=None) -> Callabl
 
     def outcome(seed: int) -> float:
         m = bm.score_seed(seed, factory, cfg).metrics[metric]
-        if not m.is_measured:
+        v = _metric_read(m)
+        if v is None:
             raise ValueError(f"{metric} unmeasured: {m.reason}")
-        return m.value
+        return v
     outcome.__name__ = f"benchmark:{metric}"
     return outcome
 
@@ -834,7 +863,7 @@ def probe_shift(measure: Measure, spec: ShiftSpec, seeds: Sequence[int], cfg: Op
             "max_abs_dev": max((r[1] for r in rows), default=None),
             "max_rel_dev": max((r[1] / r[2] for r in rows), default=None),
             "max_dev_over_bound": max(ratios) if ratios else None,
-            "unmeasured_seeds": [sd for sd, m in zip(seeds, per_seed) if not m.is_measured]},
+            "unmeasured_seeds": [sd for sd, m in zip(seeds, per_seed) if not _metric_ok(m)]},
         non_claims=("Bounds are hand-derived caps for this fixture family; a pass does not show the measure "
                     "is robust to any perturbation outside the probed family.",))
 
@@ -847,9 +876,9 @@ def arm_difference(arms: Mapping[str, MetricValue], treatment: str, control: str
             return MetricValue.unmeasured(f"arm {nm!r} absent")
         if not isinstance(arms[nm], MetricValue):
             raise ValueError(f"arm {nm!r} must be a MetricValue")
-        if not arms[nm].is_measured:
+        if not _metric_ok(arms[nm]):
             return MetricValue.unmeasured(f"arm {nm!r} unmeasured: {arms[nm].reason}")
-    return MetricValue.measured(arms[treatment].value - arms[control].value)
+    return MetricValue.measured(_metric_read(arms[treatment]) - _metric_read(arms[control]))
 
 
 def guarded(measure: Measure) -> Callable[..., MetricValue]:
@@ -937,7 +966,7 @@ def probe_missing_inputs(measure: Measure, seeds: Sequence[int], cfg: Optional[P
     arm = arm_difference({"C0": MetricValue.measured(0.0)}, "E", "C0")
     structural = {"empty_seed_list_gives_insufficient": empty.status is ProbeStatus.INSUFFICIENT_EVIDENCE
                   and empty.summary is None,
-                  "absent_arm_gives_unmeasured": (not arm.is_measured) and arm != MetricValue.measured(0.0)}
+                  "absent_arm_gives_unmeasured": (not _metric_ok(arm)) and arm != MetricValue.measured(0.0)}
     silent_total = sum(r["silent_value"] for r in table.values())
     defect = silent_total > 0 or not all(structural.values())
     return build_scorecard(

@@ -18,6 +18,9 @@
 #   * reflection through a MAPPING rather than an attribute: vars(os)["system"], os.__dict__["system"],
 #     dict(inspect.getmembers(os))["system"]. A different shape from the attribute blocklist, and deliberately
 #     left uncovered (see docs/CLEAN_CLONE.md "Still not covered");
+#   * STRING ANNOTATIONS and other places a name is spelled as data rather than as code. `typing.get_type_hints`
+#     is now named, so the demonstrated form is caught, but the class is not closed: any other stdlib function
+#     that evaluates a string it is handed is a fresh instance of it;
 #   * and, most importantly, every stdlib code-execution or server entry point NOT named in the lists below. The
 #     lists were extended after review found many that passed: see docs/CLEAN_CLONE.md "Lint scope" for the
 #     enumeration of what is and is not named, and for the ones still known to pass.
@@ -79,7 +82,20 @@ SRC_IMPORT_OK = set(sys.stdlib_module_names) | {"toy", "torch"}
 # `loadTestsFromName` is listed with `resolve_name` because it is the same shape and the same power:
 # unittest.TestLoader().loadTestsFromName("os.system") is a plain static call with a literal string.
 # `_getframe` reaches the caller's builtins (sys._getframe().f_builtins["exec"]).
+#
+# The last three were each DEMONSTRATED to execute a shell command and to pass this lint with `0 error(s)`, with no
+# eval/exec/compile/getattr/__dict__/vars/getmembers token anywhere, and were reported as NOT part of any failing
+# criterion (the doc already concedes "any stdlib code-execution or server entry point nobody has thought of yet").
+# They are closed because they cost one name each, not because the list is now complete:
+#   get_type_hints  -- typing.get_type_hints(f) EVALUATES a string annotation, so a return annotation that is the
+#                      string "__import__('os').system('echo pwned')" runs as code with no eval in sight.
+#   getattr_static  -- inspect.getattr_static(os, "system") returns the function without an attribute access the
+#                      blocklist can see; same shape and same power as pkgutil.resolve_name.
+#   breakpointhook  -- sys.breakpointhook("...") honours $PYTHONBREAKPOINT (e.g. os.system). The bare builtin
+#                      `breakpoint()` reaches pdb -- a module named in PROC -- through no import at all, so it is
+#                      in DANGEROUS_NAMES below rather than here.
 DANGEROUS_ATTR = {"resolve_name", "loadTestsFromName", "_getframe",
+                  "get_type_hints", "getattr_static", "breakpointhook",
                   "system", "popen", "fork", "forkpty", "startfile", "import_module", "exec",
                   "eval", "__import__", "posix_spawn", "posix_spawnp", "Popen", "check_output", "check_call",
                   "runsource", "runcode", "interact", "run_module", "run_path", "runctx",
@@ -88,7 +104,9 @@ DANGEROUS_ATTR = {"resolve_name", "loadTestsFromName", "_getframe",
                   "testmod", "testfile", "ProcessPoolExecutor", "EnvBuilder", "bootstrap",
                   "load_extension", "enable_load_extension", "attrgetter", "methodcaller"} | \
                  {f"{p}{s}" for p in ("exec", "spawn") for s in ("l", "le", "lp", "lpe", "v", "ve", "vp", "vpe")}
-DANGEROUS_NAMES = {"eval", "exec", "__import__", "compile", "__builtins__"}   # banned in src/ only
+# banned in src/ only. `breakpoint` is a BUILTIN that reaches pdb (named in PROC) with no import, and honours
+# $PYTHONBREAKPOINT, so it is the one entry here that needs no module reference at all.
+DANGEROUS_NAMES = {"eval", "exec", "__import__", "compile", "__builtins__", "breakpoint"}
 # eval/exec allowed in src/ ONLY for these exact (file, literal text) pairs: the demonstration of a bare-exception
 # statement. Anything else, including other string literals, is an error.
 EXEC_ALLOW = {("src/toy/failure_modes.py", "evaluated += 1; RuntimeError"),
