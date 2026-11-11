@@ -188,6 +188,13 @@ def _panel(title: str, ec: EvidenceClass, body: str, problem: Optional[str] = No
 #      ("num"), `_count` ("count"), `_mv_intact` ("mv"). `float()` appears exactly ONCE in this file,
 #      in `_num`, downstream of all four, because every coercion that ever existed here was a
 #      laundering step.
+#      AND EACH OF THE THREE NUMERIC KINDS NORMALISES WHAT IT ADMITS, which is round 7 (item 6 below).
+#      A normalisation AT THE POINT OF ADMISSION is the opposite of the coercions this item removed: a
+#      `float(c.margin)` in front of a verdict decided on a number no cell had checked, while
+#      `float.__float__(x)` INSIDE the kind returns the same double `math.isfinite` just inspected. The
+#      rule is `benchmark._plain_number`'s and is now stated identically on both sides of the boundary:
+#      normalise, THEN compare -- and hand the normalised value on, because a predicate applied to a
+#      value and an operator applied to that value are two independently overridable operations.
 #   2. A DECLARED TABLE. `STORED_NUMBERS` names every attribute of a scorer object that this renderer
 #      turns into a figure or feeds to a verdict, with its kind. `_admitted` is the only reader in the
 #      VERDICT path and it returns the admitted VALUES, so that path admits each field once;
@@ -248,18 +255,60 @@ def _panel(title: str, ec: EvidenceClass, body: str, problem: Optional[str] = No
 #      for the two bootstrap bounds, `test_the_two_bootstrap_bounds_have_no_recoverable_second_source`.
 #      See `_interval_problem`.
 #
+#   6. ROUND 7: A CROSS-CHECK RUNS ON WHATEVER OBJECT YOU HAND IT, AND THE KINDS WERE HANDING ON THE
+#      CALLER'S. Rounds 5 and 6 added second sources; this round's defect is that the COMPARISONS
+#      against them were performed by the suspect value's own dunders. `benchmark.py` normalises at the
+#      point of use (`_plain_number`/`_plain_parameter` inside `_verdict_from_bounds`, `_check_margin`,
+#      `MetricValue.__post_init__`), which is why SR-10 passed every equivalent attack; this module
+#      cited that same docstring and did the opposite -- the three kinds each ended `return x`, and
+#      `_finite_number`'s docstring stated the non-conversion as a deliberate choice. An `int`/`float`
+#      SUBCLASS instance stores a legal value, passes `isinstance`, need not lie to `math.isfinite`, and
+#      answers `==`/`<`/`>`/`__float__` as it pleases. FOUR MEASURED CONSEQUENCES, each one
+#      `object.__setattr__` on a field the suite already swept: `pair.n` (undoing rounds 5 AND 6 on the
+#      suite's own `laundered_below_minimum` fixture -- see `_count`), `ComponentResult.min_n` (removing
+#      the protocol-6.1 floor AND silencing `_weaker_than_protocol` -- see `_count`),
+#      `ComponentResult.margin` (JOINT_UNSUPPORTED -> JOINT_SUPPORTED with every displayed figure
+#      honest -- see `_finite_number`), and `pair.level` (an edited figure in every level cell of the
+#      same render that verified `t_lo`/`t_hi` against the honest level -- see `_finite_float`).
+#      WHY FIVE ROUNDS MISSED ALL FOUR, counted rather than argued: 0 of the 107 values in the suite's
+#      `HOSTILE_BY_KIND` + `LEGAL_BUT_WRONG` tables were `int`/`float` SUBCLASS instances. The tables
+#      swept 44 hostile TYPES, all correctly rejected, and no hostile SUBCLASS -- a value space that a
+#      table of ill-typed literals and a table of wrong-but-legal literals both miss by construction,
+#      because the attack is in neither the type nor the stored value but in the dunders. The pin is
+#      therefore not four more literals: `test_every_admitted_field_is_normalised_by_its_kind` derives
+#      the fields from `dataclasses.fields()` of the verdict-bearing classes and asserts of each that
+#      its kind hands back a value of EXACTLY the plain type, so a NEW field inherits the check.
+#
 # WHAT IS DELIBERATELY NOT IN THE SCHEME is argued at `_valid_history` and `_protocol_params`.
 def _num(x: float) -> str:
     """Render a number one of the four kind functions has ALREADY admitted.
 
     THE ONLY `float()` IN THIS MODULE, and it is not a gate -- it is reached only downstream of one.
     The coercions that used to sit in front of verdicts (`float(code)`, `float(c.margin)`,
-    `float(getattr(margins, attr))`) are gone; see the scheme note above."""
+    `float(getattr(margins, attr))`) are gone; see the scheme note above.
+
+    AND ITS ARGUMENT IS NOW A PLAIN NUMBER, which is round 7 (scheme note item 6). This `float()`
+    HONOURS A `__float__` OVERRIDE, so while the kinds handed back the caller's object it was itself a
+    laundering step: measured, a `float` subclass storing an honest `pair.level` of 0.9875 whose
+    `__float__` returned 0.5 printed `0.5` in every level cell of the same render that verified
+    `t_lo`/`t_hi` against 0.9875. The kinds collapse a subclass to the number they inspected, so there
+    is no override left for this call to consult."""
     return repr(float(x))
 
 
 def _finite_float(x: Any) -> Optional[float]:
-    """KIND "float": a genuine finite `float` and nothing else. None means "render UNKNOWN", never 0.0.
+    """KIND "float": a genuine finite `float` and nothing else, AS A PLAIN `float`. None means "render
+    UNKNOWN", never 0.0.
+
+    IT RETURNS `float.__float__(x)`, NOT `x` (round 7; scheme note item 6). A `float` SUBCLASS instance
+    passes `isinstance(x, float)` and need not lie to `math.isfinite`, which reads the stored double --
+    so while this handed back `x` itself, every consumer downstream of the admission ran on the caller's
+    overridable dunders rather than on the number this function inspected. `float.__float__` reads that
+    same stored double and is not itself overridable from a subclass, so the number returned is the
+    number checked. MEASURED on `pair.level` at the previous HEAD: a subclass storing the honest 0.9875
+    with `__float__` returning 0.5 printed `0.5` in every level cell, while `_interval_problem` in the
+    SAME render verified `t_lo`/`t_hi` against 0.9875 -- an edited figure, unalarmed, which
+    `_pair_numbers_ok` rules is tampering "even when it buys nothing".
 
     Not `int`, not `bool`, not a numeric string, not NaN/inf. That is exactly the invariant
     `MetricValue.__post_init__` already enforces on a measured value (schema.py: float-only, bool
@@ -277,13 +326,15 @@ def _finite_float(x: Any) -> Optional[float]:
     can pin it -- measured: that mutant survives the whole suite, and it is the only one that does.
     It is kept deliberately: in the sibling kinds `_finite_number` and `_count` the identical clause IS
     load-bearing, and widening this test to `(int, float)` would make it load-bearing here too."""
-    if isinstance(x, bool) or not isinstance(x, float) or not math.isfinite(x):
+    if isinstance(x, bool) or not isinstance(x, float):
         return None
-    return x
+    v = float.__float__(x)                  # NORMALISE, then test: see the docstring
+    return v if math.isfinite(v) else None
 
 
 def _finite_number(x: Any) -> Optional[Any]:
-    """KIND "num": a finite `int` or `float`, `bool` rejected. Returns the value UNCHANGED; None rejects.
+    """KIND "num": a finite `int` or `float`, `bool` rejected, AS THE PLAIN NUMBER IT STORES -- `int`
+    stays `int` and `float` stays `float`. None rejects.
 
     This is the kind for a field whose honest producer may legitimately emit either -- `Margins.delta_*`
     and `ComponentResult.margin` (`Margins.__post_init__` itself accepts `(int, float)`), the declared
@@ -292,23 +343,79 @@ def _finite_number(x: Any) -> Optional[Any]:
     instead, so the string `"0.1"` read UNKNOWN in both panels while a decisive verdict derived from it
     was displayed unalarmed. `bool` is load-bearing here, unlike in `_finite_float`.
 
-    It does NOT convert: an admitted `int` comes back an `int`, so the single `float()` in this module
-    stays in `_num` where rendering happens, and comparisons against the declared margin stay exact."""
-    if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x):
+    IT NORMALISES, AND THIS PARAGRAPH REPLACES THE ONE THAT WAS THE ROUND-7 DEFECT. That paragraph read:
+    "It does NOT convert: an admitted `int` comes back an `int`, so the single `float()` in this module
+    stays in `_num` where rendering happens, and comparisons against the declared margin stay exact."
+    Both clauses were true of the code and the conclusion was false. Handing back `x` meant every
+    cross-check downstream of `_admitted` ran on the CALLER'S OBJECT rather than on the number this
+    function had just inspected, and an `int`/`float` SUBCLASS instance stores a legal value while
+    answering `==`, `<`, `>` and `__float__` however it likes. MEASURED at the previous HEAD, both via
+    `object.__setattr__` (benchmark's declared route (b)):
+        ComponentResult.margin = float subclass storing -1e5, `__eq__`->True, `__float__`->0.1
+            `margin != declared` was False, so `_recompute` recomputed an honest UNSUPPORTED study
+            against -1e5: JOINT_UNSUPPORTED -> JOINT_SUPPORTED, 0 warning paragraphs, no alarm, and
+            every figure on the page -- margin included -- honest.
+        ComponentResult.width_tol = float subclass storing 1e9 with `__gt__`->False
+            `min(c.width_tol, 0.25)` returned 1e9 and `_weaker_than_protocol` returned [], i.e. the
+            protocol-6.3 floor was removed silently. (No verdict flip was found for it over 48 honest
+            shapes, so it is a NOTE; the mechanism is closed here regardless.)
+    `int`-vs-`float` IS STILL PRESERVED, which is why the normalisation is not `float(x)`: `_num` renders
+    an int differently from a float, and `_declared`'s `margin != declared` is an exact comparison
+    against a `Margins` field that may itself honestly be an `int`. `float.__float__`/`int.__int__` read
+    the number the object STORES and cannot be overridden from a subclass, so the number returned is the
+    number `math.isfinite` inspected -- which is also why the finiteness test now runs on the normalised
+    value and not on `x`: an `int` subclass CAN lie to `math.isfinite`, because for a non-`float` that
+    predicate consults `__float__` (measured: `math.isfinite(I(5))` is False for `class I(int)` with
+    `__float__` returning nan, and True for one storing 10**400 with `__float__` returning 1.0).
+
+    AN `int` TOO LARGE TO BE A `float` IS REJECTED, not raised. `math.isfinite(10**400)` raises
+    OverflowError, and at the previous HEAD that escaped this module's error contract entirely: measured,
+    `ComponentResult.margin = 10**400` (reachable by `object.__setattr__`, and absent from the suite's
+    hostile-type table) made `render_scorecard` AND `render_dashboard` raise OverflowError rather than
+    refuse the result -- a page taken down, which contradicts this module's own docstring promise and the
+    `_seed_series` rule that an exception here would "fail open" in the operational sense. `benchmark`'s
+    `_plain_number` had already closed exactly this case in its own lane; this is the same ruling."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
         return None
-    return x
+    v = float.__float__(x) if isinstance(x, float) else int.__int__(x)   # NORMALISE, then test
+    try:
+        return v if math.isfinite(v) else None
+    except OverflowError:                   # an int too large to be a float is not a renderable number
+        return None
 
 
 def _count(x: Any) -> Optional[int]:
-    """KIND "count": a genuine `int`, `bool` rejected. None rejects. Sign is NOT constrained here.
+    """KIND "count": a genuine `int`, `bool` rejected, AS A PLAIN `int`. None rejects. Sign is NOT
+    constrained here.
 
     For `pair.n`, `ComponentResult.min_n`, `JointResult.n_attempted`/`n_failed` and the snapshot's
     comparison counts. Sign stays with the caller on purpose: `_int_or_unk` must still print a negative
     `behind_by` as a number (it is a real datum), while `_recompute` separately refuses a negative
-    `min_n` as a protocol parameter. Type is the shared part; domain is local and stated where it is."""
+    `min_n` as a protocol parameter. Type is the shared part; domain is local and stated where it is.
+
+    IT RETURNS `int.__int__(x)`, NOT `x` (round 7; scheme note item 6), because EVERY cross-check this
+    kind feeds is an operator the caller's object can answer for itself. MEASURED at the previous HEAD,
+    all via `object.__setattr__`:
+        pair.n = `class NSub(int)` storing a legal 30 with `__gt__`/`__ge__` -> False, in the suite's
+            OWN `laundered_below_minimum(n=NSub(30))` fixture: `_n_problem`'s `n > measured_n` was
+            False and its `n >= min_n` was False, so BOTH sources went quiet on a genuine 29-seed run
+            that still carried its 'n below protocol minimum' flag -- JOINT_SUPPORTED, 0 warning
+            paragraphs, every alarm False, beside a gate row printing "29 measured seeds vs minimum 30".
+            A plain `30` is caught. One `int` subclass undid rounds 5 and 6 together.
+        ComponentResult.min_n = `class MSub(int)` storing 1 with `__lt__`/`__le__` -> False:
+            `max(mn, 30)` returned 1, so `_recompute`'s protocol-6.1 floor was removed, and
+            `_weaker_than_protocol` returned [] so the page did not even say the parameter was weak.
+            `pair.n` was left honest, so the page printed 29 beside a decisive JOINT_SUPPORTED.
+        JointResult.n_attempted = an `int` subclass overriding ONLY `__sub__` (stores 29, returns 30):
+            `_measured_seeds`' `attempted - len(scores)` equality still held on the honest 29, and
+            `attempted - failed` returned 30, so the second source for every `pair.n` reported 30
+            measured seeds on a 29-seed study. It bought nothing alone (source (2), the pair's flag,
+            still fired), but with the flags cleared it completed the F1 render.
+    `int.__int__` reads the value the object stores and cannot be overridden from a subclass, so the
+    number handed to those comparisons is the number this function admitted."""
     if isinstance(x, bool) or not isinstance(x, int):
         return None
-    return x
+    return int.__int__(x)                   # NORMALISE: see the docstring
 
 
 def _mv_intact(mv: Any) -> Optional[Any]:

@@ -5366,3 +5366,758 @@ than `pgrep -f python3`, waited for it **by PID**, and then **re-measured the ba
 surviving mutants on a verified-quiet machine — every verdict identical.** It also noted that
 contention cannot manufacture an `rc=0 / OK` across 381 tests, so its findings were never at risk, and
 re-ran anyway. Nobody asked for that.
+
+---
+
+# Round 6 opens by unmarking SR-09. Verified count 9 → 8.
+
+**Date:** 2026-11-11. Found by the orchestrator while round-6 attesters were running, by checking
+whether SR-12's ten required actions were closed. **This is SR-12's F14, never closed and now
+amplified four revisions further.**
+
+## The defect: the checkbox attests r3/r4; the live protocol is r9
+
+`docs/EVALUATION_PROTOCOL.md` header, the file's own words:
+
+> *"the independent QA PASS first recorded applied to r2; r3 and r4 later passed a final independent
+> review; **r5 was reviewed and FAILED; r6 was reviewed and FAILED; r7 was reviewed and FAILED (one
+> defect); r8 was reviewed and FAILED (three accuracy defects); r9 has not been independently
+> reviewed.**"*
+
+The PASS that set the checkbox is at `PROGRESS.md:2129` — *"this close-out PASS covering r3 and r4
+together"*. Every `^## ` heading after it that names SR-09 (`awk 'NR>2200 && /^## /'`) reads: r5 FAIL,
+→ r6, → r7, → r8, r8 FAIL, → r9. **No heading records a PASS for any of r5–r9, and the checkbox was
+never moved.** Each revision fixed the previous review's defects — by the owner, which is a build, and
+CLAUDE.md says a task is never `[x]` from a build alone.
+
+So SR-09 was marked against a text superseded five times, across four reviewed FAILs, with the live
+revision unreviewed. The r8 review's three defects were **accuracy** defects, so the recent error rate
+on this file's revisions is not zero.
+
+## Second, independent ground: a reviewer-flagged unconditional claim is still live
+
+`docs/EVALUATION_PROTOCOL.md:420` — *"Level A is wholly synthetic … and **cannot be repurposed as a
+capability evaluation**."* The r9 changelog discloses this under **"Deliberately not changed"**, names
+it as *"an unconditional wording flagged by the reviewer"*, and states the safe wording it declined to
+adopt (*"is not designed to be, and contains nothing that would serve as"*).
+
+The stated reason for declining is real and not evasion: line 420 sits inside the Level B region whose
+**byte-identity to the previously passed text** is what the r3/r4 PASS anchors. Fixing the overclaim
+would break the anchor. The owner chose the anchor and disclosed the choice.
+
+But the dilemma resolves the other way. "Wholly synthetic" supports *"is not designed as, and contains
+nothing that would serve as"*. It does not support *"cannot be repurposed"* — a claim about all future
+uses by all users, which no property of the text can establish. A reviewer having passed the bytes does
+not make the sentence true. The orchestration prompt's standing constraint is **"Do not mark unsupported
+external safety claims as validated"**, and this is one, inside the artifact the checkbox points at.
+
+## Why grep could not settle this, and a bookkeeping defect it exposed
+
+**The `F<n>` label namespace is overloaded.** SR-12's required actions are F1–F15; round 5 reused
+F1–F5 for unrelated findings (F1 = `MetricValue` value substitution, F2 = `_check_seeds`, …). A
+mention count per label is therefore meaningless, and I nearly acted on one:
+
+- F13 ("record a QA verdict for SR-05, or re-attest it") showed **0 mentions** and looked open. It is
+  **closed** — `PROGRESS.md:1974`, *"SR-05 — QA verdict: PASS (the attestation section that was
+  missing)"*. It simply never cites the label.
+- I then suspected SR-05 of F14's shape, because `86a52ed` touched `teacher_student.py` after that
+  attestation. **It does not:** the change is docstring-only (`+13`, `0` deletions) and two new tests
+  pin the added disclosure. **SR-05 stands.**
+
+Had I trusted the zero-count I would have unmarked a sound task. Standing rule: **a finding's label is
+not its identity — re-derive closure from the artifact, never from a mention count**, and do not reuse
+an `F<n>` label across rounds.
+
+## Consequence
+
+SR-09 `[x]` → `[ ]`. **Verified: 8 of 17** — SR-00, SR-01, SR-02, SR-03, SR-05, SR-06, SR-07, SR-08.
+SR-09 needs an independent review of **r9 as it stands**, which must also adjudicate line 420 and the
+byte-identity argument for leaving it. SR-10's dependency on SR-09 is now unmet, so an SR-10 PASS this
+round cannot be marked either; its attestation still has standing as evidence.
+
+## Round 6, SR-04 + SR-11: FAIL. The falsifiable question answered in the worst direction.
+
+**Date:** 2026-11-11. SR-04 **FAIL** (2nd), SR-11 **FAIL** (6th). The round was designed to test one
+binary claim — that round 5 attacked the *class* rather than sampling instances. **It sampled.** Four
+more routes of the identical shape exist inside the region round 5 claimed to cover, all through
+public entry points, none needing `object.__setattr__`.
+
+**And the tree asserts the opposite in writing.** `tests/toy_tests/test_schema.py:441`:
+*"The last instance the operator sweep turned up"* — false by four counterexamples. This is round 5's
+`_SneakyBound` lesson recurring at the same literal location in the process: a **test docstring
+asserting the completeness of a sweep** that nothing verifies. The standing rule caught the avoided
+*input*; it did not catch the asserted *completeness*. Extend it: **a sentence claiming a sweep found
+the last instance is a claim about absence, and absence is not demonstrable by sweeping.**
+
+### The four findings (all verified live in the unmodified tree; owner suites 172 tests OK, so none is pinned)
+
+1. **`RunProvenance.input_hashes` values are format-checked and then stored un-normalised**
+   (`src/toy/schema.py:172-178`; consequence at `src/toy/benchmark.py:1996-2006`). `_SHA256_RE.fullmatch`
+   reads the real characters, then the caller's object is kept. A 64-hex `str` subclass with lying
+   `__eq__` defeats `verdict_from_records`' config binding: **`JOINT_INCONCLUSIVE` → `JOINT_SUPPORTED`,
+   h1/h2/h3 all SUPPORTED, `reasons=()`**, while `config_hash` reports `000000000000` — a hash that is
+   not the study's. The study ran at `width_tol=0.10`; the recompute silently ran at the module default
+   `0.25`. **Strictly stronger than the residual disclosed in that function's own docstring**, which
+   says the attack needs the rewrite *plus a matching `cfg`*: neither is needed, and the real hash need
+   not be known. The sibling guards cannot fire — `stored` is a `set`, so "records disagree" and
+   `None in stored` are both defeated by the same object.
+   Second consequence, same root: two `input_hashes` entries **silently collapse to one**, and
+   `robustness.py:372` calls that field *"the provenance anchor a reader would check the seeds against."*
+2. **`arm_difference` turns an absent arm into a measured 0.0** (`src/toy/robustness.py:1076-1085`).
+   A name object is the lookup key and is never normalised. Ten seeds, treated arm **never recorded**:
+   **`INSUFFICIENT_EVIDENCE` → `MEASURED`**, `summary={"n":10,"mean":0.0,"sd":0.0,…}`, and the
+   `UNKNOWN` evidence label the honest card carries is **gone**. The existing pin
+   (`test_robustness.py:1470-1489`) names this exact outcome as forbidden — *"in particular NEVER
+   `measured(0.0)` — a missing arm reading as a zero contrast is the single most dangerous substitution
+   in this kit"* — and sweeps the **values** axis while leaving the **names** axis untouched.
+3. **`ExperimentRecord.from_dict`'s version and label gates are `!=` on the caller's object**
+   (`src/toy/schema.py:325-328`). A version-**1** record is laundered into a valid version-2 record,
+   and a record whose stored label read `"VERIFIED SAFETY FINDING"` is accepted and silently
+   relabelled to the canonical `TOY_LABEL`. Honest limit, as reported: `from_json` is immune (the
+   decoder emits plain `str`), so this needs a hand-built dict — but the docstring declaring that
+   route *"HARMLESS"* covers `_check_keys`' **keys** and does not extend to these two **value** gates.
+4. **`shift_reorder_rows`'s `rel_tol` is the un-swept sibling of `probe_precision`'s `tol`**
+   (`src/toy/robustness.py:945`, general form `:1045`). **`INVARIANCE_DEFECT` → `INVARIANCE_HOLDS`
+   with 12 of 12 seeds violating**; the card self-contradicts, reporting `max_abs_dev=2.728e-03`
+   beside `n_violations=0`. Same defect, same fix (`_plain_parameter`) that round 5 applied to `tol` —
+   whose own comment at `:1257-1261` states the lesson this sibling did not receive.
+
+Two notes without verdict flips, correctly labelled as notes by the reviewer: `Scorecard` accepts a
+`MetricValue` **subclass** (`robustness.py:608` uses `isinstance` where the rechecks use `type(x) is`),
+which falsifies that class's docstring claim at `:546-556` to list the *"complete list of routes known
+to this module"* — a third route exists, and that bears on SR-11's "immutable scorecards" clause; and
+metric **names** are `_nonblank`-checked but never normalised, so a metric a recompute reads can be
+absent from the record's canonical JSON and from its `content_hash`.
+
+### The structural root, which is what actually matters
+
+`_plain_summary_fields`, `_plain_text`, `_plain_measure` — **3 definitions, 12 hand-placed call sites**
+(`grep -cE '_plain_(text|parameter|measure|summary_fields)\('`). The guard is correct everywhere it
+was applied. Every round has found the sites **nobody remembered to apply it to**, and each round's fix
+has been "apply it at the sites this round found." That procedure cannot terminate: it is a hand-maintained
+allowlist of places to be careful, audited by people looking for places someone forgot.
+
+Round 5's own refusal of `_to_metric` is the tell, and this reviewer **confirmed the refusal was right**
+and declined to dispute it, reporting that it could not construct a consequence there.
+
+**The fix that follows is not a fifth site list.** Normalisation must be derived by machine from
+`dataclasses.fields()` for every verdict-bearing dataclass, so a field is covered **by default** and an
+exemption is explicit and carries a reason — fail-closed, with a test that enumerates the fields and
+asserts each is normalised or exempted. That converts "did someone remember this site?" into "is this
+exemption justified?", which is auditable. Scope: cross-module (`schema.py`, `robustness.py`,
+`benchmark.py`), so it is an orchestrator-serialized change, not an owner's.
+
+**SR-04 and SR-11 both stay unmarked.** Three attesters (SR-10/13, SR-15, protocol r9) still in flight.
+
+## SR-09 r9 review: FAIL on one line. All five criterion clauses PASS.
+
+**Date:** 2026-11-11. The unmark above was correct, and the reviewer reached it independently. But the
+defect is **one sentence**, not the revision staleness — r9's substance holds up better than any prior
+revision of this file.
+
+**All five Verify clauses PASS**, each checked against the text rather than accepted from it: controls
+(`:48`-`:56`, incl. the non-obvious `C0` ≠ "no change" at `:51`), disconfirming cases (per-hypothesis
+"Disconfirmed if" column; H3 registered as *expected to FAIL*, with `:321` closing the "a scorer that
+never says SUPPORTED would pass them" loophole), confidence intervals (§6.2-§6.4, B=10,000, Bonferroni
+98.75%, t cross-check with the 25% width rule, n≥30), evidence thresholds (§7, margins labelled
+arbitrary PROTOCOL PARAMETERS, stop rule, `logged_late`), and **no fabricated measured results** —
+verified by independent sweep, **1116 numeric tokens** extracted and every distinct value classified as
+section/gate number, date, hash, protocol parameter, schema constant, or journal *configuration*
+descriptor; plus 50 outcome-verb sentences, all rules or conditionals. Every result slot still UNKNOWN.
+
+### F1 (blocking) — `docs/EVALUATION_PROTOCOL.md:420`
+
+*"Level A is wholly synthetic … and **cannot be repurposed as a capability evaluation**."* Not
+supportable, and the reviewer's reason is sharper than my unprovability argument: **the document
+refutes it structurally.** §9 (`:397`-`:410`) *is* the Level A design — arms, controls, joint rule,
+bootstrap, multiplicity — restated as the requirement skeleton for a real-model evaluation. The
+protocol is a reusable evaluation template and says so. `:420` is also the single unhedged absolute in
+a document that elsewhere instructs the reader to report any apparent measurement as a defect (`:10`).
+
+**Minimum change:** the wording the changelog already drafted — *"and is not designed to be, and
+contains nothing that would serve as, a capability evaluation"* — plus a changelog note so the next
+reviewer re-anchors §9/§11 (both unchanged) rather than §9-§11. Nothing else moves.
+
+### Correction to me: the byte-identity defence is factually TRUE
+
+I primed the reviewer with the A-1/`ff451e1` incident as a *prior* and told it to test the defence
+against git rather than accept it. **It tested, and the defence holds.** The sentence's bytes are
+unchanged across **all ten** commits of this file (`d87b48f:275` through `8f74aca:420`); the §9+§10+§11
+region is byte-identical across r3, r4, r4-corrected and r9, one sha256
+`7ea8cade5b637e444b8dec66ae872290252f5d2c83419cbe6dbf61b0f979257b` for all four. **This is not A-1
+repeating.** One refinement: *"whose byte-identity is relied on"* has exactly one hit in the document —
+the changelog row asserting it. The reliance is real but lives in the **journal** (`PROGRESS.md:2642`,
+`:2849`, `:3245`, `:3357`), recorded by three prior reviews; no Level B region is designated in the
+document's own text.
+
+The defence is true **and insufficient**: byte-identity is a reviewer convenience, not a correctness
+property, the document never promises it, and the machinery for a disclosed in-place edit already
+exists (three dated A-2 revision notes at `:524`/`:526`/`:528`). One re-hash and one note against a
+live unsupported absolute is the wrong trade, and disclosing a choice does not make a sentence true.
+
+### r8→r9 changelog accounting: VERIFIED COMPLETE in both directions
+
+`git diff -U0 0507399 8f74aca` → 8 insertions / 5 deletions / 6 hunks, and **the per-hunk arithmetic
+sums to exactly 8/5**, so the enumeration is the whole diff. The "Correction to the r8 row" claims
+(a)-(e) also check out against `3c078ae..0507399` (12/5, 8 hunks). **r8's accounting defect is genuinely
+fixed, and the r8 false pin with it**: counting `Known-good side|Known-bad side` per commit gives 0 for
+`3620de2` through `32882fd` and **3 first at `0507399`**, so the corrected two-pin claim is right. The
+third A-2 revision note's three git claims are true, verified line-range by line-range: `577099d`
+rewrote exactly **five** parts, `3c078ae` rewrote **only** the `reason` line, and the A-2 entry is
+byte-identical r7 == r8 == r9.
+
+### Non-blocking notes to fold into the same revision
+
+- **N1** `:311` — a journal pointer with **no commit pin**, in a document whose `:292` states "the
+  journal is mutable; the commit pin is what makes the reference verifiable". Same family as the pin
+  defects that failed r7 and r8, milder (missing, not wrong).
+- **N2** `:443` — "from two placeholders to five" **undercounts by one**; r7's item 1 named three.
+- **N3** `:496` — "r2 (commit `905bbfe`)" is neither of §7's two recognised forms: the diff carrying r2
+  is `710151f`, and `905bbfe` does not touch this file (though the blob is identical at both, so it is
+  true as a *state* pin). Pre-existing since `c9f52d8`; **it survived the r3/r4 PASS whose reviewer had
+  both hashes in hand** (`PROGRESS.md:2136`).
+- **N4** `:311`/`:317` assert implementation observations in a document whose §0 forbids them. Both are
+  true and correctly attributed (`delta_A`/`loss_factor` confirmed in `benchmark.py:456-457`/`:486`,
+  validated only as finite-nonnegative while only `lr > 0` and `alpha in (0,1)` are enforced). Tension
+  with §0's rule, not with SR-09; clause 5 stands.
+- **N5** `:311` — r8's "if it cannot, that is a gap to be closed" clause removed, not itemised. The
+  replacement is epistemically no weaker; non-blocking.
+
+**SR-09 stays unmarked pending the one-line fix and re-attestation.** The fix is doc-only and cannot
+start yet: the SR-10/SR-13 attester is reading this file as its normative spec, and editing it mid-review
+would move the ground under that attestation.
+
+## Round 6, SR-10 + SR-13: SR-10 **PASS** (first time), SR-13 **FAIL** (4th). The root cause is now located.
+
+**Date:** 2026-11-11. Independent attester, concurrent with and unaware of the SR-04/SR-11 attester.
+**The two converged on the same root from opposite ends**, which is the strongest evidence this round
+produced.
+
+### Why SR-10 passes and SR-13 fails is one sentence
+
+**`benchmark.py` normalises at the point of use** (`_plain_number`/`_plain_parameter` inside
+`_verdict_from_bounds`, `_check_margin`, `MetricValue.__post_init__`), so an overridable dunder never
+decides anything there. **`dashboard.py` cites that same docstring and then does the opposite:**
+`src/toy/dashboard.py:282`, `:299`, `:311` are each `return x`, and `_finite_number`'s docstring states
+the choice outright — *"It does NOT convert: an admitted `int` comes back an `int`"*. Every cross-check
+downstream of `_admitted` (`:383`) therefore runs on **the forger's object**, not on the double the kind
+function just inspected. The attester verified the contrast directly: `ComponentResult(min_n=MSub(30),
+width_tol=WSub(0.25))` with lying `__lt__`/`__gt__` **stores plain `30`/`0.25`** in `benchmark` and the
+floor still applies — *"this is precisely the route that breaks in `dashboard.py`."*
+
+**The enumeration gap is measurable: 0 of 107 values in `HOSTILE_BY_KIND` + `LEGAL_BUT_WRONG` are
+`int`/`float` subclass instances** (counted by iterating both tables, testing `type(v) not in (int, float)`).
+The sweep tested 44 hostile *types* — all correctly rejected — and no hostile *subclasses*.
+
+### SR-13's four findings — three flip a verdict to JOINT_SUPPORTED with zero warnings
+
+Reproduced on Python **3.12.13** and **3.13.5**. All use `object.__setattr__`, benchmark's declared
+route (b) — the same threat model as round 5's own `laundered_below_minimum` fixture, so like-for-like.
+
+1. **F1 `pair.n` — round 5's own cross-check defeated by two dunders** (`:1106`, `:1113`). `NSub(int)`
+   storing a legal `30` with lying `__gt__`/`__ge__`, in **round 5's own fixture unchanged**:
+   `_measured_seeds` returns the honest **29**, `_n_sources_disagree` returns **`[]`**, the flag
+   `'n below protocol minimum'` is still present, and the page renders **`JOINT_SUPPORTED`, 0 warnings,
+   all alarms False**. Control with a plain `30` is caught, exactly as round 5 claims. The page prints
+   `PASS | 29 measured seeds vs minimum 30` — **the true number beside a PASS it contradicts**, which is
+   the precise page state round 5 was written to eliminate.
+2. **F2 `ComponentResult.min_n` — the one-sided floor is not one-sided** (`:1242`, `:1332`). `MSub(int)`
+   storing `1` with lying `__lt__`/`__le__`: `max(mn, 30)` returns **1**. **Worse than F1 because
+   `pair.n` is never touched** — the page honestly prints `<td>29</td>` and `Attempted 29, failed 0`
+   *next to a decisive JOINT_SUPPORTED* against a minimum of 30. `_recompute`'s docstring claim *"a
+   weaker one cannot buy a decisive verdict"* is **false for any `int` subclass**.
+3. **F3 `ComponentResult.margin` — the declared second source is an overridable `__ne__`** (`:1236`).
+   Honest `S=0.0` vs `delta_S=0.10` and `L=1.0` vs `delta_R=0.05` (both UNSUPPORTED) render
+   **`JOINT_UNSUPPORTED` → `JOINT_SUPPORTED`, 0 warnings, 0 alarms, and every displayed figure honest**:
+   the page shows margins `0.1 / 0.05 / 0.1` while the verdict was computed against **±100000.0**
+   (admitted, since within `MARGIN_MAX`). Round 5 filed this field in `SECOND_SOURCE` with the source
+   *"joint.margins via db._declared"* — **that source is a single `!=`**.
+4. **F4 `pair.level` — a displayed figure the page's own cross-check contradicts** (`:258` + `:282`).
+   Every `level` cell prints `0.5`; the honest level is `0.9875`, **and `_interval_problem` used 0.9875
+   to verify `t_lo`/`t_hi` on the same render** — the page confirmed one number and printed another.
+   No verdict flip, so it is a finding only by the module's own rule, quoted at `_pair_numbers_ok`:
+   *"an edited figure is unalarmed tampering even when it buys nothing"* — the rule round 5 cited to put
+   `level` in the declared set.
+
+### The scope call, recorded because it matters for the final write-up
+
+**SR-13's literal sub-clause HOLDS.** The attester could not make an absent result render as `0` on any
+input: `render_dashboard({})` gives 5 UNKNOWN panels with **no `class="measured"` cell anywhere**;
+dropping `train`/`joint`/`records` individually renders that panel UNKNOWN with zero measured cells; a
+1-seed study renders *"interval not computable"*, never `[0.0, 0.0]`; `render_scorecard(object())`
+refuses. The **FAIL is on the clause's purpose** as the brief directed it be read — the page must not
+show a number, alarm state or decisive word the evidence does not support — not on the literal words.
+
+**The attester also corrected its own false positive**, unprompted: an initial pass flagged the
+drop-panel cases as broken; localising the hit showed the only measured `0` on the page is the
+snapshot's **own honest datum** `behind_by_vs_merge_base = 0`, in a panel that had not been dropped.
+*"My check's error, not a defect."* Reported anyway, because a wrong figure is how this project has
+been burned.
+
+### Round 5's refusal of `GateResult.reason` is now vindicated by measurement, not argument
+
+F1's page prints that free text **correctly** (`PASS | 29 measured seeds vs minimum 30`) while both
+*structural* sources are silent. So parsing the string would have patched F1 and done **nothing** for
+F2, F3 or F4. *"The defect is not a missing third source; it is that the two existing structural sources
+are compared with un-normalised operands."* Guard 3 ("no verdict is ever parsed from any string") costs
+nothing here and stays.
+
+### Notes, correctly labelled as notes
+
+`width_tol`'s sibling hole at `:1242` is fully measured (`min(c.width_tol, 0.25)` → `1e9`,
+`_weaker_than_protocol` → `[]`) but **no verdict flip was found in a 48-shape sweep** (heavy-tail factor
+× outlier index), because 6.3 fires on the sign clause there, which `width_tol` does not govern — the
+hole is real, the exploit needs a fixture that was not found. `verdict_from_records`' n cross-check has
+no `seed_scores`-style anchor (records-path twin of a known-open residual). **`FrozenSeedList` has no
+`__post_init__`** and `seed_list_digest` calls an overridable `__int__`: a direct construction yields
+`digest c768f6ddd4c7` against an actual-seeds digest of `2b47e3ae7bc8` — a `seed_list_frozen` PASS
+against a digest that does not describe the analysed seeds (provenance, not a flipped verdict; the
+public builder `freeze_seed_list` emits plain ints). Also: an `int` subclass overriding only `__sub__`
+**defeats `_measured_seeds` outright** (returns 30 against an honest 29, all three `seed_scores`
+equalities satisfied) but buys nothing alone, because source (2) still fires.
+
+### SR-10's PASS, and what it is evidence of
+
+Measured repeatability: `config_hash` canonical under field reordering; two independent `analyze_scores`
+runs bit-identical across **6 components × 5 interval fields = 30 comparisons, all equal**. Owner suites
+**623 tests OK** (`test_benchmark`, `test_dashboard`, `test_robustness` — the last because
+`robustness.py` imports `benchmark`). Attacks that bounced in `benchmark`: forged `n_seeds=1e9`,
+`margin=-1.8e308`, `ci_level=0.95` all refused; omitting `cfg` **fails closed** with a config-hash
+reason rather than falling back to module defaults; `evaluate_gates`' 30-copies attack gives
+`seed_list_frozen=False`.
+
+**SR-10 cannot be marked**: its dependency SR-09 is unmarked as of this round. The PASS stands as
+evidence with standing, and the checkbox waits on SR-09's one-line fix.
+
+### The fix, now convergent from two independent directions
+
+The cheapest root fix is **3 lines** at `src/toy/dashboard.py:282`/`:299`/`:311` — make the kinds
+normalise what they admit, as `benchmark.py` already does (`float.__float__(x)`;
+`bm._plain_parameter(x)`, preserving int-vs-float which `_num`/`_declared` rely on; `int.__int__(x)`) —
+because `_admitted` is already the single reader. That closes F1-F4 **and** the `_measured_seeds` note
+at the root. It also makes `_finite_number`'s *"It does NOT convert"* sentence false in the safe
+direction, so **that docstring must be rewritten in the same change** — it is currently the one
+load-bearing claim that *is* the defect.
+
+Together with the SR-04/SR-11 attester's finding (3 normaliser definitions, 12 hand-placed sites), the
+unified lesson is the same from both ends: **normalisation belongs at the type boundary, applied by
+machine, not at sites chosen by hand.** `benchmark.py` is the existence proof that point-of-use
+normalisation works; `dashboard.py` is the existence proof that omitting it is invisible to a
+type-only hostile-value sweep.
+
+## Round 6, SR-15: **FAIL** (4th). And a correction to the project's own green status.
+
+**Date:** 2026-11-11. Four findings. **The headline is the same meta-pattern as the other two
+attesters found, in a third module**, and one finding is a live test failure I reproduced myself.
+
+### The meta-pattern, now three-for-three
+
+Round 5 closed the **tool** exemption category with three independent guards (`\A`, `.match`, trailing
+`\b`) **plus** a closed allowlist. **The filesystem-case category got none of them.**
+`scripts/run_tests.sh:330` is `FS = re.compile(r"case[- ]sensitive", re.I)`, used **unanchored** via
+`.search` at `:410`. So *any* reason containing the substring `case-sensitive` anywhere is exempt in
+**every** mode, with no allowlist, no anchor and no word boundary.
+
+That is the identical shape as: `_plain_*` applied at 12 hand-picked sites in `schema.py`/`robustness.py`
+(sites missed), and `dashboard.py`'s kinds not normalising at all while `benchmark.py` does (module
+missed). **Three independent attesters, three modules, one root: a guard installed at hand-chosen
+locations, with the symmetric sibling left open.**
+
+### F1 — the `case-sensitive` exemption is an open set (illegitimate permit)
+
+Measured live, all three modes, zero policy tokens emitted:
+`case-sensitive filesystem: …; libtorch is gone` → OK/OK/OK. Same for `_torch`, `_pytest`, `mytorch`,
+and for `…; optional developer tool \`black\` is not on PATH`, and for
+`the optional developer tool \`mypy\` is not on PATH (case-sensitive filesystem)`. The *reference*
+rows confirm the controls work: `…; torchrun is gone` → `POLICY:NONE_REASON` / `TORCH_MODE_UNEXPLAINED`,
+and a bare `mypy` reason → `TOOL_UNDECLARED` in all modes.
+
+**`PKG_EXEMPT` is prefix-only**, so suffix evasions (`torchrun`, `torch2`, `numpy2`, `pytestx`,
+`yamllint`) are correctly **denied** while **prefix** evasions (`libtorch`, `_torch`) are **permitted** —
+no `\b` precedes `torch` in `libtorch`. The generated tails table at `test_scripts.py:1729` enumerates
+**only suffix** evasions, though `libtorch` and `_torch` appear 90 lines later as tool names.
+
+**Two written claims falsified:** `run_tests.sh:368` — *"gets no exemption, whatever else it says and
+**however it spells it**"* — and `docs/CLEAN_CLONE.md:411` — *"The word-boundary problem is closed twice
+over."* The disclosed residue at `CLEAN_CLONE.md:417` covers only a tail that "names no measured
+package"; `; libtorch is gone` names one.
+
+**Round 5's derivation test is bypassed in the same move:** `_suite_tool_gates` uses
+`pat.match(arg.value.strip())`, so a reason not *beginning* with the phrase is not seen as a gate.
+Measured on a byte-identical repo copy: probe `mypy` reason → test **FAILS** (control works); probe
+`…(case-sensitive filesystem)` → test **OK**. A test gated on an undeclared tool is green at test time
+*and* at runtime.
+
+**Honest bound, measured not assumed:** re-parking an existing baseline-counted skip → `POLICY:BASELINE_SKIPS`
+(the hole cannot hide a skip the baseline counts); *adding* laundered skips → OK up to 8, `POLICY:FS_CAP`
+at 9. So reach is ≤8 new parked tests, ≤4 on Linux. The docs state that arithmetic for *filesystem*
+skips, not for undeclared-tool parks.
+
+### F2 — every backticked token is treated as a tool name (legitimate deny)
+
+`tool_undeclared`'s `BACKTICKED = re.compile(r"\`([^\`]*)\`")`. The live ruff reason plus
+`" (see \`scripts/lint.sh\`)"` → `POLICY:TOOL_UNDECLARED` in **all three** modes, `RESULT: FAIL`, with
+advice that cannot be followed: *"`scripts/lint.sh` is not in the TOOLS allowlist … declare the tool
+there."* Same for a backticked rule code. **This is round 3's defect shape exactly** — honest reason,
+red suite, unfollowable guidance. Latent, not live: the current reason happens to backtick only `ruff`.
+`CLEAN_CLONE.md:417` presents "every backticked name must be declared" as a feature and does not
+disclose this cost.
+
+### F3 — `POLICY:TOOL_CAP` is evadable by appending the FS phrase
+
+`run_tests.sh:432-436` computes `fs` first and excludes from `tool` anything `fs_skip` matches. Live
+ruff reason ×5 → `TOOL_CAP` (×4 → OK, the documented 4/5 boundary). Same reason + `" (case-sensitive
+filesystem)"` ×5 → **OK**, reported as *"note: 5 skip(s) for a case-sensitive filesystem"*; ×9 →
+`FS_CAP`. The combined 12-skip ceiling is not breached; what breaks is the per-category bound the docs
+name as the thing that bounds tool parking, and the run then **misreports tool parks as the Linux
+figure** CLEAN_CLONE tells readers to expect.
+
+### F4 — a live test failure, and the "clean-clone" FAIL. **Reproduced by the orchestrator.**
+
+`scripts/lint.sh:230` probes `python3 -m pyflakes --version` — through the **interpreter** — while
+`scripts/lint.sh:226` gates ruff on `command -v ruff` (PATH). `_toolfree_bin()` (`test_scripts.py:2025`)
+removes tools from **PATH** and its docstring claims *"A directory we construct cannot drift that way."*
+**It can:** the symlinked interpreter brings its own site-packages, so `RAN_ANY=1` and the
+*"no optional linter (ruff/pyflakes) installed; skipped"* branch at `:236` never fires. The test
+measures the opposite branch from the one it names.
+
+**My own verification**, cleared bytecode, serial, nothing else running:
+```
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest tests.toy_tests.test_scripts
+  -> Ran 137 tests, FAILED (failures=5)
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 (same command)
+  -> Ran 137 tests, FAILED (failures=1)
+     FAIL: TestLintPolicy.test_missing_optional_tools_never_fail
+```
+The 4 suppressed failures are **ambient to this machine, not the repo's**: an autoloaded `pytest11`
+plugin under `/Users/shrey/miniconda3` imports a broken `llvmlite`
+(`OSError: Could not find/load shared object file 'libllvmlite.dylib'`). The attester's attribution was
+exactly right. **CI would not catch F4**, because neither job installs pyflakes — so there the test
+measures the branch it names and passes.
+
+### Correction to the state I have been reporting: the green baseline is interpreter-dependent
+
+`scripts/run_tests.sh` invokes **bare `python3`** throughout (`:264`, `:271`, `:278`, `:557`, `:560`).
+The 1216/OK baseline was recorded with `python: Python 3.12.4`. **Ambient `python3` on this machine is
+now `/Users/shrey/miniconda3/bin/python3`, Python 3.13.5, with `pyflakes 3.4.0` importable** — the exact
+condition that exposes F4. So:
+
+- "**Suite: 1216 tests, OK**" is true **for 3.12.4 via `run_tests.sh`** and **false for the
+  CLAUDE.md-mandated per-module command on this machine's default interpreter**, where one real test
+  fails. I reported the former as the project's health without recording which interpreter produced it.
+- Nothing in the repo pins the interpreter, and nothing recorded that the baseline's `python3` and the
+  mandated command's `python3` can differ. The Python 3.13 measurement in this journal was taken once at
+  `209adfc` and never re-measured; it is now the *default*, unobserved.
+
+**Standing rule to add: a suite result is not a fact about the repository unless the interpreter that
+produced it is recorded beside it.** Every "OK" in this journal that lacks one is a claim about an
+unrecorded environment.
+
+### Claim-by-claim, and the one I cannot measure
+
+**deterministic** — PASS on mechanism (`PYTHONHASHSEED=0`, bytecode cleared, `--twice` compares
+per-module counts *and* the skip list, `POLICY:NONDETERMINISTIC` asserted), **unverified end-to-end**.
+**pinning** — PASS with disclosed limits: `constraints.txt` pins `pytest==8.4.1`, `pyyaml==6.0.3`,
+`numpy==1.26.4; python_version < "3.13"`, `torch==2.7.1`, CI pins `pip<26`; no hashes, no lockfile, and
+`--extra-index-url https://download.pytorch.org/whl/cpu` is an unpinned index — the file itself
+discloses the combination "has not been exercised locally". **offline** — PASS as scoped; ~60 driven
+runs all printed the guard line; the `optional-deps` CI job is not offline and says so in its name.
+**clean-clone** — **FAIL** (F4). **complete offline regression suite passes** — **BLOCKED on
+orchestrator-run measurement**: `./scripts/run_tests.sh --expect none --twice` inside the documented
+bare venv, which must use the bare venv or `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` or it inherits the four
+ambient failures.
+
+### CI read as text, never executed
+
+One workflow, two jobs (`core-no-deps` on a 3.12/3.13 matrix; `optional-deps` on 3.12). **Would catch:**
+a bare-mode policy failure including `TOOL_UNDECLARED`, numpy pin drift, a lint regression. **Would not
+catch:** F1 or F3 (both measured exempt in `--expect none`, the job's mode), F4 (no pyflakes), F2
+(latent). Neither job runs `--expect any`; both compare the **macOS-generated** committed baseline
+against a Linux run, which has never been observed.
+
+## SR-09 → v1-DRAFT-r10: the blocking finding closed, and a figure of mine demoted.
+
+**Date:** 2026-11-11. `docs/EVALUATION_PROTOCOL.md` only; 7 hunks, **+8/−7**, net +1 line. No tests, no
+commit, no checkbox.
+
+**F1 closed at `:420`**, adopting the wording r9's own changelog had already drafted:
+*"…and is not designed to be, and contains nothing that would serve as, a capability evaluation."*
+Verified in the tree by me. `grep -rn 'repurposed' tests/ scripts/ src/` → no output, re-confirmed by
+the owner independently of my brief.
+
+**N1** `:311` — pin added, and the commit was **derived by git, not copied**: `git log -S` on two
+distinct phrases both return `9204f7c` as the sole result, `merge-base --is-ancestor` YES, committer
+date `2026-11-10T05:46:17Z` (same convention as `:292`'s `3620de2`, whose own UTC date the owner
+re-verified). **No line range was given, deliberately** — the entry moved 3253 → 3265 between that
+commit and HEAD, and a pin exists not to depend on line numbers. **N2** `:443` — before-count verified
+from the r7 text itself (`git show 3c078ae:… | grep -n 'must be set at registration'` → three named
+parameters), corrected to "from three named parameters … to five". **N3** `:496` — both hashes checked
+rather than trusted: `905bbfe` does **not** contain this file, `710151f` does, and the two blobs are
+identical (`7c767b18…`), so it now reads "as it stands at commit `905bbfe`; introduced in `710151f`".
+
+**N4 — decided: qualify `:10`, not relocate.** Reasoning accepted: `:311` and `:317` are load-bearing
+for **rules**, not outcomes — `:311` is the entire reason the 11(c) known-bad case must be a
+*substitution* rather than a configuration, `:317` the entire reason the registration constraints are
+stated as not code-enforced. Moving them would leave both rules unmotivated at the point of use. §0
+already admits code-structure reading one bullet later (`:11`) and defines SOURCE_OBSERVED at `:8` as
+"never a run record", so the taxonomy already contemplated this; only `:10`'s wording over-reached.
+Run outcomes and figures still belong to the journal alone. **N5 — itemised retroactively**, on the
+ground that "it was no weaker" defends the edit, not the accounting.
+
+### My figure `7ea8cade5b637e…` is UNREPRODUCED. Demoting it.
+
+Round 6's reviewer reported that sha256 for the §9+§10+§11 region across r3/r4/r4-corrected/r9, and I
+carried it into this journal and into the fix brief. **The owner could not reproduce it** — 12 boundary
+variants tried (`391,431`, `391,430`, `393,430`, `393,431`, `392,430`, `389,431`, `390,431`, `391,429`
+and per-section ranges) — and **declined to restate it as its own fact.** Correct call, and exactly the
+discipline this project needs: an unreproducible hash is the figure class that has burned us repeatedly.
+
+The **substance** survives independently, under a commit-portable boundary (section heading to the line
+before the next heading) that I re-ran myself:
+
+| Region | r3…r9 — all **eight** commits identical | r10 working tree |
+|---|---|---|
+| §9 | `334fa2b4a4ff9d9cc47518401127719c7856a63a8c1260a7f1bd561667f7554d` | **unchanged** (I reproduced) |
+| §10 | `55776647310ce2f62713a37219d6410b844a1f87c584587e3cd7e750d8de5e8f` | `d8aca67bcbfc38fe6eab8ee97a27cddb5b9fa2a650c941ee7d6eb9bf43f2783e` |
+| §11 | `ecb4d2bc64580d68d3d5f4edb81f4c226403f78cb974e2edbabdcae23f735e34` | **unchanged** (I reproduced) |
+
+**For the next reviewer: re-anchor §9 and §11 PER SECTION. §9–§11 is no longer one byte-identical
+block.** §10 changed by exactly one bullet; heading line numbers are unmoved (§9=393, §10=414, §11=424,
+§12=432) and the +1 line lands in §13. The same note is recorded inside the document's r10 row.
+**Standing rule: a hash is only evidence if the command that produced it is recorded with it.** The
+reviewer's value had no boundary definition attached, so it was unusable as a check.
+
+### A briefing error of mine, correctly flagged
+
+My hard constraint 6 enumerated the lines the owner could touch — §10's sentence, `:311`, `:443`,
+`:496`, the header, the changelog — and **both** of N4's options necessarily fall outside it (`:10` to
+qualify, or `:317` to relocate). I drew that list from the F1+N1–N3 set without accounting for N4's
+footprint, then asked for N4 anyway. The owner took the one-hunk option, disclosed the deviation, and
+noted the alternative would have been two hunks and removed load-bearing text. The second deviation
+(`:530`→`:531`, the trailer's review-status line) was **forced by the document's own rule**: its third
+A-2 revision note at `:528` states that sentence "is a status line that is updated in place at every
+revision", so leaving it would have put the header and trailer in direct contradiction — the defect
+class that sank r6. Both deviations were right and both were disclosed.
+
+### Open, and mine
+
+`docs/PROGRESS.md:5399`, `:5409`, `:5530` still carry the old `:420` wording as quoted findings. Those
+are historical records of a defect now closed and **stay as written** — this journal is append-only —
+but they are hereby marked **CLOSED at r10** so no future reader mistakes a quoted defect for a live
+one. **SR-09 remains unmarked and now needs attestation of r10**, which no reviewer has seen; r10's own
+header records it as unreviewed. The r9 review's four non-blocking notes N1–N3 and N5 are addressed and
+N4 is decided, so an r10 review starts from the blocking finding being closed, not from scratch.
+
+## SR-13 fix: the three kinds normalise at admission. My briefed fix was wrong on ordering.
+
+**Date:** 2026-11-11. `src/toy/dashboard.py` + `tests/toy_tests/test_dashboard.py` only; +131 / +527
+lines. All four findings, both notes, **and one defect the owner found itself** closed on one mechanism.
+`test_dashboard` **216 → 226, OK on BOTH 3.12.4 and 3.13.5**; `test_benchmark` 280 OK.
+
+### The owner refused the fix I briefed, with three measurements. It was right.
+
+I passed through the attester's "3-line fix" (`_finite_number` → `bm._plain_parameter(x)`). Measured
+objections:
+
+1. `_plain_parameter` **does** preserve int-vs-float — that half was sound.
+2. **`dashboard.py` has zero executable `benchmark` privates.** Tokenised with the suite's own
+   `module_code_by_line` (docstrings stripped), the 8 `bm.` names in code are all public. I verified
+   independently: the sole `bm._` match in the file is prose inside a docstring. So the proposal would
+   have created the module's **first private cross-module dependency**, which `_contract_problems` does
+   not cover — a rename in `benchmark` would surface as an `AttributeError` raised inside
+   `_admitted`/`_kind_cell`, i.e. **a page taken down**, the exact failure mode the module docstring
+   forbids, rather than a reported contract problem.
+3. **Decisively: substituting the call at the old `return x` leaves the ORDERING defect in place.**
+   `math.isfinite` on a non-`float` **consults `__float__`**, so an `int` subclass storing `10**400`
+   whose `__float__` returns 1.0 passes `isfinite` while `_plain_parameter` hands back the honest
+   `10**400` — admitted as "a finite number", then fatal downstream in `_num`. The inverse
+   (`__float__`→nan over a stored 5) makes the kind **refuse an honest 5**. The owner ran exactly that
+   mutant (normalisation kept, order reverted): **KILLED** by two tests.
+
+So the rule is **normalise first, then test** — which is `benchmark.py`'s own stated rule and not what
+my brief said — written locally as `float.__float__` / `int.__int__`: identical operation, no new
+import, no private dependency, and no fifth function (a shared helper would have had to be added to the
+source test's `KIND_FUNCTIONS` allow-list, weakening "exactly four numeric predicates"). Verified in the
+tree: `v = float.__float__(x)` then `try: return v if math.isfinite(v) else None / except OverflowError`.
+
+### A defect neither the attester nor I asked about, found by the owner, **needing no subclass at all**
+
+`ComponentResult.margin = 10**400`. `math.isfinite(10**400)` **raises**, so pre-fix **both
+`render_scorecard` and `render_dashboard` raise `OverflowError`** — a page taken down, outside the
+module's error contract — and the value was **absent from `HOSTILE_BY_KIND["num"]`**. A plain int. Five
+rounds of subclass-hunting missed an attack that needed no subclass. Now refused → UNKNOWN + alarm, no
+raise, same for `-10**400`.
+
+### Before → after, every route measured on both interpreters (they agree exactly)
+
+| route | BEFORE | AFTER |
+|---|---|---|
+| F1 `pair.n = NSub(30)` in the suite's own fixture | JOINT_SUPPORTED, 0 warn, alarms False | **JOINT_INCONCLUSIVE, 2 warn, alarm**; all 6 components named, "SAMPLE SIZE CONTRADICTED" |
+| F2 `min_n = MSub(1)` | JOINT_SUPPORTED, 0 warn, no alarm; `max(mn,30)`→1 | **JOINT_INCONCLUSIVE, 3 warn, alarm**; 6 × "min_n=1 is below the protocol minimum 30" |
+| F3 `margin` liar ∓1e5 | JOINT_UNSUPPORTED → **JOINT_SUPPORTED**, 0 warn, every figure honest | **JOINT_INCONCLUSIVE, 1 warn, alarm**; page now prints the real `-100000.0` |
+| F4 `pair.level` shows 0.5 | every level cell `0.5` while the same render verified against 0.9875 | render **byte-identical to the honest page**; 6 × `0.9875`; no false alarm |
+| Note A `n_attempted`, `__sub__` only | `_measured_seeds` → **30** on a 29-seed study | → **29**; JOINT_INCONCLUSIVE, 2 warn, alarm. Closed by the same three lines |
+| Note B `width_tol` 1e9 | `min(wt,0.25)` → **1e9**, tolerance removed silently | → 0.25, "WEAKER THAN THE PROTOCOL" stated |
+
+**Note B: still no verdict flip claimed.** Four honest shapes swept (`joint()`, `heavy_tailed()`,
+`idx=7`, `factor=500`); the floored tolerance leaves the joint cell identical every time, because
+`heavy_tailed`'s 6.3 INCONCLUSIVE comes from the disagreement clause, which `width_tol` does not govern.
+Mechanism closed, no claim inflated.
+
+### The machine-derived pin exists, and it answers round 6's objection
+
+Round 6 ruled that a suite cannot check a *written* reason. The owner found the exception and used it:
+**where the reason is "this field is not read", a suite can verify it behaviourally.**
+
+- `test_every_numeric_field_of_a_verdict_bearing_class_is_declared_or_exempt` — field set from
+  `dataclasses.fields()` on the four `VERDICT_BEARING` classes, **not** from a render, so a **new**
+  numeric field fails the suite the moment it exists. Exactly **6** exemptions
+  (`IntervalPair.n_boot/sd/iqr/minimum/maximum/max_over_median_abs`), each with a reason, and each
+  reason **checked**: 6 fields × 5 hostile values × 2 renders must stay byte-identical — measured
+  **60/60**.
+- `test_the_probe_itself_is_not_vacuous` asserts `n_boot` is absent from the recording probe's bucket,
+  i.e. the fields-derived test strictly dominates the render-derived one.
+- `test_every_admitted_field_is_normalised_by_its_kind` — feeds each field's kind a lying subclass of
+  its own honest value and demands **exactly** the plain type. Every `return x` mutant dies here,
+  including on fields this round never considered.
+- Subclass instances in the hostile tables: **21 of 129** (`HOSTILE_BY_KIND` 8/71, `LEGAL_BUT_WRONG`
+  13/58), against **0 of 107** at round 6, with a test that fails if any kind returns to 0.
+
+**Each fixed line is individually load-bearing** (targeted runs, KILLs): `_finite_float` reverted →
+killed by 2, `_finite_number` → 7, `_count` → 6; "check before normalise" → 2; "drop the
+`OverflowError` guard" → 2. Of 13 relevant tests, **11 fail against the pre-fix emulation**, and the two
+that pass pre-fix are correctly identified as constraining the tables and the field set rather than the
+fix.
+
+### Figure correction, and residuals stated rather than closed
+
+**This machine has Python 3.12.4, not the 3.12.13 the round-6 attester reported** — verified at
+`/Library/Frameworks/Python.framework/Versions/3.12/bin/python3`. One more reminder that a version
+string is a measurement.
+
+Residuals, each disclosed and none dressed as closed: a value can still lie about its **type** via
+`__class__` swap or `__getattribute__` — `isinstance` is the one predicate these kinds take on trust,
+and the suite itself uses that technique; a subclass attack on a numeric field **outside**
+`STORED_NUMBERS` is covered only by the exemption test's byte-identity measurement, with the
+fields-derived test as the tripwire; **huge counts measured and deliberately NOT forced into a table**
+(`_count(10**400)` returns it by design; 8/8 renders give JOINT_INCONCLUSIVE + alarm, no raise, so it
+fails closed via second sources — but it meets neither `HOSTILE_BY_KIND`'s refusal contract nor
+`NEUTRALISED_BY_A_FLOOR`'s unchanged-page contract, and was noted instead of mis-filed); and
+`_finite_float`'s `isinstance(x, bool)` clause remains the project's one documented unpinnable mutant,
+unchanged and still pinned as unpinnable-by-construction.
+
+## SR-04/SR-11 fix: the boundary is machine-derived. 49 fields, 46 covered, 3 exempted.
+
+**Date:** 2026-11-11. Interpreter for every count: **CPython 3.13.5** (`/Users/shrey/miniconda3/bin/python3`,
+ambient). `schema.py +166`, `robustness.py +155/−26`, `test_schema.py +448/−5`, `test_robustness.py +300/−11`.
+
+### The structural fix I asked for exists, and it is not vacuous
+
+`_plain_value(x)` — one recursive normaliser (`str`/`int`/`float`/`Mapping`/`list`/`tuple`, recursing
+through mapping **keys and values**; `Enum`, `bool`, `None`, nested dataclasses and callables returned
+unchanged; key collisions **refused** with `ValueError`; **container identity preserved** when nothing
+collapsed, so honest records stay byte- *and* allocation-identical). `_normalise_fields(obj)` walks
+`dataclasses.fields(obj)` minus `type(obj)._NORMALISE_EXEMPT`, called as the **first statement** of
+`__post_init__` in **nine** dataclasses, plus `data = _plain_value(data)` in all three `from_dict`s.
+
+**Coverage: 49 fields, 46 covered, 3 exempted** — `schema.py` 3 classes / 14 fields / **0** exemptions;
+`robustness.py` 6 classes / 35 fields / 3. All three exemptions are `ShiftSpec` **callables**, each with
+a recorded reason, and the reasons are substantive rather than decorative: a callable stores no scalar,
+and its *return* is normalised where consumed (`probe_shift`'s `_plain_measure`). The `bound` reason
+names the one thing the boundary **cannot** reach — `shift_reorder_rows`'s `rel_tol` is a **closure
+variable, not a field of anything**, so it is normalised where it is *bound*.
+
+The coverage test asserts four things, and the first two are what make it better than a sweep:
+**(1) a new dataclass fails closed** (registry derived from `vars(module)`); **(2) by AST,
+`_normalise_fields(self)` is the FIRST statement of `__post_init__`** — a call placed after a gate
+normalises nothing the gate used; (3) each field stores plain, or is refused, or is exempt with a
+nonblank reason; (4) the measured `(fields, exemptions)` counts, so a new field is *noticed* even though
+it is covered by default.
+
+**Seven mutants, all KILLED** by the 188-test pair: `_normalise_fields` → early return (8 failures);
+boundary call dropped from `MeasureFixture` **only** (1 failure — the AST assertion caught it);
+`_plain_value` stops walking mappings (18); one exemption reason blanked (2); `rel_tol` normalisation
+removed (1); `probe_shift` bound reverted to bare `float()` (1); `arm_difference` name normalisation
+removed (1).
+
+### Two corrections to the attestation, from the owner
+
+**Finding 1b as written was not realisable.** A **dict literal cannot carry the collapse** —
+`{"seed_list": a, Collapse("scorecard"): b}` collapses inside the *caller's* dict before any constructor
+sees two entries, so the schema is handed an honest 1-entry mapping. The realisable shape is a **non-dict
+`Mapping` whose `.items()` yields both**, which is what the pin now uses. Before: `n=1`,
+`{'seed_list': 'bbb…'}` — the scorecard anchor's value under the seed-list key. After: `n=2`, both keys
+present, both reaching `content_hash()`; a *genuine* duplicate refused with `ValueError`.
+
+**Finding 1 is sharper than reported.** Recomputed with the study's **own** cfg, the honest answer is
+`(JOINT_INCONCLUSIVE, SUPPORTED, INCONCLUSIVE, INCONCLUSIVE)` with `reasons=()`. So the forgery did not
+merely defeat a binding check — **out of the same records it produced a verdict the configuration the
+study actually ran under refuses.** Also: finding 4's `max_abs_dev` measured `9.1145e-03` here against
+the attester's `2.728e-03` — different fixture, and one more reminder that a figure travels with its
+fixture or not at all.
+
+### Before → after
+
+| route | BEFORE | AFTER |
+|---|---|---|
+| 1a `input_hashes` → config binding | **JOINT_SUPPORTED**, h1/h2/h3 SUPPORTED, `reasons=()`, `config_hash=000000000000` | `JOINT_INCONCLUSIVE`, 1 reason, **stored type `str`** |
+| 2 absent arm, **names** axis | `MetricValue(0.0, None)`, card `INSUFFICIENT_EVIDENCE` → **MEASURED**, `UNKNOWN` label gone | `MetricValue(None, "arm 'E' absent")`, `INSUFFICIENT_EVIDENCE`, labels include `UNKNOWN`, `content_hash` = honest card's |
+| 3 `from_dict` gates | version-1 dict **accepted** and restamped `'2'`; `"VERIFIED SAFETY FINDING"` **accepted** and relabelled | `ValueError` on both |
+| 4 `rel_tol` + general form at `:1045` | `INVARIANCE_DEFECT` → **INVARIANCE_HOLDS**, `n_violations=0` beside `max_abs_dev=9.1145e-03` | `INVARIANCE_DEFECT`, `n_violations=12`, `content_hash` = honest card's |
+| note A `MetricValue` subclass on a card | accepted | `ValueError` (subclasses refused); `isinstance` → `type(m) is` |
+| note B metric names | subclass stored as-is; a second name could collapse into it | both in canonical JSON, `content_hash` = plain-key record's |
+
+**22 failures + 3 errors across the 18 new/extended tests pre-fix** — every pin was watched failing.
+One new test **passes** pre-fix by design and is labelled a control, not a pin:
+`test_the_boundary_did_not_weaken_a_single_existing_refusal`, re-asserting nine pre-existing refusals so
+the normaliser cannot have quietly become a **coercion**.
+
+### Both absence claims removed from the tree
+
+`test_schema.py:441`'s *"The last instance the operator sweep turned up"* is **deleted, not softened**,
+and replaced with a docstring that names all four counterexamples and states the rule: **a claim that a
+sweep found the LAST instance is a claim about ABSENCE, and sweeping cannot establish absence. A sweep
+can only report what it found.** The same rule was then applied to the second absence claim in these
+files, which nobody asked about: `Scorecard`'s *"HONEST LIMITS, **the complete list** of routes known to
+this module"* is gone, replaced by "the routes THIS MODULE KNOWS OF, which is not a claim that they are
+all of them", the falsified wording kept only as an attributed correction, **the test needle that pinned
+the false sentence moved**, and an `assertNotIn` added so it cannot return.
+
+### A refusal with a measurement, and a distinction worth keeping
+
+Three now-subsumed hand-placed guards are **kept**, with their mutants reported as **unkilled by
+`test_schema`/`test_robustness`** (not as survivors): `Scorecard.seed_digest`'s `_plain_text`,
+`does_not_establish`'s, and `SeedSummary`'s `_plain_summary_fields`. The reasoning is load-bearing and
+distinguishes this from round 5's **refusal** to add a cast in `_to_metric`: that one **never carried
+the guarantee**, so adding it would have been decoration a reviewer could mistake for a defence. These
+three **did** carry it, alone, for a round, and would again if the boundary regressed. Their removal is
+unobservable because something **stronger** covers them — not because they never did anything. What
+changed is that no reader has to *remember* them any more.
+
+### An observation for `benchmark.py`'s owner, correctly not acted on
+
+`verdict_from_records`' own disclosed residual — "rewriting it in every record **and** passing the cfg
+that matches the rewrite … requires write access to every record" — was **false when the round-6
+attestation was written** (neither the rewrite nor a matching cfg was needed, and the real hash need not
+be known) and is **true again as of this fix**. The owner did not edit another module's docstring and
+passed it to me instead. Recorded here: that sentence was briefly false, and the schema boundary is what
+made it true again.
+
+### Counts, A/B'd against the concurrent owner
+
+`test_schema`+`test_robustness` **188 (was 172) OK**. `test_benchmark` 280 OK. The seven other schema
+consumers 407 (84 skipped) OK. `test_dashboard` **226 OK both with these changes and with HEAD versions
+of exactly these two files** — run twice precisely because another owner was editing `dashboard.py`
+concurrently and misattribution has happened here. `test_scripts`+`tests.test_toy` 141 with **5
+failures, identical both ways, none attributable** — the `libllvmlite.dylib` plugin-autoload hazard.
+`ruff` on the four files: **9 findings, byte-identical to HEAD's 9** — none introduced, none fixed
+(out of scope).
+
+### Process defect found by accident, and a rule
+
+**The session scratchpad is shared between concurrent owners, and one owner's `repro.py` was clobbered
+by another's mid-measurement**, briefly producing dashboard output under the schema owner's filename.
+Caught and worked around by namespacing. **Standing rule: every owner writes to its own scratchpad
+subdirectory, named for the owner.** A measurement read from a file another process can overwrite is
+not a measurement. This is the same hazard class as the stale-`.pyc` and the concurrent-suite-run
+incidents, in a place nobody had looked.

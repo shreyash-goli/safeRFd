@@ -1,14 +1,19 @@
 """SR-04 schema tests. TOY data only: abstract numbers, no biological content."""
+import ast
 import dataclasses
 import json
 import math
 import random
 import sys
 import unittest
+from collections.abc import Mapping
+from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
-from toy.schema import (SCHEMA_VERSION, EvidenceClass, ExperimentRecord, MetricValue, RunProvenance,
+from toy import schema
+from toy.schema import (SCHEMA_VERSION, TOY_LABEL, EvidenceClass, ExperimentRecord, MetricValue, RunProvenance,
                         current_python_version, derive_seed, make_rng)
 
 H = "a" * 64
@@ -438,7 +443,25 @@ class AMetricStoresTheNumberItChecked(unittest.TestCase):
 
 
 class TheKeySetCheckComparesPlainKeys(unittest.TestCase):
-    """The last instance the operator sweep turned up, reported as the minor thing it is.
+    """One site's behaviour, pinned. NOT the last instance of anything -- see below.
+
+    THE SENTENCE THAT USED TO OPEN THIS DOCSTRING was "The last instance the operator sweep turned up,
+    reported as the minor thing it is." It is deleted rather than softened, because it was FALSE BY FOUR
+    COUNTEREXAMPLES, every one of them live in the unmodified tree one round later, reproduced through
+    public entry points with no `object.__setattr__`: `RunProvenance.input_hashes` was format-checked and
+    then stored un-normalised, so a 64-lowercase-hex `str` subclass decided
+    `toy.benchmark.verdict_from_records`' own config binding (JOINT_INCONCLUSIVE -> JOINT_SUPPORTED);
+    `ExperimentRecord.from_dict`'s version and label gates were `!=` on the caller's object, which
+    laundered a version-1 record and silently relabelled a record reading "VERIFIED SAFETY FINDING";
+    `toy.robustness.arm_difference` ran its membership test on un-normalised arm NAMES, turning an absent
+    arm into a measured 0.0; and `toy.robustness.shift_reorder_rows`'s `rel_tol` was the un-swept sibling
+    of a `tol` the previous round had just fixed.
+    STANDING RULE, which is why no sentence replacing it quotes a number: a claim that a sweep found the
+    LAST instance is a claim about ABSENCE, and sweeping cannot establish absence. A sweep can only ever
+    report what it found. What makes a NEW site covered is therefore not a better sweep but a boundary
+    whose field list is read from the class -- `_normalise_fields`, pinned by
+    `EveryDataclassFieldIsNormalisedOrExplicitlyExempt` below, which fails closed on a new field and on a
+    new dataclass. This class pins what it always pinned: the behaviour of `_check_keys`.
 
     `_check_keys` compares key SETS, so it runs on `__hash__` and `__eq__`. A `str` subclass whose hash
     equals a real key's and whose `__eq__` always returns True is accepted as that key. MEASURED on both
@@ -562,6 +585,427 @@ class ASeedIsNormalisedBeforeItIsCompared(unittest.TestCase):
         self.assertEqual(record(provenance=prov(seed=self.StrSeed(9))).content_hash(),
                          record(provenance=prov(seed=9)).content_hash())
         self.assertEqual(len({p.seed} & {9}), 1)       # a set built from it behaves
+
+
+# =================================================== the round-6 findings, pinned by consequence
+class TwoKeyMapping(Mapping):
+    """A real `Mapping` that really yields TWO distinct key objects.
+
+    Needed because a dict LITERAL cannot carry the collapse: `{"seed_list": a, Collapse("scorecard"): b}`
+    collapses inside the CALLER's own dict, before any constructor sees two entries, so the schema is
+    handed an honest one-entry mapping and has nothing to detect. The realisable shape of the defect is a
+    non-dict `Mapping` whose `.items()` yields both, which `RunProvenance.__post_init__` iterates."""
+
+    def __init__(self, pairs):
+        self._pairs = list(pairs)
+
+    def __iter__(self):
+        return iter(k for k, _ in self._pairs)
+
+    def __len__(self):
+        return len(self._pairs)
+
+    def __getitem__(self, key):
+        for k, v in self._pairs:
+            if k is key or str.__str__(k) == str.__str__(key):
+                return v
+        raise KeyError(key)
+
+    def items(self):
+        return list(self._pairs)
+
+
+class LyingText(str):
+    """64-lowercase-hex-compatible `str` subclass: equal to everything, unequal to nothing.
+
+    It does NOT lie to `str.__str__`, to `str.strip()` or to a regex -- it does not have to. The guards
+    it defeats are written in `==` / `!=` / `in`, and those are what it overrides."""
+
+    def __eq__(self, other):
+        return True
+
+    def __ne__(self, other):
+        return False
+
+    def __hash__(self):
+        return hash(str.__str__(self))
+
+
+_STUDY = {}
+
+
+def study_records():
+    """A real SR-10 study run at `width_tol=0.10`, with its records. Cached: ~2.5s per run.
+
+    This file imports `toy.benchmark` for ONE reason, stated so it does not read as creep: finding 1's
+    fix is in `RunProvenance.__post_init__`, in this module, but its CONSEQUENCE is in
+    `benchmark.verdict_from_records`, which this owner may not edit. A pin on the stored TYPE would not be
+    a pin on the consequence, and the brief for this round is explicit that the consequence is what must
+    be pinned. `width_tol` 0.10 vs the module default 0.25 is the pair the honest refusal exists for."""
+    if "recs" not in _STUDY:
+        from toy import benchmark as bm
+        fz = bm.freeze_seed_list(7, 30)
+        res = bm.run_study(fz, bm.fixture_oracle_gated, subject="oracle_gated",
+                           registered_digest=fz.digest, cfg=bm.BenchmarkConfig(n_boot=2000, width_tol=0.10))
+        _STUDY["bm"] = bm
+        _STUDY["recs"] = bm.to_experiment_records(res, study_id="f", base_seed=7,
+                                                  timestamp_utc="2025-01-02T03:04:05Z")
+    return _STUDY["bm"], _STUDY["recs"]
+
+
+class AStoredHashIsNormalisedBeforeAnythingComparesIt(unittest.TestCase):
+    """ROUND-6 FINDING 1, pinned by the verdict it buys.
+
+    `RunProvenance.__post_init__` ran `_SHA256_RE.fullmatch(v)` on each `input_hashes` value -- which
+    reads the real characters, so a 64-lowercase-hex `str` SUBCLASS passes it -- and then stored THE
+    CALLER'S OBJECT. `benchmark.verdict_from_records` binds a recompute to the configuration the study
+    ran under with `bound != want_hash` over `input_hashes["config"]`, so the value under audit decided
+    whether it matched. MEASURED on a study run at `width_tol=0.10` recomputed with the module default
+    0.25, through the public constructor, no `object.__setattr__`:
+        honest -> JOINT_INCONCLUSIVE, h1/h2/h3 INCONCLUSIVE, one reason naming the mismatch
+        forged -> JOINT_SUPPORTED,    h1/h2/h3 SUPPORTED,    reasons = (), config_hash "000000000000"
+    STRICTLY STRONGER than the residual `verdict_from_records`' own docstring discloses, which says the
+    attack needs the records rewritten AND a matching `cfg`: neither is needed, and the study's real hash
+    need not be known. The three sibling guards in that function cannot help, because `stored` is a `set`
+    built from the same object: "records disagree on the stored config hash" and `None in stored` are
+    defeated by it too.
+    THE FIX IS HERE, NOT THERE. `benchmark.py` belongs to another owner this round, and the defect is not
+    in its comparison -- a recompute SHOULD compare the stored hash with `==` -- but in a schema that
+    validated one object and stored another."""
+
+    def forged(self, recs, value):
+        out = []
+        for r in recs:
+            p = r.provenance
+            ih = dict(p.input_hashes)
+            ih["config"] = value
+            out.append(dataclasses.replace(r, provenance=RunProvenance(
+                run_id=p.run_id, timestamp_utc=p.timestamp_utc, seed=p.seed, code_version=p.code_version,
+                python_version=p.python_version, toy_only=True, input_hashes=ih)))
+        return out
+
+    def test_a_lying_config_hash_cannot_bind_a_recompute_to_a_configuration_it_does_not_match(self):
+        bm, recs = study_records()
+        wrong_cfg = bm.BenchmarkConfig(n_boot=2000)              # default width_tol 0.25, not the study's
+        honest = bm.verdict_from_records(recs, wrong_cfg)
+        self.assertEqual(honest.joint, bm.JointVerdict.JOINT_INCONCLUSIVE)   # the control: it refuses
+        self.assertEqual(len(honest.reasons), 1)
+        self.assertIn("does not match the stored study configuration", honest.reasons[0])
+        for forged in (LyingText("0" * 64), LyingText("a" * 64)):
+            with self.subTest(forged=str.__str__(forged)[:4]):
+                got = bm.verdict_from_records(self.forged(recs, forged), wrong_cfg)
+                self.assertEqual(got.joint, bm.JointVerdict.JOINT_INCONCLUSIVE)
+                for v in (got.h1, got.h2, got.h3):
+                    self.assertEqual(v, bm.Verdict.INCONCLUSIVE)
+                self.assertEqual(len(got.reasons), 1)
+                self.assertIn("does not match the stored study configuration", got.reasons[0])
+                self.assertIs(type(got.config_hash), str)
+        # THE HONEST DIRECTION, and the sharpest statement of what the forgery bought. The study's OWN
+        # cfg binds (`reasons == ()`) and recomputes H2 and H3 as INCONCLUSIVE: at `width_tol=0.10` the
+        # two interval methods disagree on width. So the forged hash did not merely defeat a binding
+        # check -- it produced JOINT_SUPPORTED with h1/h2/h3 all SUPPORTED, a verdict the configuration
+        # the study actually ran under REFUSES, out of the same records.
+        right = bm.verdict_from_records(recs, bm.BenchmarkConfig(n_boot=2000, width_tol=0.10))
+        self.assertEqual(right.reasons, ())
+        self.assertEqual((right.joint, right.h1, right.h2, right.h3),
+                         (bm.JointVerdict.JOINT_INCONCLUSIVE, bm.Verdict.SUPPORTED,
+                          bm.Verdict.INCONCLUSIVE, bm.Verdict.INCONCLUSIVE))
+
+    def test_the_stored_hash_is_the_plain_text_and_the_record_is_byte_identical(self):
+        p = prov(input_hashes={"config": LyingText("b" * 64)})
+        self.assertIs(type(p.input_hashes["config"]), str)
+        self.assertEqual(p.to_dict()["input_hashes"], {"config": "b" * 64})
+        self.assertEqual(record(provenance=p).content_hash(),
+                         record(provenance=prov(input_hashes={"config": "b" * 64})).content_hash())
+        # the key side too, and the honest format gate is untouched
+        q = prov(input_hashes={LyingText("config"): "b" * 64})
+        self.assertEqual([type(k) for k in q.input_hashes], [str])
+        for bad in ("A" * 64, "a" * 63, "g" * 64, "", 64 * "a" + "a"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                prov(input_hashes={"config": bad})
+        with self.assertRaises(ValueError):
+            prov(input_hashes={"config": LyingText("NOT A HASH")})
+
+    def test_two_input_hash_entries_cannot_collapse_into_one(self):
+        """The second consequence of the same root, on the field `toy.robustness` calls "the provenance
+        anchor a reader would check the seeds against" -- and `robustness.scorecard_to_record` writes
+        exactly the two keys used here. Before the fix `dict(sorted(self.input_hashes.items()))` was
+        built from the caller's key objects, so a key holding "scorecard" that HASHES as "seed_list"
+        landed on the existing entry and the stored mapping held ONE: measured as
+        `{'seed_list': 'bbb...'}`, n = 1, a record carrying one anchor where its producer wrote two.
+        Normalising the keys first makes both survive with their real names, because the collapse was
+        never about the characters. The loud refusal is kept for the case where it IS about the
+        characters -- two keys that are the same text once plain -- inside the `ValueError` contract."""
+        class Collapse(str):
+            def __hash__(self):
+                return hash("seed_list")
+
+            def __eq__(self, other):
+                return True
+
+            def __ne__(self, other):
+                return False
+        m = TwoKeyMapping([("seed_list", "a" * 64), (Collapse("scorecard"), "b" * 64)])
+        self.assertEqual(len(m), 2)                              # the caller really wrote two anchors
+        p = prov(input_hashes=m)
+        self.assertEqual(dict(p.input_hashes), {"seed_list": "a" * 64, "scorecard": "b" * 64})
+        self.assertEqual([type(k) for k in p.input_hashes], [str, str])
+        self.assertEqual(sorted(json.loads(record(provenance=p).to_json())["provenance"]["input_hashes"]),
+                         ["scorecard", "seed_list"])
+        # ... and a genuine duplicate, two keys that are one text once plain, is refused rather than
+        # resolved silently to whichever happened to be iterated last
+        dupe = TwoKeyMapping([("seed_list", "a" * 64), (Collapse("seed_list"), "b" * 64)])
+        with self.assertRaisesRegex(ValueError, "collapse to 'seed_list'"):
+            prov(input_hashes=dupe)
+        # two honestly distinct keys are unaffected
+        ok = prov(input_hashes=TwoKeyMapping([("seed_list", "a" * 64), ("scorecard", "b" * 64)]))
+        self.assertEqual(dict(ok.input_hashes), {"seed_list": "a" * 64, "scorecard": "b" * 64})
+
+    def test_a_metric_name_cannot_be_absent_from_the_content_hash(self):
+        """The note of the same shape: metric NAMES were `_nonblank`-checked and never normalised, so a
+        metric a recompute reads could be stored under a subclass key, and a second name could collapse
+        into it -- absent from the canonical JSON and therefore from `content_hash()`."""
+        r = record(metrics={LyingText("loss"): MetricValue.measured(0.25)})
+        self.assertEqual([type(k) for k in r.metrics], [str])
+        self.assertEqual(sorted(json.loads(r.to_json())["metrics"]), ["loss"])
+        self.assertEqual(r.content_hash(), record(metrics={"loss": MetricValue.measured(0.25)}).content_hash())
+
+        class Collapse(str):
+            def __hash__(self):
+                return hash("loss")
+
+            def __eq__(self, other):
+                return True
+
+            def __ne__(self, other):
+                return False
+        mm = TwoKeyMapping([("loss", MetricValue.measured(1.0)),
+                            (Collapse("recall"), MetricValue.measured(2.0))])
+        r2 = record(metrics=mm)
+        self.assertEqual(sorted(json.loads(r2.to_json())["metrics"]), ["loss", "recall"])
+        self.assertEqual(r2.content_hash(),
+                         record(metrics={"loss": MetricValue.measured(1.0),
+                                         "recall": MetricValue.measured(2.0)}).content_hash())
+        with self.assertRaisesRegex(ValueError, "collapse to 'loss'"):
+            record(metrics=TwoKeyMapping([("loss", MetricValue.measured(1.0)),
+                                          (Collapse("loss"), MetricValue.measured(2.0))]))
+
+
+class AVersionAndLabelGateCompareThePlainText(unittest.TestCase):
+    """ROUND-6 FINDING 3, pinned by what the accepted record SAYS.
+
+    `ExperimentRecord.from_dict`'s two value gates were `data["schema_version"] != SCHEMA_VERSION` and
+    `data["label"] != TOY_LABEL`, i.e. `__ne__` on the caller's object. MEASURED through `from_dict` on a
+    hand-built dict, no `object.__setattr__`:
+      * a VERSION-1 record was laundered into a valid version-2 one and RE-SERIALIZED with
+        `schema_version="2"` and the canonical `TOY_LABEL` -- the version gate exists precisely because
+        TOY_LABEL's text changed when SCHEMA_VERSION went 1 -> 2, so the one record the gate is for is
+        the one it passed;
+      * a record whose stored label read "VERIFIED SAFETY FINDING" was accepted and silently RELABELLED,
+        which inverts the direction the label is for: the reader of the re-serialized record is told this
+        kit vouched for text it never saw.
+    HONEST BOUND, measured and unchanged by the fix: only `from_dict` with a hand-built dict reaches it.
+    `from_json` is immune because the JSON decoder emits plain `str` -- which is exactly why this escaped
+    five rounds: BOTH label-tampering tests at `test_label_tampering_rejected` /
+    `test_label_near_misses_rejected` go through `from_json`, the one route that cannot show it.
+    `_check_keys` normalises the dict's KEYS and its docstring calls that route "HARMLESS"; that
+    measurement is about keys and never extended to these two values."""
+
+    def test_a_lying_schema_version_cannot_be_laundered_into_the_current_one(self):
+        d = record().to_dict()
+        self.assertEqual(ExperimentRecord.from_dict(d).content_hash(), record().content_hash())  # control
+        for bad in ("1", "0", "3", "2.0", ""):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError, "unsupported schema_version"):
+                    ExperimentRecord.from_dict(dict(d, schema_version=LyingText(bad)))
+
+    def test_a_lying_label_cannot_be_relabelled_as_a_toy_result(self):
+        d = record().to_dict()
+        for bad in ("VERIFIED SAFETY FINDING", "", "TOY RESULT", TOY_LABEL + " "):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError, "label must equal"):
+                    ExperimentRecord.from_dict(dict(d, label=LyingText(bad)))
+        # and the record that WOULD have been built is the one whose text is the giveaway: the forged
+        # label never appears in anything the schema produces, because nothing is produced at all.
+        self.assertNotIn("VERIFIED", record().to_json())
+
+    def test_the_whole_document_is_normalised_not_just_these_two_gates(self):
+        """The fix is `data = _plain_value(data)` at the boundary, not two more `_plain_text` calls, so a
+        gate a future reader ADDS to this method is covered without being remembered. Asserted on the
+        fields that are not gates at all: an honest record whose every string, number and key is a
+        subclass instance deserialises BYTE-IDENTICALLY to the plain one."""
+        d = record().to_dict()
+        lied = _subclassed(d)
+        self.assertNotEqual({type(k) for k in lied}, {str})      # the input really is subclassed
+        got = ExperimentRecord.from_dict(lied)
+        self.assertEqual(got.content_hash(), record().content_hash())
+        self.assertEqual(_impure(got, "record"), [])
+        # a non-dict input still gets the stated diagnostic rather than an AttributeError
+        for bad in ([1, 2], "x", None, 7):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                ExperimentRecord.from_dict(bad)
+
+
+# ----------------------------------------------- machine-derived field-coverage probe (shared shape)
+def _subclassed(v):
+    """Rebuild `v` with every plain `str` / `int` / `float` replaced by a SUBCLASS instance holding the
+    same value, recursing through mapping keys AND values, sequences, and nested dataclasses.
+
+    The subclasses do not lie about anything. That is deliberate: the property under test is that the
+    object STORES the plain value, which is what makes every `==` / `!=` / `in` / `<` / `>` / `__float__`
+    guard written anywhere downstream unfoolable. A probe built from one particular lie would pin one
+    particular lie."""
+    if v is None or isinstance(v, (Enum, bool)):
+        return v
+    if isinstance(v, str):
+        return type("StrSub", (str,), {})(v)
+    if isinstance(v, float):
+        return type("FloatSub", (float,), {})(v)
+    if isinstance(v, int):
+        return type("IntSub", (int,), {})(v)
+    if isinstance(v, Mapping):
+        return {_subclassed(k): _subclassed(v[k]) for k in v}
+    if isinstance(v, (list, tuple)):
+        return (list if isinstance(v, list) else tuple)(_subclassed(x) for x in v)
+    if dataclasses.is_dataclass(v) and not isinstance(v, type):
+        return type(v)(**{f.name: _subclassed(getattr(v, f.name)) for f in dataclasses.fields(v)})
+    return v
+
+
+def _impure(v, path):
+    """Every path inside `v` at which a `str` / `int` / `float` / container SUBCLASS instance is stored.
+
+    An empty list is the assertion "nothing here can answer a comparison with anything but its own
+    value". `Enum` members and `bool`s are skipped: `EvidenceClass` is a `str` subclass BY DESIGN and
+    `bool` cannot be subclassed (see `toy.schema._plain_value`)."""
+    out = []
+    if v is None or isinstance(v, (Enum, bool)):
+        return out
+    if isinstance(v, (str, float, int)):
+        if type(v) not in (str, float, int):
+            out.append(f"{path} is a {type(v).__name__}")
+        return out
+    if isinstance(v, Mapping):
+        if type(v) not in (dict, type(MappingProxyType({}))):
+            out.append(f"{path} is a {type(v).__name__}")
+        for k in v:
+            out += _impure(k, f"{path}/key") + _impure(v[k], f"{path}[{k!r}]")
+        return out
+    if isinstance(v, (list, tuple)):
+        if type(v) not in (list, tuple):
+            out.append(f"{path} is a {type(v).__name__}")
+        for i, x in enumerate(v):
+            out += _impure(x, f"{path}[{i}]")
+        return out
+    if dataclasses.is_dataclass(v) and not isinstance(v, type):
+        for f in dataclasses.fields(v):
+            out += _impure(getattr(v, f.name), f"{path}.{f.name}")
+    return out
+
+
+def assert_fields_are_covered_or_exempt(case, module, fixtures, expected_counts):
+    """The shared body of the two coverage tests (this module's and `test_robustness`'s twin).
+
+    THE POINT, which is the whole round-6 fix: the field list is read from `dataclasses.fields()` and the
+    class list from the MODULE, so a new field and a new dataclass FAIL CLOSED instead of being noticed
+    by a reviewer. Three things are asserted per class:
+      1. it is in the registry at all (a new dataclass fails);
+      2. every `__post_init__` has `_normalise_fields(self)` as its FIRST statement -- the ordering rule
+         ("normalise, THEN compare") is what the previous rounds' half-fixes kept getting wrong, and a
+         call placed after a gate is as useless as no call;
+      3. every field is either stored PLAIN when handed a subclass instance, or refused outright with a
+         `ValueError` (also fail-closed), or named in the class's `_NORMALISE_EXEMPT` with a nonblank
+         reason.
+    What this does NOT cover, said plainly so it is not mistaken for more than it is: function
+    PARAMETERS and closure variables are not fields. `toy.robustness.arm_difference`'s arm names,
+    `shift_reorder_rows`'s `rel_tol`, `probe_precision`'s `tol` / `param` and `probe_shift`'s three
+    callable returns are normalised where they are bound or consumed, each with its own consequence
+    test."""
+    found = {v for v in vars(module).values()
+             if isinstance(v, type) and dataclasses.is_dataclass(v) and v.__module__ == module.__name__}
+    case.assertEqual(sorted(c.__name__ for c in found), sorted(c.__name__ for c in fixtures),
+                     f"a dataclass in {module.__name__} is not in this registry: add it, with a fixture, "
+                     "and state for each of its fields whether it is normalised or exempt")
+    tree = ast.parse(Path(module.__file__).read_text())
+    posts = {f"{cls.name}.{fn.name}": fn for cls in ast.walk(tree) if isinstance(cls, ast.ClassDef)
+             for fn in cls.body if isinstance(fn, ast.FunctionDef) and fn.name == "__post_init__"}
+    n_fields = n_exempt = 0
+    for cls, make in fixtures.items():
+        key = f"{cls.__name__}.__post_init__"
+        case.assertIn(key, posts, f"{cls.__name__} has no __post_init__, so nothing normalises it")
+        first = posts[key].body[0]
+        case.assertEqual(
+            isinstance(first, ast.Expr) and isinstance(first.value, ast.Call)
+            and getattr(first.value.func, "id", None) == "_normalise_fields", True,
+            f"{key} must call _normalise_fields(self) as its FIRST statement, before any gate; "
+            f"got {ast.dump(first)[:120]}")
+        inst = make()
+        exempt = dict(getattr(cls, "_NORMALISE_EXEMPT", {}))
+        names = [f.name for f in dataclasses.fields(cls)]
+        case.assertLessEqual(set(exempt), set(names), f"{cls.__name__}: _NORMALISE_EXEMPT names a "
+                                                      "field that does not exist")
+        for name in names:
+            n_fields += 1
+            if name in exempt:
+                n_exempt += 1
+                case.assertTrue(str(exempt[name]).strip(),
+                                f"{cls.__name__}.{name} is exempt with no reason recorded")
+                continue
+            kwargs = {f.name: getattr(inst, f.name) for f in dataclasses.fields(cls)}
+            kwargs[name] = _subclassed(kwargs[name])
+            try:
+                built = cls(**kwargs)
+            except ValueError:
+                continue                      # refused outright: also fail-closed
+            case.assertEqual(_impure(getattr(built, name), f"{cls.__name__}.{name}"), [],
+                             f"{cls.__name__}.{name} stored a subclass instance: either normalise it "
+                             "(it should be covered by default) or exempt it with a reason")
+    case.assertEqual((n_fields, n_exempt), expected_counts,
+                     "the field/exemption counts moved. This is not a rubber stamp: confirm the new "
+                     "field is covered (it is, by default) or exempt it with a reason, then update the "
+                     "count -- a count that is remembered rather than measured is how five numbers got "
+                     "into circulation for SEED_FLOOR.")
+
+
+class EveryDataclassFieldIsNormalisedOrExplicitlyExempt(unittest.TestCase):
+    """THE ROUND-6 FIX ITSELF, pinned. See `assert_fields_are_covered_or_exempt` for what it asserts.
+
+    Why a boundary and not four more fixes: `_plain_summary_fields`, `_plain_text`, `_plain_measure`,
+    `toy.benchmark._plain_number` and `_plain_parameter` are all CORRECT, and were applied at twelve
+    hand-chosen call sites. Five consecutive review rounds each found the sites nobody remembered. That
+    procedure cannot terminate, because its audit is a person hunting for omissions; this one terminates
+    because the list of places is computed."""
+
+    def test_schema_fields_are_covered_or_exempt_with_a_reason(self):
+        from toy import schema
+        assert_fields_are_covered_or_exempt(
+            self, schema,
+            {RunProvenance: prov, MetricValue: lambda: MetricValue.measured(0.25), ExperimentRecord: record},
+            expected_counts=(14, 0))
+
+    def test_the_normaliser_leaves_an_honest_record_byte_identical(self):
+        """A normalisation that moved an honest byte would be a breaking change for every stored
+        `content_hash`. The baseline is pinned by value in
+        `AMetricStoresTheNumberItChecked.test_the_serialisation_contract_is_unchanged_for_honest_values`;
+        here the assertion is that identity, not merely equality, survives for plain values."""
+        for v in ("abc", 0.25, 7, True, None, (1, 2), ["a"], {"k": "v"}):
+            self.assertIs(schema._plain_value(v), v, repr(v))
+        self.assertEqual(SCHEMA_VERSION, "2")
+        r = record()
+        self.assertIs(r.name, "toy-exp")
+        self.assertEqual(r.content_hash(), ExperimentRecord.from_json(r.to_json()).content_hash())
+
+    def test_an_enum_member_is_not_collapsed_and_a_forged_one_is_refused(self):
+        """The one TYPE-level skip in `_plain_value`, and the reason it launders nothing: `EvidenceClass`
+        is a `str` subclass by construction, so collapsing it would destroy the `isinstance` checks the
+        module relies on -- and a bare `str` subclass offered where an enum is required is refused."""
+        r = record()
+        self.assertIs(r.evidence_class, EvidenceClass.TOY_RESULT)
+        self.assertIs(type(r.evidence_class), EvidenceClass)
+        self.assertIs(schema._plain_value(EvidenceClass.TOY_RESULT), EvidenceClass.TOY_RESULT)
+        with self.assertRaises(ValueError):
+            record(evidence_class=LyingText("TOY_RESULT"))
+        self.assertEqual(json.loads(r.to_json())["evidence_class"], "TOY_RESULT")
 
 
 if __name__ == "__main__":

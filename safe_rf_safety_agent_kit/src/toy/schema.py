@@ -13,9 +13,31 @@ Caveats stated plainly:
 - Rule: an `ExperimentRecord` (a run record) can never be `SOURCE_OBSERVED`.
   That class belongs to audit/claim records (SR-14), not run records, and is
   rejected at construction. It stays in `EvidenceClass` for those consumers.
+- SUBCLASS NORMALISATION IS APPLIED AT THE TYPE BOUNDARY, not at a list of
+  remembered sites. `_normalise_fields(self)` is the first statement of every
+  `__post_init__` here and walks `dataclasses.fields()`, and each `from_dict`
+  normalises the whole incoming document with `_plain_value(data)` -- so a new
+  field, and a gate a future reader adds to a `from_dict`, are COVERED BY
+  DEFAULT. The reason this is a boundary and not a fifth helper: five correct
+  helpers (`toy.benchmark._plain_number`, `_plain_parameter`,
+  `toy.robustness._plain_text`, `_plain_measure`, `_plain_summary_fields`) were
+  applied at twelve hand-chosen call sites, and five consecutive review rounds
+  each found the sites nobody remembered -- `input_hashes`, the version and
+  label gates, metric NAMES. That procedure cannot terminate, because its audit
+  is a person hunting for omissions. Exemptions are declared per class in
+  `_NORMALISE_EXEMPT` with a reason, and
+  `test_schema.EveryDataclassFieldIsNormalisedOrExplicitlyExempt` fails closed
+  on a new field and on a new dataclass. This is NOT a tamper boundary:
+  `object.__setattr__` still replaces a field afterwards. It is the guarantee
+  that the value a validator inspected is the value the object stores.
+- What the boundary does NOT reach: a function PARAMETER and a closure variable
+  are not fields (see `toy.robustness.arm_difference` and
+  `shift_reorder_rows`), and `Enum` members are deliberately skipped because
+  `EvidenceClass` is a `str` subclass by construction.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import math
@@ -96,6 +118,104 @@ def _check_keys(what: str, data: Any, expected: set[str]) -> None:
         raise ValueError(f"{what}: missing keys {sorted(missing)}")
 
 
+# ------------------------------------------------- normalisation AT THE TYPE BOUNDARY
+def _plain_value(x: Any) -> Any:
+    """Collapse `x`, RECURSIVELY, to the plain `str` / `int` / `float` / `dict` / `list` / `tuple` values
+    it STORES. Anything that is not one of those (an `Enum` member, a `bool`, a nested dataclass, a
+    callable, `None`, an arbitrary object) is returned unchanged.
+
+    THIS IS THE SINGLE NORMALISER THE WHOLE KIT'S GUARDS WERE MISSING, and the reason it is written as one
+    recursive function over a value rather than as another named helper to call by hand: every previous
+    round of this project fixed the sites it remembered. `toy.benchmark._plain_number`,
+    `_plain_parameter`, `toy.robustness._plain_text`, `_plain_measure` and `_plain_summary_fields` are all
+    correct, and between them they were applied at twelve hand-chosen call sites -- so every round the
+    attestation found the thirteenth. A hand-maintained list of places to be careful cannot terminate,
+    because its audit is a person hunting for omissions. `_normalise_fields` below drives this function
+    from `dataclasses.fields()`, so a field is covered BY DEFAULT and an exemption has to be written down
+    with a reason.
+    WHAT A SUBCLASS BUYS, which is why containers are walked and not just scalars: `str` / `int` / `float`
+    satisfy every `isinstance` check and need not lie to `math.isfinite` or to a regex, while `__eq__`,
+    `__ne__`, `__hash__`, `__lt__`, `__gt__`, `__float__`, `__int__`, `__str__`, `__mul__` and `__format__`
+    are all overridable -- and those operators are what every guard in this kit is WRITTEN IN. A liar
+    nested one level down (a mapping VALUE, a tuple element, a mapping KEY) is reached by no scalar check
+    at the field itself: `RunProvenance.input_hashes` was format-checked element by element and then
+    stored as the caller's object, and `toy.benchmark.verdict_from_records` read one of those values with
+    `bound != want_hash`.
+    `str.__str__` / `float.__float__` / `int.__int__` are used rather than `str(x)` / `float(x)` / `int(x)`
+    DELIBERATELY, for the reason `toy.benchmark._plain_number` states: they read what the object actually
+    stores, so a `__str__` / `__float__` / `__int__` override is not consulted at all, and the value
+    checked cannot differ from the value stored.
+    THREE DECISIONS STATED RATHER THAN LEFT TO BE INFERRED:
+    * `Enum` members are returned unchanged, and that is a TYPE rule, not a per-field exemption.
+      `EvidenceClass` / `ProbeStatus` / `ShiftKind` are `str` subclasses by construction, so collapsing
+      them would destroy the very `isinstance(x, EvidenceClass)` checks this module relies on. A forged
+      `str` subclass offered where an enum is required is refused by that `isinstance`, so nothing is
+      laundered by the skip.
+    * `bool` is returned unchanged (the rule of `toy.benchmark._plain_parameter`): `bool` cannot be
+      subclassed, and silently turning `True` into `1` is the D5 defect.
+    * A nested dataclass is returned unchanged because it normalises ITS OWN fields in ITS OWN
+      `__post_init__`. The boundary composes; it does not reach across one.
+    MAPPING KEYS ARE NORMALISED AND COLLISIONS ARE REFUSED, loudly, inside the documented `ValueError`
+    family: two keys that are distinct to the caller but equal once plain would otherwise SILENTLY become
+    one entry, which on `input_hashes` means a record that carries one provenance anchor where its
+    producer wrote two, and on `ExperimentRecord.metrics` a metric that is absent from the canonical JSON
+    and therefore from `content_hash()`."""
+    if x is None or isinstance(x, (Enum, bool)):
+        return x
+    if isinstance(x, str):
+        return x if type(x) is str else str.__str__(x)
+    if isinstance(x, float):
+        return x if type(x) is float else float.__float__(x)
+    if isinstance(x, int):
+        return x if type(x) is int else int.__int__(x)
+    if isinstance(x, Mapping):
+        out: dict[Any, Any] = {}
+        changed = type(x) is not dict
+        for k in x:
+            pk, pv = _plain_value(k), _plain_value(x[k])
+            if pk in out:
+                raise ValueError(f"two keys collapse to {pk!r} once normalised: a mapping cannot "
+                                 "silently lose an entry to an overridden __hash__/__eq__")
+            changed = changed or pk is not k or pv is not x[k]
+            out[pk] = pv
+        return out if changed else x
+    if isinstance(x, (list, tuple)):
+        items = [_plain_value(v) for v in x]
+        # IDENTITY IS PRESERVED when nothing needed collapsing, for two reasons worth stating: an honest
+        # record must be byte-identical AND allocation-identical (a rebuilt container is a behaviour
+        # change a reader cannot see), and `MeasureFixture` holds matrices that this walks per fixture.
+        if type(x) in (list, tuple) and len(items) == len(x) and all(a is b for a, b in zip(items, x)):
+            return x
+        return (list if isinstance(x, list) else tuple)(items)
+    return x
+
+
+def _normalise_fields(obj: Any) -> None:
+    """Normalise EVERY field of a frozen dataclass instance in place, driven by `dataclasses.fields()`.
+
+    Call this as the FIRST statement of `__post_init__`, before any gate: normalise, THEN compare (the
+    ordering rule of `toy.benchmark._plain_number`). Because the field list is read from the class and not
+    written here, ADDING A FIELD DEFAULTS TO COVERED -- which is the whole point, and the property no
+    previous round's fix had.
+    A class exempts a field by declaring, unannotated so that it is a class attribute and not a field
+    itself, `_NORMALISE_EXEMPT = MappingProxyType({"<field>": "<why>"})`. The reason is not decoration:
+    `test_schema.EveryDataclassFieldIsNormalisedOrExplicitlyExempt` and its `test_robustness` twin
+    enumerate `dataclasses.fields()` of every dataclass in each module and require each field to be
+    either demonstrably stored plain or named in that mapping with a nonblank reason, so a new field, and
+    a new dataclass, FAIL CLOSED rather than being noticed by a reviewer.
+    This is not a tamper boundary: `object.__setattr__` still replaces any field afterwards, which is why
+    `toy.benchmark._metric_read` exists. It is the guarantee that the value a validator INSPECTED is the
+    value the object STORES."""
+    exempt = getattr(type(obj), "_NORMALISE_EXEMPT", {})
+    for f in dataclasses.fields(obj):
+        if f.name in exempt:
+            continue
+        v = getattr(obj, f.name)
+        p = _plain_value(v)
+        if p is not v:
+            object.__setattr__(obj, f.name, p)
+
+
 # ---------------------------------------------------------------- seeding
 def make_rng(seed: int) -> random.Random:
     """Return an independent generator; never touches the global `random` state.
@@ -154,7 +274,24 @@ class RunProvenance:
     toy_only: bool
     input_hashes: Mapping[str, str]
 
+    _NORMALISE_EXEMPT = MappingProxyType({})   # nothing here may keep a caller's subclass
+
     def __post_init__(self) -> None:
+        # NORMALISE AT THE BOUNDARY, BEFORE ANY GATE. `input_hashes` is the field this was measured on:
+        # `_SHA256_RE.fullmatch(v)` reads the real characters of a 64-lowercase-hex `str` SUBCLASS and
+        # passed it, and the un-normalised object was then STORED -- so
+        # `toy.benchmark.verdict_from_records`' config binding, which is `bound != want_hash` over
+        # `input_hashes["config"]`, was decided by the value under audit. MEASURED, through the public
+        # constructor with no `object.__setattr__`, on a study run at `width_tol=0.10` recomputed with the
+        # module default 0.25: JOINT_INCONCLUSIVE ("cfg does not match the stored study configuration")
+        # became JOINT_SUPPORTED with h1/h2/h3 all SUPPORTED, `reasons = ()` and `config_hash` reporting
+        # a hash that is not the study's -- and the sibling guards could not fire, because `stored` is a
+        # `set` built from the same object, so "records disagree" and `None in stored` were defeated by
+        # it too. The real hash need not be known and no matching `cfg` is needed. Second consequence,
+        # same root: two `input_hashes` entries could collapse to one on an overridden `__hash__`, and
+        # `toy.robustness` calls that field "the provenance anchor a reader would check the seeds
+        # against".
+        _normalise_fields(self)
         _nonblank("run_id", self.run_id)
         _nonblank("timestamp_utc", self.timestamp_utc)
         if not _TS_RE.fullmatch(self.timestamp_utc):
@@ -186,6 +323,7 @@ class RunProvenance:
 
     @classmethod
     def from_dict(cls, data: Any) -> "RunProvenance":
+        data = _plain_value(data)   # the deserialisation boundary; see `ExperimentRecord.from_dict`
         _check_keys("RunProvenance", data, {
             "run_id", "timestamp_utc", "seed", "code_version", "python_version", "toy_only", "input_hashes"})
         return cls(**data)
@@ -209,7 +347,14 @@ class MetricValue:
     value: Optional[float]
     reason: Optional[str] = None
 
+    _NORMALISE_EXEMPT = MappingProxyType({})
+
     def __post_init__(self) -> None:
+        # Normalise at the boundary (see `_normalise_fields`). This makes the `float.__float__` below a
+        # no-op for a subclass, and it is kept anyway: it is the line the -0.0 normalisation needs, it is
+        # pinned by `test_schema.AMetricStoresTheNumberItChecked`, and a validator that re-reads what it
+        # is about to store is the one place in this module where redundancy is the point.
+        _normalise_fields(self)
         if self.value is None:
             _nonblank("reason", self.reason)  # also rejects None: unmeasured requires a reason
         else:
@@ -265,6 +410,7 @@ class MetricValue:
 
     @classmethod
     def from_dict(cls, data: Any) -> "MetricValue":
+        data = _plain_value(data)   # the deserialisation boundary; see `ExperimentRecord.from_dict`
         _check_keys("MetricValue", data, {"value", "reason"})
         return cls(**data)
 
@@ -278,7 +424,15 @@ class ExperimentRecord:
     evidence_class: EvidenceClass
     notes: Optional[str] = None
 
+    _NORMALISE_EXEMPT = MappingProxyType({})
+
     def __post_init__(self) -> None:
+        # Normalise at the boundary, before every gate below (see `_normalise_fields`). `metrics` is
+        # walked as a mapping, which is what closes the metric-NAME route: a name was `_nonblank`-checked
+        # and never normalised, so a `str` subclass could be stored as a key and a second key could
+        # collapse into it -- a metric a recompute reads being absent from the canonical JSON and hence
+        # from `content_hash()`.
+        _normalise_fields(self)
         _nonblank("name", self.name)
         if not isinstance(self.provenance, RunProvenance):
             raise ValueError("provenance must be a RunProvenance")
@@ -315,6 +469,18 @@ class ExperimentRecord:
 
     @classmethod
     def from_dict(cls, data: Any) -> "ExperimentRecord":
+        # NORMALISE THE WHOLE INCOMING DOCUMENT, not just its keys. `_check_keys` normalises the KEYS and
+        # its docstring calls the top-level liar "HARMLESS"; that claim is about keys and does NOT extend
+        # to the two VALUE gates below, which were `!=` on the caller's object. MEASURED, through
+        # `from_dict` with a hand-built dict and no `object.__setattr__`: a `str` SUBCLASS whose `__eq__`
+        # returns True and `__ne__` False laundered a VERSION-1 record into a valid version-2 record
+        # (re-serialized with `schema_version="2"` and the canonical `TOY_LABEL`), and a record whose
+        # stored label read "VERIFIED SAFETY FINDING" was accepted and silently RELABELLED as a toy
+        # result. `from_json` was immune only because the JSON decoder emits plain `str`, so both
+        # label-tampering tests went through the one route that could not show it. Normalising here is the
+        # deserialisation half of the same boundary `__post_init__` applies to fields: one call that
+        # covers these two gates and every gate a future reader adds to this method.
+        data = _plain_value(data)
         _check_keys("ExperimentRecord", data, {
             "schema_version", "label", "name", "provenance", "metrics", "evidence_class", "notes"})
         # Version BEFORE label, deliberately. TOY_LABEL's text changed when SCHEMA_VERSION went

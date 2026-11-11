@@ -68,6 +68,26 @@ Structural rule against single-example claims (checked at construction, not mere
   All three are normalised before comparison now and pinned by
   `test_robustness.ACardCannotAssertAMinimumItDoesNotMeet`. A card carrying a summary of fewer than `SEED_FLOOR` values, or a subclass of
   `SeedSummary`, cannot be built through the public constructors, `dataclasses.replace`, or the builders.
+* WHERE SUBCLASS NORMALISATION NOW LIVES, and why it is not a list of sites any more. Every bullet above
+  records a defeated guard of the same shape: a `str` / `int` / `float` SUBCLASS satisfies every
+  `isinstance` check and every regex, and the guard is written in `__eq__` / `__ne__` / `__hash__` /
+  `__lt__` / `__gt__` / `__mul__` / `__float__`, all of which it overrides. Five correct helpers
+  (`toy.benchmark._plain_number`, `_plain_parameter`, this module's `_plain_text`, `_plain_measure`,
+  `_plain_summary_fields`) were applied at TWELVE hand-chosen call sites, and five consecutive review
+  rounds each found the sites nobody remembered -- most recently `RunProvenance.input_hashes`,
+  `arm_difference`'s arm NAMES, `ExperimentRecord.from_dict`'s version and label gates, and
+  `shift_reorder_rows`'s `rel_tol` (the un-swept sibling of a `tol` round 5 had just fixed). That
+  procedure cannot terminate, because its audit is a person hunting for omissions. Normalisation is
+  therefore applied AT THE TYPE BOUNDARY: `toy.schema._normalise_fields(self)` is the first statement of
+  `__post_init__` in every dataclass here (`ProbeConfig`, `InsufficientEvidence`, `SeedSummary`,
+  `Scorecard`, `MeasureFixture`, `ShiftSpec`), and it walks `dataclasses.fields()` -- so a NEW FIELD IS
+  COVERED BY DEFAULT and an exemption must be declared in the class's `_NORMALISE_EXEMPT` with a reason.
+  `test_robustness.EveryDataclassFieldIsNormalisedOrExplicitlyExempt` enumerates the fields and the
+  classes from the module itself and fails closed on either a new field or a new dataclass. What the
+  boundary does NOT reach, stated plainly: a function PARAMETER or a closure variable is not a field, so
+  `arm_difference`'s names, `shift_reorder_rows`'s `rel_tol`, `probe_precision`'s `tol` / `param` and
+  `probe_shift`'s three callable returns are still normalised where they are bound or consumed, each with
+  a consequence test.
 Honest limits: Python cannot make this impossible. `object.__setattr__`, `object.__new__`, and
 SUBCLASSING `SeedSummary` / `InsufficientEvidence` with a `__post_init__` that skips the checks all build
 unvalidated nested objects (a `Scorecard` still refuses such an object, via the exact-type check, but a
@@ -113,6 +133,7 @@ from toy.benchmark import (_metric_ok, _metric_read, _plain_number, _plain_param
 from toy.benchmark import mean as _mean
 from toy.schema import (SCHEMA_VERSION, TOY_LABEL, EvidenceClass, ExperimentRecord, MetricValue, RunProvenance,
                         canonical_json, current_python_version, derive_seed, make_rng)
+from toy.schema import _normalise_fields, _plain_value
 
 CODE_VERSION = "toy-robustness-v1"
 SEED_FLOOR = 3            # absolute minimum NUMBER of measured values (seeds) for any summary; not configurable below
@@ -185,7 +206,10 @@ class ProbeStatus(str, Enum):
 class ProbeConfig:
     min_seeds: int = DEFAULT_MIN_SEEDS
 
+    _NORMALISE_EXEMPT = MappingProxyType({})
+
     def __post_init__(self) -> None:
+        _normalise_fields(self)    # at the boundary, before any gate; see `toy.schema._normalise_fields`
         if isinstance(self.min_seeds, bool) or not isinstance(self.min_seeds, int):
             raise ValueError("min_seeds must be an int")
         # NORMALISE BEFORE COMPARING, and store what was compared. MEASURED defect: `self.min_seeds <
@@ -223,7 +247,10 @@ class InsufficientEvidence:
     n_required: int
     reason: str
 
+    _NORMALISE_EXEMPT = MappingProxyType({})
+
     def __post_init__(self) -> None:
+        _normalise_fields(self)    # at the boundary; the hand-placed loop below is now redundant and kept
         # NORMALISE BEFORE COMPARING, and store what was compared (see `ProbeConfig.__post_init__`):
         # `n_measured >= n_required` is an overridable comparison on two fields a direct caller supplies,
         # and `Scorecard.__post_init__` then compares `n_required` with its own `min_seeds`. No verdict
@@ -265,7 +292,11 @@ class SeedSummary:
     maximum: float
     values: tuple
 
+    _NORMALISE_EXEMPT = MappingProxyType({})
+
     def __post_init__(self) -> None:
+        _normalise_fields(self)    # at the boundary; `_plain_summary_fields` below is kept because
+        # `_recheck_summary` calls it on objects built by `object.__new__`, which never ran this method
         vals = tuple(self.values)
         if len(vals) < SEED_FLOOR:
             raise ValueError(f"a summary needs >= {SEED_FLOOR} measured seeds, got {len(vals)} "
@@ -356,6 +387,19 @@ def _plain_summary_fields(obj) -> tuple:
 
 def _plain_text(s: Any) -> Any:
     """Collapse a `str` SUBCLASS to the plain text it STORES; anything else is returned unchanged.
+
+    MEASURED AND DECIDED, because the answer looks like a contradiction of this kit's own standard: with
+    `toy.schema._normalise_fields` now running first in `Scorecard.__post_init__`, a mutant removing
+    EITHER of this function's two call sites there is UNKILLED by `test_schema` / `test_robustness` (188
+    tests, CPython 3.13.5), and the same holds for `_plain_summary_fields`'s call in
+    `SeedSummary.__post_init__`. The calls are KEPT, and the distinction from the cast round 5 REFUSED to
+    add in `_to_metric` is the whole reason: that one never carried a guarantee at all, so adding it would
+    have been decoration a reviewer could mistake for a defence. These DID carry the guarantee, alone, for
+    a round -- and would again if the boundary regressed. Their removal is unobservable because something
+    STRONGER covers them, not because they never did anything, and "the only mechanism is the one added
+    last week" is not a property to engineer for. What matters is that neither is any longer the thing a
+    reader has to REMEMBER: coverage is asserted from `dataclasses.fields()` by
+    `test_robustness.EveryDataclassFieldIsNormalisedOrExplicitlyExempt`.
 
     The `str` sibling of `toy.benchmark._plain_number` / `_plain_parameter`, and it exists for the same
     reason: a `str` subclass passes `isinstance(v, str)`, `v.strip()` and a regex, and can still override
@@ -543,7 +587,10 @@ class Scorecard:
     """Immutable record of one probe. Frozen dataclass; containers are read-only (MappingProxyType / tuple),
     copied defensively at construction.
 
-    HONEST LIMITS, the complete list of routes known to this module (Python cannot make this impossible):
+    HONEST LIMITS -- the routes THIS MODULE KNOWS OF, which is not a claim that they are all of them
+    (Python cannot make this impossible, and a sweep for routes cannot establish that none is left; this
+    sentence used to say "the complete list of routes known to this module" and a round-6 attestation
+    falsified it with a third, (3) below):
     (1) `object.__setattr__` bypasses the freeze and replaces any field outright.
     (2) `gc.get_referents(card.details)[0]` returns the WRITABLE dict behind the `MappingProxyType`, so
         `gc.get_referents(card.details)[0]["injected"] = 1` adds a key to `details` and changes
@@ -551,6 +598,14 @@ class Scorecard:
         dict through the view. This grants no power (1) does not already grant, and it is equally detectable
         by the same means, but it is a route and this module's standard is that routes are stated.
         (`to_dict()` is a true defensive copy: mutating its result cannot reach the card.)
+    (3) THE ROUTE THAT FALSIFIED THE WORD "COMPLETE" ABOVE, found by a round-6 attestation and now
+        CLOSED: `per_seed` was checked with `isinstance(m, MetricValue)` while `_recheck_summary` /
+        `_recheck_insufficient` demand `type(x) is ...`, so a `MetricValue` SUBCLASS -- which can
+        override `__eq__`, `__ne__` and `to_dict` -- was accepted onto a card. No verdict flip was
+        measured from it, and it is stated as what it is: an inconsistency between three sibling checks
+        in one method, closed by making all three exact-type. It is recorded here because the sentence
+        that said this list was complete was wrong, and a list claimed to be complete has to name what
+        proved it was not.
     The card stores no hash of itself (only `seed_digest`, a hash of the seed list), so tampering by EITHER
     route is detectable only by comparing a freshly recomputed `content_hash()` with a hash recorded EARLIER,
     for example the one `scorecard_to_record` places in the record's `input_hashes["scorecard"]`; not
@@ -568,18 +623,25 @@ class Scorecard:
     details: Mapping
     does_not_establish: tuple
 
+    _NORMALISE_EXEMPT = MappingProxyType({})
+
     def __post_init__(self) -> None:
+        # NORMALISE EVERY FIELD AT THE BOUNDARY, FIRST (see `toy.schema._normalise_fields`). This
+        # REPLACES an argument that this method used to make, and the argument is worth recording
+        # because it was the shape of the whole defect class: `probe_id` / `probe_kind` were left
+        # un-normalised on the reasoning that they are "compared with nothing (AST-checked)" and that a
+        # `_plain_text` call there would be "unpinnable code dressed as a guard". That reasoning is sound
+        # about a HAND-PLACED call and worthless as a policy: it is an argument that has to be re-made,
+        # correctly, for every field of every class in the module, and the four live findings of round 6
+        # were all fields for which nobody made it. A boundary driven by `dataclasses.fields()` costs one
+        # line per class, covers a new field BY DEFAULT, and makes the exemptions a written list with
+        # reasons instead of a reviewer's memory. So the two text fields are now covered like the rest,
+        # and the question "is this field normalised?" is answered by the class, not by a sweep.
+        _normalise_fields(self)
         for nm in ("probe_id", "probe_kind"):
             v = getattr(self, nm)
             if not isinstance(v, str) or not v.strip():
                 raise ValueError(f"{nm} must be a nonblank string")
-            # NOT normalised, and that is a decision rather than an omission: `probe_id` / `probe_kind`
-            # are compared with nothing (AST-checked: no `==`, `in` or dict-key use anywhere in this
-            # module or `toy.benchmark`) and `json.dumps` writes a `str` subclass's real characters, so
-            # a `_plain_text` call here would have no observable consequence -- unpinnable code dressed
-            # as a guard, which is what `toy.benchmark._pair_from_record`'s comment warns against. The
-            # two text fields that ARE compared (`seed_digest`, `does_not_establish`) are normalised
-            # below, each pinned by a consequence test.
         if not isinstance(self.status, ProbeStatus):
             raise ValueError("status must be a ProbeStatus")
         # USE THE RESULT. This was the ONLY `ProbeConfig(...)` in the module whose return value was
@@ -605,8 +667,11 @@ class Scorecard:
         if self.seed_digest != seed_list_digest(seeds):
             raise ValueError("seed_digest does not match the seed list")
         per_seed = tuple(self.per_seed)
-        if len(per_seed) != len(seeds) or not all(isinstance(m, MetricValue) for m in per_seed):
-            raise ValueError("per_seed must hold exactly one MetricValue per seed")
+        # `type(m) is not MetricValue`, not `isinstance`: see honest limit (3) in the class docstring.
+        # The two sibling checks on the next few lines (`_recheck_summary`, `_recheck_insufficient`)
+        # already refuse a subclass by exact type, and a card is where the three must agree.
+        if len(per_seed) != len(seeds) or not all(type(m) is MetricValue for m in per_seed):
+            raise ValueError("per_seed must hold exactly one MetricValue per seed (subclasses are refused)")
         if (self.summary is None) == (self.insufficient is None):
             raise ValueError("exactly one of summary / insufficient must be set")
         measured = tuple(v for v in (_metric_read(m) for m in per_seed) if v is not None)
@@ -774,6 +839,14 @@ class MeasureFixture:
     target: Matrix
     mask: Mask
 
+    _NORMALISE_EXEMPT = MappingProxyType({})
+
+    def __post_init__(self) -> None:
+        # A fixture is the INPUT every measure and every shift computes from, and `_rebuild` reconstructs
+        # one from caller-supplied rows, so a subclass element reaching a measure's arithmetic is reached
+        # by no other guard on this path. Covered by the boundary rather than by a hand-placed cast.
+        _normalise_fields(self)
+
 
 def make_measure_fixture(seed: int, rows: int = 16, width: int = 3, noise: float = 0.1,
                          magnitude_spread: int = 0) -> MeasureFixture:
@@ -917,6 +990,20 @@ class ShiftSpec:
     bound: Callable = lambda base, expected, fx: 0.0
     rationale: str = ""
 
+    _NORMALISE_EXEMPT = MappingProxyType({
+        "transform": "a callable stores no scalar to collapse; what it RETURNS is a fixture, which "
+                     "normalises its own fields in MeasureFixture.__post_init__",
+        "expected": "a callable; its RETURN is normalised where it is consumed, by probe_shift's "
+                    "`_plain_measure(spec.expected(base), 'expected value')`",
+        "bound": "a callable; its RETURN is normalised where it is consumed, by probe_shift's "
+                 "`_plain_measure(spec.bound(...), 'deviation bound')`. A closure variable it computes "
+                 "from (`shift_reorder_rows`'s `rel_tol`) is normalised where it is BOUND, because it is "
+                 "not a field of anything and this boundary cannot reach it",
+    })
+
+    def __post_init__(self) -> None:
+        _normalise_fields(self)
+
 
 def _masked_stats(fx: MeasureFixture) -> tuple:
     vals = [abs(v) for pr, tr, m in zip(fx.pred, fx.target, fx.mask) if m for v in pr + tr]
@@ -938,6 +1025,19 @@ def _rebuild(fx, pred=None, target=None, mask=None) -> MeasureFixture:
 
 
 def shift_reorder_rows(kind: ShiftKind = ShiftKind.INVARIANCE_EXACT, rel_tol: float = 0.0) -> ShiftSpec:
+    """`rel_tol` is the UN-SWEPT SIBLING of `probe_precision`'s `tol`, and it is normalised for the same
+    reason and with the same helper. It is captured in the `bound` closure and multiplied there
+    (`rel_tol * abs(e)`), i.e. `type(rel_tol).__mul__`, which decides the allowed deviation. MEASURED,
+    through this public factory with no `object.__setattr__`: a `float` subclass STORING 0.0 whose
+    `__mul__` / `__rmul__` return 1e9 turned `probe_shift(row_weighted_mse, ...)` from INVARIANCE_DEFECT,
+    n_violations=12 into INVARIANCE_HOLDS, n_violations=0 -- with 12 of 12 seeds actually violating, and
+    the card self-contradicting itself by serialising `max_abs_dev = 9.11e-03` beside `n_violations = 0`.
+    Round 5 fixed `tol` and wrote the lesson in `probe_precision`'s comment; this sibling never received
+    it, which is the failure mode of a hand-maintained list of normalisation sites. `_plain_parameter`
+    rather than `_plain_number`, for `probe_precision`'s stated reason: it preserves int-vs-float and
+    adds no refusal, so an unusable `rel_tol` still fails per seed and is recorded as unmeasured."""
+    rel_tol = _plain_parameter(rel_tol)
+
     def tf(fx, rng):
         order = list(range(len(fx.pred)))
         rng.shuffle(order)
@@ -1042,7 +1142,14 @@ def probe_shift(measure: Measure, spec: ShiftSpec, seeds: Sequence[int], cfg: Op
             if not (math.isfinite(exp) and exp > 0):
                 raise ValueError("expected value is not positive; relative deviation undefined")
             dev = abs(val - exp)
-            bound = 0.0 if exact_kind else float(spec.bound(base, exp, fx2))
+            # `_plain_measure`, not a bare `float(...)`: this is the GENERAL FORM of the `rel_tol` defect
+            # above, and the last un-normalised number on this path. `spec.bound` is public (a caller
+            # supplies the spec), `bound` is the right operand of the `dev > bound` that decides the
+            # status, and a bare `float()` consults a `__float__` OVERRIDE -- while `measure`'s and
+            # `spec.expected`'s returns, four and seven lines up, both go through `_plain_measure`. A
+            # bound that is not a usable number now makes the seed unmeasured with a reason, the
+            # fail-closed outcome this probe already uses everywhere else.
+            bound = 0.0 if exact_kind else _plain_measure(spec.bound(base, exp, fx2), "deviation bound")
             rows.append((s, dev, exp, bound))
             per_seed.append(MetricValue.measured(float(dev / exp)))
         except (ValueError, TypeError, ArithmeticError) as e:
@@ -1074,7 +1181,31 @@ def probe_shift(measure: Measure, spec: ShiftSpec, seeds: Sequence[int], cfg: Op
 
 # ===================================================== 3. missing-input handling
 def arm_difference(arms: Mapping[str, MetricValue], treatment: str, control: str) -> MetricValue:
-    """treatment - control as a MetricValue; any absent or unmeasured arm => unmeasured(reason). Never 0.0."""
+    """treatment - control as a MetricValue; any absent or unmeasured arm => unmeasured(reason). Never 0.0.
+
+    NORMALISE THE NAMES, AND THE MAPPING'S KEYS, BEFORE THE MEMBERSHIP TEST. `nm not in arms` is
+    `__hash__` plus `__eq__` on the caller's name against the caller's keys, and neither was type-checked
+    or normalised. MEASURED, through this public function with no `object.__setattr__`, on a `str`
+    SUBCLASS holding "E" that hashes as "C0" and answers True to `__eq__`: an absent treatment arm
+    returned `MetricValue(value=0.0, reason=None)` instead of `MetricValue(value=None, reason="arm 'E'
+    absent")`, and over ten seeds the card that records it went INSUFFICIENT_EVIDENCE ->
+    MEASURED, `summary={"n": 10, "mean": 0.0, "sd": 0.0, ...}`, with the UNKNOWN evidence label the
+    honest card carries GONE. `test_robustness.test_R_arm_diff_an_unusable_arm_gives_unmeasured_never_zero`
+    had already named that exact outcome as forbidden -- "in particular NEVER `measured(0.0)` -- a
+    missing arm reading as a zero contrast is the single most dangerous substitution in this kit" -- while
+    sweeping only the VALUES axis (`forge(arms[which], bad)`); the NAMES axis was untouched, and it is
+    the axis that carried the defect. This is NOT a dataclass field, so the
+    `toy.schema._normalise_fields` boundary cannot reach it: a function parameter used as a dict key is
+    normalised where it is bound."""
+    if not isinstance(arms, Mapping):
+        raise ValueError(f"arms must be a mapping, got {type(arms).__name__}")
+    arms = _plain_value(arms)       # keys plain, and two keys that collapse to one are refused loudly
+    names = []
+    for nm in (treatment, control):
+        if not isinstance(nm, str) or not nm.strip():
+            raise ValueError(f"arm name must be a nonblank string, got {type(nm).__name__}")
+        names.append(_plain_value(nm))
+    treatment, control = names
     for nm in (treatment, control):
         if nm not in arms:
             return MetricValue.unmeasured(f"arm {nm!r} absent")

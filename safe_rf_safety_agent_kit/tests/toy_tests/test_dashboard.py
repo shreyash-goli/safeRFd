@@ -4,6 +4,7 @@ import dataclasses
 import inspect
 import io
 import itertools
+import math
 import os
 import random
 import re
@@ -2475,20 +2476,104 @@ class SnapshotTotalsPinned(unittest.TestCase):
 SCORER_CLASSES = {"IntervalPair": bm.IntervalPair, "ComponentResult": bm.ComponentResult,
                   "Margins": bm.Margins, "JointResult": bm.JointResult}
 
+
+# ---------------------------------------------------------------------------------------------------------
+# SR-13 ROUND 7: THE THIRD HALF OF A VALUE. A value has a TYPE (round 4's table), it has a STORED NUMBER
+# (round 5's table), and it has DUNDERS -- and the dunders are what every cross-check these rounds added
+# actually calls. `liar` is the shape that evaded five sweeps, and it is one object rather than four
+# hand-written classes so that both tables and every new field get the SAME attack.
+#
+# COUNTED, not argued, on the round-6 tree: 0 of the 107 values in `HOSTILE_BY_KIND` + `LEGAL_BUT_WRONG`
+# were `int`/`float` subclass instances (iterate both tables, test `type(v) not in (int, float)`). The
+# tables held 44 hostile TYPES, all correctly rejected, and no hostile SUBCLASS -- which no amount of
+# care in keeping either table could have fixed, because the attack is in neither the type nor the stored
+# value. `test_both_hostile_tables_sweep_subclass_instances_too` now fails if that count returns to 0 for
+# any kind or for any declared number that has a second source.
+# ---------------------------------------------------------------------------------------------------------
+def liar(stored, shown=None):
+    """An `int`/`float` SUBCLASS INSTANCE that STORES `stored` while PRESENTING itself as `shown`.
+
+    It is a subclass of `type(stored)`, so `isinstance(v, (int, float))` holds, `MetricValue`'s own
+    float-only invariant holds, and `math.isfinite` reads the double it STORES (which, for the legal
+    values this is used with, is finite). Nothing but a dunder is overridden:
+
+      * every COMPARISON answers "nothing to see here": `__eq__` True, `__ne__` False, and all four
+        orderings False. That is not one attack but all of them at once, because a cross-check can only
+        be `==`, `!=` or an inequality: `_declared`'s `margin != declared`, `_n_problem`'s `n > measured_n`
+        and `n >= min_n`, `_recompute`'s `max(c.min_n, 30)` and `min(c.width_tol, 0.25)`,
+        `_measured_seeds`' `attempted != len(scores)` and `failed != listed_failed`. Python prefers a
+        SUBCLASS's reflected method, so `max(mn, 30)` and `0.25 < wt` consult the liar even when it is
+        the right-hand operand (measured: `max(liar(1, 30), 30)` is the liar, and `min(liar(1e9), 0.25)`
+        is the liar).
+      * ARITHMETIC behaves as if the object were `shown`, which is the `_measured_seeds` route:
+        `attempted - failed` is the only arithmetic this renderer does on a declared number, and an
+        `int` subclass overriding only `__sub__` defeats it outright while every equality beside it
+        still holds.
+      * every CONVERSION shows `shown`: `__float__` (which `_num`'s `repr(float(x))` consults, so this
+        is how a forged number prints an honest figure), `__int__`, `__index__` and `__str__` (which
+        `_e` consults, so this is how a forged COUNT prints an honest figure).
+
+    `__repr__` is deliberately HONEST and names both numbers, so a sweep's failure message says which
+    object it was holding. It is the one dunder a renderer never reads (`_num` reprs the *converted*
+    plain float, and `_e` goes through `str`), so making it honest gives nothing back to the defence."""
+    base = float if isinstance(stored, float) else int
+    shown = stored if shown is None else shown
+
+    class Liar(base):
+        def __eq__(self, other): return True
+        def __ne__(self, other): return False
+        def __lt__(self, other): return False
+        def __le__(self, other): return False
+        def __gt__(self, other): return False
+        def __ge__(self, other): return False
+        def __sub__(self, other): return base(shown) - other
+        def __rsub__(self, other): return other - base(shown)
+        def __float__(self): return float(shown)
+        def __int__(self): return int(shown)
+        def __index__(self): return int(shown)
+        def __str__(self): return str(shown)
+        def __repr__(self): return f"<lying {base.__name__} storing {base.__repr__(self)} shown as {shown!r}>"
+        __hash__ = base.__hash__
+
+    Liar.__name__ = f"Lying{base.__name__.capitalize()}"
+    return Liar(stored)
+
+
+def is_a_subclass_instance(v):
+    """The shape round 7 exists for: an `int`/`float` subclass instance, not an `int`/`float`. This is
+    the exact predicate the round-6 count used (`type(v) not in (int, float)` over values that are
+    `isinstance` of one), so the figure in the section comment above is reproducible from this file."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and type(v) not in (int, float)
+
+
 # Hostile values per KIND: everything an honest producer of a field of this kind cannot emit BECAUSE OF
 # ITS TYPE. Round 4 wrote that as "everything an honest producer of a field of this kind cannot emit",
 # full stop, and the sweep over it was this module's whole answer for a stored number -- which is how
 # round 5 happened. See `LEGAL_BUT_WRONG` below: these lists contain not one legal `int`, and an honest
 # producer of `pair.n` on a 29-seed run cannot emit the legal int `30` either. A type table cannot refuse
 # a legal value; only a second source can, so the two tables are separate and both are swept.
+#
+# ROUND 7 added the SUBCLASS entries, which belong in THIS table rather than in `LEGAL_BUT_WRONG`
+# because what they store is inadmissible: a subclass may lie about the number it holds, and when the
+# number it holds is `nan`/`inf`/`10**400` the kind must still refuse it. The `10**400` pair is the
+# round-7 bonus defect and is a PIN, not coverage: at the round-6 tree `_finite_number` applied
+# `math.isfinite` to an `int` too large to be a float, so `ComponentResult.margin = 10**400` (reachable
+# by `object.__setattr__`, and absent from this table) made `render_scorecard` AND `render_dashboard`
+# raise OverflowError instead of refusing the result -- a page taken down, outside this module's error
+# contract, which the sweep's "must not raise, ever" would have caught had the value been in the table.
+# The subclass form of it lies to `math.isfinite` as well (`__float__` -> 1.0), which is why the
+# finiteness test now runs on the NORMALISED value.
 HOSTILE_BY_KIND = {
-    "mv": BREAKS_MV_INVARIANT,                              # forged into MetricValue.value
+    "mv": BREAKS_MV_INVARIANT + (liar(float("nan"), 0.5), liar(float("inf"), 1.0)),
     "float": (0, 1, 30, -1, "0.5", "", [], {}, (), object(), None, True, False,
-              float("nan"), float("inf"), float("-inf")),
+              float("nan"), float("inf"), float("-inf"),
+              liar(float("nan"), 0.5), liar(float("inf"), 0.9875)),
     "num": ("0.1", "", "nan", [], {}, (), object(), None, True, False,
-            float("nan"), float("inf"), float("-inf")),
+            float("nan"), float("inf"), float("-inf"), 10 ** 400,
+            liar(float("nan"), 0.1), liar(10 ** 400, 1)),
     "count": (0.0, 1.0, 30.0, "30", "", [], {}, (), object(), None, True, False,
-              float("nan"), float("inf"), float("-inf")),
+              float("nan"), float("inf"), float("-inf"),
+              liar(30.0, 30), liar(float("nan"), 30)),
 }
 # Which hypotheses read a given declared number. A pair/component number is forged on EVERY instance, so
 # all three are affected; a Margins field is read by exactly one hypothesis (benchmark.PRIMARY).
@@ -2591,24 +2676,46 @@ NO_SECOND_SOURCE = {
 # Values of the RIGHT TYPE that an honest producer of this field cannot emit on the fixture named in the
 # sweep. `None` means "use the default 30-seed fixture"; `pair.n` additionally gets the 29-seed fixture
 # of the reported defect, in test_G3.
+#
+# ROUND 7 added the `liar(stored, shown)` entries. They are LEGAL-BUT-WRONG and not hostile: what each
+# one STORES is a value of exactly the right type that this fixture's honest producer cannot emit, so the
+# kind function must admit it (after normalising it) and the SECOND SOURCE must be what refuses it. The
+# addition is the dunders: each stores the wrong number, answers every comparison a cross-check can make
+# with "nothing to see", does `attempted - failed` as if it held the honest number, and PRINTS the honest
+# number. Four of these were the round-6 attestation's four SR-13 findings and FAIL on the round-6 tree
+# (measured, before/after, in `DundersAreNotPartOfTheTypeEither`); the rest are coverage, and which is
+# which is recorded per entry rather than claimed for the group.
 LEGAL_BUT_WRONG = {
-    ("IntervalPair", "n"): (31, 50, 1000),             # a 30-seed study has no 31-seed component
+    ("IntervalPair", "n"): (31, 50, 1000,              # a 30-seed study has no 31-seed component
+                            liar(31, 30)),             # FINDING 1: the `pair.n` route, as a subclass
     # ROUND 6. Forged INSIDE the MetricValue (kind "mv"), so each is a finite float that `_mv_intact`
     # must admit -- an honest producer simply cannot emit it for THIS series. 0.5 and 1.5 are far from
     # the fixture's ~1.0 mean; the third is the sibling bound's own value, which is the cheapest forgery
     # of all (it makes the t-interval agree with the bootstrap interval, defeating protocol 6.3).
-    ("IntervalPair", "mean"): (0.5, 1.5, -2.25),
-    ("IntervalPair", "t_lo"): (0.5, 0.95, -2.25),
-    ("IntervalPair", "t_hi"): (1.5, 1.05, 2.25),
-    ("IntervalPair", "level"): (0.95, 0.99, 0.5),      # all valid levels, none this study's 0.9875
-    ("JointResult", "n_attempted"): (29, 31, 100, 0),  # contradicts len(seed_scores) == 30
-    ("JointResult", "n_failed"): (1, 5, 30),           # contradicts "no entry of seed_scores is not-ok"
-    ("ComponentResult", "margin"): (0.0, 0.2, 1.0, -1.0),   # != Margins() delta_S 0.10 / R 0.05 / sel 0.10
-    ("Margins", "delta_S"): (0.0, 0.2, 1.0, -1.0),
-    ("Margins", "delta_R"): (0.0, 0.2, 1.0, -1.0),
-    ("Margins", "delta_sel"): (0.0, 0.2, 1.0, -1.0),
-    ("ComponentResult", "min_n"): (0, 1, 5, 29),       # weaker than the protocol's 30: neutralised
-    ("ComponentResult", "width_tol"): (0.9, 1, 1e9),   # wider than the protocol's 0.25: neutralised
+    # the three `mv` liars are COVERAGE, not pins: round 6 already normalised at the point of use here
+    # (`_same_number` compares `bm.mean([stored]) == bm.mean([want])`, two plain floats, and its own
+    # docstring argues the overridable-`__eq__` case), so these are caught on the round-6 tree too.
+    ("IntervalPair", "mean"): (0.5, 1.5, -2.25, liar(0.5, 0.9995918337735029)),
+    ("IntervalPair", "t_lo"): (0.5, 0.95, -2.25, liar(0.5, 0.9995918337735029)),
+    ("IntervalPair", "t_hi"): (1.5, 1.05, 2.25, liar(1.5, 0.9995918337735029)),
+    # also coverage: `bm.t_interval` normalises the level it is handed (`_check_level` -> `_plain_number`),
+    # so a WRONG stored level was already caught. FINDING 4 is the other direction -- an HONEST stored
+    # level with a lying `__float__`, which changes no verdict and edits every level FIGURE -- and it is
+    # not a legal-but-wrong value at all, so it is pinned by its own test, not here.
+    ("IntervalPair", "level"): (0.95, 0.99, 0.5, liar(0.95, 0.9875)),
+    ("JointResult", "n_attempted"): (29, 31, 100, 0,   # contradicts len(seed_scores) == 30
+                                     liar(29, 30)),    # NOTE A: the `attempted - failed` route
+    ("JointResult", "n_failed"): (1, 5, 30,            # contradicts "no entry of seed_scores is not-ok"
+                                  liar(1, 0)),
+    ("ComponentResult", "margin"): (0.0, 0.2, 1.0, -1.0,    # != Margins() delta_S 0.10 / R 0.05 / sel 0.10
+                                    liar(0.2, 0.1)),        # FINDING 3's mechanism, one value
+    ("Margins", "delta_S"): (0.0, 0.2, 1.0, -1.0, liar(0.2, 0.1)),
+    ("Margins", "delta_R"): (0.0, 0.2, 1.0, -1.0, liar(0.2, 0.05)),
+    ("Margins", "delta_sel"): (0.0, 0.2, 1.0, -1.0, liar(0.2, 0.1)),
+    ("ComponentResult", "min_n"): (0, 1, 5, 29,        # weaker than the protocol's 30: neutralised
+                                   liar(1, 30)),       # FINDING 2: the `max(c.min_n, 30)` route
+    ("ComponentResult", "width_tol"): (0.9, 1, 1e9,    # wider than the protocol's 0.25: neutralised
+                                       liar(1e9, 0.25)),   # NOTE B: the `min(c.width_tol, 0.25)` route
 }
 
 
@@ -4202,6 +4309,392 @@ class RoundThreeSurvivorsPinned(unittest.TestCase):
         self.assertIsNotNone(db._count(1))
         self.assertIsNone(db._count(True))
         self.assertIn("THE `bool` CLAUSE IS REDUNDANT HERE", db._finite_float.__doc__)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# SR-13 ROUND 7: the kinds now NORMALISE what they admit.
+# ---------------------------------------------------------------------------------------------------------
+# A numeric field of a verdict-bearing class that the renderer DOES NOT read, with the reason, so that
+# "undeclared" is a recorded decision per field instead of an omission per field -- the same rule
+# `NO_SECOND_SOURCE` applies to second sources. This list is the price of deriving the field set from
+# `dataclasses.fields()` instead of from a render, and it buys the thing a render-time probe cannot give:
+# a NEW numeric field on a scorer dataclass fails the suite the moment it exists, whether or not anything
+# reads it yet (the probe sees only what its single render exercises, and
+# `test_the_probe_itself_is_not_vacuous` asserts that `n_boot` is NOT in its bucket).
+#
+# EACH REASON IS CHECKED, NOT WRITTEN: `test_every_numeric_field_...` forges each exempted field to five
+# hostile values on every instance and requires BOTH renders to stay byte-identical, which is what "not
+# read" means operationally. Round 6's ruling was that nothing in a test suite can check that a reason
+# written in a table is true; where the reason is "this is not read", it can.
+FIELDS_NOT_RENDERED = {
+    ("IntervalPair", "n_boot"): "the bootstrap resample count. Nothing renders it and no recomputation "
+                                "can use it: see NO_SECOND_SOURCE[boot_lo] -- it is one of the two "
+                                "numbers whose absence from JointResult makes the bootstrap interval "
+                                "irreproducible.",
+    ("IntervalPair", "sd"): "a dispersion summary `summarize` records and this page does not show; the "
+                            "page shows the two INTERVALS instead, which is what protocol 7 decides on.",
+    ("IntervalPair", "iqr"): "as `sd`: a dispersion summary that is recorded and not rendered.",
+    ("IntervalPair", "minimum"): "an order statistic of the series, not a figure on this page.",
+    ("IntervalPair", "maximum"): "as `minimum`: an order statistic, recorded and not rendered.",
+    ("IntervalPair", "max_over_median_abs"): "a heavy-tail diagnostic `summarize` records; protocol 6.3's "
+                                             "tail rule is applied by the scorer, not re-derived here.",
+}
+
+
+class DundersAreNotPartOfTheTypeEither(FailsClosedAssertions, unittest.TestCase):
+    """SR-13 ROUND 7. The item failed a SIXTH time, on four routes with one root cause, and -- like
+    rounds 5 and 6 -- not because a consumer was missed or a second source was absent. Rounds 5 and 6
+    ADDED the second sources; this round's defect is that the COMPARISONS against them were performed by
+    the suspect value's own dunders, because the three kind functions ended `return x` and
+    `_finite_number`'s docstring stated that non-conversion as a deliberate choice.
+
+    MEASURED, all on a round-6 tree emulated by rebinding the three kind functions to their pre-fix
+    bodies (`_NUM_KINDS` and the three globals are every path dashboard.py reaches them by), on
+    Python 3.12.4 and 3.13.5, each one `object.__setattr__` -- benchmark's declared route (b), the same
+    threat model as `laundered_below_minimum`:
+
+        FINDING 1  pair.n = liar(30, 30) in laundered_below_minimum()   JOINT_SUPPORTED, 0 warn, no alarm
+        FINDING 2  min_n  = liar(1, 30)  in laundered_below_minimum()   JOINT_SUPPORTED, 0 warn, no alarm
+        FINDING 3  margin = liar(-1e5, honest) on an UNSUPPORTED study  JOINT_SUPPORTED, 0 warn, no alarm
+        FINDING 4  level  = liar(0.9875, 0.5) on an honest study        every level cell reads 0.5
+        NOTE A     n_attempted = liar(29, 30)                           _measured_seeds returns 30
+        NOTE B     width_tol   = liar(1e9, 0.25)                        min(wt, 0.25) returns 1e9
+        BONUS      margin = 10**400 (no subclass needed)                render_scorecard RAISES
+
+    and after the fix, all seven: the honest verdict, with the alarm the forgery earns.
+
+    WHY FIVE ROUNDS MISSED ALL OF IT, counted: 0 of the 107 values in `HOSTILE_BY_KIND` +
+    `LEGAL_BUT_WRONG` were `int`/`float` subclass instances. Both tables are tables of VALUES, and the
+    attack is in neither the type nor the stored value, so neither table could reach it however
+    carefully it was kept -- the round-5 lesson one level up. The response is therefore NOT four more
+    table rows: `test_every_admitted_field_is_normalised_by_its_kind` derives the fields from
+    `dataclasses.fields()` and asserts the PROPERTY (the kind hands back a value of exactly the plain
+    type), and `test_both_hostile_tables_sweep_subclass_instances_too` fails if the count of subclass
+    instances in either table returns to zero for any kind or any declared number. The four rows exist
+    beside them so that the reported attacks are literal in the file and run through the existing
+    verdict-and-alarm sweeps."""
+
+    def plain(self, kind, honest):
+        return int if kind == "count" or (kind == "num" and isinstance(honest, int)) else float
+
+    def forge_liar(self, j, cls_name, attr, stored="honest", shown="honest"):
+        """Forge `attr` to a lying subclass on EVERY instance of `cls_name` in `j`. "honest" means each
+        instance's OWN current value, which matters in both arguments: `shown="honest"` is why these
+        four findings were unalarmed rather than merely wrong (the page kept showing what it showed
+        before), and `stored="honest"` gives the pure-dunder attack -- a value that is CORRECT and lies
+        anyway, which must change nothing at all."""
+        for obj in instances_of(j, cls_name):
+            if db.STORED_NUMBERS[cls_name][attr] == "mv":
+                mv = getattr(obj, attr)
+                if mv.value is None:                 # honestly unmeasured: nothing to forge
+                    continue
+                h = mv.value
+                forge_mv(mv, liar(h if stored == "honest" else stored, h if shown == "honest" else shown))
+            else:
+                h = getattr(obj, attr)
+                object.__setattr__(obj, attr, liar(h if stored == "honest" else stored,
+                                                   h if shown == "honest" else shown))
+        return j
+
+    def test_every_numeric_field_of_a_verdict_bearing_class_is_declared_or_exempt(self):
+        """THE MACHINE-DERIVED HALF. The field set comes from `dataclasses.fields()`, not from a render
+        and not from a list written here, so a new numeric field on any verdict-bearing scorer class
+        fails this test naming itself -- before anything reads it, which is the one thing the recording
+        probe cannot do."""
+        for cls_name in db.VERDICT_BEARING:
+            obj = instances_of(joint(), cls_name)[0]
+            numeric = {f.name for f in dataclasses.fields(SCORER_CLASSES[cls_name])
+                       if is_a_stored_number(getattr(obj, f.name, None))}
+            declared = set(db.STORED_NUMBERS[cls_name])
+            exempt = {a for c, a in FIELDS_NOT_RENDERED if c == cls_name}
+            self.assertEqual(numeric, declared | exempt, f"""
+{cls_name}: a numeric field is neither declared in db.STORED_NUMBERS nor exempted in FIELDS_NOT_RENDERED.
+  numeric but unaccounted for : {sorted(numeric - declared - exempt)}
+  accounted for but not numeric: {sorted((declared | exempt) - numeric)}
+Declare it (with its kind, and its class in db.VERDICT_BEARING if it reaches a verdict), or exempt it
+with the reason it is not rendered -- the exemption is then CHECKED behaviourally below.""")
+            self.assertEqual(declared & exempt, set(), cls_name)
+        # EVERY EXEMPTION IS CHECKED, not taken on trust: an exempted field is one whose value cannot
+        # move one byte of either render. 6 fields x 5 hostile values x 2 renders.
+        honest_card, honest_page = db.render_scorecard(joint()), db.render_dashboard({"joint": joint()})
+        for (cls_name, attr), reason in FIELDS_NOT_RENDERED.items():
+            self.assertGreater(len(reason), 40, (cls_name, attr))       # a reason, not a shrug
+            for bad in (-1, float("nan"), None, object(), liar(1e9, 0.0)):
+                j = joint()
+                for obj in instances_of(j, cls_name):
+                    object.__setattr__(obj, attr, bad)
+                label = f"{cls_name}.{attr} = {bad!r}"
+                self.assertEqual(db.render_scorecard(j), honest_card, label)
+                self.assertEqual(db.render_dashboard({"joint": j}), honest_page, label)
+
+    def test_every_admitted_field_is_normalised_by_its_kind(self):
+        """THE PROPERTY, asserted per declared field rather than per attack: what a kind function hands
+        back is of EXACTLY the plain type, so no dunder of the caller's object can reach a cross-check,
+        a `float()` in `_num`, or an `_e(...)` in a count cell. Every `return x` mutant in the three
+        kinds dies here, including on a field this round never thought of.
+
+        `int`-vs-`float` is part of the property: `_num` renders them differently, `_declared`'s
+        `margin != declared` is exact, and `_count`'s consumers use `len()`-comparable integers."""
+        j = joint()
+        for cls_name in db.VERDICT_BEARING:
+            obj = instances_of(j, cls_name)[0]
+            for attr, kind in db.STORED_NUMBERS[cls_name].items():
+                label = f"{cls_name}.{attr} ({kind})"
+                if kind == "mv":
+                    honest = getattr(obj, attr).value
+                    if honest is None:
+                        continue
+                    mv = forge_mv(MetricValue.measured(1.0), liar(honest, 0.5))
+                    self.assertIsNotNone(db._mv_intact(mv), label)
+                    got = db._mv_float(mv)
+                    self.assertIs(type(got), float, f"{label}: _mv_float returned {type(got).__name__}")
+                    self.assertEqual(got, honest, label)
+                    continue
+                honest = getattr(obj, attr)
+                want = self.plain(kind, honest)
+                v = liar(honest, honest)
+                got = db._NUM_KINDS[kind](v)
+                self.assertIsNotNone(got, f"{label}: the kind must still ADMIT a legal stored value")
+                self.assertIs(type(got), want, f"{label}: kind returned {type(got).__name__}, not "
+                                               f"{want.__name__} -- the caller's dunders are still live")
+                self.assertEqual(got, honest, label)
+                # NOT VACUOUS: the object really is a lying subclass, and it really lies
+                self.assertTrue(is_a_subclass_instance(v), label)
+                self.assertIsNot(type(v), want, label)
+                self.assertTrue(v == object(), label)                  # __eq__ lies
+                self.assertFalse(v > honest - 1 if want is int else v > honest / 2, label)
+        # and the same property through the ONLY reader in the verdict path, on every live instance
+        for cls_name in db.VERDICT_BEARING:
+            k = joint()
+            for attr, kind in db.STORED_NUMBERS[cls_name].items():
+                self.forge_liar(k, cls_name, attr)        # every field, each storing its OWN true value
+            for obj in instances_of(k, cls_name):
+                nums = db._admitted(obj, cls_name)
+                self.assertIsNotNone(nums, cls_name)
+                for attr, v in nums.items():
+                    if db.STORED_NUMBERS[cls_name][attr] != "mv":
+                        self.assertIn(type(v), (int, float), f"{cls_name}.{attr}")
+                        self.assertFalse(is_a_subclass_instance(v), f"{cls_name}.{attr}")
+            # a liar storing the HONEST number cannot move one byte of the page
+            self.assertEqual(db.render_scorecard(k), db.render_scorecard(joint()), cls_name)
+
+    def test_both_hostile_tables_sweep_subclass_instances_too(self):
+        """The round-6 count, turned into a test. It was 0 of 107, and a table of literals cannot reach
+        this shape however carefully it is kept, so the requirement is per KIND and per DECLARED NUMBER
+        and a new entry with only literals fails here."""
+        counts = {}
+        for kind, vals in HOSTILE_BY_KIND.items():
+            n = sum(1 for v in vals if is_a_subclass_instance(v))
+            counts[f"HOSTILE_BY_KIND[{kind}]"] = (n, len(vals))
+            self.assertGreater(n, 0, f"HOSTILE_BY_KIND[{kind}] sweeps no subclass instance")
+        for key, vals in LEGAL_BUT_WRONG.items():
+            n = sum(1 for v in vals if is_a_subclass_instance(v))
+            counts[f"LEGAL_BUT_WRONG{key}"] = (n, len(vals))
+            self.assertGreater(n, 0, f"LEGAL_BUT_WRONG{key} sweeps no subclass instance: a declared "
+                                     f"number with a second source must be attacked through its dunders "
+                                     f"as well as through its type and its value")
+        total = sum(n for n, _ in counts.values())
+        allv = sum(t for _, t in counts.values())
+        self.assertGreater(total, 0, counts)
+        self.assertEqual(set(LEGAL_BUT_WRONG), set(SECOND_SOURCE) | set(NEUTRALISED_BY_A_FLOOR))
+        # the measurement this test replaces, reproduced here so the number in the comments is checkable
+        plain_only = [v for vals in (*HOSTILE_BY_KIND.values(), *LEGAL_BUT_WRONG.values())
+                      for v in vals if type(v) in (int, float)]
+        self.assertGreater(len(plain_only), 50, "the literal halves of both tables are still swept")
+        self.assertGreater(total, 10, f"{total} subclass instances in {allv} table values: {counts}")
+
+    def test_F1_a_lying_int_subclass_n_cannot_relaunder_the_round_five_fixture(self):
+        """FINDING 1, pinned by its CONSEQUENCE on the suite's own fixture. Pre-fix: JOINT_SUPPORTED,
+        0 warning paragraphs, every alarm False, on a genuine 29-seed run still carrying its
+        'n below protocol minimum' flag, beside a gate row reading "29 measured seeds vs minimum 30"."""
+        k = laundered_below_minimum(n=liar(30, 30))
+        p = k.h1.components[0].pair
+        # THE CONSEQUENCE FIRST, so that this test fails pre-fix on the page and not on a type
+        h = db.render_scorecard(k)
+        self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), "n = liar(30, 30)")
+        self.assertNotIn("JOINT_SUPPORTED", h)
+        self.assertIn("SAMPLE SIZE CONTRADICTED", h)
+        self.assertIn("a component claims 30 seeds but the study records only 29", h)
+        self.assertEqual(len(db._n_sources_disagree(k, 29)), 6)
+        self.assertIn("<td>30</td>", comp_row(h, "S"))       # the refused number is still SHOWN
+        # and the mechanism, so that a future reader can see which step does the refusing
+        self.assertTrue(is_a_subclass_instance(p.n))
+        self.assertEqual(int.__int__(p.n), 30)               # it stores a legal, honest-looking 30
+        self.assertFalse(p.n > 29)                           # ... and lies to _n_problem's comparison
+        self.assertFalse(p.n >= 30)                          # ... and to the flag clause as well
+        self.assertEqual(db._measured_seeds(k), 29)
+        self.assertEqual(db._count(p.n), 30)                 # ADMITTED, as a legal count must be
+        self.assertIs(type(db._count(p.n)), int)             # but as a PLAIN int: this is the fix
+        self.assertIsNone(recompute(k.h1.components[0], k.margins, k))
+        self.assertFalse(pair_ok(k))
+        # NOT VACUOUS: the honest fixtures are untouched by the fix
+        self.assertNotIn("SAMPLE SIZE CONTRADICTED", db.render_scorecard(joint()))
+        self.assertIn("JOINT_SUPPORTED", joint_cell(db.render_scorecard(joint())))
+
+    def test_F2_a_lying_int_subclass_min_n_cannot_remove_the_protocol_floor(self):
+        """FINDING 2. Pre-fix `max(c.min_n, 30)` returned 1 -- Python prefers the SUBCLASS's reflected
+        `__lt__` even as the right-hand operand -- so protocol 6.1's floor was gone AND
+        `_weaker_than_protocol` was silent, which is the combination that made the page honest-looking:
+        `pair.n` was left at its true 29 and printed beside a decisive JOINT_SUPPORTED."""
+        k = laundered_below_minimum()
+        self.assertEqual(k.h1.components[0].pair.n, 29)       # untouched: only min_n is forged
+        self.forge_liar(k, "ComponentResult", "min_n", 1, shown=30)
+        c0 = k.h1.components[0]
+        h = db.render_scorecard(k)                            # THE CONSEQUENCE FIRST
+        self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), "min_n = liar(1, 30)")
+        self.assertNotIn("JOINT_SUPPORTED", h)
+        self.assertIn("WEAKER THAN THE PROTOCOL", h)          # and the page SAYS which finding it is
+        self.assertEqual(len(db._weaker_than_protocol(k)), 6)
+        self.assertIn("min_n=1 is below the protocol minimum 30", db._weaker_than_protocol(k)[0])
+        self.assertEqual(int.__int__(c0.min_n), 1)
+        self.assertIs(max(c0.min_n, 30), c0.min_n)            # the lie, measured on the real expression
+        self.assertEqual(db._count(c0.min_n), 1)              # admitted ...
+        self.assertEqual(max(db._count(c0.min_n), 30), 30)    # ... and the floor holds on the plain int
+        self.assertIsNone(recompute(c0, k.margins, k))
+        # ... and a STRICTER declared parameter is still honoured in full, not floored away
+        s = joint()
+        self.forge_liar(s, "ComponentResult", "min_n", 60, shown=30)
+        self.assertEqual(hyp_cells(db.render_scorecard(s)),
+                         {"H1": "INCONCLUSIVE", "H2": "INCONCLUSIVE", "H3": "INCONCLUSIVE"})
+
+    def test_F3_a_lying_float_subclass_margin_cannot_buy_a_decisive_verdict(self):
+        """FINDING 3, the only one of the four that turns an UNSUPPORTED study into a SUPPORTED page.
+        Pre-fix, on two honest fixtures (H1 UNSUPPORTED at S=0.0, H2 UNSUPPORTED at L=1.0), with the
+        stored verdicts forged SUPPORTED as `laundered_below_minimum` does: JOINT_UNSUPPORTED ->
+        JOINT_SUPPORTED, 0 warning paragraphs, no alarm, and EVERY FIGURE ON THE PAGE HONEST -- the
+        verdict was recomputed against +-100000.0 and the margin cells printed 0.1 and 0.05."""
+        for kw, honest_joint in ((dict(expect=None, S=0.0), "JOINT_UNSUPPORTED"),
+                                 (dict(expect=None, L=1.0), "JOINT_UNSUPPORTED")):
+            self.assertIn(honest_joint, joint_cell(db.render_scorecard(joint(**kw))), repr(kw))
+            j = forge_all_verdicts_supported(joint(**kw))
+            for c in all_components(j):
+                direction, declared = db._declared(c.metric, j.margins)
+                stored = -1e5 if direction == "greater" else 1e5
+                object.__setattr__(c, "margin", liar(stored, float(declared)))
+            c0 = j.h1.components[0]
+            h = db.render_scorecard(j)                       # THE CONSEQUENCE FIRST
+            self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), f"margin liar {kw}")
+            self.assertNotIn("JOINT_SUPPORTED", h, repr(kw))
+            self.assertIn("-100000.0", h, repr(kw))          # the real margin is now the figure shown
+            self.assertIsNone(recompute(c0, j.margins, j), repr(kw))
+            self.assertEqual(float.__float__(c0.margin), -1e5)
+            self.assertTrue(c0.margin == db._declared(c0.metric, j.margins)[1])   # the lie
+            self.assertEqual(float(c0.margin), 0.1)                               # the honest figure
+            self.assertEqual(db._finite_number(c0.margin), -1e5)                  # admitted, NORMALISED
+            self.assertIs(type(db._finite_number(c0.margin)), float)
+            # and the same attack on `Margins`, the other end of the same comparison
+            k = forge_all_verdicts_supported(joint_private_margins(**kw))
+            for attr, honest in (("delta_S", 0.10), ("delta_R", 0.05), ("delta_sel", 0.10)):
+                object.__setattr__(k.margins, attr, liar(0.2, honest))
+            self.assertFailsClosedWithAnAlarm(db.render_scorecard(k), ("H1", "H2", "H3"), "Margins liar")
+
+    def test_F4_a_lying_float_subclass_level_cannot_edit_the_figure_it_displays(self):
+        """FINDING 4, and the one that buys NO verdict change: `interval_verdict` never reads `level`,
+        and `bm.t_interval` normalises the level it is handed, so the cross-check used the honest
+        0.9875 while every level CELL in the same render printed 0.5. It is a finding by this module's
+        own rule at `_pair_numbers_ok` -- "an edited figure is unalarmed tampering even when it buys
+        nothing" -- which is the rule round 4 wrote for `pair.level` and round 7 had to apply to it.
+
+        So this pins the FIGURE: the number shown is the number stored, and the forged one appears
+        nowhere. The verdict stays SUPPORTED and the page stays silent, because nothing about the study
+        changed -- a forged level that CONTRADICTS the stored t-interval is the other case, and it is
+        swept by `LEGAL_BUT_WRONG[("IntervalPair", "level")]`."""
+        k = joint()
+        honest_level = k.h1.components[0].pair.level
+        self.assertEqual(honest_level, 0.9875)
+        self.forge_liar(k, "IntervalPair", "level", honest_level, shown=0.5)
+        p = k.h1.components[0].pair
+        h = db.render_scorecard(k)                            # THE CONSEQUENCE FIRST: the FIGURE
+        self.assertNotIn(">0.5<", h)                          # the forged figure, nowhere on the page
+        self.assertEqual(h.count('<span class="measured">0.9875</span>'), 6)   # one cell per component
+        self.assertEqual(h, db.render_scorecard(joint()))     # byte-identical to the honest render
+        self.assertTrue(pair_ok(k))                           # and no false alarm: nothing contradicts
+        self.assertIn("JOINT_SUPPORTED", joint_cell(h))
+        self.assertTrue(is_a_subclass_instance(p.level))
+        self.assertEqual(float(p.level), 0.5)                 # what _num's float() used to print
+        self.assertEqual(db._finite_float(p.level), 0.9875)   # admitted, NORMALISED
+        self.assertIs(type(db._finite_float(p.level)), float)
+
+    def test_note_A_an_int_subclass_overriding_only_sub_cannot_defeat_measured_seeds(self):
+        """THE ATTESTER'S FIRST NOTE, closed by the same three lines. An `int` subclass overriding ONLY
+        `__sub__` (storing the honest 29, returning 30) defeats `_measured_seeds` outright: both of its
+        equalities are satisfied by the honest stored value, and the quantity it RETURNS is the lie. It
+        buys nothing alone -- source (2), the pair's own flag, still fires -- so it is pinned here both
+        alone and in the combination that completes the F1 render."""
+        class OnlySub(int):
+            def __sub__(self, other):
+                return 30
+
+        j = joint(expect=None, seeds=FZ.seeds[:29])
+        self.assertEqual(j.n_attempted, 29)
+        object.__setattr__(j, "n_attempted", OnlySub(29))
+        self.assertEqual(j.n_attempted - j.n_failed, 30)      # the lie, on the real expression
+        self.assertEqual(db._measured_seeds(j), 29)           # ... which the admitted plain int undoes
+        self.assertIs(type(db._admitted(j, "JointResult")["n_attempted"]), int)
+        # the combination: the F1 forgery with the flag deleted, so ONLY the measured-seed count can act
+        k = laundered_below_minimum(n=30)
+        object.__setattr__(k, "n_attempted", OnlySub(29))
+        for c in all_components(k):
+            object.__setattr__(c.pair, "flags", ())
+        self.assertEqual(db._measured_seeds(k), 29)
+        self.assertIn("only 29 measured seeds",
+                      db._n_problem(k.h1.components[0].pair, 30, 30, db._measured_seeds(k)))
+        self.assertFailsClosedWithAnAlarm(db.render_scorecard(k), ("H1", "H2", "H3"), "note A")
+        # NOT VACUOUS: the honest counts still read, and a genuinely 29-seed study is not alarmed
+        self.assertEqual(db._measured_seeds(joint()), 30)
+        self.assertNotIn("SAMPLE SIZE CONTRADICTED",
+                         db.render_scorecard(joint(expect=None, seeds=FZ.seeds[:29])))
+
+    def test_note_B_a_lying_width_tol_cannot_remove_the_protocol_tolerance(self):
+        """THE ATTESTER'S SECOND NOTE, and it is reported as a NOTE here too: NO VERDICT FLIP IS
+        CLAIMED. `min(c.width_tol, 0.25)` returned 1e9 pre-fix and `_weaker_than_protocol` was silent,
+        so the protocol-6.3 tolerance was removed with nothing said -- that much is measured. What is
+        NOT claimed is that it bought a decisive verdict: on every honest shape this file builds, the
+        floored tolerance leaves the page unchanged, and the one fixture where 6.3 alone decides
+        (`heavy_tailed`) fires on the DISAGREEMENT clause, which `width_tol` does not govern. Measured
+        below rather than asserted in prose, and the mechanism is closed regardless."""
+        for label, j in (("joint()", joint()), ("heavy_tailed()", heavy_tailed()),
+                         ("heavy_tailed(idx=7)", heavy_tailed(idx=7)),
+                         ("heavy_tailed(factor=500)", heavy_tailed(factor=500.0))):
+            honest = db.render_scorecard(j)
+            k = j
+            self.forge_liar(k, "ComponentResult", "width_tol", 1e9, shown=0.25)
+            c0 = k.h1.components[0]
+            h = db.render_scorecard(k)                                         # THE CONSEQUENCE FIRST
+            self.assertEqual(hyp_cells(h), hyp_cells(honest), label)           # NO flip, either way
+            self.assertEqual(joint_cell(h), joint_cell(honest), label)
+            self.assertNotIn("NOT shown", h, label)                            # not tampering, either
+            self.assertIn("WEAKER THAN THE PROTOCOL", h, label)                # but no longer SILENT
+            self.assertEqual(len(db._weaker_than_protocol(k)), 6, label)
+            self.assertIn("is wider than the protocol tolerance 0.25", db._weaker_than_protocol(k)[0])
+            self.assertIs(min(c0.width_tol, 0.25), c0.width_tol, label)        # the lie
+            self.assertEqual(db._finite_number(c0.width_tol), 1e9, label)      # admitted, normalised
+            self.assertIs(type(db._finite_number(c0.width_tol)), float, label)
+            self.assertEqual(min(db._finite_number(c0.width_tol), 0.25), 0.25, label)
+        self.assertNotIn("WEAKER THAN THE PROTOCOL", db.render_scorecard(joint()))   # not vacuous
+
+    def test_an_int_too_large_to_be_a_float_is_refused_not_raised(self):
+        """THE ROUND-7 BONUS DEFECT, which needed no subclass at all and is the reason the finiteness
+        test moved AFTER the normalisation. `math.isfinite(10**400)` RAISES OverflowError, so at the
+        round-6 tree `ComponentResult.margin = 10**400` made `render_scorecard` AND `render_dashboard`
+        raise -- a page taken down rather than a result refused, outside this module's error contract and
+        against its own docstring promise. `benchmark._plain_number` had closed exactly this case in its
+        own lane ("an int too large to be a float (`10**400`) -- which is how an OverflowError outside
+        this module's error contract used to escape `_check_margin`") and this module had not."""
+        self.assertIsNone(db._finite_number(10 ** 400))
+        self.assertIsNone(db._finite_number(-10 ** 400))
+        self.assertIsNone(db._finite_number(liar(10 ** 400, 1)))      # lies to math.isfinite as well
+        self.assertTrue(math.isfinite(liar(10 ** 400, 1)))            # ... measured, on the predicate
+        self.assertEqual(db._count(10 ** 400), 10 ** 400)             # kind "count" has no such test
+        for key in (("ComponentResult", "margin"), ("Margins", "delta_S"),
+                    ("ComponentResult", "width_tol")):
+            for bad in (10 ** 400, -10 ** 400, liar(10 ** 400, 1)):
+                j = forge_declared(joint_private_margins(), *key, bad)
+                h = db.render_scorecard(j)                            # must not raise
+                self.assertIn("UNKNOWN", h, (key, repr(bad)))
+                self.assertNotIn("vd-supported", joint_cell(h), (key, repr(bad)))
+                self.assertIn("NOT shown", h, (key, repr(bad)))
+                self.assertNotIn("REFUSED", db.render_dashboard({"joint": j}), (key, repr(bad)))
 
 
 if __name__ == "__main__":

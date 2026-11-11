@@ -25,6 +25,12 @@ from toy.robustness import ShiftKind as SK
 from toy.schema import (SCHEMA_VERSION, TOY_LABEL, EvidenceClass, ExperimentRecord, MetricValue,
                         canonical_json, derive_seed)
 
+# The field-coverage probe is shared with `test_schema` ON PURPOSE: two copies of it would be two things
+# to keep in step, which is the exact failure mode the probe exists to end. A RELATIVE import, so it
+# resolves both as `tests.toy_tests.test_robustness` (an owner's targeted run) and as
+# `toy_tests.test_robustness` (`unittest discover -s tests`, whose top-level dir is `tests`).
+from . import test_schema as ts
+
 SEEDS = tuple(derive_seed(11, f"s{k}") for k in range(12))
 SEEDS_B = tuple(derive_seed(12, f"s{k}") for k in range(12))
 CFG = rb.ProbeConfig(10)
@@ -1121,9 +1127,28 @@ class TestQAHardening(unittest.TestCase):
         self.assertNotIn("injected", sc.details)
         self.assertEqual(sc.content_hash(), before)
         doc = " ".join(rb.Scorecard.__doc__.split())
-        for needle in ("HONEST LIMITS, the complete list of routes known to this module",
+        for needle in ("HONEST LIMITS -- the routes THIS MODULE KNOWS OF, which is not a claim that "
+                       "they are all of them",
                        "gc.get_referents(card.details)[0]", "`to_dict()` is a true defensive copy"):
             self.assertIn(needle, doc)
+        # THE CLAIM THAT USED TO BE HERE, and why its own test needle had to move. This docstring said
+        # "HONEST LIMITS, the complete list of routes known to this module" and this assertion PINNED
+        # that wording, so the sentence was protected by a test while being false: a round-6 attestation
+        # produced a third route (a `MetricValue` SUBCLASS accepted onto a card, because `per_seed` was
+        # checked with `isinstance` where its two sibling checks demand `type(x) is ...`). The route is
+        # closed and named as limit (3); the word "complete" is gone, and it may not come back, because
+        # a list of routes is an assertion about ABSENCE and sweeping for routes cannot establish absence.
+        # The falsified wording may appear ONLY as an attributed correction, never as the docstring's own
+        # claim -- the convention `test_benchmark` and `ThePolicyParametersAreThemselvesPinned` both use.
+        self.assertNotIn("HONEST LIMITS, the complete list of routes", doc)
+        self.assertIn('this sentence used to say "the complete list of routes known to this module"', doc)
+        with self.assertRaises(ValueError):          # limit (3), closed: subclasses are refused
+            class Sub(MetricValue):
+                pass
+            rb.build_scorecard(probe_id="p", probe_kind="seed_sensitivity", seeds=tuple(range(1, 11)),
+                               per_seed=tuple(Sub(float(i), None) for i in range(1, 11)),
+                               cfg=rb.ProbeConfig(10), status_if_summarized=PS.MEASURED,
+                               details_always={})
         self.assertIn("gc.get_referents", " ".join(rb.__doc__.split()))
 
     def test_probe_config_defaults_are_constructed_per_call(self):
@@ -1471,7 +1496,21 @@ class EveryMetricReadSiteIsPinnedByItsConsequence(unittest.TestCase):
         """`arm_difference`'s two reads. The consequence is the returned `MetricValue`: explicitly
         unmeasured WITH a reason, and in particular NEVER `measured(0.0)` -- a missing arm reading as a
         zero contrast is the single most dangerous substitution in this kit, and
-        `probe_missing_inputs` asserts exactly that as a structural check."""
+        `probe_missing_inputs` asserts exactly that as a structural check.
+
+        THIS TEST NAMED THAT OUTCOME AS FORBIDDEN AND THEN SWEPT THE WRONG AXIS, for five rounds. It
+        forged the arms' VALUES (`forge(arms[which], bad)`) and left the arms' NAMES untouched -- and the
+        names are where the defect was. `nm not in arms` is `__hash__` plus `__eq__` on the caller's name
+        against the caller's keys, neither type-checked nor normalised. MEASURED in the unmodified tree,
+        no `object.__setattr__`: with ten seeds and the treatment arm NEVER RECORDED, a `str` subclass
+        holding "E" that hashes as "C0" and answers True to `__eq__` turned the honest
+        `MetricValue(value=None, reason="arm 'E' absent")` into `MetricValue(value=0.0, reason=None)`, and
+        the card recording it went INSUFFICIENT_EVIDENCE -> MEASURED with
+        `summary={"n": 10, "mean": 0.0, "sd": 0.0, ...}` and the UNKNOWN evidence label GONE. The names
+        axis is swept below, in this test rather than in a parallel one, because a test that forbids an
+        outcome in prose while sweeping one of its two inputs is worse than no test: it is a reason not to
+        look again. `arm_difference`'s names are function PARAMETERS, so the
+        `toy.schema._normalise_fields` boundary cannot reach them; they are normalised where they bind."""
         self.assertEqual(rb.arm_difference({"C0": MetricValue.measured(1.0),
                                             "E": MetricValue.measured(5.0)}, "E", "C0"),
                          MetricValue.measured(4.0))                            # the control
@@ -1484,6 +1523,66 @@ class EveryMetricReadSiteIsPinnedByItsConsequence(unittest.TestCase):
                 self.assertFalse(rb._metric_ok(got), why)
                 self.assertNotEqual(got, MetricValue.measured(0.0), why)
                 self.assertIn(f"arm {which!r} unmeasured", got.reason, why)
+
+        # ---- THE NAMES AXIS, the one this test used to leave unswept ----
+        def liar(text, hashes_as):
+            class Name(str):
+                def __hash__(self):
+                    return hash(hashes_as)
+
+                def __eq__(self, other):
+                    return True
+
+                def __ne__(self, other):
+                    return False
+            return Name(text)
+        present = {"C0": MetricValue.measured(3.0)}
+        honest = rb.arm_difference(present, "E", "C0")
+        self.assertEqual(honest, MetricValue(value=None, reason="arm 'E' absent"))      # the control
+        for pos, args, absent in (("treatment", (liar("E", "C0"), "C0"), "E"),
+                                  ("control", ("C0", liar("Ctrl", "C0")), "Ctrl")):
+            got = rb.arm_difference(present, *args)
+            why = (pos, absent)
+            self.assertFalse(rb._metric_ok(got), why)
+            self.assertNotEqual(got, MetricValue.measured(0.0), why)
+            self.assertIsNone(got.value, why)
+            self.assertEqual(got.reason, f"arm {absent!r} absent", why)
+        # a name that is not a usable name at all is a loud ValueError, not a zero
+        for bad in (None, 7, b"E", "", "  ", ["E"]):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                rb.arm_difference(present, bad, "C0")
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                rb.arm_difference(present, "C0", bad)
+        with self.assertRaises(ValueError):
+            rb.arm_difference([("C0", MetricValue.measured(3.0))], "E", "C0")     # not a Mapping
+        # the ARMS KEYS are the other half of the same membership test
+        keyed = {liar("C0", "C0"): MetricValue.measured(3.0)}
+        g = rb.arm_difference(keyed, "E", "C0")
+        self.assertIsNone(g.value)
+        self.assertIn("arm 'E' absent", g.reason)
+        # an honest name that IS present still reads as a measurement, so the fix adds no false absence
+        self.assertEqual(rb.arm_difference({"C0": MetricValue.measured(1.0),
+                                            "E": MetricValue.measured(5.0)},
+                                           liar("E", "E"), liar("C0", "C0")),
+                         MetricValue.measured(4.0))
+
+        # ---- THE CARD, which is where a reader meets the consequence ----
+        def card_for(treatment):
+            arms = {"C0": MetricValue.measured(3.0)}
+            return rb.build_scorecard(
+                probe_id="armdiff", probe_kind="seed_sensitivity", seeds=tuple(range(1, 11)),
+                per_seed=tuple(rb.arm_difference(arms, treatment, "C0") for _ in range(10)),
+                cfg=rb.ProbeConfig(10), status_if_summarized=PS.MEASURED, details_always={})
+        base = card_for("E")
+        self.assertIs(base.status, PS.INSUFFICIENT_EVIDENCE)                   # the honest card
+        self.assertIsNone(base.summary)
+        self.assertIn(EvidenceClass.UNKNOWN, base.evidence_labels)
+        forged_card = card_for(liar("E", "C0"))
+        self.assertIs(forged_card.status, PS.INSUFFICIENT_EVIDENCE)
+        self.assertIsNone(forged_card.summary)
+        self.assertIn(EvidenceClass.UNKNOWN, forged_card.evidence_labels)
+        self.assertNotIn(EvidenceClass.TOY_RESULT, forged_card.evidence_labels)
+        self.assertEqual(forged_card.content_hash(), base.content_hash())
         # and the structural check that reports it is itself asserted, on a real probe card
         card = rb.probe_missing_inputs(rb.mse_fsum, tuple(range(1, 13)), rb.ProbeConfig(3))
         self.assertTrue(card.details["structural_checks"]["absent_arm_gives_unmeasured"])
@@ -1702,12 +1801,12 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
             if isinstance(fn, ast.FunctionDef):
                 for sub in ast.walk(fn):
                     owner.setdefault(id(sub), fn.name)
-        qual = {}
-        for cls in ast.walk(tree):
-            if isinstance(cls, ast.ClassDef):
-                for fn in cls.body:
-                    if isinstance(fn, ast.FunctionDef):
-                        qual[fn.name, fn.lineno] = f"{cls.name}.{fn.name}"
+        spans = [(fn.lineno, fn.end_lineno, f"{cls.name}.{fn.name}")
+                 for cls in ast.walk(tree) if isinstance(cls, ast.ClassDef)
+                 for fn in cls.body if isinstance(fn, ast.FunctionDef)]
+
+        def qualify(lineno, name):
+            return next((q for a, b, q in spans if a <= lineno <= b), name)
         sites = sorted({(n.lineno, owner.get(id(n), "<module>"))
                         for n in ast.walk(tree) if isinstance(n, ast.Compare)
                         for sub in ast.walk(n)
@@ -1717,10 +1816,14 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
                          f"the SEED_FLOOR comparison sites moved: {sites}")
         self.assertEqual(len(sites), 4, f"SEED_FLOOR is compared at {len(sites)} sites, not 4: {sites}")
         self.assertEqual(len({ln for ln, _ in sites}), 4)            # the line-number dedup is the point
-        # and the two "__post_init__" entries really are two DIFFERENT functions
-        classes = sorted({qual[k] for k in qual if k[0] == "__post_init__"})
-        self.assertEqual(classes, ["InsufficientEvidence.__post_init__", "ProbeConfig.__post_init__",
-                                   "Scorecard.__post_init__", "SeedSummary.__post_init__"])
+        # and the two "__post_init__" entries really are two DIFFERENT functions. Qualified FROM THE
+        # SITES' OWN LINE NUMBERS, not from a census of every `__post_init__` in the module: the census
+        # version broke the moment the subclass-normalisation boundary gave `MeasureFixture` and
+        # `ShiftSpec` a `__post_init__` apiece, which compare nothing against `SEED_FLOOR` and were
+        # never what this assertion was about. A test of "the four sites" must be derived from the four
+        # sites.
+        classes = sorted({qualify(ln, f) for ln, f in sites if f == "__post_init__"})
+        self.assertEqual(classes, ["ProbeConfig.__post_init__", "SeedSummary.__post_init__"])
         # ---- THE PATH COUNT, MEASURED (this is what the previous version only text-pinned): the four
         # direct sites plus every DELEGATION, i.e. every call to a gatekeeper outside its own definition.
         gates = {"ProbeConfig", "_recheck_summary"}
@@ -2139,6 +2242,91 @@ class AMeasureCannotDecideItsOwnProbe(unittest.TestCase):
         self.assertIs(loose.status, PS.PRECISION_OK)
         self.assertEqual(loose.details["tolerance"], 1e-6)
 
+    def test_a_lying_reorder_tolerance_cannot_report_an_invariance_that_failed(self):
+        """ROUND-6 FINDING 4: `shift_reorder_rows`'s `rel_tol`, the UN-SWEPT SIBLING of the `tol` the
+        test above pins. The two are the same shape one level apart -- a caller-supplied number that is
+        the right operand of the comparison deciding the status -- and round 5 fixed `tol`, wrote the
+        lesson into `probe_precision`'s comment, and left `rel_tol` alone. That is the failure mode of a
+        hand-maintained list of normalisation sites, and it is why the fix of this round is a boundary
+        and not a thirteenth call site.
+        `rel_tol` is captured in the `bound` closure and MULTIPLIED there (`rel_tol * abs(e)`), i.e.
+        `type(rel_tol).__mul__`. MEASURED through the public factory, no `object.__setattr__`, on a
+        measure that genuinely violates permutation invariance:
+            honest -> INVARIANCE_DEFECT, n_violations=12, max_abs_dev=9.11e-03
+            forged -> INVARIANCE_HOLDS,  n_violations=0,  max_abs_dev=9.11e-03
+        The forged card SELF-CONTRADICTS -- it serialises a nonzero worst deviation beside a violation
+        count of zero -- which is the signature this kit keeps producing when a comparison and a stored
+        number come from two different objects."""
+        class BigTol(float):
+            """Stores 0.0, multiplies to 1e9. Lies in ONE dunder, and in neither comparison."""
+            def __mul__(self, other):
+                return 1e9
+
+            def __rmul__(self, other):
+                return 1e9
+
+        seeds, tol_kind = SEEDS, SK.INVARIANCE_TOLERANCE
+        honest = rb.probe_shift(row_weighted_mse, rb.shift_reorder_rows(tol_kind, 0.0), seeds, CFG)
+        self.assertIs(honest.status, PS.INVARIANCE_DEFECT)      # the control: the defect IS detected
+        self.assertEqual(honest.details["n_violations"], len(seeds))
+        card = rb.probe_shift(row_weighted_mse, rb.shift_reorder_rows(tol_kind, BigTol(0.0)), seeds, CFG)
+        self.assertIs(card.status, PS.INVARIANCE_DEFECT)
+        self.assertEqual(card.details["n_violations"], honest.details["n_violations"])
+        self.assertEqual(card.details["violating_seeds"], honest.details["violating_seeds"])
+        self.assertEqual(card.details["max_abs_dev"], honest.details["max_abs_dev"])
+        self.assertEqual(card.content_hash(), honest.content_hash())
+        # the honest direction: a tolerance the deviation really meets still reads INVARIANCE_HOLDS, and
+        # it does so for a SUBCLASS holding that tolerance -- the fix must not refuse a legitimate value
+        loose = rb.probe_shift(row_weighted_mse, rb.shift_reorder_rows(tol_kind, 1.0), seeds, CFG)
+        self.assertIs(loose.status, PS.INVARIANCE_HOLDS)
+
+        class PlainSub(float):
+            pass
+        same = rb.probe_shift(row_weighted_mse, rb.shift_reorder_rows(tol_kind, PlainSub(1.0)), seeds, CFG)
+        self.assertEqual(same.content_hash(), loose.content_hash())
+        # and `standard_shifts`, the public path that forwards this parameter, forwards the fix with it
+        spec = next(s for s in rb.standard_shifts(tol_kind, BigTol(0.0)) if s.name == "reorder_rows")
+        self.assertIs(rb.probe_shift(row_weighted_mse, spec, seeds, CFG).status, PS.INVARIANCE_DEFECT)
+
+    def test_a_lying_deviation_bound_cannot_report_an_invariance_that_failed(self):
+        """The GENERAL FORM of the finding above, and the last un-normalised number on this path:
+        `bound = 0.0 if exact_kind else float(spec.bound(base, exp, fx2))`. A bare `float()` consults a
+        `__float__` OVERRIDE, while `measure`'s and `spec.expected`'s returns -- four and seven lines up
+        in the same `try` -- both go through `_plain_measure`. `spec.bound` is public: a caller supplies
+        the spec, and every built-in `ShiftSpec` computes its bound from caller-supplied numbers.
+        `ShiftSpec.bound` is exempt from the field-normalisation boundary BECAUSE it is a callable, and
+        its exemption reason names this call site as where its return is normalised instead."""
+        class LyingBound(float):
+            def __float__(self):
+                return 1e9
+
+        base = rb.shift_reorder_rows(SK.INVARIANCE_TOLERANCE, 0.0)
+        honest = rb.probe_shift(row_weighted_mse, base, SEEDS, CFG)
+        self.assertIs(honest.status, PS.INVARIANCE_DEFECT)                      # the control
+        card = rb.probe_shift(row_weighted_mse,
+                              dataclasses.replace(base, bound=lambda b, e, fx: LyingBound(0.0)),
+                              SEEDS, CFG)
+        self.assertIs(card.status, PS.INVARIANCE_DEFECT)
+        self.assertEqual(card.details["n_violations"], honest.details["n_violations"])
+        self.assertEqual(card.content_hash(), honest.content_hash())
+        # a bound that is not a usable number at all makes the seed unmeasured with a reason -- the
+        # fail-closed outcome this probe already uses for a measure that rejects its input -- never 0.0
+        for bad in (None, "0.0", float("inf"), float("nan"), [0.0]):
+            c = rb.probe_shift(rb.mse_fsum, dataclasses.replace(base, bound=lambda b, e, fx, _v=bad: _v),
+                               SEEDS, CFG)
+            self.assertIs(c.status, PS.INSUFFICIENT_EVIDENCE, repr(bad))
+            self.assertTrue(all(not m.is_measured for m in c.per_seed), repr(bad))
+            self.assertIn("deviation bound", c.per_seed[0].reason, repr(bad))
+        # the exemption is declared, and its reason names where the return is normalised
+        self.assertIn("_plain_measure", rb.ShiftSpec._NORMALISE_EXEMPT["bound"])
+        # an INVARIANCE_EXACT spec ignores the bound entirely, which must stay true
+        exact = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), SEEDS, CFG)
+        self.assertIs(exact.status, PS.INVARIANCE_HOLDS)
+        self.assertIs(rb.probe_shift(rb.mse_fsum,
+                                     dataclasses.replace(rb.shift_reorder_rows(),
+                                                         bound=lambda b, e, fx: LyingBound(0.0)),
+                                     SEEDS, CFG).status, PS.INVARIANCE_HOLDS)
+
     def test_a_lying_param_cannot_make_the_card_describe_another_probe(self):
         """`param` was used as `int(param)` (how many values are accumulated) and recorded as
         `float(param)`: two independently overridable conversions of one never-normalised argument, so
@@ -2224,6 +2412,94 @@ class AForgedOutcomeCannotBecomeAZeroVarianceMeasurement(unittest.TestCase):
         self.assertIn("WHY THERE IS NO `float.__float__` HERE", doc)
         self.assertIn("it never compares or computes with it", doc)
         self.assertIn("a mutant removing it survives every test", doc)
+
+
+class EveryDataclassFieldIsNormalisedOrExplicitlyExempt(unittest.TestCase):
+    """THE ROUND-6 FIX, on this module's six dataclasses. The twin of
+    `test_schema.EveryDataclassFieldIsNormalisedOrExplicitlyExempt`, and it reuses that file's shared
+    body so the two cannot drift apart -- which is the failure mode this whole class exists to end.
+
+    What it asserts, per class: that the class is in the registry at all (a NEW dataclass fails closed);
+    that `_normalise_fields(self)` is the FIRST statement of its `__post_init__` (a call placed after a
+    gate normalises nothing the gate used); and that every field is either stored PLAIN when handed a
+    subclass instance, or refused with a `ValueError`, or named in `_NORMALISE_EXEMPT` with a nonblank
+    reason. The field list comes from `dataclasses.fields()` and the class list from the module, so
+    adding a field DEFAULTS TO COVERED rather than defaulting to forgotten.
+    NOT COVERED BY IT, stated so the coverage is not read as larger than it is: a function parameter and
+    a closure variable are not fields. `arm_difference`'s arm names, `shift_reorder_rows`'s `rel_tol`,
+    `probe_precision`'s `tol` / `param` and `probe_shift`'s three callable returns are normalised where
+    they are bound or consumed, and each has its own consequence test in this file."""
+
+    def fixtures(self):
+        return {
+            rb.ProbeConfig: lambda: rb.ProbeConfig(10),
+            rb.InsufficientEvidence: lambda: rb.InsufficientEvidence(3, 10, "3 measured of 10"),
+            rb.SeedSummary: lambda: rb.SeedSummary.from_values([1.0, 2.0, 3.0]),
+            rb.Scorecard: sc_simple,
+            rb.MeasureFixture: lambda: rb.make_measure_fixture(1),
+            rb.ShiftSpec: rb.shift_reorder_rows,
+        }
+
+    def test_robustness_fields_are_covered_or_exempt_with_a_reason(self):
+        ts.assert_fields_are_covered_or_exempt(self, rb, self.fixtures(), expected_counts=(35, 3))
+
+    def test_the_three_exemptions_are_the_three_callables_and_say_why(self):
+        """An exemption list is only worth having if each entry carries a reason a reader can check. All
+        three are `ShiftSpec`'s callables: a callable stores no scalar to collapse, and what it RETURNS
+        is normalised where it is consumed."""
+        ex = dict(rb.ShiftSpec._NORMALISE_EXEMPT)
+        self.assertEqual(sorted(ex), ["bound", "expected", "transform"])
+        for name, why in ex.items():
+            self.assertIn("callable", why, name)
+        self.assertIn("MeasureFixture.__post_init__", ex["transform"])
+        self.assertIn("_plain_measure", ex["expected"])
+        self.assertIn("_plain_measure", ex["bound"])
+        # and no OTHER class in the module exempts anything
+        for cls in self.fixtures():
+            if cls is not rb.ShiftSpec:
+                self.assertEqual(dict(getattr(cls, "_NORMALISE_EXEMPT", {})), {}, cls.__name__)
+
+    def test_an_honest_card_is_byte_identical_under_the_boundary(self):
+        """The boundary must be invisible to honest data: it preserves container IDENTITY when nothing
+        needed collapsing, so neither a stored `content_hash` nor an allocation pattern moved."""
+        card = sc_simple()
+        self.assertEqual(card.content_hash(), sc_simple().content_hash())
+        self.assertEqual(_impure_rb(card, "card"), [])
+        fx = rb.make_measure_fixture(1)
+        self.assertIs(rb.MeasureFixture(fx.seed, fx.pred, fx.target, fx.mask).pred, fx.pred)
+        spec = rb.shift_reorder_rows()
+        self.assertIs(dataclasses.replace(spec, rationale=spec.rationale).bound, spec.bound)
+        # a card built from subclass-wrapped fields is the same card, byte for byte
+        kw = {f.name: getattr(card, f.name) for f in dataclasses.fields(card)}
+        lied = rb.Scorecard(**{k: ts._subclassed(v) for k, v in kw.items()})
+        self.assertEqual(lied.content_hash(), card.content_hash())
+        self.assertEqual(_impure_rb(lied, "card"), [])
+
+    def test_the_boundary_did_not_weaken_a_single_existing_refusal(self):
+        """A normaliser that quietly became a coercion would be worse than the defect: it would make
+        values this module refuses by TYPE acceptable. Every stated refusal is re-asserted."""
+        with self.assertRaises(ValueError):
+            rb.ProbeConfig(True)                               # bool is not a count
+        with self.assertRaises(ValueError):
+            rb.ProbeConfig(rb.SEED_FLOOR - 1)
+        with self.assertRaises(ValueError):
+            rb.SeedSummary.from_values([True, False, True])     # booleans are never measurements
+        with self.assertRaises(ValueError):
+            rb.SeedSummary.from_values(["1", "2", "3"])         # nor numbers parsed out of text
+        with self.assertRaises(ValueError):
+            rb.InsufficientEvidence(10, 3, "backwards")
+        with self.assertRaises(ValueError):
+            dataclasses.replace(sc_simple(), seed_digest="0" * 64)
+        with self.assertRaises(ValueError):
+            dataclasses.replace(sc_simple(), does_not_establish=("THIS IS A SAFETY FINDING.",))
+        with self.assertRaises(ValueError):
+            dataclasses.replace(sc_simple(), probe_id="   ")
+        with self.assertRaises(ValueError):
+            dataclasses.replace(sc_simple(), status="MEASURED")  # a bare str is not a ProbeStatus
+
+
+def _impure_rb(v, path):
+    return ts._impure(v, path)
 
 
 if __name__ == "__main__":
