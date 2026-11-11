@@ -444,6 +444,27 @@ def fail_gate(j, name):
     return j
 
 
+def measured_n(j):
+    """The second source `db._recompute` / `db._pair_numbers_ok` now require: the study's OWN count of
+    measured seeds, `n_attempted - n_failed`, anchored on `seed_scores` (db._measured_seeds).
+
+    Every direct call to either function in this file goes through this helper or names the number
+    explicitly, so no test can silently hand the verdict path a `None` second source and be handed a
+    fail-closed it did not mean to ask for -- which would make a pass here mean nothing."""
+    return db._measured_seeds(j)
+
+
+def recompute(c, margins, j):
+    """`db._recompute` with the second source taken from the result the component came from."""
+    return db._recompute(c, margins, db._measured_seeds(j))
+
+
+def pair_ok(j, pair=None, c=None):
+    """`db._pair_numbers_ok` for one pair of `j`, with `min_n` and the second source read off `j`."""
+    c = j.h1.components[0] if c is None else c
+    return db._pair_numbers_ok(c.pair if pair is None else pair, c.min_n, db._measured_seeds(j))
+
+
 def joint_cell(h):
     return re.search(r"<b>Joint verdict:</b>.*?</p>", h).group(0)
 
@@ -1375,7 +1396,7 @@ class ProtocolParametersFailClosed(unittest.TestCase):
         self.assertIn("NOT shown", h)
         self.assertNotIn("vd-supported", joint_cell(h))
 
-    def spy_params(self, c, margins):
+    def spy_params(self, c, margins, j):
         """Capture the (width_tol, min_n) actually handed to the scorer."""
         seen = []
         real = bm.interval_verdict
@@ -1384,7 +1405,7 @@ class ProtocolParametersFailClosed(unittest.TestCase):
             seen.append((width_tol, min_n))
             return real(pair, margin, direction, width_tol, min_n)
         with mock.patch.object(bm, "interval_verdict", spy):
-            out = db._recompute(c, margins)
+            out = recompute(c, margins, j)
         return seen, out
 
     def test_weaker_than_protocol_parameters_never_reach_the_scorer(self):
@@ -1392,30 +1413,57 @@ class ProtocolParametersFailClosed(unittest.TestCase):
         c = j.h1.components[0]
         object.__setattr__(c, "min_n", 1)
         object.__setattr__(c, "width_tol", 1e9)
-        seen, out = self.spy_params(c, j.margins)
+        seen, out = self.spy_params(c, j.margins, j)
         self.assertEqual(seen, [(0.25, 30)])            # floored to the scorer's own declared protocol values
         self.assertIsNot(out, None)
 
     def test_stricter_than_protocol_parameters_are_honoured_not_overridden(self):
-        # proof that the floor is a FLOOR and not a hard-coded 30/0.25: a stricter config is passed through
+        """Proof that the floor is a FLOOR and not a hard-coded 30/0.25: a stricter declared parameter is
+        passed through to the scorer unweakened.
+
+        THIS TEST USED TO STOP AT THE SPY, which is the shape of defect this whole item is about -- it
+        asserted what reached `interval_verdict` and never asked what the PAGE then said. Measured
+        consequence: two mutants that add a read inside `_recompute` behind `if mn > 10**6` -- a branch
+        no other test in this file ever took -- survived the whole suite while turning a stricter
+        parameter into a decisive SUPPORTED. Neither is caught by any mechanism here (one reads an
+        UNDECLARED field, so the recording probe would see it only if its single honest render took that
+        branch; the other re-reads an ALREADY-DECLARED one, which an attribute-SET comparison cannot see
+        at all). Both die to the loop below, which is behavioural coverage of the branch itself: a
+        stricter minimum the run does not meet is INCONCLUSIVE, with an alarm, at every magnitude."""
         j = joint()
         c = j.h1.components[0]
         object.__setattr__(c, "min_n", 50)
         object.__setattr__(c, "width_tol", 0.1)
-        seen, _ = self.spy_params(c, j.margins)
+        seen, _ = self.spy_params(c, j.margins, j)
         self.assertEqual(seen, [(0.1, 50)])
+        # ... and the PAGE, over magnitudes either side of every threshold any branch could test on
+        for mn in (31, 50, 10 ** 6, 10 ** 6 + 1, 2_000_000, 10 ** 12):
+            k = joint()
+            for cc in all_components(k):
+                object.__setattr__(cc, "min_n", mn)
+            self.assertEqual(db._protocol_params()[1], 30)          # the floor is below every mn above
+            self.assertEqual(recompute(k.h1.components[0], k.margins, k), bm.Verdict.INCONCLUSIVE, mn)
+            h = db.render_scorecard(k)
+            self.assertEqual(set(hyp_cells(h).values()), {"INCONCLUSIVE"}, mn)
+            self.alarmed(h)
+            self.assertNotIn("JOINT_SUPPORTED", h, mn)
+            self.assertNotIn("WEAKER THAN THE PROTOCOL", h, mn)     # stricter is not weaker
+        # NOT VACUOUS: the same fixture at the honest min_n is decisive and silent.
+        clean = db.render_scorecard(joint())
+        self.assertIn("JOINT_SUPPORTED", joint_cell(clean))
+        self.assertNotIn("NOT shown", clean)
 
     def test_missing_or_malformed_parameters_are_could_not_recompute_not_a_default(self):
         for bad in (None, "x", float("nan"), float("inf"), True, -1.0, [], object()):
             j = joint()
             c = j.h1.components[0]
             object.__setattr__(c, "width_tol", bad)
-            self.assertIsNone(db._recompute(c, j.margins), f"width_tol={bad!r}")
+            self.assertIsNone(recompute(c, j.margins, j), f"width_tol={bad!r}")
         for bad in (None, "x", 1.5, True, -1, float("nan"), [], object()):
             j = joint()
             c = j.h1.components[0]
             object.__setattr__(c, "min_n", bad)
-            self.assertIsNone(db._recompute(c, j.margins), f"min_n={bad!r}")
+            self.assertIsNone(recompute(c, j.margins, j), f"min_n={bad!r}")
         # A field cannot be made ABSENT on a real ComponentResult: every one has a class-level default,
         # so `object.__delattr__` just falls back to it (min_n -> 30). The absent case is reached with a
         # stand-in component instead, which is what the `getattr(c, ..., None)` guard is actually for.
@@ -1429,13 +1477,26 @@ class ProtocolParametersFailClosed(unittest.TestCase):
             pair = c.pair
         self.assertFalse(hasattr(Stand(), "min_n"))
         self.assertFalse(hasattr(Stand(), "width_tol"))
-        self.assertIsNone(db._recompute(Stand(), j.margins))
-        self.assertIsNone(db._recompute(Stand(), None))
+        self.assertIsNone(recompute(Stand(), j.margins, j))
+        self.assertIsNone(recompute(Stand(), None, j))
+        # and a stand-in with no `pair` at all is 'could not recompute', not an exception
+        self.assertIsNone(db._recompute(object(), None, 30))
 
     def test_forged_min_n_cannot_launder_a_genuine_below_minimum_run(self):
         """The laundering route, with the gate NAME SET left intact so only this cross-check can catch it:
         a genuine n=29 run, its `min_seeds` gate flipped to passed in place, `blocking` cleared, every
-        stored verdict forged SUPPORTED, and `min_n` forged to 1."""
+        stored verdict forged SUPPORTED, and `min_n` forged to 1.
+
+        THE ONE-SIDED FLOOR IS STILL WHAT THIS TEST IS ABOUT, and it is still measured below (the
+        unforged half, and the rendered outcome). What CHANGED in round 5 is that the forged half is now
+        caught one step EARLIER, as 'could not recompute' rather than as a recomputation that floors to
+        INCONCLUSIVE: `_n_problem`'s second source is the pair's own `n below protocol minimum` flag,
+        which `summarize` appended because the real n (29) was below the real `min_seeds` (30), and
+        `n >= min_n` is now true of the FORGED `min_n` of 1. So the flag and the parameter contradict
+        each other, which only an edit can produce -- an honest `BenchmarkConfig(min_seeds=1)` run gets
+        no flag at all (measured: min_seeds 1/10/29/30/60 against 10 and 30 seeds, 0 contradictions).
+        The displayed page is unchanged either way, which is why this is recorded here rather than
+        treated as a behaviour change: INCONCLUSIVE everywhere, alarmed, no JOINT_SUPPORTED."""
         j = joint(expect=bm.JointVerdict.JOINT_INCONCLUSIVE, seeds=FZ.seeds[:29])
         self.assertEqual(j.h1.components[0].pair.n, 29)
         forge_gate_pass(j, "min_seeds")
@@ -1447,11 +1508,18 @@ class ProtocolParametersFailClosed(unittest.TestCase):
         for h_ in (j.h1, j.h2, j.h3):                    # now forge the protocol parameter too
             for c in (*h_.components, *(h_.converged_components or ())):
                 object.__setattr__(c, "min_n", 1)
-        self.assertEqual(db._recompute(j.h1.components[0], j.margins), bm.Verdict.INCONCLUSIVE)
+        self.assertIsNone(recompute(j.h1.components[0], j.margins, j))   # round 5: caught earlier
         h = db.render_scorecard(j)
         self.assertEqual(set(hyp_cells(h).values()), {"INCONCLUSIVE"}, "min_n forged to 1")
         self.alarmed(h)
         self.assertNotIn("JOINT_SUPPORTED", h)
+        # the FLOOR itself, unmasked by the new cross-check: with the pair's flags cleared so only the
+        # one-sided floor can act, the recomputation still runs and still refuses to be weakened.
+        for h_ in (j.h1, j.h2, j.h3):
+            for c in (*h_.components, *(h_.converged_components or ())):
+                object.__setattr__(c.pair, "flags", ())
+        self.assertEqual(recompute(j.h1.components[0], j.margins, j), bm.Verdict.INCONCLUSIVE)
+        self.assertEqual(set(hyp_cells(db.render_scorecard(j)).values()), {"INCONCLUSIVE"})
 
     def test_protocol_params_are_read_from_the_scorer_not_hard_coded(self):
         self.assertEqual(db._protocol_params(), (0.25, 30))
@@ -1499,13 +1567,13 @@ class DefenceInDepthLayersUnmasked(unittest.TestCase):
         # looks the same either way. Directly, HEAD must say 'could not recompute' (None), not UNSUPPORTED.
         j = joint()
         c = j.h1.components[0]
-        self.assertEqual(db._recompute(c, j.margins), bm.Verdict.SUPPORTED)
+        self.assertEqual(recompute(c, j.margins, j), bm.Verdict.SUPPORTED)
         object.__setattr__(c, "direction", "less")
-        self.assertIsNone(db._recompute(c, j.margins))
+        self.assertIsNone(recompute(c, j.margins, j))
         # the mutant's value, shown here so the difference is explicit and not merely asserted
         self.assertEqual(bm.interval_verdict(c.pair, float(c.margin), "less", 0.25, 30)[0],
                          bm.Verdict.UNSUPPORTED)
-        self.assertIsNotNone(db._recompute(c, None))       # without margins there is no declared direction
+        self.assertIsNotNone(recompute(c, None, j))        # without margins there is no declared direction
 
     def test_D11_declared_raises_for_an_unknown_metric(self):
         # masked because `_component_sets_ok` validates metric names before `_declared` is ever called
@@ -1519,7 +1587,7 @@ class DefenceInDepthLayersUnmasked(unittest.TestCase):
         j = joint()
         c = j.h1.components[0]
         object.__setattr__(c, "metric", "not_a_metric")
-        self.assertIsNone(db._recompute(c, j.margins))
+        self.assertIsNone(recompute(c, j.margins, j))
 
     def test_D20_unknown_gate_scope_forces_gates_not_ok(self):
         # masked because the identical clause in `_eff_hypothesis`'s `blocked` already forces INCONCLUSIVE
@@ -1880,7 +1948,7 @@ class NonDefaultConfigAndTheAnchorQuestion(unittest.TestCase):
         c = j.h1.components[0]
         self.assertEqual((c.min_n, c.width_tol, c.pair.n), (5, 0.9, 8))
         self.assertIs(j.verdict, bm.JointVerdict.JOINT_SUPPORTED)      # the scorer says SUPPORTED
-        self.assertEqual(db._recompute(c, j.margins), bm.Verdict.INCONCLUSIVE)   # the renderer floors it
+        self.assertEqual(recompute(c, j.margins, j), bm.Verdict.INCONCLUSIVE)    # the renderer floors it
         self.assertEqual({(0.25, 30)}, set(self.spy_width_tols(j)))
         h = db.render_scorecard(j)
         self.assertNotIn("vd-supported", joint_cell(h))                # never promoted
@@ -2094,18 +2162,32 @@ class MetricValueConsumersShareOneCheck(unittest.TestCase):
 
     def test_a_forged_non_finite_bound_cannot_buy_a_decisive_verdict(self):
         """FOUND WHILE FIXING `_interval`, and not part of the reported defect.
-        `IntervalPair.boot()` / `tint()` (benchmark.py) gate on `is_measured` alone, so a forged bound
-        reaches `interval_verdict` AS A NUMBER. Measured at HEAD with `boot_lo = boot_hi = inf`:
-        `lo > margin` is true, and the H1/S cell rendered a decisive `vd-supported` while
+
+        STALE AS WRITTEN, CORRECTED. This said, in the present tense, that "`IntervalPair.boot()` /
+        `tint()` (benchmark.py) gate on `is_measured` alone, so a forged non-finite bound reaches
+        `interval_verdict` AS A NUMBER". That WAS true and was reported upwards; it stopped being true
+        when `benchmark.IntervalPair._bound` was added, which DELEGATES to `_metric_read`, that module's
+        single checked reader, so a bound that is not a genuine finite number now reads as "interval not
+        computable" at the scorer and never reaches `_verdict_from_bounds` as a number at all.
+        What was MEASURED at the dashboard HEAD of that round, with `boot_lo = boot_hi = inf`:
+        `lo > margin` was true, and the H1/S cell rendered a decisive `vd-supported` while
         `_metric_cell` and `_interval` on the same pair said UNKNOWN -- a SUPPORTED row with no figures
-        behind it, which is worse than the `[0.0, 0.0]` this item started from. The recomputation now
-        fails closed on any bound that breaks `MetricValue`'s own invariant."""
+        behind it, which is worse than the `[0.0, 0.0]` this item started from.
+
+        WHY `_pair_numbers_ok` IS STILL WORTH HAVING NOW THAT `_bound` CLOSES THE BOUNDS. `_bound`
+        covers the four `MetricValue` bounds and nothing else. `pair.n` and `pair.level` are plain
+        numbers that `_bound` never sees: `interval_verdict` reads `pair.n` directly for protocol 6.1's
+        floor (the round-4 defect, G1, and `nan < 30` is False), and nothing in `benchmark` checks
+        `pair.level` at all. This renderer also may not DEPEND on `_bound`: it recomputes precisely so
+        that a change or regression in the scorer is a visible disagreement rather than a shared blind
+        spot, and `_bound` is in the scorer. So this test keeps asserting the renderer's own
+        fail-closed, and `pair.n`/`pair.level` remain covered only here."""
         for bad in (float("inf"), float("-inf"), float("nan"), 0, 1, True, "1e9"):
             j = joint()
             for h_ in (j.h1, j.h2, j.h3):
                 for c in (*h_.components, *(h_.converged_components or ())):
                     forge_bounds(c.pair, bad)
-            self.assertIsNone(db._recompute(j.h1.components[0], j.margins), repr(bad))
+            self.assertIsNone(recompute(j.h1.components[0], j.margins, j), repr(bad))
             h = db.render_scorecard(j)
             self.assertEqual(set(hyp_cells(h).values()), {"INCONCLUSIVE"}, repr(bad))
             self.assertNotIn("vd-supported", h, repr(bad))
@@ -2116,7 +2198,7 @@ class MetricValueConsumersShareOneCheck(unittest.TestCase):
         for h_ in (j.h1, j.h2, j.h3):
             for c in (*h_.components, *(h_.converged_components or ())):
                 forge_bounds(c.pair, None)
-        self.assertIs(db._recompute(j.h1.components[0], j.margins), bm.Verdict.INCONCLUSIVE)
+        self.assertIs(recompute(j.h1.components[0], j.margins, j), bm.Verdict.INCONCLUSIVE)
         h = db.render_scorecard(j)
         self.assertEqual(set(hyp_cells(h).values()), {"INCONCLUSIVE"})
         self.assertNotIn("vd-supported", h)
@@ -2124,29 +2206,32 @@ class MetricValueConsumersShareOneCheck(unittest.TestCase):
     def test_pair_numbers_ok_fails_closed_unmasked_and_never_false_fires(self):
         """Direct unit test: `_recompute` has several other ways to return None, so no other layer may
         be allowed to mask a fail-open here (the F-h lesson)."""
-        self.assertTrue(db._pair_numbers_ok(joint().h1.components[0].pair))
+        j = joint()
+        self.assertTrue(pair_ok(j))
         for bad in BREAKS_MV_INVARIANT:
-            self.assertFalse(db._pair_numbers_ok(forge_bounds(joint().h1.components[0].pair, bad)),
-                             repr(bad))
+            k = joint()
+            self.assertFalse(pair_ok(k, pair=forge_bounds(k.h1.components[0].pair, bad)), repr(bad))
         for field in ("boot_lo", "boot_hi", "t_lo", "t_hi"):           # one bad bound is enough
-            self.assertFalse(db._pair_numbers_ok(
-                forge_bounds(joint().h1.components[0].pair, float("inf"), (field,))), field)
+            k = joint()
+            self.assertFalse(
+                pair_ok(k, pair=forge_bounds(k.h1.components[0].pair, float("inf"), (field,))), field)
             k = joint()                                                 # and a non-MetricValue bound
             object.__setattr__(k.h1.components[0].pair, field, 1.0)
-            self.assertFalse(db._pair_numbers_ok(k.h1.components[0].pair), field)
+            self.assertFalse(pair_ok(k), field)
         for junk in (None, object(), "pair", 0):
-            self.assertFalse(db._pair_numbers_ok(junk), repr(junk))
+            self.assertFalse(db._pair_numbers_ok(junk, 30, 30), repr(junk))
         # NO FALSE FIRE: a genuinely unmeasured bound (n < 2) satisfies MetricValue's invariant
-        self.assertTrue(db._pair_numbers_ok(joint(expect=None, seeds=FZ.seeds[:1]).h1.components[0].pair))
+        k = joint(expect=None, seeds=FZ.seeds[:1])
+        self.assertTrue(pair_ok(k))
         k = joint()
         object.__setattr__(k.h1.components[0].pair, "boot_lo", MetricValue.unmeasured("failed"))
-        self.assertTrue(db._pair_numbers_ok(k.h1.components[0].pair))
+        self.assertTrue(pair_ok(k))
         for kw in (dict(), dict(expect=None, S=0.0), dict(expect=None, conv=False),
                    dict(expect=None, L=1.0), dict(expect=None, seeds=FZ.seeds[:29])):
             j = joint(**kw)
             for h_ in (j.h1, j.h2, j.h3):
                 for c in (*h_.components, *(h_.converged_components or ())):
-                    self.assertTrue(db._pair_numbers_ok(c.pair), repr(kw))
+                    self.assertTrue(pair_ok(j, c=c), repr(kw))
         self.assertNotIn("NOT shown", db.render_scorecard(joint()))     # honest page still clean
 
 
@@ -2329,8 +2414,12 @@ class SnapshotTotalsPinned(unittest.TestCase):
 SCORER_CLASSES = {"IntervalPair": bm.IntervalPair, "ComponentResult": bm.ComponentResult,
                   "Margins": bm.Margins, "JointResult": bm.JointResult}
 
-# Hostile values per KIND. Each list is "everything an honest producer of a field of this kind cannot
-# emit", so the sweep below is the kind's own rejection set rather than one hand-picked per field.
+# Hostile values per KIND: everything an honest producer of a field of this kind cannot emit BECAUSE OF
+# ITS TYPE. Round 4 wrote that as "everything an honest producer of a field of this kind cannot emit",
+# full stop, and the sweep over it was this module's whole answer for a stored number -- which is how
+# round 5 happened. See `LEGAL_BUT_WRONG` below: these lists contain not one legal `int`, and an honest
+# producer of `pair.n` on a 29-seed run cannot emit the legal int `30` either. A type table cannot refuse
+# a legal value; only a second source can, so the two tables are separate and both are swept.
 HOSTILE_BY_KIND = {
     "mv": BREAKS_MV_INVARIANT,                              # forged into MetricValue.value
     "float": (0, 1, 30, -1, "0.5", "", [], {}, (), object(), None, True, False,
@@ -2359,6 +2448,71 @@ FIGURE_CAVEAT = {("IntervalPair", "mean"): "malformed measured value",
                  ("Margins", "delta_sel"): "delta_sel is not a finite number",
                  ("JointResult", "n_attempted"): "not recorded",
                  ("JointResult", "n_failed"): "not recorded"}
+
+# ---------------------------------------------------------------------------------------------------------
+# SR-13 round 5: LEGAL-BUT-WRONG VALUES, and the enumeration of which declared numbers can have one.
+#
+# "When a type is the attack surface, enumerate its consumers, not its inputs" is this project's own
+# standing rule, and round 4 applied it to one half of the problem and reversed it on the other: the
+# CONSUMERS were enumerated by machine (the recording probe) while the INPUTS went back to being a list
+# kept by hand -- a list of ill-typed values, which is the only kind of list a type predicate can act on.
+# The gap it left is not a missing consumer and not a missing hostile type. It is that `_count(30)` is
+# correct and `pair.n = 30` on a 29-seed run is a forgery, and those two facts are compatible.
+#
+# So every declared number is classified below by WHETHER THE RESULT CONTAINS A SECOND SOURCE FOR IT,
+# into exactly one of three dicts whose union must be exactly `db.STORED_NUMBERS`
+# (`test_every_declared_number_is_classified_by_its_second_source`). A new declared number cannot be
+# added without saying which it is, and the two classes that have one get a legal-but-wrong sweep that
+# asserts the VERDICT and the ALARM -- the same rule as the type sweep, over the other half of the space.
+SECOND_SOURCE = {
+    ("IntervalPair", "n"):
+        "joint.n_attempted - joint.n_failed (itself anchored on joint.seed_scores), and the pair's own "
+        "'n below protocol minimum' flag against the component's declared min_n",
+    ("JointResult", "n_attempted"): "len(joint.seed_scores)",
+    ("JointResult", "n_failed"): "the number of not-ok entries in joint.seed_scores",
+    ("ComponentResult", "margin"): "joint.margins, via the protocol tables (db._declared)",
+    ("Margins", "delta_S"): "the H1 component's own `margin` field (db._declared)",
+    ("Margins", "delta_R"): "the H2 component's own `margin` field (db._declared)",
+    ("Margins", "delta_sel"): "the H3 components' own `margin` fields (db._declared)",
+}
+# A legal-but-wrong value here cannot be REFUSED, because an honest producer may emit it: these are
+# protocol parameters the component merely asserts, and a weaker-than-protocol value is produced by an
+# honest non-compliant `BenchmarkConfig` as well as by an edit (argued at `db._weaker_than_protocol`).
+# They are instead NEUTRALISED by `_recompute`'s one-sided floor, so what must hold is that they cannot
+# change what the page displays. The STRICTER direction is honoured in full and does change it, which is
+# `test_stricter_than_protocol_parameters_are_honoured_not_overridden`, not this sweep.
+NEUTRALISED_BY_A_FLOOR = {
+    ("ComponentResult", "min_n"): "max(c.min_n, the scorer's declared min_n default)",
+    ("ComponentResult", "width_tol"): "min(c.width_tol, the scorer's declared width_tol default)",
+}
+# RESIDUALS, stated rather than quietly absent. Each is already documented in dashboard.py; this table
+# exists so that "no second source" is a recorded decision per field instead of an omission per field.
+NO_SECOND_SOURCE = {
+    ("IntervalPair", "mean"): "the interval itself is producer-asserted; a self-consistent forged pair "
+                              "under a correctly named component is the residual documented at _recompute",
+    ("IntervalPair", "boot_lo"): "as `mean`", ("IntervalPair", "boot_hi"): "as `mean`",
+    ("IntervalPair", "t_lo"): "as `mean`", ("IntervalPair", "t_hi"): "as `mean`",
+    ("IntervalPair", "level"): "a second source IS on the page (bm.bonferroni_level in the family line) "
+                               "and is deliberately not used: an honest pair's level is "
+                               "bonferroni_level(cfg.alpha, N_PRIMARY), BenchmarkConfig.alpha is settable "
+                               "and JointResult carries only an opaque config_hash, so comparing them "
+                               "would false-fire on every honest non-default-alpha study -- the same "
+                               "undecidability as min_n. `level` also reaches no verdict at all.",
+}
+# Values of the RIGHT TYPE that an honest producer of this field cannot emit on the fixture named in the
+# sweep. `None` means "use the default 30-seed fixture"; `pair.n` additionally gets the 29-seed fixture
+# of the reported defect, in test_G3.
+LEGAL_BUT_WRONG = {
+    ("IntervalPair", "n"): (31, 50, 1000),             # a 30-seed study has no 31-seed component
+    ("JointResult", "n_attempted"): (29, 31, 100, 0),  # contradicts len(seed_scores) == 30
+    ("JointResult", "n_failed"): (1, 5, 30),           # contradicts "no entry of seed_scores is not-ok"
+    ("ComponentResult", "margin"): (0.0, 0.2, 1.0, -1.0),   # != Margins() delta_S 0.10 / R 0.05 / sel 0.10
+    ("Margins", "delta_S"): (0.0, 0.2, 1.0, -1.0),
+    ("Margins", "delta_R"): (0.0, 0.2, 1.0, -1.0),
+    ("Margins", "delta_sel"): (0.0, 0.2, 1.0, -1.0),
+    ("ComponentResult", "min_n"): (0, 1, 5, 29),       # weaker than the protocol's 30: neutralised
+    ("ComponentResult", "width_tol"): (0.9, 1, 1e9),   # wider than the protocol's 0.25: neutralised
+}
 
 
 def all_components(j):
@@ -2391,7 +2545,42 @@ def recording_subclass(base, bucket):
     """A subclass of a scorer dataclass that records every attribute name read off it.
 
     `isinstance(x, base)` still holds, so `_joint_wellformed` still accepts the result and the render
-    takes its normal path -- which is the point: the probe observes the REAL render, not a model of it."""
+    takes its normal path -- which is the point: the probe observes the REAL render, not a model of it.
+
+    WHAT THIS PROBE COVERS, AND WHAT IT DOES NOT. Stated here because the two rounds before this one
+    each shipped a mechanism whose docstring claimed more than the mechanism did, and the claim is what
+    the next round had to disprove. MEASURED, one spelling per run, reading `IntervalPair.n`:
+
+        p.n | getattr(p, "n" + "") | attrgetter("n")(p) | comprehension | lambda      -> SEEN
+        p.__getattribute__("n")                                                       -> SEEN
+        dataclasses.asdict(p)["n"]                                                    -> SEEN*
+        vars(p)["n"]            -> BLIND   (the bucket gets `__dict__`, which the filter discards)
+        p.__dict__["n"]         -> BLIND   (same)
+        object.__getattribute__(p, "n")  -> BLIND   (the bucket stays EMPTY: `__getattribute__` is
+                                  bypassed entirely, so the subclass is never consulted)
+
+    So: ANY SPELLING THAT BYPASSES `__getattribute__` IS OUTSIDE THIS PROBE. Two of them are
+    lint-clean by design -- `CLEAN_CLONE.md` deliberately leaves mapping reflection uncovered -- and
+    both were measured to survive the whole suite while changing behaviour (forging `pair.n_boot = -1`
+    through `vars(c.pair)["n_boot"]` gave JOINT_SUPPORTED with no alarm where HEAD gives INCONCLUSIVE),
+    so a contributor could ship either through lint AND the suite.
+    (*) `asdict` is seen, but it reads EVERY field, so the probe fails in the other direction, naming
+    `n_boot`/`sd`/`iqr`/`minimum`/`maximum`/`max_over_median_abs` as read-but-undeclared: a true alarm
+    with a misleading list.
+
+    IT ALSO SEES ONLY WHAT ITS ONE RENDER EXERCISES. The probe renders a single honest dashboard, so a
+    read behind a branch that render never takes is invisible: a plain-attribute read of an UNDECLARED
+    field behind `if mn > 10**6` survived, and forging `min_n = 2_000_000` then gave JOINT_SUPPORTED
+    with no alarm. And because the probe compares attribute SETS, a SECOND read of an ALREADY-DECLARED
+    number is invisible by construction, exercised branch or not.
+
+    WHAT IS THEREFORE NOT RELIED ON. This probe is a convenience that names a new consumer early; it is
+    not the guarantee. The guarantee is behavioural: `EveryForgedNumberIsCheckedAtTheVerdictAndTheAlarm`
+    and `TypeIsNotTheWholeOfAdmission` forge each declared number and assert the VERDICT CELL and the
+    ALARM, and a test of that shape dies no matter how the read is spelled, which branch it sits behind,
+    or whether any mechanism noticed it. The probe's own non-vacuity guard is working and is load-bearing
+    for what it does cover: an undeclared read by plain attribute on the exercised path is killed, by
+    `assertNotIn("n_boot", bucket)` in `test_the_probe_itself_is_not_vacuous`."""
     class Rec(base):
         def __getattribute__(self, name):
             bucket.add(name)
@@ -2461,7 +2650,22 @@ class StoredNumbersAreEnumeratedNotAsserted(unittest.TestCase):
         "correct but separate" inline check behind, and a separate check is what drifts.
 
     Together they mean a future reader cannot add an unchecked consumer of a stored number: either the
-    attribute is undeclared (probe fails) or the check is written inline (source test fails)."""
+    attribute is undeclared (probe fails) or the check is written inline (source test fails).
+
+    THAT LAST SENTENCE IS OVERSTATED AND IS KEPT WITH ITS CORRECTION ATTACHED, because an overstated
+    claim about a mechanism is what each of the last three rounds had to disprove. Four mutants were
+    measured to survive both tests: the same consumer spelled `vars(c.pair)["n_boot"]` or
+    `c.pair.__dict__["n_boot"]` (both outside `__getattribute__`, both lint-clean by design, both with a
+    demonstrated behaviour change), an undeclared read behind a branch this probe's single render never
+    takes, and a duplicate read of an already-DECLARED number, which an attribute-SET comparison cannot
+    see at all. `recording_subclass`' docstring records the measurements.
+
+    AND ROUND 5 WAS NOT ANY OF THOSE. It needed no unseen consumer: `pair.n` was declared, routed and
+    swept, and a legal `int` still laundered a below-minimum run, because these two tests check WHETHER a
+    number is admitted and not WHETHER THE VALUE IS BELIEVABLE. See `SECOND_SOURCE` and
+    `TypeIsNotTheWholeOfAdmission`. The weight is therefore on the behavioural sweeps, which die
+    regardless of spelling, branch or mechanism; these two remain because naming a new consumer by
+    machine is cheaper than finding it by review, not because they close the space."""
 
     def probe(self, cls_name):
         bucket = set()
@@ -2536,8 +2740,12 @@ separate inline check, and the separate one is the one that drifted. Call _finit
                 self.assertIn(kind, db._NUM_KINDS, (cls_name, attr, kind))
                 self.assertIn((cls_name, attr), FIGURE_CAVEAT, (cls_name, attr))
         self.assertTrue(set(db.VERDICT_BEARING) <= set(db.STORED_NUMBERS))
-        # the one class that is deliberately NOT verdict-bearing, and why it is not
-        self.assertEqual(set(db.STORED_NUMBERS) - set(db.VERDICT_BEARING), {"JointResult"})
+        # ROUND 5: there is no longer a class that is not verdict-bearing. `JointResult` used to be the
+        # exception, on the stated grounds that `n_attempted`/`n_failed` "feed no recomputation at all",
+        # and that was the hole: their difference is the measured-seed count every `pair.n` is now
+        # checked against. The equality is asserted in this direction so that re-exempting a class is a
+        # deliberate edit to this line and not a quiet omission.
+        self.assertEqual(set(db.STORED_NUMBERS) - set(db.VERDICT_BEARING), set())
 
     def test_the_declared_min_n_is_admitted_as_a_COUNT_not_as_any_number(self):
         """`_protocol_params` reads the scorer's own `min_n` default as kind "count", where HEAD read it
@@ -2615,29 +2823,50 @@ separate inline check, and the separate one is the one that drifted. Call _finit
             self.assertIsNone(db._admitted(forge_declared(joint(), "ComponentResult", "margin", bad)
                                            .h1.components[0], "ComponentResult"), repr(bad))
 
-    def test_numbers_intact_requires_every_declared_field_to_be_present(self):
+    def test_admitted_requires_every_declared_field_to_be_present(self):
+        """`db._numbers_intact`, the predicate alias this test used to call, was deleted in round 5:
+        `_pair_numbers_ok` now needs the admitted `n` to cross-check rather than a yes/no, so the alias
+        had no module-level caller left and would have been a reader kept alive by its tests alone."""
         j = joint()
         for cls_name in db.STORED_NUMBERS:
             for obj in instances_of(j, cls_name):
-                self.assertTrue(db._numbers_intact(obj, cls_name), cls_name)
+                self.assertIsNotNone(db._admitted(obj, cls_name), cls_name)
                 self.assertEqual(set(db._admitted(obj, cls_name)),
                                  set(db.STORED_NUMBERS[cls_name]), cls_name)
         for cls_name in db.STORED_NUMBERS:                        # an object missing the fields entirely
             for junk in (None, object(), "pair", 0, ()):
-                self.assertFalse(db._numbers_intact(junk, cls_name), (cls_name, repr(junk)))
+                self.assertIsNone(db._admitted(junk, cls_name), (cls_name, repr(junk)))
+        self.assertFalse(hasattr(db, "_numbers_intact"))
         # one absent field is enough, and `_pair_numbers_ok` is exactly the IntervalPair case
         class NoLevel(bm.IntervalPair):
             @property
             def level(self):
                 raise AttributeError("level is absent")
-        p = joint().h1.components[0].pair
+        k = joint()
+        p = k.h1.components[0].pair
         object.__setattr__(p, "__class__", NoLevel)
-        self.assertFalse(db._numbers_intact(p, "IntervalPair"))
-        self.assertFalse(db._pair_numbers_ok(p))
-        self.assertEqual(db._pair_numbers_ok(joint().h1.components[0].pair), True)
+        self.assertIsNone(db._admitted(p, "IntervalPair"))
+        self.assertFalse(pair_ok(k))
+        self.assertEqual(pair_ok(joint()), True)
 
 
-class EveryForgedNumberIsCheckedAtTheVerdictAndTheAlarm(unittest.TestCase):
+class FailsClosedAssertions:
+    """`assertFailsClosedWithAnAlarm` as a mixin, so the round-5 class below uses the SAME assertion as
+    the round-4 sweep rather than a re-typed copy of it. A plain mixin (no TestCase base) is not
+    collected as a test case, so the sweeps it serves are not run twice."""
+
+    def assertFailsClosedWithAnAlarm(self, h, hids, label):
+        cells = hyp_cells(h)
+        for hid in hids:
+            self.assertEqual(cells.get(hid), "INCONCLUSIVE", f"{label}: {hid} is {cells.get(hid)}")
+        self.assertIn("NOT shown", h, f"{label}: no alarm")
+        jc = joint_cell(h)
+        self.assertNotIn("vd-supported", jc, label)
+        self.assertNotIn("vd-unsupported", jc, label)
+        self.assertIn("JOINT_INCONCLUSIVE", jc, label)
+
+
+class EveryForgedNumberIsCheckedAtTheVerdictAndTheAlarm(FailsClosedAssertions, unittest.TestCase):
     """THE TEST-DESIGN RULE THAT WOULD HAVE CAUGHT ALL THREE ROUNDS, applied as this module's default
     shape for a forgery test: FOR EVERY FORGED VALUE, ASSERT THE VERDICT CELL AND THE ALARM, NOT JUST
     THE FIGURE CELL.
@@ -2654,16 +2883,6 @@ class EveryForgedNumberIsCheckedAtTheVerdictAndTheAlarm(unittest.TestCase):
     table gets this assertion automatically and a number added WITHOUT the table fails the probe test
     above instead. That chain -- probe proves the table complete, table drives the sweep, sweep asserts
     verdict and alarm -- is what replaces three rounds of asserted enumerations."""
-
-    def assertFailsClosedWithAnAlarm(self, h, hids, label):
-        cells = hyp_cells(h)
-        for hid in hids:
-            self.assertEqual(cells.get(hid), "INCONCLUSIVE", f"{label}: {hid} is {cells.get(hid)}")
-        self.assertIn("NOT shown", h, f"{label}: no alarm")
-        jc = joint_cell(h)
-        self.assertNotIn("vd-supported", jc, label)
-        self.assertNotIn("vd-unsupported", jc, label)
-        self.assertIn("JOINT_INCONCLUSIVE", jc, label)
 
     def test_every_verdict_bearing_stored_number_fails_closed_with_an_alarm(self):
         for cls_name in db.VERDICT_BEARING:
@@ -2686,12 +2905,25 @@ class EveryForgedNumberIsCheckedAtTheVerdictAndTheAlarm(unittest.TestCase):
         self.assertNotIn("NOT shown", clean)
         self.assertEqual(set(hyp_cells(clean).values()), {"SUPPORTED"})
 
-    def test_the_two_figure_only_numbers_are_UNKNOWN_and_create_no_verdict(self):
-        """`JointResult.n_attempted` / `n_failed` are the only declared numbers that feed NO
-        recomputation, so UNKNOWN-without-an-alarm is the correct outcome for them rather than a gap.
-        Stated as a test so the asymmetry is deliberate and visible, not an oversight: what must hold is
-        that forging them cannot CREATE a decisive verdict or change one."""
+    def test_the_study_seed_counts_are_a_figure_AND_the_second_source(self):
+        """ROUND-5 REVERSAL, kept as its own test because the claim it replaces is the clearest
+        statement of the round-5 defect in this file.
+
+        This test used to be called `test_the_two_figure_only_numbers_are_UNKNOWN_and_create_no_verdict`
+        and it asserted that `JointResult.n_attempted` / `n_failed` "feed NO recomputation, so
+        UNKNOWN-without-an-alarm is the correct outcome for them rather than a gap" -- and then measured
+        exactly that, over all 15 hostile counts: figure UNKNOWN, and `hyp_cells(h) == hyp_cells(honest)`
+        in both directions. Every assertion passed. The asymmetry it called deliberate was the hole:
+        `n_attempted - n_failed` is the study's own measured-seed count, which is the only second source
+        this page has for `pair.n`, so a renderer that recomputes nothing from these two has no way to
+        refuse a forged legal `n`. They are now BOTH a figure and a verdict input, which is the normal
+        case in this module and not an exception to it.
+
+        What must hold now: the figure still reads UNKNOWN (never 0), and the page fails closed with an
+        alarm instead of carrying on -- because an unreadable second source means `pair.n` is
+        unverified, not that the cross-check may be skipped."""
         honest = db.render_scorecard(joint())
+        self.assertIn("JOINT_SUPPORTED", joint_cell(honest))
         for attr in ("n_attempted", "n_failed"):
             for bad in HOSTILE_BY_KIND["count"]:
                 j = forge_declared(joint(), "JointResult", attr, bad)
@@ -2700,9 +2932,11 @@ class EveryForgedNumberIsCheckedAtTheVerdictAndTheAlarm(unittest.TestCase):
                 self.assertIn("UNKNOWN", line, f"{attr}={bad!r}")
                 self.assertIn("not recorded", line, f"{attr}={bad!r}")
                 self.assertNotIn(">0<", line, f"{attr}={bad!r}")
-                # no verdict anywhere on the page moved, in either direction
-                self.assertEqual(hyp_cells(h), hyp_cells(honest), f"{attr}={bad!r}")
-                self.assertEqual(joint_cell(h), joint_cell(honest), f"{attr}={bad!r}")
+                # the figure is UNKNOWN *and* nothing decisive survives it, with the reason named
+                self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), f"{attr}={bad!r}")
+                self.assertIsNone(db._measured_seeds(j), f"{attr}={bad!r}")
+                self.assertIn("not readable", h, f"{attr}={bad!r}")
+                self.assertNotEqual(hyp_cells(h), hyp_cells(honest), f"{attr}={bad!r}")
 
     def test_G1_a_forged_n_cannot_launder_a_genuinely_below_minimum_run(self):
         """ROUND-4 FAIL GROUND. `pair.n` had two consumers that disagreed: the display cell (an inline
@@ -2737,8 +2971,8 @@ class EveryForgedNumberIsCheckedAtTheVerdictAndTheAlarm(unittest.TestCase):
             forge_all_verdicts_supported(k)
             h = db.render_scorecard(k)
             self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), f"n={bad!r}")
-            self.assertIsNone(db._recompute(k.h1.components[0], k.margins), repr(bad))
-            self.assertFalse(db._pair_numbers_ok(k.h1.components[0].pair), repr(bad))
+            self.assertIsNone(recompute(k.h1.components[0], k.margins, k), repr(bad))
+            self.assertFalse(pair_ok(k), repr(bad))
             self.assertNotIn("JOINT_SUPPORTED", h, repr(bad))
             # the n cell and the verdict cell now agree that the sample size is unknown
             self.assertIn('<span class="caveat">n</span>', comp_row(h, "S"), repr(bad))
@@ -2774,12 +3008,12 @@ class EveryForgedNumberIsCheckedAtTheVerdictAndTheAlarm(unittest.TestCase):
             self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), repr(bad))
             self.assertIn("is not a finite number; unmeasured, NOT zero", page, repr(bad))
             self.assertIn('<span class="caveat">margin</span>', comp_row(h, "S"), repr(bad))
-            self.assertIsNone(db._recompute(j.h1.components[0], j.margins), repr(bad))
+            self.assertIsNone(recompute(j.h1.components[0], j.margins, j), repr(bad))
             self.assertIsNone(db._declared("S", j.margins)[1], repr(bad))
         # the component margin alone, with an honest Margins object: still an alarm (it was already)
         j = joint_private_margins()
         object.__setattr__(j.h1.components[0], "margin", "0.1")
-        self.assertIsNone(db._recompute(j.h1.components[0], j.margins))
+        self.assertIsNone(recompute(j.h1.components[0], j.margins, j))
         self.assertFailsClosedWithAnAlarm(db.render_scorecard(j), ("H1",), "component margin only")
         # NOT VACUOUS / no over-refusal: an honest float margin, and a legitimate INT margin, both work.
         self.assertEqual(db._declared("S", bm.Margins()), ("greater", bm.Margins().delta_S))
@@ -2824,18 +3058,379 @@ class EveryForgedNumberIsCheckedAtTheVerdictAndTheAlarm(unittest.TestCase):
             j = joint(**kw)
             for cls_name in db.STORED_NUMBERS:
                 for obj in instances_of(j, cls_name):
-                    self.assertTrue(db._numbers_intact(obj, cls_name), (kw, cls_name))
+                    self.assertIsNotNone(db._admitted(obj, cls_name), (kw, cls_name))
             for c in all_components(j):
-                self.assertIsNotNone(db._recompute(c, j.margins), repr(kw))
+                self.assertIsNotNone(recompute(c, j.margins, j), repr(kw))
         for kw in (dict(), dict(expect=None, S=0.0), dict(expect=None, L=1.0)):
             self.assertNotIn("NOT shown", db.render_scorecard(joint(**kw)), repr(kw))
         # a legitimately unmeasured bound is NOT tampering, and a genuine 0.0 is still measured
         k = joint()
         object.__setattr__(k.h1.components[0].pair, "boot_lo", MetricValue.unmeasured("failed"))
-        self.assertTrue(db._pair_numbers_ok(k.h1.components[0].pair))
+        self.assertTrue(pair_ok(k))
         self.assertIn('<span class="measured">0.0</span>', db._kind_cell(0.0, "why", "num"))
         self.assertIn('<span class="measured">0</span>', db._kind_cell(0, "why", "count"))
         self.assertIn('<span class="measured">0.0</span>', db._kind_cell(0.0, "why", "float"))
+
+
+def laundered_below_minimum(n=None, seeds=29, **over):
+    """The round-5 fixture: a GENUINE below-minimum study presented as a decisive success.
+
+    A real `seeds`-seed run, its failing `min_seeds` gate flipped to passed IN PLACE (so the gate NAME
+    set stays intact and `_gate_set_ok` cannot be what catches it -- the same forgery `test_G1` uses),
+    every stored component and hypothesis verdict forged SUPPORTED, and `blocking` cleared. `n` forges
+    `pair.n` on every component; `over` forges fields of the JointResult itself."""
+    j = joint(expect=bm.JointVerdict.JOINT_INCONCLUSIVE, seeds=FZ.seeds[:seeds])
+    forge_gate_pass(j, "min_seeds")
+    forge_all_verdicts_supported(j)
+    if n is not None:
+        for c in all_components(j):
+            object.__setattr__(c.pair, "n", n)
+    for k, v in over.items():
+        object.__setattr__(j, k, v)
+    return j
+
+
+def honest_shapes():
+    """Every legitimate study shape this file can build, as (label, JointResult). A cross-check that
+    false-fires is a defect, so the no-false-alarm sweep needs more shapes than the forgery sweeps do --
+    in particular shapes where `pair.n` is legitimately LESS than the measured-seed count, which is the
+    reason the cross-check is an inequality and not an equality."""
+    out = [(f"joint({kw})", joint(**kw)) for kw in (
+        dict(), dict(expect=None, S=0.0), dict(expect=None, conv=False), dict(expect=None, L=1.0),
+        dict(expect=None, gate_inputs=False), dict(expect=None, seeds=FZ.seeds[:29]),
+        dict(expect=None, seeds=FZ.seeds[:1]), dict(expect=None, registered="deadbeef" * 8))]
+    for nfail in (1, 3, 10):            # FAILED seeds: n_attempted stays 30, the measured count drops
+        scores = make_scores(FZ.seeds)
+        for i in range(nfail):
+            scores[i] = bm.SeedScores.failed(FZ.seeds[i], "synthetic failure")
+        out.append((f"n_failed={nfail}", bm.analyze_scores(
+            scores, frozen=FZ, registered_digest=FZ.digest, subject="synthetic", cfg=SMALL)))
+    scores = make_scores(FZ.seeds)      # one metric unmeasured on 5 OK seeds: pair.n < measured count
+    for i in range(5):
+        m = dict(scores[i].metrics)
+        m["delta_conv"] = MetricValue.unmeasured("not supplied")
+        scores[i] = dataclasses.replace(scores[i], metrics=m)
+    out.append(("delta_conv unmeasured on 5 ok seeds", bm.analyze_scores(
+        scores, frozen=FZ, registered_digest=FZ.digest, subject="synthetic", cfg=SMALL)))
+    for ms, nseeds in ((10, 10), (10, 30), (29, 29), (1, 30), (60, 30), (30, 30)):
+        out.append((f"min_seeds={ms} over {nseeds} seeds", bm.analyze_scores(
+            make_scores(FZ.seeds[:nseeds]), frozen=FZ, registered_digest=FZ.digest, subject="synthetic",
+            cfg=bm.BenchmarkConfig(n_boot=500, min_seeds=ms))))
+    return out
+
+
+class TypeIsNotTheWholeOfAdmission(FailsClosedAssertions, unittest.TestCase):
+    """SR-13 ROUND 5. The item failed a FOURTH time, and this time not because a consumer of a stored
+    number was missed. Every consumer was declared in `db.STORED_NUMBERS`, the probe proved the table
+    complete, every consumer was routed through its kind function, and the whole table was swept with
+    hostile values while asserting the verdict and the alarm. The defect is that `pair.n` was admitted
+    BY TYPE ONLY.
+
+    MEASURED AT HEAD on `laundered_below_minimum()` -- a genuine 29-seed run whose `min_seeds` gate was
+    flipped to passed in place and whose stored verdicts were forged SUPPORTED:
+        pair.n untouched (29) -> JOINT_INCONCLUSIVE, alarm, 1 warning paragraph    (caught)
+        pair.n = 30           -> JOINT_SUPPORTED, NO alarm, ZERO warning paragraphs
+        pair.n = 31           -> JOINT_SUPPORTED, NO alarm, ZERO warning paragraphs
+        pair.n = nan          -> JOINT_INCONCLUSIVE, alarm                         (caught: not an int)
+    `30` is a legal `int`, `_count` admits it, and `_count` MUST admit it. No tightening of a type
+    predicate can distinguish the honest 30 from the forged one, so the round-4 mechanism could not have
+    caught this however carefully its tables were kept.
+
+    THE FIX IS THE ONE `benchmark.py` HAD ALREADY WRITTEN DOWN, at its own `n` cross-check: "A forged
+    `n_seeds` is a legal count, so `_metric_count` cannot catch it; the only defence is a second stored
+    number to compare it against ... n must be CHECKED against something, not trusted." This renderer
+    printed BOTH HALVES of that second number on the same page -- "Attempted 29, failed 0" -- and used
+    neither, and `IntervalPair.flags` carried the producer's own statement that n was below the minimum
+    while `dashboard.py` contained no reference to `flags` at all."""
+
+    def test_G3_a_LEGAL_n_cannot_launder_a_genuinely_below_minimum_run(self):
+        """THE ROUND-5 PIN. Asserts the VERDICT and the ALARM for each legal forged `n`, not a figure."""
+        j = laundered_below_minimum()
+        self.assertEqual(j.h1.components[0].pair.n, 29)
+        self.assertTrue(db._gate_set_ok(j.gates))            # not the gate-set check
+        self.assertIs(j.verdict, bm.JointVerdict.JOINT_SUPPORTED)   # the page IS asked to show SUPPORTED
+        self.assertFailsClosedWithAnAlarm(db.render_scorecard(j), ("H1", "H2", "H3"), "n untouched")
+        for bad in (30, 31, 1000, 2 ** 40):                  # every one a legal, nonnegative int
+            k = laundered_below_minimum(n=bad)
+            self.assertEqual(db._count(bad), bad, repr(bad))         # the TYPE check is right to admit it
+            h = db.render_scorecard(k)
+            self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), f"n={bad!r}")
+            self.assertNotIn("JOINT_SUPPORTED", h, repr(bad))
+            self.assertIsNone(recompute(k.h1.components[0], k.margins, k), repr(bad))
+            self.assertFalse(pair_ok(k), repr(bad))
+            self.assertIn("SAMPLE SIZE CONTRADICTED", h, repr(bad))
+            self.assertIn(f"a component claims {bad} seeds but the study records only 29", h, repr(bad))
+            # the n CELL still prints the forged value: this page does not hide the number it refuses,
+            # it shows it and says it is contradicted (round 4's n=nan rendered 'UNKNOWN n' instead).
+            self.assertIn(f"<td>{bad}</td>", comp_row(h, "S"), repr(bad))
+        # NOT VACUOUS and no over-refusal: the honest 29 and the honest 30 are unchanged.
+        self.assertIn("<td>29</td>", comp_row(db.render_scorecard(
+            joint(expect=bm.JointVerdict.JOINT_INCONCLUSIVE, seeds=FZ.seeds[:29])), "S"))
+        clean = db.render_scorecard(joint())
+        self.assertIn("<td>30</td>", comp_row(clean, "S"))
+        self.assertIn("JOINT_SUPPORTED", joint_cell(clean))
+        self.assertNotIn("NOT shown", clean)
+        self.assertNotIn("SAMPLE SIZE CONTRADICTED", clean)
+
+    def test_the_second_source_is_itself_anchored_on_the_seed_score_list(self):
+        """A cross-check whose second source is one more producer-asserted integer is defeated by one
+        more `object.__setattr__`. MEASURED with the n-cross-check in place but no anchor: on the
+        `pair.n = 30` fixture, forging `n_attempted` to 30, to 1000, or to 31 with `n_failed` 1 each
+        restored JOINT_SUPPORTED with no alarm. `seed_scores` is a LIST OF OBJECTS, and `SeedScores.ok`
+        is a read-only property derived from the metrics rather than a stored flag, so neither the length
+        nor the not-ok count can be edited in place at all."""
+        for over in ({"n_attempted": 30}, {"n_attempted": 1000},
+                     {"n_attempted": 31, "n_failed": 1}, {"n_failed": -1}):
+            k = laundered_below_minimum(n=30, **over)
+            h = db.render_scorecard(k)
+            self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), repr(over))
+            self.assertIsNone(db._measured_seeds(k), repr(over))
+            self.assertIn("not readable", h, repr(over))
+        # the anchor's two halves, each unmasked by the other
+        j = joint()
+        self.assertEqual(db._measured_seeds(j), 30)
+        object.__setattr__(j, "seed_scores", tuple(j.seed_scores[:29]))
+        self.assertIsNone(db._measured_seeds(j))             # length half
+        j = joint()
+        s0 = j.seed_scores[0]
+        with self.assertRaises(AttributeError):              # `ok` is a property: not settable at all
+            object.__setattr__(s0, "ok", True)
+        object.__setattr__(j, "seed_scores",
+                           (bm.SeedScores.failed(1, "synthetic"), *j.seed_scores[1:]))
+        self.assertIsNone(db._measured_seeds(j))             # not-ok-count half
+        for junk in (None, object(), 0, "scores"):           # an unreadable list is no second source
+            k = joint()
+            object.__setattr__(k, "seed_scores", junk)
+            self.assertIsNone(db._measured_seeds(k), repr(junk))
+        # RESIDUAL, stated: a tamperer who rebuilds `seed_scores` consistently still gets through. This
+        # raises the cost of the forgery from one integer to 30 fabricated objects; it does not remove it.
+        k = laundered_below_minimum(n=30)
+        object.__setattr__(k, "seed_scores", (*k.seed_scores, make_scores([999])[0]))
+        object.__setattr__(k, "n_attempted", 30)
+        for c in all_components(k):
+            object.__setattr__(c.pair, "flags", ())
+        self.assertEqual(db._measured_seeds(k), 30)
+        self.assertIsNone(db._n_problem(k.h1.components[0].pair, 30, 30, 30))
+
+    def test_the_two_sources_are_independent_and_neither_masks_the_other(self):
+        """The F-h lesson: each source must be able to catch the forgery with the other one disabled, or
+        one of them is untested and could be fail-open without any test going red."""
+        # SOURCE A ALONE: delete the producer's flag, so only the measured-seed count can act.
+        k = laundered_below_minimum(n=30)
+        for c in all_components(k):
+            object.__setattr__(c.pair, "flags", ())
+        self.assertIn("but the study records only 29 measured seeds",
+                      db._n_problem(k.h1.components[0].pair, 30, 30, db._measured_seeds(k)))
+        self.assertFailsClosedWithAnAlarm(db.render_scorecard(k), ("H1", "H2", "H3"), "source A alone")
+        # SOURCE B ALONE: an honest 30-seed study, so source A is silent (30 <= 30) -- asserted on the
+        # untouched pair FIRST, or "source B caught it" would be unfalsifiable -- then the flag is
+        # forged on, which only source B can see.
+        k = joint()
+        self.assertEqual(db._measured_seeds(k), 30)
+        self.assertIsNone(db._n_problem(k.h1.components[0].pair, 30, 30, 30),
+                          "source A must be silent on this fixture, or source B is masked")
+        for c in all_components(k):
+            object.__setattr__(c.pair, "flags", (db.MIN_SEEDS_FLAG,))
+        p = db._n_problem(k.h1.components[0].pair, 30, 30, db._measured_seeds(k))
+        self.assertIn("but its stored n is 30, which is not below the declared minimum 30", p)
+        self.assertFailsClosedWithAnAlarm(db.render_scorecard(k), ("H1", "H2", "H3"), "source B alone")
+        # and a `flags` forged to the bare STRING would otherwise defeat source B, because `in` over a
+        # string matches characters -- so a non-tuple `flags` is itself fail-closed.
+        k = joint()
+        for c in all_components(k):
+            object.__setattr__(c.pair, "flags", db.MIN_SEEDS_FLAG)
+        self.assertIn("flags field is not a tuple", db._n_problem(k.h1.components[0].pair, 30, 30, 30))
+        self.assertFailsClosedWithAnAlarm(db.render_scorecard(k), ("H1", "H2", "H3"), "flags as a string")
+
+    def test_n_problem_and_measured_seeds_fail_closed_unmasked(self):
+        """Direct unit tests. `_recompute` has many other ways to return None, so no other layer may be
+        allowed to mask a fail-open in either of these (the F-h lesson)."""
+        flagged, clean = (db.MIN_SEEDS_FLAG,), ()
+        P = lambda fl, n, mn, m: db._n_problem(joint().h1.components[0].pair.__class__(  # noqa: E731
+            "x", n, 0.9, 10, *([MetricValue.unmeasured("u")] * 10), fl), n, mn, m)
+        self.assertIsNone(P(clean, 29, 30, 29))              # honest below-minimum run
+        self.assertIsNone(P(flagged, 29, 30, 29))            # ... and its flag agrees
+        self.assertIsNone(P(clean, 0, 30, 30))               # a 0-seed converged series
+        self.assertIsNone(P(clean, 25, 30, 30))              # legitimately fewer than the measured count
+        self.assertIn("only 29", P(clean, 30, 30, 29))       # source A
+        self.assertIn("not below the declared minimum", P(flagged, 30, 30, 30))   # source B
+        self.assertEqual(P(clean, 30, 30, None), db.NO_SECOND_SOURCE_MSG)         # no second source
+        self.assertEqual(db._measured_seeds(joint(expect=None, seeds=FZ.seeds[:1])), 1)
+        self.assertEqual(db._measured_seeds(joint(expect=None, seeds=FZ.seeds[:29])), 29)
+        for junk in (None, object(), 0, "joint", ()):
+            self.assertIsNone(db._measured_seeds(junk), repr(junk))
+        self.assertEqual(db._n_sources_disagree(joint(), 30), [])
+        self.assertEqual(db._n_sources_disagree(joint(), None), [db.NO_SECOND_SOURCE_MSG])
+        for junk in (None, object(), 0):
+            self.assertEqual(db._n_sources_disagree(junk, 30), [], repr(junk))
+        # a non-count `n` is NOT reported here: the kind functions alarm on that, in their own words
+        k = forge_declared(joint(), "IntervalPair", "n", float("nan"))
+        self.assertEqual(db._n_sources_disagree(k, 30), [])
+        self.assertFalse(pair_ok(k))
+
+    def test_the_min_seeds_flag_literal_is_the_one_the_scorer_emits(self):
+        """`db.MIN_SEEDS_FLAG` is a string literal SHARED with `benchmark.summarize`, so a rename in the
+        scorer would silently disable source B rather than break anything. It is pinned here, against
+        the scorer's real output, rather than by a render-time contract probe: `_contract_problems`
+        withholds every decisive verdict when it fires, and a page must not lose its verdicts because a
+        neighbouring module in flux renamed a flag. The suite is the right place for that to go red."""
+        self.assertIn(db.MIN_SEEDS_FLAG, bm.summarize("c", [1.0], 0.99, 10, 0, min_n=30).flags)
+        self.assertNotIn(db.MIN_SEEDS_FLAG, bm.summarize("c", [1.0], 0.99, 10, 0, min_n=1).flags)
+        self.assertIn(db.MIN_SEEDS_FLAG,
+                      joint(expect=None, seeds=FZ.seeds[:29]).h1.components[0].pair.flags)
+        self.assertNotIn(db.MIN_SEEDS_FLAG, joint().h1.components[0].pair.flags)
+
+    def test_the_gate_detail_text_is_the_same_number_read_as_a_string(self):
+        """The third source the brief named, and the one deliberately NOT read: the `min_seeds` gate row
+        renders "29 measured seeds vs minimum 30" on the very page that displayed the forgery. It is
+        `GateResult.reason`, free text, and structural guard 3 of this module is "No verdict is ever
+        parsed from any string" -- so parsing it would make producer-supplied prose verdict-bearing.
+
+        Nothing is given up, and that is what this test pins: `evaluate_gates` computes that sentence
+        from `len(scores) - sum(not s.ok for s in scores)`, which is the same number off the same
+        `seed_scores` list that `db._measured_seeds` reads as typed data. Pinned because it is a claim
+        about a neighbouring module: if the gate ever reports a DIFFERENT quantity, this goes red and the
+        argument for ignoring the text has to be made again rather than inherited."""
+        for label, j in honest_shapes():
+            g = next(g for g in j.gates if g.name == "min_seeds")
+            self.assertEqual(g.reason.split()[0], str(db._measured_seeds(j)), label)
+            self.assertIn("measured seeds vs minimum", g.reason, label)
+        # and the text is rendered only through the untrusted-free-text box, never parsed
+        h = db.render_scorecard(laundered_below_minimum(n=30))
+        self.assertIn("29 measured seeds vs minimum 30", h)
+        self.assertNotIn("reason", db._n_problem.__code__.co_names)
+
+    def test_only_one_direction_of_the_flag_implication_is_used(self):
+        """"flag present => n < min_n" is used. "n < min_n => flag present" is NOT, and must not be:
+        `benchmark._pair_from_record` rebuilds an `IntervalPair` from stored metrics and passes no
+        `flags`, so a records-roundtripped below-minimum pair legitimately carries an EMPTY tuple. The
+        asymmetry is also the only form a forgery cannot exploit -- deleting the flag gives up a check
+        and buys nothing, which `test_the_two_sources_are_independent...` measures on source A."""
+        self.assertEqual(bm.IntervalPair.__dataclass_fields__["flags"].default, ())
+        p = bm.IntervalPair("x", 5, 0.9, 10, *([MetricValue.unmeasured("u")] * 10))
+        self.assertEqual((p.n, p.flags), (5, ()))            # below any minimum, and unflagged
+        self.assertIsNone(db._n_problem(p, 5, 30, 29))       # so it must NOT be refused
+
+    def test_every_declared_number_is_classified_by_its_second_source(self):
+        """The classification is PERFORMED, like the consumer enumeration above it: a declared number
+        that is in none of the three dicts fails here, naming itself, so "no second source" has to be a
+        recorded decision rather than an omission."""
+        declared = {(cls, attr) for cls, fields in db.STORED_NUMBERS.items() for attr in fields}
+        classified = set(SECOND_SOURCE) | set(NEUTRALISED_BY_A_FLOOR) | set(NO_SECOND_SOURCE)
+        self.assertEqual(classified, declared, f"""
+A declared stored number is not classified by whether the result contains a second source for it.
+  declared but unclassified : {sorted(declared - classified)}
+  classified but undeclared : {sorted(classified - declared)}
+Round 4 swept `HOSTILE_BY_KIND` (a TYPE table) over every declared number and called the enumeration
+done; round 5's defect was a LEGAL value for a field that had a second source nobody consulted. Put the
+entry in SECOND_SOURCE (and give it LEGAL_BUT_WRONG values), in NEUTRALISED_BY_A_FLOOR, or in
+NO_SECOND_SOURCE with the reason -- the third is a residual and is allowed, but it has to be written.""")
+        self.assertEqual(len(set(SECOND_SOURCE) & set(NEUTRALISED_BY_A_FLOOR)), 0)
+        self.assertEqual(len(set(SECOND_SOURCE) & set(NO_SECOND_SOURCE)), 0)
+        self.assertEqual(len(set(NEUTRALISED_BY_A_FLOOR) & set(NO_SECOND_SOURCE)), 0)
+        # every entry that HAS a second source is swept with legal-but-wrong values
+        self.assertEqual(set(LEGAL_BUT_WRONG),
+                         set(SECOND_SOURCE) | set(NEUTRALISED_BY_A_FLOOR))
+        for key, vals in LEGAL_BUT_WRONG.items():
+            kind = db.STORED_NUMBERS[key[0]][key[1]]
+            # an emptied entry would make the sweeps below pass by iterating over nothing, which is the
+            # vacuity that let three rounds' "the enumeration is complete" claims stand
+            self.assertGreaterEqual(len(vals), 3, f"{key}: too few legal-but-wrong values to be a sweep")
+            for v in vals:                       # each must be ADMITTED by its kind: that is the point
+                self.assertIsNotNone(db._NUM_KINDS[kind](v), (key, v))
+                # ... and must not already be in the TYPE table. Compared by repr, not by `in`: `0` and
+                # `0.0` are `==` in Python while being a legal count and an ill-typed one respectively,
+                # which is the same int/float confusion the kind functions exist to refuse.
+                self.assertNotIn(repr(v), [repr(x) for x in HOSTILE_BY_KIND[kind]], (key, v))
+
+    def test_every_legal_but_wrong_value_fails_closed_with_an_alarm(self):
+        """The round-4 sweep's rule -- assert the VERDICT and the ALARM, never the figure alone -- over
+        the half of the value space a type predicate cannot reach."""
+        for key in SECOND_SOURCE:
+            cls_name, attr = key
+            hids = HYPOTHESES_READING.get(key, ("H1", "H2", "H3"))
+            for bad in LEGAL_BUT_WRONG[key]:
+                label = f"{cls_name}.{attr} = {bad!r} (legal, wrong)"
+                j = forge_declared(joint_private_margins(), cls_name, attr, bad)
+                h = db.render_scorecard(j)                   # must not raise, ever
+                self.assertFailsClosedWithAnAlarm(h, hids, label)
+                self.assertNotIn("JOINT_SUPPORTED", joint_cell(h), label)
+        clean = db.render_scorecard(joint_private_margins())  # NOT VACUOUS
+        self.assertIn("JOINT_SUPPORTED", joint_cell(clean))
+        self.assertNotIn("NOT shown", clean)
+
+    def test_a_floored_parameter_cannot_change_what_the_page_displays(self):
+        """The two declared numbers whose legal-but-wrong values may NOT be refused, because an honest
+        non-compliant `BenchmarkConfig` emits them too (argued at `db._weaker_than_protocol`). What must
+        hold instead is that the one-sided floor makes them unable to move anything displayed."""
+        honest = db.render_scorecard(joint_private_margins())
+        for key in NEUTRALISED_BY_A_FLOOR:
+            for bad in LEGAL_BUT_WRONG[key]:
+                label = f"{key[0]}.{key[1]} = {bad!r}"
+                h = db.render_scorecard(forge_declared(joint_private_margins(), *key, bad))
+                self.assertEqual(hyp_cells(h), hyp_cells(honest), label)
+                self.assertEqual(joint_cell(h), joint_cell(honest), label)
+                self.assertNotIn("NOT shown", h, label)
+                self.assertIn("WEAKER THAN THE PROTOCOL", h, label)   # said, not silently absorbed
+
+    def test_the_cross_check_never_false_fires_on_a_legitimate_study(self):
+        """OVER-REFUSAL CHECK, and the reason the invariant is `component n <= measured seeds` rather
+        than equality. Measured over 18 legitimate study shapes: 0 disagreements, and `pair.n` is
+        STRICTLY less than the measured-seed count in three of them (`conv=False` gives `pair.n = 0` on
+        the converged components; one converged metric left unmeasured on 5 OK seeds gives
+        `delta_conv n = 25` against 30 measured seeds). A cross-check that false-fires is a defect."""
+        strict, shapes = 0, honest_shapes()
+        self.assertGreaterEqual(len(shapes), 18)
+        for label, j in shapes:
+            m = db._measured_seeds(j)
+            self.assertIsNotNone(m, label)
+            self.assertEqual(j.n_attempted - j.n_failed, m, label)
+            self.assertEqual(db._n_sources_disagree(j, m), [], label)
+            for c in all_components(j):
+                self.assertLessEqual(c.pair.n, m, f"{label}/{c.metric}")
+                self.assertIsNone(db._n_problem(c.pair, c.pair.n, c.min_n, m), f"{label}/{c.metric}")
+                self.assertIsNotNone(recompute(c, j.margins, j), f"{label}/{c.metric}")
+                strict += c.pair.n < m
+            if db.MIN_SEEDS_FLAG in j.h1.components[0].pair.flags:   # the flagged shapes are reached
+                self.assertLess(j.h1.components[0].pair.n, j.h1.components[0].min_n, label)
+        self.assertGreater(strict, 0, "no shape exercised the strict inequality: the sweep is vacuous")
+        for kw in (dict(), dict(expect=None, S=0.0), dict(expect=None, L=1.0)):
+            h = db.render_scorecard(joint(**kw))
+            self.assertNotIn("SAMPLE SIZE CONTRADICTED", h, repr(kw))
+            self.assertNotIn("NOT shown", h, repr(kw))
+
+    def test_a_deflated_n_is_the_safe_direction_and_is_still_alarmed(self):
+        """Why the cross-check is one-sided. `interval_verdict` uses `n` for exactly one thing, protocol
+        6.1's floor `n < min_n`, so only an INFLATED `n` can buy a decisive verdict from a run that
+        earned none. A deflated `n` drives the floor the safe way; it is still caught one layer on, as a
+        disagreement with the stored verdict, so it is not unalarmed tampering either."""
+        j = joint()
+        for c in all_components(j):
+            object.__setattr__(c.pair, "n", 5)
+        h = db.render_scorecard(j)
+        self.assertFailsClosedWithAnAlarm(h, ("H1", "H2", "H3"), "n deflated to 5")
+        self.assertNotIn("SAMPLE SIZE CONTRADICTED", h)      # not a cross-source contradiction
+        self.assertIsNone(db._n_problem(j.h1.components[0].pair, 5, 30, 30))
+        self.assertEqual(recompute(j.h1.components[0], j.margins, j), bm.Verdict.INCONCLUSIVE)
+
+    def test_the_page_states_the_finding_without_asserting_tampering(self):
+        """The round-4 lesson about the weaker-than-protocol paragraph, applied to this one before it can
+        be made again: name the two contradicting numbers, say what was withheld (observable), and
+        assert neither "a field was edited" nor "this is nothing"."""
+        h = db.render_scorecard(laundered_below_minimum(n=30))
+        p = re.search(r'<p class="warn">SAMPLE SIZE CONTRADICTED.*?</p>', h).group(0)
+        self.assertIn("a component claims 30 seeds", p)          # both numbers, named
+        self.assertIn("only 29 measured seeds", p)
+        self.assertIn("is withheld (INCONCLUSIVE shown)", p)     # and it really was: asserted above
+        self.assertIn("CANNOT BE DETERMINED FROM THIS RESULT", p)
+        self.assertIn("asserts neither", p)
+        self.assertNotIn("tampered", p)
+        self.assertNotIn("forged", p)
+        self.assertIn("H1/S", p)                                 # which component, not just "somewhere"
+        # free text cannot reach this paragraph as markup
+        k = laundered_below_minimum(n=30)
+        object.__setattr__(k.h1.components[0], "metric", "S<script>x</script>")
+        self.assertNotIn("<script>", db.render_scorecard(k))
 
 
 class RoundThreeSurvivorsPinned(unittest.TestCase):

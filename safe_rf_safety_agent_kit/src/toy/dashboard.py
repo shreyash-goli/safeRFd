@@ -154,17 +154,34 @@ def _panel(title: str, ec: EvidenceClass, body: str, problem: Optional[str] = No
 # ===================================================================================================
 # THE STORED-NUMBER SCHEME.  Read this before adding ANY consumer of a stored number.
 # ===================================================================================================
-# SR-13 failed three times for one reason, in three different places. Round 2: `_interval` gated on
+# SR-13 failed four times for one reason, in four different places. Round 2: `_interval` gated on
 # `MetricValue.is_measured` (merely `value is not None`) while `_metric_cell` checked properly, so one
 # forged value rendered UNKNOWN in one cell of a row and a measured `[0.0, 0.0]` in the next. Round 3:
 # the fix introduced `_finite_float` and a test class asserting that "all four cells and the
 # recomputation now route through" it -- and round 3 found a SIXTH and SEVENTH consumer, because that
-# enumeration was ASSERTED, not PERFORMED. Round 4 (this one) found `pair.n` (display cell vs
+# enumeration was ASSERTED, not PERFORMED. Round 4 found `pair.n` (display cell vs
 # `interval_verdict`'s `n < min_n` floor: a forged `nan` bought a decisive JOINT_SUPPORTED on a
 # genuinely below-minimum run with zero alarms) and `c.margin` / `Margins.<attr>` (still bare
 # `float(...)`, which coerces -- the exact pattern the previous round's docstring claimed was gone).
 #
-# So the fix is NOT "also check `pair.n`". It is this, in three parts, none of which is an assertion:
+# ROUND 5 (this one) IS NOT ANOTHER MISSING CONSUMER. Every consumer was declared and every one was
+# routed through its kind -- and the item still failed, because round 4 admitted `pair.n` BY TYPE ONLY.
+# Measured on the same below-minimum fixture round 4 was built from (29 real seeds, the `min_seeds` gate
+# flipped to passed in place so the gate-NAME set stays intact, stored verdicts forged SUPPORTED):
+#     pair.n untouched (29)  -> JOINT_INCONCLUSIVE, alarm, 1 warning paragraph   (caught)
+#     pair.n forged to 30    -> JOINT_SUPPORTED, NO alarm, ZERO warning paragraphs
+#     pair.n forged to 31    -> JOINT_SUPPORTED, NO alarm, ZERO warning paragraphs
+#     pair.n forged to nan   -> JOINT_INCONCLUSIVE, alarm                        (caught: not an int)
+# `30` is a legal `int`. `_count` admits it and must: `_count`'s own docstring says sign is not
+# constrained there, and an honest `pair.n` of 30 is the commonest value in the kit. No tightening of a
+# TYPE predicate can refuse it. THE ONLY DEFENCE IS A SECOND SOURCE FOR THE SAME NUMBER, and
+# `benchmark.py` had already said so in as many words, at its own `n` cross-check in
+# `verdict_from_records`: "A forged `n_seeds` is a legal count, so `_metric_count` cannot catch it; the
+# only defence is a second stored number to compare it against ... n must be CHECKED against something,
+# not trusted." This renderer read BOTH HALVES of that second source onto the page -- "Attempted 29,
+# failed 0" -- and used neither. See `_measured_seeds` and `_n_problem` for the three sources now read.
+#
+# So the fix is NOT "also check `pair.n`". It is this, in four parts, none of which is an assertion:
 #
 #   1. KINDS. There are exactly four predicates in this module that admit a stored number -- one per
 #      kind -- and no inline numeric test anywhere else. `_finite_float` ("float"), `_finite_number`
@@ -185,6 +202,15 @@ def _panel(title: str, ec: EvidenceClass, body: str, problem: Optional[str] = No
 #      below. A future reader cannot add an unchecked consumer without turning one of those red.
 #      Every entry of `STORED_NUMBERS` is then forged by a table-driven sweep that asserts the VERDICT
 #      CELL and the ALARM, not just the figure cell -- which is what all three rounds' tests omitted.
+#   4. TYPE IS NOT THE WHOLE OF ADMISSION. Where a stored number has a SECOND SOURCE in the same result,
+#      the two are compared and a disagreement fails closed; where it has none, that is declared and the
+#      residual is stated. The classification is itself enumerated, by `SECOND_SOURCE` /
+#      `NEUTRALISED_BY_A_FLOOR` / `NO_SECOND_SOURCE` in the test module, whose union must be exactly the
+#      entries of `STORED_NUMBERS` -- so a new declared number cannot be added without saying which of
+#      the three it is. The hostile-value sweep gained a LEGAL-BUT-WRONG table beside the type table,
+#      because the type table is now the known-weak half: `HOSTILE_BY_KIND["count"]` claimed to hold
+#      "everything an honest producer of a field of this kind cannot emit" and contained not one legal
+#      int, though an honest producer of `pair.n` on a 29-seed run cannot emit `30` either.
 #
 # WHAT IS DELIBERATELY NOT IN THE SCHEME is argued at `_valid_history` and `_protocol_params`.
 def _num(x: float) -> str:
@@ -275,11 +301,17 @@ STORED_NUMBERS = {
     "Margins": {"delta_S": "num", "delta_R": "num", "delta_sel": "num"},
     "JointResult": {"n_attempted": "count", "n_failed": "count"},
 }
-# Classes whose numbers reach a VERDICT, so `_recompute` must fail closed on every one of them. The
-# distinction is stated rather than left implicit because it is the only reason an entry may legitimately
-# render UNKNOWN without an alarm: `JointResult.n_attempted`/`n_failed` are counted on the page and feed
-# no recomputation at all, so there is no verdict for them to fail closed on.
-VERDICT_BEARING = ("IntervalPair", "ComponentResult", "Margins")
+# Classes whose numbers reach a VERDICT, so `_recompute` must fail closed on every one of them.
+#
+# `JointResult` JOINED THIS TUPLE IN ROUND 5, and the comment it replaces is the clearest statement of
+# the round-5 defect that exists in this file, so it is quoted rather than deleted: "the only reason an
+# entry may legitimately render UNKNOWN without an alarm: `JointResult.n_attempted`/`n_failed` are
+# counted on the page and feed no recomputation at all, so there is no verdict for them to fail closed
+# on." Both halves were true as written and together they were the hole. `n_attempted - n_failed` is the
+# study's own count of measured seeds -- the SECOND SOURCE for every component's `pair.n`, printed on
+# the page one line above the gate row that contradicted it -- and "feeds no recomputation" was the
+# defect, not the justification. It feeds one now (`_measured_seeds`), so it fails closed like the rest.
+VERDICT_BEARING = ("IntervalPair", "ComponentResult", "Margins", "JointResult")
 
 
 def _admitted(obj: Any, cls_name: str) -> Optional[dict]:
@@ -293,7 +325,10 @@ def _admitted(obj: Any, cls_name: str) -> Optional[dict]:
     field. Measured: deleting the guard entirely then changed no output at all (the later reads caught
     everything), i.e. the round-4 fix had itself grown a masked duplicate of its own check, which is
     the whole failure mode of this item. Handing back the admitted values leaves exactly ONE admission
-    per field and nothing to drift.
+    per field and nothing to drift. `_admitted` IS NOW THE ONLY READER IN FACT AS WELL AS IN THE
+    DOCSTRING: the `_numbers_intact` predicate alias that used to sit here was deleted in round 5 once
+    `_pair_numbers_ok` had to consume the admitted `n` rather than a yes/no, because it would otherwise
+    have been a module-level reader with no module-level caller.
 
     THE REMAINING `nums is None` GUARD IN `_recompute` IS PROVABLY EQUIVALENT TO NO GUARD, and is
     labelled rather than left as an unexplained surviving mutant: if it were dropped, the very next
@@ -308,11 +343,6 @@ def _admitted(obj: Any, cls_name: str) -> Optional[dict]:
             return None
         out[attr] = a
     return out
-
-
-def _numbers_intact(obj: Any, cls_name: str) -> bool:
-    """`_admitted` as a predicate, for the callers that need only the yes/no."""
-    return _admitted(obj, cls_name) is not None
 
 
 def _mv_float(mv: Any) -> Optional[float]:
@@ -734,9 +764,133 @@ def _protocol_params() -> tuple:
     return tuple(out)
 
 
-def _pair_numbers_ok(pair: Any) -> bool:
+NO_SECOND_SOURCE_MSG = ("the study's own measured-seed count (n_attempted - n_failed) is not readable, "
+                        "so the sample size behind every interval cannot be cross-checked")
+MIN_SEEDS_FLAG = "n below protocol minimum"
+# The literal `benchmark.summarize` appends to `IntervalPair.flags` when `n < min_n`. It is a string
+# SHARED with the scorer, so a rename there would silently disable source (2) of `_n_problem` rather
+# than break anything. That is pinned by a test against the scorer's real output rather than by a
+# render-time contract probe, deliberately: `_contract_problems` withholds every decisive verdict when
+# it fires, and a page must not lose its verdicts because a neighbouring module in flux renamed a flag.
+# Residual, stated: between a rename in `benchmark` and the next run of this module's suite, source (2)
+# is silently inert. Source (1), which needs no literal, is not affected.
+
+
+def _measured_seeds(joint: Any) -> Optional[int]:
+    """THE SECOND SOURCE FOR `pair.n`: how many seeds this study says actually produced data.
+
+    `n_attempted - n_failed`, both admitted as kind "count" from `STORED_NUMBERS`, and then checked
+    against the `seed_scores` list they were counted from. None means "there is no readable second
+    source", which every caller treats as fail-closed -- NOT as "skip the cross-check". That asymmetry
+    is deliberate and is the one place this function is stricter than `benchmark.verdict_from_records`,
+    which skips its own cross-check when the stored `n_seeds` METRIC is absent from the record (there,
+    absence is a real possibility, because the second source is a dict entry). Here both numbers are
+    required fields of `JointResult`, so an honest producer cannot omit or malform them; absence or
+    malformation is tampering or a type drift, and `benchmark._metric_strict` states the rule for
+    exactly this case -- for a cross-check field "unreadable" is evidence of tampering and must not be
+    laundered into the same outcome as "not recorded".
+
+    WHY THE `seed_scores` ANCHOR IS HERE AND NOT LEFT AS A RESIDUAL. A cross-check whose second source
+    is one more producer-asserted integer is defeated by one more `object.__setattr__`. MEASURED on the
+    round-5 fixture (29 genuine seeds, `pair.n` forged to 30) with the n-cross-check in place but no
+    anchor: `n_attempted` forged to 30, to 1000, or to 31-with-`n_failed`-1 each restored
+    JOINT_SUPPORTED with no alarm. `analyze_scores` builds the result as
+    `JointResult(..., scores, ..., len(scores), sum(not s.ok for s in scores), ...)`, so
+    `n_attempted == len(seed_scores)` and `n_failed == the number of not-ok entries` hold identically
+    for every result the scorer produces, and `seed_scores` is a LIST OF OBJECTS rather than an integer.
+    RESIDUAL, stated plainly: this raises the cost of the forgery to fabricating seed-score objects, it
+    does not remove it. A tamperer who rebuilds `seed_scores` consistently still gets through, which is
+    the same residual class as the consistently-forged `Margins` already documented at `_recompute`.
+
+    `attempted - failed` needs no nonnegativity guard, and one is deliberately absent rather than left
+    as an unpinnable surviving mutant: `failed` equals the not-ok count of a tuple whose length equals
+    `attempted`, so `failed <= attempted` is already proved by the two equalities above it."""
+    nums = _admitted(joint, "JointResult")      # the ONLY admission of these two in the verdict path
+    if nums is None:
+        return None
+    attempted, failed = nums["n_attempted"], nums["n_failed"]
+    try:
+        scores = tuple(joint.seed_scores)
+        listed_failed = sum(1 for s in scores if getattr(s, "ok", None) is not True)
+    except Exception:  # noqa: BLE001 - an absent or unreadable seed-score list is no second source
+        return None
+    if attempted != len(scores) or failed != listed_failed:
+        return None
+    return attempted - failed
+
+
+def _n_problem(pair: Any, n: int, min_n: int, measured_n: Optional[int]) -> Optional[str]:
+    """THE ROUND-5 CROSS-CHECK on one component's `pair.n`. None means cross-checked; a string is the
+    disagreement, in the words the page prints. `n` and `min_n` are values already admitted by kind
+    "count", so nothing is admitted twice here.
+
+    TWO SOURCES, BOTH ALREADY PRESENT IN THE RESULT, NEITHER OF THEM A TYPE TEST:
+
+    (1) `n <= _measured_seeds(joint)`. This is `benchmark.verdict_from_records`' invariant verbatim --
+        `component n <= joint n`, equality NOT required -- and it is verified here on the same grounds
+        it is verified there: `analyze_scores` builds every series as the OK seeds' readable values, so
+        a component's `n` is the size of a SUBSET of the measured seeds. MEASURED over 12 legitimate
+        study shapes (30-seed default, S=0.0, L=1.0, conv=False, gate_inputs=False, unregistered digest,
+        29 seeds, 1 seed, n_failed = 1 / 3 / 10, and one converged metric left unmeasured on 5 OK
+        seeds): the inequality held in 12 of 12 and was STRICT in three of them -- `conv=False` gives
+        `pair.n = 0` on the converged components, and the unmeasured-metric shape gives
+        `delta_conv n = 25` against 30 measured seeds -- which is why equality must not be required.
+
+    (2) The producer's own statement, `MIN_SEEDS_FLAG in pair.flags`. `summarize` appends it exactly
+        when `n < min_n`, and `evaluate_primary` passes the same `cfg.min_seeds` to `summarize` and to
+        the `ComponentResult`, so on an honest component the flag is present only when `n < c.min_n`.
+        MEASURED over 48 honest (shape x component) pairs: 14 flagged, 0 violations; and over five
+        non-default `min_seeds` configurations (10/10, 10/30, 29/29, 1/30, 60/30), including the
+        honest `min_seeds=60` case where the flag IS present at n=30, 0 violations.
+        ONLY THE ONE DIRECTION IS ASSERTED. "flag present => n < min_n" is used; "n < min_n => flag
+        present" is NOT, and must not be: `benchmark._pair_from_record` rebuilds an `IntervalPair` from
+        stored metrics and passes no `flags` at all, so a records-roundtripped below-minimum pair
+        legitimately carries an EMPTY flags tuple. The one-directional form is also the only one a
+        forgery cannot exploit -- deleting the flag merely gives up a check, it buys nothing.
+
+    A THIRD SOURCE IS ON THE PAGE AND IS DELIBERATELY NOT USED. The `min_seeds` gate row renders its own
+    detail text, which on the round-5 fixture reads "29 measured seeds vs minimum 30" -- the true value,
+    beside a PASS it contradicts. It is not read here, and should not be: `GateResult.reason` is free
+    text, it reaches the page only through `_untrusted`, and structural guard 3 in this module's own
+    docstring is "No verdict is ever parsed from any string". Deriving a fail-closed from a regex over a
+    producer-supplied sentence would make the gate text verdict-bearing, which is the guard this renderer
+    is built on. Nothing is given up by refusing it: `evaluate_gates` computes that sentence as
+    `f"{n_ok} measured seeds vs minimum {cfg.min_seeds}"` with
+    `n_ok = len(scores) - sum(not s.ok for s in scores)`, which is the SAME number, off the SAME
+    `seed_scores` list, that `_measured_seeds` reads directly as typed data. The gate row renders it as a
+    string; the anchor reads it as a list of objects. The second is the better source for the same fact.
+
+    THE CROSS-CHECK IS ONE-SIDED (`n > measured_n`, not `n != measured_n`) for the same reason
+    `_recompute`'s protocol floor is one-sided: an INFLATED `n` is the only direction that can buy a
+    decisive verdict, because the only thing `interval_verdict` does with `n` is apply the protocol-6.1
+    floor `n < min_n`. A DEFLATED `n` drives the floor the safe way and is caught anyway, one layer on,
+    as a disagreement with the stored verdict: measured, `pair.n` forged from 30 down to 5 renders
+    INCONCLUSIVE with an alarm.
+
+    `flags` MUST BE A TUPLE. `IntervalPair.flags` is declared `tuple = ()` and both producers in
+    `benchmark` emit one, so requiring it cannot false-fire; without the requirement a `flags` forged to
+    the bare STRING "n below protocol minimum" would silently disable source (2), because `in` over a
+    string matches characters. A non-tuple `flags` is a type drift and fails closed, like a non-number
+    in the kind functions."""
+    if measured_n is None:
+        return NO_SECOND_SOURCE_MSG
+    if n > measured_n:
+        return (f"a component claims {n} seeds but the study records only {measured_n} measured seeds "
+                f"(attempted minus failed): a component cannot be measured on more seeds than succeeded")
+    flags = getattr(pair, "flags", None)
+    if not isinstance(flags, tuple):
+        return "the interval's own flags field is not a tuple, so the producer's sample-size statement " \
+               "cannot be read"
+    if MIN_SEEDS_FLAG in flags and n >= min_n:
+        return (f"the producer flagged this interval {MIN_SEEDS_FLAG!r} but its stored n is {n}, which "
+                f"is not below the declared minimum {min_n}")
+    return None
+
+
+def _pair_numbers_ok(pair: Any, min_n: int, measured_n: Optional[int]) -> bool:
     """EVERY number `STORED_NUMBERS` declares on an `IntervalPair` -- not just the four bounds -- must
-    still be admitted by its kind, or the recomputation fails closed.
+    still be admitted by its kind AND, for `n`, agree with the result's own second sources, or the
+    recomputation fails closed.
 
     WHY IT IS THE WHOLE DECLARED SET AND NOT A HAND-WRITTEN LIST (the round-4 FAIL ground, G1). This
     function used to list `boot_lo, boot_hi, t_lo, t_hi` inline and nothing else, and `pair.n` was
@@ -750,16 +904,39 @@ def _pair_numbers_ok(pair: Any) -> bool:
     level was edited is not a pair whose interval can be read, and HEAD showed a forged level as UNKNOWN
     with no alarm -- unalarmed tampering, the same shape as G2.
 
+    WHY THE DECLARED SET WAS STILL NOT ENOUGH (the round-5 FAIL ground). Admitting `pair.n` by TYPE left
+    the legal int `30` admissible on a 29-seed run, which is the whole of round 5; `_n_problem` is the
+    cross-check that closes it and this is the single place in the verdict path that calls it, so there
+    is one implementation of "is this n believable" rather than one per consumer.
+
+    `pair.level` IS DELIBERATELY NOT CROSS-CHECKED, although a second source for it is already on this
+    page: `_protocol_params`' sibling `bm.bonferroni_level()` is printed in the family line, and an
+    honest `pair.level` is `bonferroni_level(cfg.alpha, N_PRIMARY)`. The two agree only when the study
+    ran at the default `alpha`, and `BenchmarkConfig.alpha` IS settable while `JointResult` carries only
+    an opaque `config_hash` -- so comparing them would false-fire on every honest non-default-alpha
+    study, which is the identical undecidability already argued for `min_n` and `width_tol` at
+    `_recompute`. `level` also reaches no verdict (`interval_verdict` never reads it), so there is
+    nothing a forged level could buy that the type check does not already refuse.
+
     Cannot false-fire: nothing an honest producer builds fails it. Each bound and `mean` must satisfy
     `MetricValue`'s own constructor invariant (so a genuinely unmeasured n<2 bound is fine), `n` is
     `len(values)` and `level` is `bonferroni_level()`. Only post-construction tampering reaches it, and
-    the no-false-alarm sweep below measures that over every honest fixture variation."""
-    return _numbers_intact(pair, "IntervalPair")
+    the no-false-alarm sweep below measures that over every honest fixture variation -- which now has to
+    cover the cross-check too, since a false-firing cross-check is itself a defect."""
+    nums = _admitted(pair, "IntervalPair")      # the ONLY admission of the pair's numbers
+    return nums is not None and _n_problem(pair, nums["n"], min_n, measured_n) is None
 
 
-def _recompute(c: Any, margins: Any = None) -> Optional[Verdict]:
+def _recompute(c: Any, margins: Any, measured_n: Optional[int]) -> Optional[Verdict]:
     """Verdict recomputed from the interval alone. None means 'could not recompute' (always treated as a
     mismatch and shown INCONCLUSIVE with an alarm, never as SUPPORTED).
+
+    `measured_n` IS A REQUIRED ARGUMENT WITH NO DEFAULT, and that is the point of round 5. It is the
+    study's own measured-seed count from `_measured_seeds`, the second source `pair.n` is checked
+    against; `None` means "unreadable", which fails closed. Giving it a default of `None` would have
+    made "nobody passed the second source" indistinguishable from "the second source is broken" at every
+    call site -- a fail-open default on the exact parameter this round exists to add -- so the three
+    internal callers and every direct test call name it explicitly instead.
 
     If `margins` is given, the component's own margin/direction must equal what the protocol tables
     (benchmark.PRIMARY / CONVERGED) declare for that metric under the result's Margins; a component whose
@@ -792,14 +969,14 @@ def _recompute(c: Any, margins: Any = None) -> Optional[Verdict]:
     floor makes it unable to change what is displayed.
 
     EVERY NUMBER IT READS IS ADMITTED BY THE SHARED SCHEME FIRST, by class, from `STORED_NUMBERS` --
-    `VERDICT_BEARING` names the three classes and this is the function that owes them a fail-closed. The
+    `VERDICT_BEARING` names the four classes and this is the function that owes them a fail-closed. The
     bare `float(c.margin)` that used to stand here is G2 (see `_declared`); the missing `pair.n` is G1
-    (see `_pair_numbers_ok`). What stays local, because it is DOMAIN and not admission: a negative
-    `width_tol` or `min_n` is a nonsensical protocol parameter rather than a non-number, and the
-    one-sided floor itself."""
+    (see `_pair_numbers_ok`); admitting that `pair.n` BY TYPE ALONE is round 5 (see `_n_problem`). What
+    stays local, because it is DOMAIN and not admission: a negative `width_tol` or `min_n` is a
+    nonsensical protocol parameter rather than a non-number, and the one-sided floor itself."""
     try:
         nums = _admitted(c, "ComponentResult")                  # the ONLY admission of these three
-        if nums is None or not _pair_numbers_ok(getattr(c, "pair", None)):
+        if nums is None or not _pair_numbers_ok(getattr(c, "pair", None), nums["min_n"], measured_n):
             return None
         margin, mn, wt = nums["margin"], nums["min_n"], nums["width_tol"]
         if margins is not None:
@@ -827,10 +1004,10 @@ def _failed(g: Any) -> bool:
     return getattr(g, "passed", None) is not True
 
 
-def _eff_component(c: Any, withheld: bool, contract_bad: bool, margins: Any = None) -> tuple:
+def _eff_component(c: Any, withheld: bool, contract_bad: bool, margins: Any, measured_n: Optional[int]) -> tuple:
     """(displayed verdict or None, mismatch). Decisive only if stored AND recomputed agree and nothing withholds it."""
     stored = _vcoerce(Verdict, getattr(c, "verdict", None))
-    rec = _recompute(c, margins)
+    rec = _recompute(c, margins, measured_n)
     if stored is None or rec is None or rec is not stored:
         return Verdict.INCONCLUSIVE, True
     if withheld or contract_bad:
@@ -903,6 +1080,43 @@ def _weaker_than_protocol(joint: Any) -> list:
     return out
 
 
+def _n_sources_disagree(joint: Any, measured_n: Optional[int]) -> list:
+    """Components whose stored `n` disagrees with the result's own second sources, in the page's words.
+
+    THE PROSE SIBLING OF THE VERDICT PATH, exactly as `_weaker_than_protocol` is for the protocol floor,
+    and accepted here for the same reason: the GUARD lives at the point of use in `_recompute`, and the
+    page still has to be able to say WHICH finding it is. Both walks call `_n_problem`, the single
+    implementation of the comparison, so this one cannot drift from the one that withholds the verdict.
+    That -- not whether two fields are read twice -- is the distinction this module's scheme is about.
+
+    Why the page needs it: without it, a 29-seed run whose `n` was forged to 30 renders only the generic
+    "stored verdict(s) ... disagree with an independent recomputation" warning, which is also exactly
+    what an HONEST below-minimum configuration gets. Round 4's finding about the weaker-than-protocol
+    paragraph was that an honest run got the accusation and a forgery got the acquittal; a cross-check
+    that fires without naming the two contradicting numbers repeats the same mistake one lane over."""
+    if measured_n is None:
+        return [NO_SECOND_SOURCE_MSG]
+    try:
+        hyps = (joint.h1, joint.h2, joint.h3)
+    except Exception:  # noqa: BLE001 - a malformed result is refused before this is reached
+        return []
+    out = []
+    for h in hyps:
+        try:
+            comps = (*h.components, *(tuple(getattr(h, "converged_components", ()) or ())))
+        except Exception:  # noqa: BLE001
+            continue
+        for c in comps:
+            pair = getattr(c, "pair", None)
+            n, mn = _count(getattr(pair, "n", None)), _count(getattr(c, "min_n", None))
+            if n is None or mn is None:
+                continue        # not a count at all: the kind functions alarm on that, with their words
+            p = _n_problem(pair, n, mn, measured_n)
+            if p is not None:
+                out.append(f"{h.hid}/{_visible(str(getattr(c, 'metric', '?')))[:40]}: {p}")
+    return out
+
+
 def _gate_set_ok(gates: Any) -> bool:
     """The validity-gate NAMES must be exactly what the scorer declares in `benchmark.GATE_SCOPES`, as
     sorted sequences (so an extra duplicate alarms too). A deleted, duplicated, extra or wrongly-named
@@ -936,13 +1150,13 @@ def _gate_set_ok(gates: Any) -> bool:
         return False
 
 
-def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool, margins: Any = None) -> tuple:
+def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool, margins: Any, measured_n: Optional[int]) -> tuple:
     """(displayed verdict, mismatch). Decisive only if the stored hypothesis verdict equals an independent
     recomputation from recomputed component verdicts, scope-aware gates, and (H3) converged components."""
     if not _component_sets_ok(h):
         return Verdict.INCONCLUSIVE, True
-    rc = [_recompute(c, margins) for c in h.components]
-    mismatch = any(_eff_component(c, False, False, margins)[1] for c in h.components)
+    rc = [_recompute(c, margins, measured_n) for c in h.components]
+    mismatch = any(_eff_component(c, False, False, margins, measured_n)[1] for c in h.components)
     if None in rc:
         return Verdict.INCONCLUSIVE, True
     blocked = bool(getattr(h, "blocking", ())) or any(
@@ -960,7 +1174,8 @@ def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool, margins: Any = Non
         rv = Verdict.INCONCLUSIVE
     if rv is Verdict.SUPPORTED and h.hid == "H3":
         conv = tuple(getattr(h, "converged_components", ()) or ())
-        if sup_block or not conv or not all(_recompute(c, margins) is Verdict.SUPPORTED for c in conv):
+        if sup_block or not conv or not all(_recompute(c, margins, measured_n) is Verdict.SUPPORTED
+                                            for c in conv):
             rv = Verdict.INCONCLUSIVE
     stored = _vcoerce(Verdict, getattr(h, "verdict", None))
     if stored is not rv:
@@ -1035,11 +1250,15 @@ def render_scorecard(joint: Any) -> str:
         problems = [*problems, "subject_kind contradicts the fixture exemption recorded in the gates"]
         bad = True
     any_failed = any(_failed(g) for g in gates) or gate_set_bad
+    # THE SECOND SOURCE, read ONCE for the whole card and handed to every recomputation. Not re-derived
+    # per component: `n_attempted`/`n_failed` are admitted here and in `_int_or_unk`'s display cell, by
+    # the same kind function, and nowhere else.
+    measured_n = _measured_seeds(joint)
     mismatch = []
     eff = {}
     rows = ""
     for h in (joint.h1, joint.h2, joint.h3):
-        ev, mm = _eff_hypothesis(h, gates, bad, joint.margins)
+        ev, mm = _eff_hypothesis(h, gates, bad, joint.margins, measured_n)
         eff[h.hid] = ev
         if mm or gate_set_bad:
             mismatch.append(h.hid)
@@ -1050,7 +1269,7 @@ def render_scorecard(joint: Any) -> str:
         for comps, suffix in groups:
             for c in comps:
                 pair = c.pair
-                ecv, cmm = _eff_component(c, any_failed, bad, joint.margins)
+                ecv, cmm = _eff_component(c, any_failed, bad, joint.margins, measured_n)
                 if cmm and h.hid not in mismatch:
                     mismatch.append(h.hid)
                 rows += (
@@ -1128,6 +1347,21 @@ def render_scorecard(joint: Any) -> str:
     if mismatch:
         body += (f'<p class="warn">Stored verdict(s) for {_e(", ".join(mismatch))} disagree with an independent '
                  f'recomputation (or could not be recomputed) and are NOT shown; INCONCLUSIVE is displayed.</p>')
+    n_bad = _n_sources_disagree(joint, measured_n)
+    if n_bad:
+        # WHAT THIS PARAGRAPH ASSERTS, AND WHAT IT DOES NOT (the round-4 lesson about the sibling
+        # paragraph below, applied before it can be made again). It states the two contradicting numbers
+        # and that the affected verdicts are withheld -- both observable right here. It does NOT assert
+        # tampering: measured over 12 legitimate study shapes the scorer emits no such contradiction, so
+        # an honest non-compliant CONFIGURATION is not an explanation the way it is for `min_n`; but a
+        # change in how the scorer counts seeds is, and this page cannot tell the two apart.
+        body += ('<p class="warn">SAMPLE SIZE CONTRADICTED BY THIS RESULT\'S OWN SECOND SOURCE: '
+                 + _e("; ".join(n_bad)) + '. Every verdict derived from a contradicted interval is '
+                 'withheld (INCONCLUSIVE shown): protocol 6.1 produces no verdict below the minimum n, '
+                 'so the stored sample size decides whether a run earned a verdict at all, and this '
+                 'result states it twice with two different values. WHETHER A FIELD WAS EDITED AFTER THE '
+                 'FACT OR THE SCORER NOW COUNTS SEEDS DIFFERENTLY CANNOT BE DETERMINED FROM THIS RESULT, '
+                 'and this page asserts neither.</p>')
     weaker = _weaker_than_protocol(joint)
     if weaker:
         # LABELLING ONLY -- which in this kit is the product. The GUARD is sound and is not touched here:
@@ -1171,11 +1405,20 @@ def render_scorecard(joint: Any) -> str:
 
 
 def _int_or_unk(v: Any) -> str:
-    """`JointResult.n_attempted` / `n_failed`. Kind "count", and in `STORED_NUMBERS` -- but the only two
-    entries there that reach a FIGURE and no verdict (nothing recomputes from them), so they are the one
-    place where UNKNOWN without an alarm is the correct outcome rather than a gap. Stays bare text and
-    stays sign-free: it sits inside the sentence "Attempted N, failed N", and a negative count is a real
-    datum to print, not a non-number (see `_count`)."""
+    """`JointResult.n_attempted` / `n_failed`. Kind "count", and in `STORED_NUMBERS`.
+
+    THIS DOCSTRING USED TO SAY these were "the only two entries there that reach a FIGURE and no verdict
+    (nothing recomputes from them), so they are the one place where UNKNOWN without an alarm is the
+    correct outcome rather than a gap". That was accurate about HEAD and it was the round-5 defect:
+    their difference IS the study's measured-seed count, the second source every `pair.n` is now checked
+    against (`_measured_seeds`), so they reach every verdict on the card and UNKNOWN here now comes with
+    an alarm. This cell is the DISPLAY consumer of the same two numbers; it shares the kind function with
+    the verdict consumer, which is what the scheme requires and what round 5 would have failed without.
+
+    Stays bare text and stays sign-free: it sits inside the sentence "Attempted N, failed N", and a
+    negative count is a real datum to print, not a non-number (see `_count`). Sign is still not
+    constrained in the kind function -- `_measured_seeds` refuses a negative pair separately, by way of
+    the `seed_scores` equality, which no negative count can satisfy."""
     return _kind_text(v, "not recorded", "count")
 
 

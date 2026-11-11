@@ -66,6 +66,25 @@ def _guard_lists():
 
 PATCHED_MODULE, PATCHED_SOCKET, GUARD_DISCLOSED = _guard_lists()
 
+
+def _policy_pkgs():
+    """The packages whose absence `scripts/run_tests.sh` measures -- its `PKGS` tuple, parsed out of the script.
+
+    Three rules in the script are built from it (the none-mode reason check, the baseline exclusion, and the rule
+    that an environment-skip exemption may not name a measured package), and the fourth SR-15 FAIL was those
+    three being hand-written lists that disagreed. The tests that drive the rule derive their cases from this, so
+    a package added to the script is a package the suite immediately tries to launder.
+    """
+    text = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")
+    m = re.search(r"(?m)^PKGS = (\(.*?\))\n", text, re.S)
+    if m is None:
+        raise AssertionError("scripts/run_tests.sh no longer defines PKGS as a plain tuple literal; this file "
+                             "parses it (see _policy_pkgs) and must be updated together with it")
+    return tuple(ast.literal_eval(m.group(1)))
+
+
+POLICY_PKGS = _policy_pkgs()
+
 # One driving expression per patched entry point, keyed exactly as the guard names it ("socket." prefix = a
 # method on socket.socket). test_network_guard_blocks_every_patched_entry_point builds a synthetic suite out of
 # this table and asserts the keys are EXACTLY the parsed patch set, so a name cannot be added to the guard
@@ -452,6 +471,43 @@ class TestNoNetworkImports(unittest.TestCase):
         for needle in ("--without-pip", "--expect any", "asserts", "--expect none", "--expect torch"):
             self.assertIn(needle, steps, f"Steps section does not mention {needle}")
 
+    def test_every_directory_pruned_from_the_bytecode_sweep_is_git_ignored(self):
+        """D2 of the fourth SR-15 FAIL. The Steps told the reader that "only `.venv`/`venv` are pruned from the
+        bytecode sweep and **ignored by git**" -- and `.gitignore` carried `.venv/` alone, while
+        `scripts/run_tests.sh` prunes `.venv`, `venv` and `node_modules`. Measured with `git check-ignore`
+        before the fix:
+
+            IGNORED  .venv/pyvenv.cfg      NOT IGNORED  venv/pyvenv.cfg      NOT IGNORED  venv/bin/python3
+
+        Half of the stated protection was absent, in the direction the sentence exists to warn about: the Steps
+        tell the reader to create a venv, name `venv` as one of the two safe names, and a reader who used it got
+        an untracked-but-not-ignored interpreter tree in `git status`.
+
+        STRUCTURAL, and says so: it compares `.gitignore`'s patterns against the prune list PARSED OUT OF the
+        script, so the two cannot drift apart again (a directory the sweep learns to skip is a directory git must
+        ignore -- that equivalence is the whole content of the sentence). It does not run git, deliberately:
+        gating it on `shutil.which("git")` would add a second optional-developer-tool skip category member and
+        another machine-dependent figure to the documented counts, to re-measure what `<dir>/` in a `.gitignore`
+        means.
+        """
+        script = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")
+        body = re.search(r"(?ms)^clear_bytecode\(\) \{(.*?)^\}", script)
+        self.assertIsNotNone(body, "scripts/run_tests.sh no longer defines clear_bytecode() as a plain function; "
+                                   "this test parses its prune list")
+        groups = re.findall(r"\\\((.*?)\\\) -prune", body.group(1), re.S)
+        pruned = {t for g in groups for t in re.findall(r"-name ([\w.*-]+)", g)} - {".git"}
+        self.assertLessEqual({".venv", "venv"}, pruned, sorted(pruned))      # not vacuous if the parse degrades
+        patterns = {l.strip().rstrip("/") for l in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+                    if l.strip() and not l.lstrip().startswith("#")}
+        self.assertEqual(sorted(d for d in pruned if d.rstrip("/") not in patterns), [],
+                         f"scripts/run_tests.sh prunes these directories from the bytecode sweep and .gitignore "
+                         f"does not ignore them, while docs/CLEAN_CLONE.md tells the reader both are true: "
+                         f"{sorted(pruned)} vs {sorted(patterns)}")
+        # ...and the sentence in the Steps that made the claim must still name both, or it has stopped being the
+        # thing this test keeps true
+        steps = (ROOT / "docs" / "CLEAN_CLONE.md").read_text(encoding="utf-8").split("## Steps", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("ignored by git", re.sub(r"\s+", " ", steps))
+
     def test_socket_guard_blocks_connections(self):
         """The guard run_tests.sh installs must make connection attempts fail (checked in a child process).
         The target is a closed LOOPBACK port: if a future edit broke the patch, this snippet would really
@@ -496,11 +552,17 @@ class TestNetworkGuardSurfaceAndDisclosure(unittest.TestCase):
         # not vacuous: if the regexes stopped matching, the whole check would pass by matching nothing
         self.assertGreaterEqual(len(fam_mod), 12, sorted(fam_mod))
         self.assertGreaterEqual(len(fam_sock), 10, sorted(fam_sock))
-        # ...and the floors are backed BY NAME, because `>= 10` is met EXACTLY on macOS: a family that shrank by
-        # one would slip under it silently, and the floor is the only thing standing between a broken regex and a
-        # vacuous pass. `PATCHED_SOCKET <= fam_sock` already pins the six patched methods; these are the other
-        # four, which are disclosed rather than patched and so were pinned by the count alone.
+        # ...and the floors are backed BY NAME, because BOTH are met EXACTLY on macOS (12 and 10): a family that
+        # shrank by one would slip under them silently, and the floor is the only thing standing between a broken
+        # regex and a vacuous pass. `PATCHED_MODULE <= fam_mod` / `PATCHED_SOCKET <= fam_sock` already pin the 8
+        # patched functions and 6 patched methods; these are the other 4 and 4, which are disclosed rather than
+        # patched and so were pinned by the count alone. (The METHOD side was given this treatment one round
+        # before the MODULE side, which is the asymmetry this line removes: `getservbyname|getprotobyname` are
+        # matched by `serv\w*|proto\w*` in MODULE_FAMILY, and deleting either alternative dropped fam_mod to 10
+        # or 11 while every other assertion here still passed.)
         self.assertLessEqual({"accept", "send", "sendall", "sendfile"}, fam_sock, sorted(fam_sock))
+        self.assertLessEqual({"gethostname", "getservbyname", "getservbyport", "getprotobyname"}, fam_mod,
+                             sorted(fam_mod))
         self.assertLessEqual(PATCHED_MODULE, fam_mod, "a patched name is outside the enumerated family")
         self.assertLessEqual(PATCHED_SOCKET, fam_sock, "a patched method is outside the enumerated family")
         unaccounted = sorted((fam_mod | fam_sock) - PATCHED_MODULE - PATCHED_SOCKET - GUARD_DISCLOSED)
@@ -1341,7 +1403,23 @@ class TestRunTestsMechanics(_SyntheticBase):
         # the script's own prose out: the header writes the placeholder `POLICY:<NAME>` and a comment writes the
         # wildcard `POLICY:BASELINE_*`, and neither is a token. (Without it the wildcard read as `BASELINE`.)
         tokens = sorted(set(re.findall(r"POLICY:([A-Z_]+)(?=\s)", script)))
-        self.assertGreaterEqual(len(tokens), 24, tokens)       # not vacuous if the regex stops matching
+        # ANTI-VACUITY, in two parts, because the one part it had was off by one: `>= 24` against a script that
+        # emits 25, so a token could be deleted and the floor still passed. The floor is now the real count
+        # (raise it when a token is added; it must never be lowered)...
+        self.assertGreaterEqual(len(tokens), 25, tokens)
+        # ...and, derived rather than typed, EVERY `POLICY:` occurrence in the script is accounted for: each is
+        # either an emission the strict regex above found, or one of the two documented non-emissions -- the
+        # header's `POLICY:<NAME>` placeholder and a comment's `POLICY:BASELINE_*` wildcard. This is the half the
+        # floor was standing in for: if the strict regex stops matching (the real hazard -- a token count is not
+        # a bug, a broken regex is), the occurrences it no longer explains fail here whatever the count.
+        NON_EMISSIONS = {"<NAME>", "BASELINE_*"}
+        occurrences = set(re.findall(r"POLICY:([^\s`'\"),.;:]*)", script))
+        self.assertEqual(sorted(occurrences - NON_EMISSIONS - set(tokens)), [],
+                         "these POLICY: strings in scripts/run_tests.sh are matched by neither the token regex "
+                         "nor the two known non-emissions: the regex has gone stale, and a token it no longer "
+                         "sees is a token no test is required to assert")
+        self.assertLessEqual(NON_EMISSIONS, occurrences, "the two documented non-emissions are gone from "
+                                                         "scripts/run_tests.sh; this accounting is now vacuous")
         for t in ("BASELINE_WRITE", "RECORDER", "SKIP_RECORD", "PYTEST_FAILED"):   # the four that were unasserted
             self.assertIn(t, tokens, t)
         asserted = set()
@@ -1381,6 +1459,32 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
 
     def _tool(self, n, cls="T", prefix="test_t"):
         return _skip_module(n, self.TOOL_REASON, cls=cls, prefix=prefix)
+
+    def rejects_each(self, reasons, expect):
+        """ONE run, many candidate reasons, per-reason attribution: every rejected skip prints its own
+        `FAIL: POLICY:<TOKEN> ... <id> :: '<reason>'` line, so a single run shows which reasons were rejected and
+        which slipped through. Written this way because each run of the script costs about a second and these
+        tables are long: 48 separate runs of the laundering table added 57 s to this module for no more
+        information than three runs give. (Each skip is judged independently of the others, so batching changes
+        no verdict; the floor is lowered to 1 so that it cannot be what fails the run.)"""
+        body = "import unittest\n"
+        for i, reason in enumerate(reasons):
+            body += _skip_module(1, reason, cls=f"L{i}", prefix=f"test_l{i}_").replace("import unittest\n", "")
+        r = self.rt({"test_a.py": body}, expect=expect, env={"MIN_NONE_SKIPS": "1"})
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        fails = [l for l in r.stdout.splitlines() if l.startswith("FAIL: POLICY:")]
+        for i, reason in enumerate(reasons):
+            # Matched on the skip's own TEST ID and not on the reason text alone, which was a masked assertion
+            # of exactly the kind this file keeps finding: one of the laundering candidates is a SUBSTRING of
+            # another ("an optional developer tool ..." contains "optional developer tool ..."), so the rejected
+            # one's FAIL line satisfied the unrejected one's check, and the mutant that re-opened the
+            # prose-carrying hole SURVIVED this test. Measured, before the id was added.
+            where = f"test_l{i}_0"
+            self.assertTrue(any(where in l and reason in l for l in fails),
+                            f"--expect {expect} did NOT reject {reason!r} (as {where}): it still claims an "
+                            f"environment-skip exemption, or is read as an honest package skip.\n"
+                            + "\n".join(fails))
+        return r
 
     # --- optional-developer-tool skips (THE SR-15 THIRD FAIL) ---
     def test_the_live_ruff_skip_reason_is_accepted_in_every_documented_mode(self):
@@ -1432,27 +1536,97 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
                  "POLICY:TOOL_CAP")
 
     def test_tool_reason_cannot_launder_a_missing_package_or_torch_present(self):
-        """The anti-laundering rule, identical to the filesystem-case one. This is why the reason says "is not on
-        PATH" instead of "is not installed": torch mode's DENY check reads EVERY skip, tool skips included, so a
-        reason that also claims a package is missing is still rejected -- the exemption buys the category
-        nothing."""
+        """The anti-laundering rule, identical to the filesystem-case one.
+
+        THIS TEST USED TO PASS THROUGHOUT THE FOURTH SR-15 FAIL, and that is the lesson in it: it tried exactly
+        two laundered reasons, both of which happened to contain one of the three spellings torch mode's DENY
+        check knows (`not installed`, `missing`, `numpy`) or the phrase `torch present`. Every laundering that
+        avoided those three words worked. The rule is no longer about wording at all -- a reason that NAMES a
+        measured package gets no exemption -- and the cases below are the ones that were passing.
+        """
         laundered = self.TOOL_REASON + "; torch not installed"
         self.bad(self.rt({"test_a.py": _skip_module(1, laundered)}, expect="torch"), "POLICY:TORCH_MODE_MISSING")
         self.bad(self.rt({"test_a.py": _mixed_none(50),
                           "test_b.py": _skip_module(1, self.TOOL_REASON + "; torch present", cls="Q", prefix="test_q")},
                          expect="none"), "POLICY:TORCH_PRESENT")
-        # and the phrase is structured, not a password: prose that merely sounds like it gets no exemption
-        for near_miss in ("optional developer tool is not on PATH", "ruff is not installed (optional linter)",
-                          "optional linter absent", "developer tool `ruff` missing"):
-            with self.subTest(near_miss=near_miss):
-                self.bad(self.rt({"test_a.py": _mixed_none(50),
-                                  "test_b.py": _skip_module(1, near_miss, cls="N", prefix="test_n")},
-                                 expect="none"), "POLICY:NONE_REASON")
+        # MEASURED PASSING before the fix, in torch mode, i.e. a torch-guarded test could be skipped as "a tool is
+        # missing" on a machine that HAS torch and the run stayed green:
+        self.rejects_each([self.TOOL_REASON + " (torch unavailable)",
+                           self.TOOL_REASON + "; torch is not available here",
+                           self.TOOL_REASON + "; torch absent",
+                           self.TOOL_REASON + "; torch could not be imported",
+                           "optional developer tool `torch` is not on PATH"], expect="torch")
+        # and the phrase is structured, not a password: prose that merely sounds like it gets no exemption, and
+        # prose that CARRIES it gets none either -- `TOOL` was an unanchored `.search()`, so a reason that merely
+        # CONTAINED the phrase collected the exemption (the last two were measured passing with `--expect none`).
+        r = self.rejects_each(["optional developer tool is not on PATH", "ruff is not installed (optional linter)",
+                               "optional linter absent", "developer tool `ruff` missing",
+                               "an optional developer tool `ruff` is not on PATHological systems",
+                               "optional developer tool `ruff` is not on PATHological systems"], expect="none")
+        self.assertIn("POLICY:NONE_REASON", r.stdout)
+
+    def test_no_environment_exemption_may_name_a_package_the_kit_MEASURES(self):
+        """THE FOURTH SR-15 FAIL, stated as the rule that replaced it, and DERIVED: the package list is parsed out
+        of `scripts/run_tests.sh` (`PKGS`), so adding a package there without re-measuring this is not possible.
+
+        Both exempt categories are driven, because the defect was in the shape of the exemption and not in the
+        tool category: `case-sensitive filesystem; torch unavailable` passed `--expect torch` as well.
+        """
+        self.assertGreaterEqual(len(POLICY_PKGS), 4, POLICY_PKGS)      # not vacuous if the parse degrades
+        self.assertIn("torch", POLICY_PKGS)
+        # (1) neither category may be claimed BY a measured package (the tool name is the only place a package
+        #     name can sit while the reason still makes no missing-claim at all, which is why it was the one
+        #     laundering no wording rule could ever have caught)
+        named = [f"optional developer tool `{pkg}` is not on PATH" for pkg in POLICY_PKGS]
+        self.rejects_each(named, expect="torch")
+        r = self.rejects_each(named, expect="none")
+        self.assertIn("POLICY:NONE_REASON", r.stdout)
+        # (2) nor may either category carry a package claim as a tail, in ANY spelling. Driven in torch mode:
+        #     with nothing installed these reasons are honest package skips and `--expect none` is right to
+        #     accept them -- what must not happen is their keeping the exemption, which is what (1) and
+        #     test_tool_skips_do_not_count_toward_the_bare_mode_floor_or_the_torch_cap measure.
+        tails = []
+        for pkg in POLICY_PKGS:
+            for tail in (f"; {pkg} unavailable", f"; {pkg} is not available", f"; {pkg} absent",
+                         f" ({pkg} could not be imported)", f"; no {pkg} here"):
+                tails += [self.TOOL_REASON + tail, self.FS_REASON + tail]
+        self.rejects_each(tails, expect="torch")
+
+    def test_live_torch_mode_skip_reasons_stay_accepted(self):
+        """WHY the torch-mode DENY list is NOT widened to the other spellings of "is missing" that `--expect none`
+        accepts, which is what the obvious fix for the laundering above would have been.
+
+        DENY is applied to EVERY skip, and these are the reasons the real suite emits in torch mode. Two of them
+        contain "unavailable" / "not available", so `DENY |= unavailable|not available` turns documented step (d)
+        red on every machine -- measured, and the reason the laundering is closed at the exemption instead.
+
+        The reasons are asserted to be present verbatim in the modules that emit them, so rewording one fails
+        here (with the file named) instead of silently making this test prove nothing.
+        """
+        TESTS = ROOT / "tests" / "toy_tests"
+        live = [(TESTS / "test_failure_modes.py", "torch present; unavailable path is exercised in the subprocess test"),
+                (TESTS / "test_tensor_ops.py", "CUDA not available: CPU-vs-CUDA comparison (ER-09) is UNKNOWN, not passed"),
+                (TESTS / "test_tensor_ops.py", "MPS not available (or probe op failed): CPU-vs-MPS comparison is UNKNOWN, not passed"),
+                (TESTS / "test_tensor_ops.py", "CUDA present")]
+        for path, reason in live:
+            self.assertIn(reason, path.read_text(encoding="utf-8"),
+                          f"{path.name} no longer emits the skip reason {reason!r}; this test drives it through "
+                          f"`--expect torch` and must be updated with it")
+            with self.subTest(reason=reason):
+                self.ok(self.rt({"test_a.py": _skip_module(1, reason)}, expect="torch"))
+        # the same two device reasons as the suite really spells them with nothing installed (test_tensor_ops
+        # prefixes `torch not installed; `), which must stay a legal BARE-mode package skip
+        for _path, reason in live[1:3]:
+            with self.subTest(none_mode=reason):
+                self.ok(self.rt({"test_a.py": _mixed_none(49),
+                                 "test_b.py": _skip_module(1, "torch not installed; " + reason, cls="W", prefix="test_w")},
+                                expect="none"))
 
     def test_the_baseline_skip_column_is_the_same_with_and_without_the_tool(self):
         """THE WRINKLE, and the reason the exclusion has to be in GENERATION as well as comparison.
-        `scripts/test_baseline.txt` records `toy_tests.test_scripts <n> 3`. Without the exclusion a no-ruff
-        machine would generate 4 there and a ruff machine 3, so the committed file would depend on whose laptop
+        `scripts/test_baseline.txt` records `toy_tests.test_scripts <n> 4` (it said 3 here while the committed
+        file said 4 -- prose only, but the figure is the subject of the test). Without the exclusion a no-ruff
+        machine would generate 5 there and a ruff machine 4, so the committed file would depend on whose laptop
         ran `--update-baseline`, and a regeneration on the other kind of machine would look like a real change.
         Both halves of the file are generated here from suites that differ ONLY in the tool skip."""
         with_tool = {"test_a.py": _mixed_none(2) + self._tool(1, cls="T", prefix="test_t").replace("import unittest\n", "")
@@ -1528,10 +1702,31 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
         b = self.dir / "cmp_baseline.txt"
         b.write_text("test_a 5 3\n", encoding="utf-8")
         for extra in ("PyYAML not installed", self.FS_REASON):
-            files = {"test_a.py": _mixed_none(2) + _skip_module(1, extra, cls="Y", prefix="test_y").replace("import unittest\\n", "")
-                     + _pass_module(2, cls="H", prefix="test_h").replace("import unittest\\n", "")}
+            # (the two `.replace(...)` calls used to be written with a LITERAL backslash-n, `"import unittest\\n"`,
+            # unlike their siblings above, so the de-duplication silently did nothing -- harmless, because a
+            # repeated `import unittest` changes no count, which is exactly why nothing noticed)
+            files = {"test_a.py": _mixed_none(2) + _skip_module(1, extra, cls="Y", prefix="test_y").replace("import unittest\n", "")
+                     + _pass_module(2, cls="H", prefix="test_h").replace("import unittest\n", "")}
             with self.subTest(extra=extra):
                 self.bad(self.rt(files, expect="none", baseline=str(b), env={"MIN_NONE_SKIPS": "1"}), "POLICY:BASELINE_SKIPS")
+
+    def test_baseline_excludes_pyyaml_as_a_WORD_not_as_a_bare_substring(self):
+        """The exclusion was the bare substring `yaml`, so ANY reason containing those four letters anywhere left
+        the baseline skip column -- including a reason that names another test (`test_yaml_roundtrip`) while
+        honestly reporting that torch is missing. It affects a floor only, which is why it is cheap to pin: the
+        skip below must be COUNTED (column 3, not 2), and under the substring rule it was not."""
+        b = self.dir / "word_baseline.txt"
+        reason = "torch not installed; see test_yaml_roundtrip for the stdlib path"
+        files = {"test_a.py": _mixed_none(2) + _skip_module(1, reason, cls="Y", prefix="test_y").replace("import unittest\n", "")
+                 + _pass_module(2, cls="H", prefix="test_h").replace("import unittest\n", "")}
+        self.ok(self.rt(files, "--update-baseline", expect="none", baseline=str(b), env={"MIN_NONE_SKIPS": "1"}))
+        self.assertIn("test_a 5 3", b.read_text(encoding="utf-8").splitlines())
+        # ...and a real PyYAML skip is still excluded, so the committed column stays machine-independent
+        b2 = self.dir / "word_baseline2.txt"
+        files2 = {"test_a.py": _mixed_none(2) + _skip_module(1, "PyYAML not installed", cls="Y", prefix="test_y").replace("import unittest\n", "")
+                  + _pass_module(2, cls="H", prefix="test_h").replace("import unittest\n", "")}
+        self.ok(self.rt(files2, "--update-baseline", expect="none", baseline=str(b2), env={"MIN_NONE_SKIPS": "1"}))
+        self.assertIn("test_a 5 2", b2.read_text(encoding="utf-8").splitlines())
 
     # --- pytest vs unittest skip counts (M13) ---
     @unittest.skipUnless(__import__("importlib.util").util.find_spec("pytest"), "pytest not installed (optional)")

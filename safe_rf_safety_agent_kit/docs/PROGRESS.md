@@ -2435,8 +2435,20 @@ IDENTITY fixtures also come out INCONCLUSIVE.
 
 **Measured causes:**
 - **gate 11(b):** `F` exceeding `eps_fit = 0.05`.
-- **gate 12:** worst-seed gradient ratio measured in the range **1.1e-3 to 3.4e-3**, against
+- **gate 12:** worst-seed gradient ratio measured in the range ~~**1.1e-3 to 3.4e-3**~~, against
   `tau_conv = 1e-3`.
+  > **CORRECTION (round 4, 2026-11-10). The range is wrong and `3.4e-3` is attained by nothing.**
+  > Re-measured independently **twice**, by a reviewer and then by the module's owner, over 30 seeds
+  > (and confirmed invariant to `n_boot` at 2000 and 500):
+  > base 7 → 5.137e-05, 11 → 5.175e-05, 99 → 5.278e-04, **23 → 1.781e-03**, **5 → 1.075e-03**.
+  > So the range over the two *failing* seeds is **1.08e-3 … 1.78e-3**. This line was labelled
+  > **SOURCE OBSERVED**, which is what makes it serious: it was a measurement nobody re-ran, and
+  > `benchmark.__doc__` carried an "AUTHORITATIVE RECORD: `docs/PROGRESS.md` wins if the two drift"
+  > clause pointing **at this line** — so the module deferred to a wrong number. The module now
+  > carries the five measured values, each **pinned by value and recomputed from the stored per-seed
+  > metrics** rather than parsed out of the gate's reason string, and a doc-only mutant restoring the
+  > old figure is KILLED. **The inference drawn below survives:** `tau_conv = 1e-3` still sits inside
+  > the real range, so the §4.1 premise holds on corrected numbers.
 
 **What this does and does not establish.**
 - SOURCE OBSERVED (by the SR-10 reviewer): the verdicts and ranges above.

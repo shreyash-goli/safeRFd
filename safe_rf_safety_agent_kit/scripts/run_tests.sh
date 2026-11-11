@@ -40,8 +40,15 @@
 #   the package-skip floor, the torch cap and the baseline -- in baseline GENERATION as well as comparison, so the
 #   recorded skip column cannot differ between a machine that has the tool and one that does not. They exist for a
 #   test whose BEHAVIOURAL half needs a linter that nothing in this kit installs (ruff); naming no package is
-#   correct for them, because no package is missing. A reason that ALSO names a package is still judged as a
-#   package skip, so the category cannot launder "torch not installed" past `--expect torch`.
+#   correct for them, because no package is missing.
+#   BOTH of those categories are EXEMPTIONS from the floor, the cap and the baseline, and an exemption is sound
+#   only while it cannot be spent on hiding a package skip. One rule makes it sound, and it is deliberately about
+#   NAMES rather than spellings: A REASON THAT NAMES ANY PACKAGE THIS KIT MEASURES GETS NO EXEMPTION -- it is
+#   judged as a package skip in whatever mode is running. The package list is the `PKGS` tuple in the policy
+#   below and every rule here is built from it, because the previous version of this rule was a list of
+#   missing-phrase SPELLINGS kept by hand in three places, and the three disagreed: measured, before the rule
+#   existed, `optional developer tool `torch` is not on PATH` passed `--expect torch`, and spent one of the 50
+#   skips `--expect none` requires; so did `case-sensitive filesystem; torch unavailable`.
 #   Skips are recorded exactly (test id + reason) by a hook in the sitecustomize shim that runs inside the
 #   unittest process only (the env var is popped, so child processes do not log), not by scraping output.
 #
@@ -296,26 +303,46 @@ for e in skips:
 # they cannot pad the bare-mode skip count or hide a torch test.
 FS = re.compile(r"case[- ]sensitive", re.I)
 # The SECOND environment category that legitimately names no package: an optional DEVELOPER TOOL that nothing in
-# this kit installs is absent, so a test whose behavioural half needs it cannot run. The phrase is fixed and
-# structured (the tool is named in backticks) so that arbitrary prose cannot claim the exemption, and it
-# deliberately says "is not on PATH" rather than "is not installed": the torch-mode DENY check below looks at
-# EVERY skip, tool skips included, so a reason that says a package is missing must still be rejected there. That
-# is the same anti-laundering rule the filesystem-case category has, and it is pinned by
-# test_tool_reason_cannot_launder_a_missing_package_or_torch_present.
-TOOL = re.compile(r"optional developer tool `[\w.+-]+` is not on PATH", re.I)
-# Skips excluded from the per-module baseline. ONE regex, used by the generation branch AND the comparison branch
-# below, because two copies of this list are exactly how `test_scripts <n> 3` would become machine-dependent --
-# 3 on a machine with ruff, 4 without it -- and a machine-dependent baseline is worse than none.
-BASE_EXCL = re.compile("|".join(("yaml", FS.pattern, TOOL.pattern)), re.I)
-fs = [e for e in skips if FS.search(e["reason"])]
-tool = [e for e in skips if TOOL.search(e["reason"]) and not FS.search(e["reason"])]
-pkg = [e for e in skips if not FS.search(e["reason"]) and not TOOL.search(e["reason"])]
+# this kit installs is absent, so a test whose behavioural half needs it cannot run. The phrase is ANCHORED at
+# the start of the reason (\A) and ends on a word boundary, so prose cannot carry it: `an optional developer tool
+# `ruff` is not on PATHological systems` collected the exemption while TOOL was an unanchored `.search()`.
+TOOL = re.compile(r"\Aoptional developer tool `[\w.+-]+` is not on PATH\b", re.I)
+# THE packages this kit measures -- ONE tuple, from which NONE_OK, the baseline exclusion and the exemption rule
+# are all built. They used to be three hand-written lists of spellings in three places and they disagreed: see
+# PKG below and the SKIP POLICY note in the header.
+PKGS = ("torch", "numpy", "yaml", "pytest")
+PKG = re.compile(r"\b(?:py)?(?:" + "|".join(PKGS) + r")\b", re.I)
+# THE EXEMPTION RULE, and the whole of it: a reason that names any measured package gets no exemption, whatever
+# else it says and however it spells it. It is a NAME test rather than a phrase test on purpose. The previous
+# rule tried to catch the laundering by its wording -- torch mode denied "not installed|missing|numpy" on every
+# skip, tool skips included -- and `unavailable`, which `--expect none` itself accepts as a package-missing
+# phrase, was not among the three; so `optional developer tool `torch` is not on PATH` (no phrase at all) and
+# ``optional developer tool `ruff` is not on PATH` (torch unavailable)`` both passed `--expect torch`, and
+# `case-sensitive filesystem; torch unavailable` passed it too. A category that admits "a test cannot run here"
+# has no business naming a package whose absence is the thing being measured, so it may not.
+def fs_skip(reason):
+    return bool(FS.search(reason)) and not PKG.search(reason)
+def tool_skip(reason):
+    return bool(TOOL.match(reason.strip())) and not PKG.search(reason)
+# Skips excluded from the per-module baseline. ONE predicate, used by the generation branch AND the comparison
+# branch below, because two copies of this list are exactly how `test_scripts <n> 4` would become
+# machine-dependent -- 4 on a machine with ruff, 5 without it -- and a machine-dependent baseline is worse than
+# none. PyYAML is excluded because it is the one optional package a developer may have without the others;
+# matched as a WORD ((py)yaml) rather than as the bare substring "yaml", which also excluded any reason that
+# merely contained those four letters.
+PYYAML = re.compile(r"\b(?:py)?yaml\b", re.I)
+def base_excl(reason):
+    return bool(PYYAML.search(reason)) or fs_skip(reason) or tool_skip(reason)
+fs = [e for e in skips if fs_skip(e["reason"])]
+tool = [e for e in skips if tool_skip(e["reason"]) and not fs_skip(e["reason"])]
+pkg = [e for e in skips if not fs_skip(e["reason"]) and not tool_skip(e["reason"])]
 if len(fs) > 8: bad.append(f"POLICY:FS_CAP {len(fs)} filesystem-case skips; at most 8 are expected (found on a case-sensitive filesystem)")
 if len(tool) > 4: bad.append(f"POLICY:TOOL_CAP {len(tool)} optional-developer-tool skips; at most 4 are expected (a growing count means tests are being parked behind tools nothing installs)")
 if fs: print(f"note: {len(fs)} skip(s) for a case-sensitive filesystem (expected on Linux); not counted toward package skips")
 if tool: print(f"note: {len(tool)} skip(s) for an absent optional developer tool; not counted toward package skips")
 if mode == "none":
-    NONE_OK = re.compile(r"(torch|numpy|pyyaml|pytest).*(not installed|missing|unavailable|not available)", re.I | re.S)
+    # Built from PKG (the one package list) rather than retyping the four names a third time.
+    NONE_OK = re.compile(PKG.pattern + r".*(not installed|missing|unavailable|not available)", re.I | re.S)
     for e in pkg:
         if not NONE_OK.search(e["reason"]): bad.append(f"POLICY:NONE_REASON skip reason does not say a package is missing: {e['id']} :: {e['reason']!r}")
     for e in skips:
@@ -325,6 +352,16 @@ if mode == "none":
     if not any(re.search(r"numpy", e["reason"], re.I) for e in pkg): bad.append("POLICY:NO_NUMPY_REASON no skip mentions numpy")
 elif mode == "torch":
     ALLOW = re.compile(r"\bcuda\b|\bmps\b|torch present", re.I)
+    # DENY is deliberately NOT widened to the other spellings of "is missing" that `--expect none` accepts
+    # ("unavailable", "not available"), and the reason is a measurement, not taste: it is applied to EVERY skip,
+    # and two reasons the suite really emits in this mode contain those words --
+    #   "torch present; unavailable path is exercised in the subprocess test"   (test_failure_modes.py)
+    #   "CUDA not available: CPU-vs-CUDA comparison (ER-09) is UNKNOWN, not passed"  (test_tensor_ops.py)
+    # -- so widening it turns documented step (d) red on every machine. (Measured; both reasons are driven
+    # through this mode by test_live_torch_mode_skip_reasons_stay_accepted.) The laundering that widening was
+    # proposed for is closed at the exemption instead: an exempt reason may not NAME a package at all, so it
+    # cannot reach this check pretending to be an environment skip. Leaving a package-missing reason that avoids
+    # these three spellings to POLICY:TORCH_MODE_UNEXPLAINED, which is where it lands, is the trade.
     DENY = re.compile(r"not installed|missing|numpy", re.I)
     for e in skips:
         if DENY.search(e["reason"]): bad.append(f"POLICY:TORCH_MODE_MISSING torch expected but skipped as missing: {e['id']} :: {e['reason']!r}")
@@ -356,7 +393,7 @@ if update and mode == "none":
         bad.append("POLICY:BASELINE_REFUSED --update-baseline refused and the baseline is UNCHANGED: "
                    + "; ".join(why) + ". Regenerate only on a quiet, green tree.")
     else:
-        rows = sorted((k, ran_mod[k], sum(1 for e in skips if mod(e["id"]) == k and not BASE_EXCL.search(e["reason"]))) for k in ran_mod)
+        rows = sorted((k, ran_mod[k], sum(1 for e in skips if mod(e["id"]) == k and not base_excl(e["reason"]))) for k in ran_mod)
         with open(stage, "w", encoding="utf-8") as f:
             f.write("# module  tests  bare-environment-skips   (generated: scripts/run_tests.sh --expect none --update-baseline)\n")
             f.write("# Fewer tests, or (bare mode) fewer skips, than recorded here fails the run. Raise only by regenerating.\n")
@@ -368,7 +405,7 @@ elif base != "none" and os.path.exists(base):
         k, r, s_ = line.split(); r, s_ = int(r), int(s_)
         if ran_mod.get(k, 0) < r: bad.append(f"POLICY:BASELINE_TESTS baseline: module {k} ran {ran_mod.get(k, 0)} tests, baseline {r} (tests deleted?)")
         elif mode == "none":
-            got = sum(1 for e in skips if mod(e["id"]) == k and not BASE_EXCL.search(e["reason"]))
+            got = sum(1 for e in skips if mod(e["id"]) == k and not base_excl(e["reason"]))
             if got < s_: bad.append(f"POLICY:BASELINE_SKIPS baseline: module {k} has {got} bare-environment skips, baseline {s_} (guarded tests now pass silently?)")
     known = {l.split()[0] for l in open(base, encoding="utf-8") if l.strip() and not l.startswith("#")}
     new = sorted(set(ran_mod) - known)

@@ -13,8 +13,10 @@ import struct
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+from toy import benchmark as bm
 from toy import robustness as rb
 from toy import stability
 from toy.benchmark import fixture_oracle_gated
@@ -1255,6 +1257,302 @@ class TestQAHardening(unittest.TestCase):
         self.assertEqual(rb.exact_masked_mse(((0.1,),), ((0.0,),), (True,)), Fraction(0.1) ** 2)
 
 
+def forge(mv, value):
+    """Install `value` into a built `MetricValue` -- route (b) of `toy.benchmark`'s threat model, and the
+    state every stored metric can be in after a serialisation round trip."""
+    object.__setattr__(mv, "value", value)
+    return mv
+
+
+class EveryMetricReadSiteIsPinnedByItsConsequence(unittest.TestCase):
+    """SR-11 ROUND 5, LAYER 2: one test per stored-metric read site in `robustness.py`, each forging the
+    metric BEHIND that site and asserting the CONSEQUENCE -- the probe STATUS, the evidence labels and the
+    structured `insufficient` / `details`, never an intermediate count.
+
+    WHY THIS CLASS EXISTS. A reroute experiment replaced each of this module's nine stored-metric read
+    sites in turn with a fully unchecked read and ran the whole suite: ALL NINE STAYED GREEN. One of them
+    turned `InsufficientEvidence(9 of 10)` into `SeedSummary(n=10)` -- that is this module's "no claims
+    based on single examples" criterion failing by exactly the mechanism it was written against, and no
+    test noticed, because every existing test asserted that the HONEST case works. A consequence test
+    does not depend on how the read is spelled or on which paths a probe's run happens to touch, so it is
+    the only one of the three layers in
+    `test_benchmark.TheCheckedReaderIsTheOnlyWayToReadAStoredMetric` that covers a forged metric
+    installed by `object.__setattr__` and read back through `object.__getattribute__`.
+
+    The honest control is asserted in every test, so none of them can pass by refusing everything."""
+
+    FORGED = (math.inf, -math.inf, math.nan, True, False, 0, 1, "1.0", "", [1.0], {}, None, object())
+    JSON_SAFE = (True, False, 0, 1, None)          # forged values a scorecard can still serialize
+
+    def ten(self):
+        return [MetricValue.measured(float(i)) for i in range(10)]
+
+    def test_R_summarize_a_forged_value_is_not_a_measured_value(self):
+        """`summarize_seeds`'s `measured` comprehension. THE SITE WHOSE REROUTE BREACHED THE MODULE'S OWN
+        CRITERION: with 9 of 10 honestly measured and one forged, an unchecked read returned
+        `SeedSummary(n=10)` -- a mean, SD and IQR over a value that is not a number -- where the contract
+        is `InsufficientEvidence`. Asserted on the TYPE (which has no statistic fields at all), the two
+        counts and the reason string."""
+        honest = rb.summarize_seeds(self.ten(), 10)
+        self.assertIsInstance(honest, rb.SeedSummary)              # the control: it CAN summarize
+        self.assertEqual(honest.n, 10)
+        for bad in self.FORGED:
+            ps = self.ten()
+            forge(ps[3], bad)
+            got = rb.summarize_seeds(ps, 10)
+            self.assertIsInstance(got, rb.InsufficientEvidence, repr(bad))
+            self.assertEqual((got.n_measured, got.n_required), (9, 10), repr(bad))
+            self.assertEqual(got.reason, "9 measured of 10 seeds; minimum is 10", repr(bad))
+            self.assertFalse(hasattr(got, "mean"), repr(bad))      # no statistic exists to be quoted
+            with self.assertRaises(rb.InsufficientEvidenceError, msg=repr(bad)):
+                rb.require_summary(got)
+
+    def test_R_build_unknown_a_forged_value_downgrades_the_whole_card(self):
+        """`build_scorecard`'s two reads -- `summarize_seeds(per_seed, ...)` and the `_metric_ok` label
+        test. The consequence is the CARD: status INSUFFICIENT_EVIDENCE, no summary, the UNKNOWN label,
+        and the structured `insufficient` object. An unchecked read produced a MEASURED card with a
+        TOY_RESULT label over a forged number."""
+        ok = rb.build_scorecard(probe_id="p", probe_kind="seed_sensitivity", seeds=tuple(range(1, 11)),
+                                per_seed=self.ten(), cfg=CFG, status_if_summarized=PS.MEASURED,
+                                details_always={"outcome_name": "o"})
+        self.assertIs(ok.status, PS.MEASURED)                      # the control
+        self.assertEqual({e.value for e in ok.evidence_labels}, {"NOT_VALIDATED", "TOY_RESULT"})
+        self.assertEqual(ok.summary.n, 10)
+        self.assertIsNone(ok.insufficient)
+        for bad in self.FORGED:
+            ps = self.ten()
+            forge(ps[3], bad)
+            card = rb.build_scorecard(probe_id="p", probe_kind="seed_sensitivity",
+                                      seeds=tuple(range(1, 11)), per_seed=ps, cfg=CFG,
+                                      status_if_summarized=PS.MEASURED,
+                                      details_always={"outcome_name": "o"})
+            why = repr(bad)
+            self.assertIs(card.status, PS.INSUFFICIENT_EVIDENCE, why)
+            self.assertIsNone(card.summary, why)
+            self.assertEqual((card.insufficient.n_measured, card.insufficient.n_required), (9, 10), why)
+            self.assertEqual({e.value for e in card.evidence_labels}, {"NOT_VALIDATED", "UNKNOWN"}, why)
+            self.assertNotIn(EvidenceClass.TOY_RESULT, card.evidence_labels, why)
+            # and the descriptive details that only exist for a summarized card are absent, so nothing
+            # downstream can quote a deviation count computed over a forged value
+            self.assertNotIn("n_distinct_values", card.details, why)
+
+    def test_R_card_measured_a_card_cannot_be_relaunched_around_a_forged_value(self):
+        """`Scorecard.__post_init__`'s `measured` tuple, which is what makes the card self-consistent.
+        Forging a per-seed metric AFTER construction and then laundering the card through
+        `dataclasses.replace` -- which does not re-run nested validators -- must be refused."""
+        card = rb.build_scorecard(probe_id="p", probe_kind="seed_sensitivity", seeds=tuple(range(1, 11)),
+                                  per_seed=self.ten(), cfg=CFG, status_if_summarized=PS.MEASURED,
+                                  details_always={})
+        self.assertIsNotNone(dataclasses.replace(card, probe_id="p2"))     # the control: replace works
+        for bad in self.JSON_SAFE + (math.inf, math.nan, "1.0"):
+            c = rb.build_scorecard(probe_id="p", probe_kind="seed_sensitivity",
+                                   seeds=tuple(range(1, 11)), per_seed=self.ten(), cfg=CFG,
+                                   status_if_summarized=PS.MEASURED, details_always={})
+            forge(c.per_seed[2], bad)
+            with self.assertRaisesRegex(ValueError, "summary does not match the measured per-seed values",
+                                        msg=repr(bad)):
+                dataclasses.replace(c, probe_id="p2")
+
+    def test_R_card_unknown_label_a_forged_value_forces_the_UNKNOWN_label(self):
+        """`Scorecard.__post_init__`'s `any(not _metric_ok(m) ...)` label test, reached only when the
+        summary itself is consistent -- so the card is built with a summary over the NINE honest values
+        and `min_seeds=9`, which is the shape an unchecked read would have produced. The label is the
+        consequence: a card holding an unusable observation may not be labelled as if every seed were
+        measured."""
+        seeds = tuple(range(1, 11))
+        nine = rb.SeedSummary.from_values([float(i) for i in range(10) if i != 3])
+        for bad in self.JSON_SAFE + (math.inf, math.nan, "1.0"):
+            ps = self.ten()
+            forge(ps[3], bad)
+            with self.assertRaisesRegex(ValueError, "must carry UNKNOWN", msg=repr(bad)):
+                rb.Scorecard("p", "k", PS.MEASURED, 9, seeds, rb.seed_list_digest(seeds), tuple(ps),
+                             nine, None, (EvidenceClass.NOT_VALIDATED, EvidenceClass.TOY_RESULT),
+                             {}, rb.STANDARD_NON_CLAIMS)
+            card = rb.Scorecard("p", "k", PS.MEASURED, 9, seeds, rb.seed_list_digest(seeds), tuple(ps),
+                                nine, None, (EvidenceClass.NOT_VALIDATED, EvidenceClass.TOY_RESULT,
+                                             EvidenceClass.UNKNOWN), {}, rb.STANDARD_NON_CLAIMS)
+            self.assertIn(EvidenceClass.UNKNOWN, card.evidence_labels, repr(bad))
+        # the control: with all ten honest, UNKNOWN is NOT required and TOY_RESULT alone is accepted
+        ten = rb.SeedSummary.from_values([float(i) for i in range(10)])
+        clean = rb.Scorecard("p", "k", PS.MEASURED, 10, seeds, rb.seed_list_digest(seeds),
+                             tuple(self.ten()), ten, None,
+                             (EvidenceClass.NOT_VALIDATED, EvidenceClass.TOY_RESULT), {},
+                             rb.STANDARD_NON_CLAIMS)
+        self.assertNotIn(EvidenceClass.UNKNOWN, clean.evidence_labels)
+
+    def test_R_record_nmeas_the_recorded_count_excludes_a_forged_value(self):
+        """`scorecard_to_record`'s `n_measured`. The consequence is the RECORD: the count must be 9, the
+        statistics must be explicitly unmeasured with the INSUFFICIENT_EVIDENCE reason, and the record's
+        evidence class must be UNKNOWN -- not TOY_RESULT with a mean over a forged number."""
+        ok = rb.build_scorecard(probe_id="p", probe_kind="seed_sensitivity", seeds=tuple(range(1, 11)),
+                                per_seed=self.ten(), cfg=CFG, status_if_summarized=PS.MEASURED,
+                                details_always={})
+        rec = rb.scorecard_to_record(ok, run_id="r", timestamp_utc=TS)
+        self.assertEqual(rec.metrics["n_measured"], MetricValue.measured(10.0))     # the control
+        self.assertIs(rec.evidence_class, EvidenceClass.TOY_RESULT)
+        for bad in self.JSON_SAFE:
+            ps = self.ten()
+            forge(ps[3], bad)
+            card = rb.build_scorecard(probe_id="p", probe_kind="seed_sensitivity",
+                                      seeds=tuple(range(1, 11)), per_seed=ps, cfg=CFG,
+                                      status_if_summarized=PS.MEASURED, details_always={})
+            r = rb.scorecard_to_record(card, run_id="r", timestamp_utc=TS)
+            why = repr(bad)
+            self.assertEqual(r.metrics["n_measured"], MetricValue.measured(9.0), why)
+            self.assertEqual(r.metrics["n_seeds"], MetricValue.measured(10.0), why)
+            self.assertIs(r.evidence_class, EvidenceClass.UNKNOWN, why)
+            for key in ("mean", "sd", "iqr", "min", "max"):
+                self.assertFalse(rb._metric_ok(r.metrics[key]), (key, why))
+                self.assertIn("INSUFFICIENT_EVIDENCE", r.metrics[key].reason, (key, why))
+        # a forged NON-SERIALISABLE value fails closed LOUDLY instead, at the content hash
+        ps = self.ten()
+        forge(ps[3], math.inf)
+        card = rb.build_scorecard(probe_id="p", probe_kind="seed_sensitivity", seeds=tuple(range(1, 11)),
+                                  per_seed=ps, cfg=CFG, status_if_summarized=PS.MEASURED, details_always={})
+        with self.assertRaises(ValueError):
+            rb.scorecard_to_record(card, run_id="r", timestamp_utc=TS)
+
+    def test_R_seedsens_vals_an_unmeasurable_outcome_is_counted_as_unmeasured(self):
+        """`seed_sensitivity_probe`'s `vals` comprehension, which feeds `n_unmeasured` and
+        `n_distinct_values`. `_to_metric` guarantees `per_seed` is honest, so this site's whole job is to
+        COUNT -- and the consequence of miscounting is a card that reports a distinct-value spread over
+        observations it never had, plus a missing UNKNOWN label."""
+        seeds = tuple(range(1, 13))
+        card = rb.seed_sensitivity_probe(lambda s: float(s % 7), seeds, CFG)
+        self.assertIs(card.status, PS.MEASURED)                               # the control
+        self.assertEqual(card.details["n_unmeasured"], 0)
+        self.assertEqual(card.details["n_distinct_values"], 7)
+        self.assertNotIn(EvidenceClass.UNKNOWN, card.evidence_labels)
+        for bad_outcome, n_bad in ((lambda s: math.nan if s < 3 else float(s % 7), 2),
+                                   (lambda s: True if s < 3 else float(s % 7), 2),
+                                   (lambda s: math.inf if s < 4 else float(s % 7), 3)):
+            c = rb.seed_sensitivity_probe(bad_outcome, seeds, rb.ProbeConfig(3))
+            self.assertIs(c.status, PS.MEASURED, n_bad)
+            self.assertEqual(c.details["n_unmeasured"], n_bad, n_bad)
+            self.assertEqual(c.summary.n, 12 - n_bad, n_bad)
+            self.assertIn(EvidenceClass.UNKNOWN, c.evidence_labels, n_bad)
+            self.assertEqual(len(c.per_seed), 12, n_bad)          # the observations are still recorded
+            self.assertEqual(sum(1 for m in c.per_seed if not rb._metric_ok(m)), n_bad, n_bad)
+
+    def test_R_shift_unmeas_a_seed_whose_deviation_is_unmeasurable_is_named(self):
+        """`probe_shift`'s `unmeasured_seeds` detail. A seed whose relative deviation cannot be computed
+        must be NAMED and must drag the UNKNOWN label onto the card; the failure mode an unchecked read
+        buys is a silent pass -- a seed counted as "within bound" because its deviation read as a number
+        that is not one."""
+        seeds = tuple(range(1, 13))
+        spec = rb.shift_reorder_rows()
+        clean = rb.probe_shift(rb.mse_fsum, spec, seeds, rb.ProbeConfig(3))
+        self.assertEqual(tuple(clean.details["unmeasured_seeds"]), ())          # the control
+        self.assertNotIn(EvidenceClass.UNKNOWN, clean.evidence_labels)
+        self.assertEqual(clean.details["n_measured"], 12)
+
+        # A measure that is unmeasurable on exactly the first TWO seeds. Driven by a call counter rather
+        # than by fixture content so the split cannot drift with the fixture generator: `probe_shift`
+        # calls the measure once for the base and once for the shifted fixture, and a base failure skips
+        # the second call -- so the first two calls are the first two seeds.
+        calls = []
+
+        def flaky(p, t, m):
+            calls.append(1)
+            if len(calls) <= 2:
+                raise ValueError("deliberately unmeasurable on this fixture")
+            return rb.mse_fsum(p, t, m)
+        flaky.__name__ = "flaky"
+        card = rb.probe_shift(flaky, spec, seeds, rb.ProbeConfig(3))
+        bad = list(card.details["unmeasured_seeds"])
+        self.assertEqual(bad, list(seeds[:2]), "the broken measure's seed split moved")
+        self.assertEqual(sorted(bad), sorted(sd for sd, m in zip(seeds, card.per_seed)
+                                             if not rb._metric_ok(m)))
+        self.assertEqual(card.details["n_measured"] + len(bad), 12)
+        self.assertIn(EvidenceClass.UNKNOWN, card.evidence_labels)
+        self.assertEqual(card.summary.n, 12 - len(bad))
+
+    def test_R_arm_diff_an_unusable_arm_gives_unmeasured_never_zero(self):
+        """`arm_difference`'s two reads. The consequence is the returned `MetricValue`: explicitly
+        unmeasured WITH a reason, and in particular NEVER `measured(0.0)` -- a missing arm reading as a
+        zero contrast is the single most dangerous substitution in this kit, and
+        `probe_missing_inputs` asserts exactly that as a structural check."""
+        self.assertEqual(rb.arm_difference({"C0": MetricValue.measured(1.0),
+                                            "E": MetricValue.measured(5.0)}, "E", "C0"),
+                         MetricValue.measured(4.0))                            # the control
+        for bad in self.FORGED:
+            for which in ("E", "C0"):
+                arms = {"C0": MetricValue.measured(1.0), "E": MetricValue.measured(5.0)}
+                forge(arms[which], bad)
+                got = rb.arm_difference(arms, "E", "C0")
+                why = (which, repr(bad))
+                self.assertFalse(rb._metric_ok(got), why)
+                self.assertNotEqual(got, MetricValue.measured(0.0), why)
+                self.assertIn(f"arm {which!r} unmeasured", got.reason, why)
+        # and the structural check that reports it is itself asserted, on a real probe card
+        card = rb.probe_missing_inputs(rb.mse_fsum, tuple(range(1, 13)), rb.ProbeConfig(3))
+        self.assertTrue(card.details["structural_checks"]["absent_arm_gives_unmeasured"])
+
+    def test_R_bench_outcome_a_forged_benchmark_metric_becomes_an_unmeasured_seed(self):
+        """`benchmark_outcome`'s two reads. It is an ADAPTER onto SR-10, so its consequence is what the
+        SR-11 probe records: a seed whose benchmark metric is unusable must become an UNMEASURED
+        observation with the reason attached, never a number. Driven through the real probe, so the
+        assertion is on the card rather than on the adapter's return value."""
+        tiny = bm.BenchmarkConfig(steps=20, steps_conv=25, n_boot=50, n_train=16, n_eval=16)
+        deg = bm.fixture_global_degrader(0.5)
+        good = rb.benchmark_outcome(deg, "S", tiny)
+        self.assertIsInstance(good(1), float)                                  # the control
+        card = rb.seed_sensitivity_probe(good, (1, 2, 3), rb.ProbeConfig(3))
+        self.assertIs(card.status, PS.MEASURED)
+        self.assertEqual(card.details["n_unmeasured"], 0)
+        # an honestly unmeasured metric: the adapter must raise, and the probe must record the reason
+        unm = rb.benchmark_outcome(deg, "E_loss_ratio", tiny)
+        with self.assertRaisesRegex(ValueError, "E_loss_ratio unmeasured"):
+            unm(1)
+        insuf = rb.seed_sensitivity_probe(unm, (1, 2, 3), rb.ProbeConfig(3))
+        self.assertIs(insuf.status, PS.INSUFFICIENT_EVIDENCE)
+        self.assertIsNone(insuf.summary)
+        self.assertEqual((insuf.insufficient.n_measured, insuf.insufficient.n_required), (0, 3))
+        self.assertIn(EvidenceClass.UNKNOWN, insuf.evidence_labels)
+        for m in insuf.per_seed:
+            self.assertIn("E_loss_ratio unmeasured", m.reason)
+        # a FORGED metric takes the same route, through the same read
+        real = bm.score_seed
+
+        def forging(seed, factory, cfg, _r=real):
+            s = _r(seed, factory, cfg)
+            forge(s.metrics["S"], math.inf)
+            return s
+        with mock.patch.object(bm, "score_seed", forging):
+            c = rb.seed_sensitivity_probe(rb.benchmark_outcome(deg, "S", tiny), (1, 2, 3),
+                                          rb.ProbeConfig(3))
+        self.assertIs(c.status, PS.INSUFFICIENT_EVIDENCE)
+        self.assertIsNone(c.summary)
+        self.assertEqual(c.insufficient.n_measured, 0)
+        self.assertIn(EvidenceClass.UNKNOWN, c.evidence_labels)
+
+    def test_the_nine_read_sites_are_counted_from_the_source_not_listed_here(self):
+        """The class above has one test per read site. THE NUMBER OF SITES IS MEASURED, so a tenth site
+        added without a consequence test fails here rather than being noticed by a reviewer -- which is
+        the whole failure mode of the previous four rounds, in which a hand-maintained list of consumers
+        went stale inside one round every time."""
+        tree = ast.parse(Path(rb.__file__).read_text())
+        owner = {}
+        for fn in ast.walk(tree):
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for sub in ast.walk(fn):
+                    owner.setdefault(id(sub), fn.name)
+        readers = {"_metric_read", "_metric_ok"}
+        sites = sorted({(n.lineno, owner.get(id(n), "<module>")) for n in ast.walk(tree)
+                        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                        and n.func.id in readers})
+        functions = sorted({f for _, f in sites})
+        self.assertEqual(functions, ["__post_init__", "arm_difference", "benchmark_outcome",
+                                     "build_scorecard", "probe_missing_inputs", "probe_shift",
+                                     "scorecard_to_record", "seed_sensitivity_probe",
+                                     "summarize_seeds"],
+                         f"the stored-metric read sites in robustness.py moved: {sites}")
+        self.assertEqual(len(functions), 9, functions)       # NINE reading functions ...
+        self.assertEqual(len(sites), 11, sites)              # ... at ELEVEN call sites
+        tested = [m for m in dir(self) if m.startswith("test_R_")]
+        self.assertEqual(len(tested), 9, sorted(tested))
+
+
 class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
     """SR-15 D7 / the `SEED_FLOOR` count. `DEFAULT_MIN_SEEDS` is this module's only PROTOCOL PARAMETER
     and it was pinned by NOTHING: all five of its test references were self-referential
@@ -1273,6 +1571,109 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
         self.assertEqual(rb.ProbeConfig().min_seeds, 10)
         self.assertEqual(rb._pcfg(None).min_seeds, 10)
 
+    def test_an_int_subclass_cannot_lower_the_floor_or_the_configured_minimum(self):
+        """N1 IN THIS MODULE, found by the same sweep that found `toy.benchmark._check_margin`'s ordering
+        defect, and worse here because it is this module's STRUCTURAL guarantee: `self.min_seeds <
+        SEED_FLOOR` is `type(min_seeds).__lt__`, so an `int` SUBCLASS returning False from `__lt__` passed
+        `ProbeConfig` through the PUBLIC constructor holding 1, with no `object.__setattr__` anywhere.
+        MEASURED before the fix: `ProbeConfig(Sneaky(1)).min_seeds == 1`, and
+        `summarize_seeds([3 measured of 10], Sneaky(1))` returned `SeedSummary(n=3)` -- "no claims from
+        single examples" reduced to "no claims from fewer than three". `SEED_FLOOR` itself still held,
+        because `SeedSummary.from_values` compares a `len()` and a `len()` is not overridable; the
+        CONFIGURED minimum did not hold at all.
+        The fix is `int.__int__` before the comparison, and STORING the normalised value so that
+        `summarize_seeds`'s own `len(measured) < min_seeds` is on the same number."""
+        class Sneaky(int):
+            def __lt__(self, other):
+                return False
+
+            def __le__(self, other):
+                return False
+
+            def __int__(self):
+                return 10 ** 6
+
+            def __index__(self):
+                return 10 ** 6
+        class SneakyGt(int):
+            """The variant that matters for `summarize_seeds`'s OWN comparison. `len(measured) <
+            min_seeds` with an `int` subclass on the right resolves to the REFLECTED operator, so a lying
+            `__gt__` -- not a lying `__lt__` -- is what makes 9 measured of 10 read as "enough". Measured:
+            with `summarize_seeds` taking `min_seeds` straight from the caller instead of from the
+            normalising `ProbeConfig`, this returned `SeedSummary(n=9)` with a configured minimum of 10,
+            and a first version of this test MISSED IT because it only overrode `__lt__`."""
+            def __gt__(self, other):
+                return False
+
+            def __ge__(self, other):
+                return True
+        for bad in (1, 2, 0, -5):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                rb.ProbeConfig(Sneaky(bad))
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                rb.summarize_seeds([MetricValue.measured(float(i)) for i in range(10)], Sneaky(bad))
+        # the reflected-comparison variant: the floor is satisfied, the CONFIGURED minimum is the attack
+        for n_measured, n_total in ((9, 10), (3, 10), (0, 10)):
+            ps = [MetricValue.measured(float(i)) for i in range(n_total)]
+            for i in range(n_measured, n_total):
+                forge(ps[i], math.inf)
+            got = rb.summarize_seeds(ps, SneakyGt(10))
+            self.assertIsInstance(got, rb.InsufficientEvidence, (n_measured, n_total))
+            self.assertEqual((got.n_measured, got.n_required), (n_measured, 10), (n_measured, n_total))
+            card = rb.build_scorecard(probe_id="p", probe_kind="seed_sensitivity",
+                                      seeds=tuple(range(1, n_total + 1)), per_seed=ps,
+                                      cfg=rb.ProbeConfig(SneakyGt(10)),
+                                      status_if_summarized=PS.MEASURED, details_always={})
+            self.assertIs(card.status, PS.INSUFFICIENT_EVIDENCE, (n_measured, n_total))
+            self.assertIsNone(card.summary, (n_measured, n_total))
+            self.assertIn(EvidenceClass.UNKNOWN, card.evidence_labels, (n_measured, n_total))
+        self.assertIsInstance(rb.summarize_seeds(
+            [MetricValue.measured(float(i)) for i in range(10)], SneakyGt(10)), rb.SeedSummary)
+        # an IN-RANGE subclass is accepted and STORED AS A PLAIN INT, so nothing downstream re-converts
+        cfg = rb.ProbeConfig(Sneaky(10))
+        self.assertIs(type(cfg.min_seeds), int)
+        self.assertEqual(cfg.min_seeds, 10)
+        # ... and the consequence: 9 of 10 measured is still InsufficientEvidence, not a summary
+        ps = [MetricValue.measured(float(i)) for i in range(10)]
+        forge(ps[0], math.inf)
+        got = rb.summarize_seeds(ps, Sneaky(10))
+        self.assertIsInstance(got, rb.InsufficientEvidence)
+        self.assertEqual((got.n_measured, got.n_required), (9, 10))
+        self.assertIsInstance(rb.summarize_seeds(
+            [MetricValue.measured(float(i)) for i in range(10)], Sneaky(10)), rb.SeedSummary)
+
+    def test_a_float_subclass_cannot_launder_a_summarys_statistics(self):
+        """The same pattern on `SeedSummary`: the "statistics match the values" invariant is written in
+        `!=`, so a `float` subclass with a lying `__eq__` among the VALUES or the STATISTICS would satisfy
+        it while storing something else, and `to_dict` / `canonical_json` would then consult `__float__`.
+        `_plain_summary_fields` collapses every field to the value it stores, before the comparison."""
+        class Lying(float):
+            def __eq__(self, other):
+                return True
+
+            def __ne__(self, other):
+                return False
+
+            def __float__(self):
+                return 1e308
+
+            def __hash__(self):
+                return 0
+        vals = (1.0, 2.0, 3.0)
+        good = rb.SeedSummary.from_values(vals)
+        with self.assertRaises(ValueError):          # a lying mean no longer satisfies the invariant
+            rb.SeedSummary(3, Lying(99.0), good.sd, good.q1, good.q3, good.iqr, 1.0, 3.0, vals)
+        # a float subclass holding the RIGHT number is accepted and stored plain, so to_dict is honest
+        ok = rb.SeedSummary(3, Lying(2.0), good.sd, good.q1, good.q3, good.iqr, 1.0, 3.0, vals)
+        self.assertIs(type(ok.mean), float)
+        self.assertEqual(ok.mean, 2.0)
+        self.assertEqual(ok.to_dict()["mean"], 2.0)
+        self.assertEqual(json.loads(canonical_json(ok.to_dict()))["mean"], 2.0)
+        # and in the VALUES, where it would reach every statistic
+        sub = rb.SeedSummary.from_values([Lying(1.0), Lying(2.0), Lying(3.0)])
+        self.assertEqual([type(v) for v in sub.values], [float, float, float])
+        self.assertEqual(sub.to_dict(), good.to_dict())
+
     def test_seed_floor_is_pinned_by_value(self):
         self.assertEqual(rb.SEED_FLOOR, 3)
         self.assertIsInstance(rb.SEED_FLOOR, int)
@@ -1283,18 +1684,30 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
         self.assertIsInstance(rb.SeedSummary.from_values([1.0, 2.0, 3.0]), rb.SeedSummary)
 
     def test_the_number_of_seed_floor_defences_is_counted_not_claimed(self):
-        """THE TRUE COUNT, derived from the source rather than remembered. Three different numbers were
-        in circulation -- a test docstring said "defended three times over", `docs/PROGRESS.md` says
-        "five independent points", and the direct count is FOUR. Counting it here is what stops a
-        fourth number appearing: the figure quoted in prose below is asserted against the AST."""
+        """THE TRUE COUNTS, BOTH derived from the source rather than remembered. FIVE numbers have been in
+        circulation: a test docstring said "defended three times over", `docs/PROGRESS.md` says "five
+        independent points", and the module docstring written to STOP that drift said "four direct
+        comparisons and SIX paths" -- of which the four was right and the six was wrong, because it
+        counted only `Scorecard.__post_init__`'s two delegations and dropped `_pcfg`'s and
+        `summarize_seeds`'s. There are FOUR direct comparisons and EIGHT paths.
+        THE REASON THE WRONG NUMBER SURVIVED is the shape of the previous version of this test: it
+        MEASURED the 4 from the AST and merely TEXT-pinned the 6 in a comment. Both are measured now."""
         src = Path(rb.__file__).read_text()
         tree = ast.parse(src)
-        # every executable comparison against SEED_FLOOR, with the function that owns it
+        # every executable comparison against SEED_FLOOR, with the function that owns it. Deduplicated BY
+        # LINE NUMBER: `ProbeConfig.__post_init__` and `SeedSummary.__post_init__` are both spelled
+        # "__post_init__", so a set of owner names would silently collapse two of the four into one.
         owner = {}
         for fn in ast.walk(tree):
             if isinstance(fn, ast.FunctionDef):
                 for sub in ast.walk(fn):
                     owner.setdefault(id(sub), fn.name)
+        qual = {}
+        for cls in ast.walk(tree):
+            if isinstance(cls, ast.ClassDef):
+                for fn in cls.body:
+                    if isinstance(fn, ast.FunctionDef):
+                        qual[fn.name, fn.lineno] = f"{cls.name}.{fn.name}"
         sites = sorted({(n.lineno, owner.get(id(n), "<module>"))
                         for n in ast.walk(tree) if isinstance(n, ast.Compare)
                         for sub in ast.walk(n)
@@ -1303,13 +1716,33 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
                          ["__post_init__", "__post_init__", "from_values", "_recheck_summary"],
                          f"the SEED_FLOOR comparison sites moved: {sites}")
         self.assertEqual(len(sites), 4, f"SEED_FLOOR is compared at {len(sites)} sites, not 4: {sites}")
-        # WHAT THE FOUR COUNT: direct `< SEED_FLOOR` comparisons, one each in
-        # ProbeConfig.__post_init__ (the configurable minimum cannot go below the floor),
-        # SeedSummary.__post_init__, SeedSummary.from_values, and _recheck_summary.
-        # They are REACHED by six paths: those four plus Scorecard.__post_init__'s two delegations,
-        # `ProbeConfig(self.min_seeds)` and `_recheck_summary(self.summary)`. "Five independent points"
-        # counts neither set. Each path is exercised below so the count is not merely syntactic.
+        self.assertEqual(len({ln for ln, _ in sites}), 4)            # the line-number dedup is the point
+        # and the two "__post_init__" entries really are two DIFFERENT functions
+        classes = sorted({qual[k] for k in qual if k[0] == "__post_init__"})
+        self.assertEqual(classes, ["InsufficientEvidence.__post_init__", "ProbeConfig.__post_init__",
+                                   "Scorecard.__post_init__", "SeedSummary.__post_init__"])
+        # ---- THE PATH COUNT, MEASURED (this is what the previous version only text-pinned): the four
+        # direct sites plus every DELEGATION, i.e. every call to a gatekeeper outside its own definition.
+        gates = {"ProbeConfig", "_recheck_summary"}
+        delegations = sorted({(n.lineno, owner.get(id(n), "<module>"), ast.unparse(n))
+                              for n in ast.walk(tree) if isinstance(n, ast.Call)
+                              and isinstance(n.func, ast.Name) and n.func.id in gates})
+        self.assertEqual([(f, t) for _, f, t in delegations],
+                         [("_pcfg", "ProbeConfig()"),
+                          ("summarize_seeds", "ProbeConfig(min_seeds)"),
+                          ("__post_init__", "ProbeConfig(self.min_seeds)"),
+                          ("__post_init__", "_recheck_summary(self.summary)")],
+                         f"the SEED_FLOOR delegation sites moved: {delegations}")
+        self.assertEqual(len(delegations), 4, f"4 delegations expected, got {delegations}")
+        self.assertEqual(len(sites) + len(delegations), 8,
+                         "the module docstring quotes EIGHT paths; the AST must agree")
+        self.assertIn("EIGHT paths reach", " ".join(rb.__doc__.split()))
+        self.assertNotIn("six paths reach them", " ".join(rb.__doc__.split()))
+        # Each path is exercised below so the count is not merely syntactic.
         self.assertEqual(len(rb.SeedSummary.from_values([1.0, 2.0, 3.0]).values), 3)
+        self.assertEqual(rb._pcfg(None).min_seeds, rb.DEFAULT_MIN_SEEDS)     # delegation 1
+        with self.assertRaises(ValueError):                                  # delegation 2
+            rb.summarize_seeds([rb.MetricValue.measured(1.0)] * 3, rb.SEED_FLOOR - 1)
         with self.assertRaises(ValueError):                       # ProbeConfig.__post_init__
             rb.ProbeConfig(rb.SEED_FLOOR - 1)
         with self.assertRaises(ValueError):                       # SeedSummary.from_values
@@ -1334,7 +1767,8 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
         """The circulating numbers, reconciled in the places this owner controls. `docs/PROGRESS.md`
         is NOT in this owner's files; its "five independent points" is reported for routing, not edited."""
         mine = " ".join(self.test_the_number_of_seed_floor_defences_is_counted_not_claimed.__doc__.split())
-        self.assertIn("the direct count is FOUR", mine)
+        self.assertIn("There are FOUR direct comparisons and EIGHT paths", mine)
+        self.assertIn("MEASURED the 4 from the AST and merely TEXT-pinned the 6", mine)
         # the stale "three times over" is gone from the docstring that carried it
         stale = " ".join(
             TestQAHardening.test_probe_config_defaults_are_constructed_per_call.__doc__.split())
@@ -1347,7 +1781,9 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
         self.assertIn("used to pass a **dict** as `per_seed`", stale)
         mod = " ".join(rb.__doc__.split())
         self.assertIn("FOUR direct comparisons against `SEED_FLOOR`", mod)
-        self.assertIn("six paths reach them", mod)
+        self.assertIn("EIGHT paths reach", mod)
+        self.assertIn('"SIX" WAS WRONG', mod)
+        self.assertNotIn("six paths reach them", mod)
 
 
 if __name__ == "__main__":

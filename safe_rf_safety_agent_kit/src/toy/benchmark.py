@@ -103,9 +103,17 @@ Known limits stated plainly:
   "the routes known to us", never "the only routes".
 * DEFAULT PARAMETERS ARE MARGINAL FOR THE ORACLE'S OWN GATES: on base seeds 23 and 5 (30 seeds, n_boot 2000) the
   oracle fixture is JOINT_INCONCLUSIVE because gate 11(b) (F above eps_fit=0.05) and/or gate 12 (worst-seed
-  gradient ratio 1.1e-3..3.4e-3 vs tau_conv=1e-3) fail, while base seeds 7, 11 and 99 give JOINT_SUPPORTED. The
-  defaults for `eps_fit` and `tau_conv` therefore need setting at registration (they are PROTOCOL PARAMETERS);
-  this is a property of the defaults, not of the fixtures' logic.
+  gradient ratio vs tau_conv=1e-3) fail, while base seeds 7, 11 and 99 give JOINT_SUPPORTED. The WORST-SEED
+  GRADIENT RATIO, per base seed, MEASURED: 7 -> 5.137e-05, 11 -> 5.175e-05, 99 -> 5.278e-04 (all pass),
+  23 -> 1.781e-03 and 5 -> 1.075e-03 (both fail). So the range over the two FAILING seeds is
+  1.08e-3 .. 1.78e-3. THIS PARAGRAPH USED TO SAY "1.1e-3..3.4e-3", AND 3.4e-3 IS ATTAINED BY NOTHING -- it was
+  a figure no measurement supported, and a doc-only mutant on it survived the whole suite because no test read
+  it. The five ratios are now pinned by value in
+  `test_benchmark.OracleAcrossBaseSeeds.test_the_gate12_marginality_figures_are_the_measured_ones`, which also
+  asserts this text, so the number and the measurement cannot drift apart again. The ratio does NOT depend on
+  `n_boot` (it comes from training, not from the bootstrap): identical at n_boot 2000 and 500. The defaults for
+  `eps_fit` and `tau_conv` therefore need setting at registration (they are PROTOCOL PARAMETERS); this is a
+  property of the defaults, not of the fixtures' logic.
 * `subject_kind` ('trained' / 'fixture' / 'unknown') records whether the answer
   was known by construction. A result with subject_kind == 'fixture' is a test
   of the scorer and must never be displayed as a method result.
@@ -153,14 +161,68 @@ Predictor = Callable[[Sequence[Sequence[float]]], Matrix]
 # own threat model, and every stored metric reaching a recompute has been through serialisation. So NO
 # consumer may read `.value` or `.is_measured` for itself.
 #
-# THE RULE, which is checked and not merely stated: in this module and in `toy/robustness.py` there is NO
-# attribute access named `value` or `is_measured` ANYWHERE -- zero, with no allowlist of consumers to keep
-# up to date. Every read goes through `_metric_read` below (which reaches the field by `getattr` with a
-# string, so it contains no such access either); an `Enum` payload is read through `robustness._enum_value`
-# for the same reason. `tests/toy_tests/test_benchmark.py`'s
-# `TheCheckedReaderIsTheOnlyWayToReadAStoredMetric` walks both modules' ASTs and FAILS on the first
-# unchecked read, so a future reader cannot add one and have the suite stay green. That is the difference
-# from rounds 2 and 3: the set of reads is DERIVED FROM THE SOURCE, not listed by hand.
+# THE RULE: in this module and in `toy/robustness.py` every read of a stored metric goes through
+# `_metric_read` below (which reaches the field by `getattr` with a string literal, inside one function);
+# an `Enum` payload is read through `robustness._enum_value` for the same reason.
+#
+# HOW THE RULE IS ENFORCED, and the correction of a claim that used to stand here. ROUND 4 wrote a STATIC
+# RULE OVER SPELLINGS -- an AST walk for `ast.Attribute` nodes named `value`/`is_measured` plus `ast.Call`
+# nodes named `getattr`/`setattr`/`vars`/`__getattribute__` -- and this comment claimed that under it "a
+# future reader cannot add [an unchecked read] and have the suite stay green". THAT CLAIM WAS FALSE, and it
+# failed in the way every enumeration-by-syntax fails: the list of spellings is itself hand-maintained.
+# MEASURED against that rule alone, 2 of 17 spellings of the same read were caught and 15 evaded it
+# (`getattr(x, "val" + "ue")`, a module-level `_F = "value"`, `x.__dict__.get("value")`, `vars(x)`,
+# `dataclasses.asdict(x)`, `operator.attrgetter`, `operator.itemgetter(...)(vars(x))`, destructuring, a
+# comprehension, a lambda, a nested function, a method on a new class, `functools.partial`,
+# `x.__getattribute__("value")` -- and `MetricValue.to_dict()` already returns `{"value": ...}`, so no new
+# code is even needed). Two of that rule's four `getattr`-form branches were DEAD: `vars` takes no second
+# positional argument, and `__getattribute__` is spelled as an `ast.Attribute`, never as an `ast.Name`.
+# WHAT ENFORCES IT NOW is a RUNTIME RECORDING PROBE
+# (`tests/toy_tests/test_benchmark.py::TheCheckedReaderIsTheOnlyWayToReadAStoredMetric`): it installs a
+# recording `__getattribute__` on `MetricValue` itself, runs a REAL study, a REAL recompute and the REAL
+# SR-11 probes, and compares the (reader function, attribute) pairs ACTUALLY READ off a stored metric by
+# these two modules against a declared table, in BOTH directions. A probe sees the read however it is
+# spelled, because it hooks the object rather than the source text. The AST rule is KEPT, with its two dead
+# branches fixed, as a cheap tripwire -- not as a guarantee. The probe's own honest limit is that it sees
+# only what the run it performs exercises, so each read site additionally carries a test that forges the
+# metric behind it and asserts the VERDICT and the REASONS TUPLE (`EveryReadSiteIsPinnedByItsConsequence`).
+def _plain_number(v: Any) -> Optional[float]:
+    """Collapse a real number to a PLAIN `float`, or None if it is not one. NORMALISE BEFORE CHECKING.
+
+    THE ORDERING DEFECT THIS EXISTS FOR, and the reason every validator in this module now normalises
+    first: a predicate applied to a value and a conversion of that value are two INDEPENDENTLY OVERRIDABLE
+    operations, so inspecting `v` and then using `float(v)` / `abs(v)` / `int(v)` / `v > m` checks one
+    number and decides on another. No tampering primitive is needed -- a `float` subclass passes
+    `isinstance(v, float)`, and `math.isfinite` reads the STORED double, which the subclass need not lie
+    about. MEASURED, on `_check_margin`, which tested `abs(v)` and returned `float(v)`:
+
+        class Sneaky(float):
+            def __abs__(self):   return 1.0
+            def __float__(self): return -1e308
+        _check_margin(Sneaky(0.0), "m")  ->  -1e+308      # MARGIN_MAX is 1e6
+
+    and on `_metric_read` itself, which checked `math.isfinite(v)` and then returned `v` ITSELF, overrides
+    and all: a `MetricValue.measured(Lo(-9.0))` built through the PUBLIC api, with `__gt__` returning True,
+    made a genuinely NEGATIVE interval read SUPPORTED against an honest margin of 0.1 -- component,
+    hypothesis and joint -- with no `object.__setattr__` anywhere.
+    `float.__float__` / `int.__int__` are used rather than `float(v)` / `int(v)` DELIBERATELY: they read
+    the value the object actually STORES, which is the same number `math.isfinite` and `MetricValue`'s own
+    construction check inspected, so the number checked and the number returned cannot differ. A
+    `__float__` override is not consulted second; it is not consulted at all.
+    Returns None for a bool, a non-number, a non-finite float, and an int too large to be a float
+    (`10**400` -- which is how an `OverflowError` outside this module's error contract used to escape
+    `_check_margin`; `_check_finite` had always converted it)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    try:
+        f = float.__float__(v) if isinstance(v, float) else float(int.__int__(v))
+    except (OverflowError, ValueError, TypeError):
+        return None
+    if type(f) is not float or not math.isfinite(f):
+        return None
+    return f
+
+
 def _metric_read(x: Any) -> Optional[float]:
     """Read a stored `MetricValue` as a number. Returns a genuine finite `float`, or None.
 
@@ -168,11 +230,14 @@ def _metric_read(x: Any) -> Optional[float]:
     fail-closed case (unmeasured, no verdict). It covers all of: an honestly unmeasured metric; a forged
     `nan`/`inf`/`-inf`; a forged `int`, `bool`, `str`, `list` or `None`; and an object that is not a
     `MetricValue` at all. `isinstance(v, bool)` is checked FIRST because `True` is an `int` and
-    `True == 1.0`, which is how a forged gate metric read as PASSED (D5)."""
+    `True == 1.0`, which is how a forged gate metric read as PASSED (D5).
+    IT RETURNS A PLAIN `float`, NEVER THE STORED OBJECT. Returning the object itself was the round-4
+    defect: a `float` subclass satisfies `isinstance(v, float)` and need not lie to `math.isfinite`, so
+    every downstream `lo > margin` ran on overridable dunders. See `_plain_number` for the measurement."""
     v = getattr(x, "value", None)
-    if isinstance(v, bool) or not isinstance(v, float) or not math.isfinite(v):
+    if isinstance(v, bool) or not isinstance(v, float):
         return None
-    return v
+    return _plain_number(v)
 
 
 def _metric_declared_unmeasured(x: Any) -> bool:
@@ -253,13 +318,21 @@ def _check_margin(v: Any, what: str) -> float:
     It is applied at the single point where a margin is USED to decide (`_verdict_from_bounds`), so every
     path -- `evaluate_primary` from a `Margins` object, `verdict_from_records` from a stored metric, a
     hand-built `interval_verdict` or `ComponentResult` call -- is covered by construction. There is no set
-    of call sites to remember, which is the mistake that produced three rounds of half-fixes."""
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+    of call sites to remember, which is the mistake that produced three rounds of half-fixes.
+    ORDER MATTERS AND IS THE ROUND-4 FIX: the value is NORMALISED FIRST (`_plain_number`) and every test
+    below, plus the returned value, is the normalised one. This function used to test `abs(v)` and return
+    `float(v)` -- two independently overridable dunders -- so `Sneaky(0.0)` with `__abs__` returning 1.0 and
+    `__float__` returning -1e308 came back as -1e+308, seven orders outside this function's own bound, and
+    carried SUPPORTED through `interval_verdict`, `ComponentResult` and `HypothesisResult`. It also raised
+    `OverflowError` for `10**400` while this docstring called such a value "not a finite real number" and
+    `interval_verdict` promised a `ValueError`; `_plain_number` converts it, as `_check_finite` always did."""
+    f = _plain_number(v)
+    if f is None:
         raise ValueError(f"{what} must be a finite number, got {v!r}")
-    if abs(v) > MARGIN_MAX:
-        raise ValueError(f"{what} magnitude {v!r} exceeds MARGIN_MAX={MARGIN_MAX!r}: a threshold that large "
+    if abs(f) > MARGIN_MAX:
+        raise ValueError(f"{what} magnitude {f!r} exceeds MARGIN_MAX={MARGIN_MAX!r}: a threshold that large "
                          f"decides the component without reference to the data (it is not a margin)")
-    return float(v)
+    return f
 
 
 # =================================================================== enums
@@ -308,8 +381,12 @@ class Margins:
     delta_sel: float = 0.10
 
     def __post_init__(self) -> None:
+        # STORE WHAT WAS CHECKED. The return value used to be discarded, so the field kept whatever object
+        # the caller passed and `evaluate_primary` re-read it through a bare `float(getattr(...))` -- a
+        # second, overridable conversion of a value that had already been validated once (see
+        # `_plain_number`). The field now holds the plain float `_check_margin` admitted.
         for k in ("delta_S", "delta_R", "delta_sel"):
-            _check_margin(getattr(self, k), k)
+            object.__setattr__(self, k, _check_margin(getattr(self, k), k))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -334,8 +411,25 @@ class BenchmarkConfig:
     loss_factor: float = 2.0    # gate 11(c): E training loss must fall at least this factor in every run
     tail_ratio_max: float = 10.0  # assumption-2 flag threshold on max|v|/median|v| (flag only, not a verdict input)
 
+    _INT_FIELDS = ("width", "n_train", "n_eval", "steps", "n_boot", "min_seeds", "steps_conv")
+    _NUM_FIELDS = ("lr", "eta_star", "g_min", "alpha", "max_failure_rate", "width_tol", "tau_conv", "delta_A",
+                   "eps_fit", "loss_factor", "tail_ratio_max")
+
     def __post_init__(self) -> None:
-        for k in ("width", "n_train", "n_eval", "steps", "n_boot", "min_seeds", "steps_conv"):
+        # NORMALISE BEFORE CHECKING (see `_plain_number`): an `int`/`float` SUBCLASS satisfies every
+        # `isinstance` test below and can still override `__lt__`, `__float__`, `__int__` or the arithmetic
+        # the parameter is then used in, so the value validated here would not be the value used. Only
+        # subclass instances are collapsed, to their exact base type: int-vs-float is preserved on purpose,
+        # because `config_hash` distinguishes them (see `config_hash`, gap (2)).
+        for k in self._INT_FIELDS + self._NUM_FIELDS:
+            v = getattr(self, k)
+            if isinstance(v, bool):
+                continue                              # the type checks below reject it by name
+            if isinstance(v, float) and type(v) is not float:
+                object.__setattr__(self, k, float.__float__(v))
+            elif isinstance(v, int) and type(v) is not int:
+                object.__setattr__(self, k, int.__int__(v))
+        for k in self._INT_FIELDS:
             v = getattr(self, k)
             if isinstance(v, bool) or not isinstance(v, int) or v < 0:
                 raise ValueError(f"{k} must be a nonnegative int")
@@ -343,10 +437,11 @@ class BenchmarkConfig:
             raise ValueError("width, n_eval and n_boot must be >= 1")
         if self.n_train < 16:
             raise ValueError("n_train must be >= 16 (protocol: masked subset needs >= 2 distinct values)")
-        for k in ("lr", "eta_star", "g_min", "alpha", "max_failure_rate", "width_tol", "tau_conv", "delta_A",
-              "eps_fit", "loss_factor", "tail_ratio_max"):
-            v = getattr(self, k)
-            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0:
+        for k in self._NUM_FIELDS:
+            # `_plain_number`, not `math.isfinite(v)`: `math.isfinite(10**400)` RAISES `OverflowError`, which
+            # is outside this module's stated error contract (`_check_margin` had the same defect, N2).
+            f = _plain_number(getattr(self, k))
+            if f is None or f < 0:
                 raise ValueError(f"{k} must be a finite nonnegative number")
         if self.lr <= 0 or not 0 < self.alpha < 1:
             raise ValueError("lr must be > 0 and alpha in (0,1)")
@@ -402,19 +497,26 @@ def _as_list(v, what: str) -> list:
     return list(v)
 
 
-def _check_finite(v: Sequence[float], what: str) -> None:
-    try:
-        ok = all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in v)
-    except OverflowError:      # a Python int too large for float, e.g. 10**400
-        ok = False
-    if not ok:
-        raise ValueError(f"{what} needs finite numbers (no inf/nan/non-numeric/too-large int)")
+def _check_finite(v: Sequence[float], what: str) -> list:
+    """Validate a sample and RETURN IT AS PLAIN FLOATS, so the sample checked is the sample computed on.
+
+    It used to return None and leave the caller holding the original objects. That is the
+    inspect-before-normalise pattern of `_plain_number` applied to a whole sample: an `int`/`float`
+    subclass passes every test here (`math.isfinite` reads the stored double) and can still override
+    `__eq__` -- which `_constant` uses -- and `__float__` -- which `_mean` then calls on `v[0]` for a
+    sample it believes constant. Every caller now rebinds to the returned list."""
+    out = []
+    for x in v:
+        f = _plain_number(x)
+        if f is None:
+            raise ValueError(f"{what} needs finite numbers (no inf/nan/non-numeric/too-large int)")
+        out.append(f)
+    return out
 
 
 def mean(v: Sequence[float]) -> float:
     """Public mean: finite numeric sequences only (ValueError otherwise)."""
-    v = _as_list(v, "mean")
-    _check_finite(v, "mean")
+    v = _check_finite(_as_list(v, "mean"), "mean")
     return _mean(v)
 
 
@@ -463,7 +565,7 @@ def sample_sd(v: Sequence[float]) -> float:
     n = len(v)
     if n < 2:
         raise ValueError("sample SD needs n >= 2")
-    _check_finite(v, "sample SD")          # without this, [inf,inf,inf] would give 0.0 (constant) or nan
+    v = _check_finite(v, "sample SD")      # without this, [inf,inf,inf] would give 0.0 (constant) or nan
     if _constant(v):
         return 0.0
     m = _mean(v)
@@ -485,8 +587,13 @@ def sample_sd(v: Sequence[float]) -> float:
 
 
 def quantile(sorted_v: Sequence[float], p: float) -> float:
-    """Linear-interpolation quantile (the 'type 7' definition): position p*(n-1) in the sorted sample."""
-    if not 0.0 <= p <= 1.0:
+    """Linear-interpolation quantile (the 'type 7' definition): position p*(n-1) in the sorted sample.
+
+    `p` is NORMALISED BEFORE the range test, so the position computed is the one validated: `0.0 <= p
+    <= 1.0` is two overridable comparisons and `p * (n - 1)` is an overridable `__mul__`. See
+    `_plain_number`."""
+    p = _plain_number(p)
+    if p is None or not 0.0 <= p <= 1.0:
         raise ValueError("p must lie in [0, 1]")
     n = len(sorted_v)
     if n == 0:
@@ -501,20 +608,36 @@ def quantile(sorted_v: Sequence[float], p: float) -> float:
 def bonferroni_level(alpha: float = 0.05, m: int = N_PRIMARY) -> float:
     """Per-hypothesis two-sided confidence level 1 - alpha/m. The primary family has m = N_PRIMARY = 4 intervals
     (alpha=.05 -> 0.9875). The formula is generic: m=3 would give 0.98333, which is NOT the protocol level."""
-    if not 0 < alpha < 1 or isinstance(m, bool) or not isinstance(m, int) or m < 1:
+    # NORMALISE BEFORE CHECKING (see `_plain_number`). This site was found by the entry-point sweep in
+    # `test_benchmark.NormaliseBeforeCheckingEverywhereANumberEnters`, not by reading the code: `0 < alpha
+    # < 1` is two overridable comparisons and `alpha / m` an overridable `__truediv__`, so a `float`
+    # subclass holding 30.0 was ACCEPTED and one holding 0.25 was REFUSED -- wrong in both directions.
+    a = _plain_number(alpha)
+    if a is None or not 0 < a < 1 or isinstance(m, bool) or not isinstance(m, int):
         raise ValueError("need 0 < alpha < 1 and integer m >= 1")
-    return 1.0 - alpha / m
+    m = int.__int__(m)
+    if m < 1:
+        raise ValueError("need 0 < alpha < 1 and integer m >= 1")
+    return 1.0 - a / m
 
 
-def _check_level(level: float) -> None:
-    if isinstance(level, bool) or not isinstance(level, (int, float)) or not 0 < level < 1:
+def _check_level(level: float) -> float:
+    """Validate a confidence level and RETURN IT as a plain float; every caller rebinds to the result.
+
+    It used to return None, so the caller kept the original object: a `float` subclass overriding `__lt__`
+    / `__gt__` passed `0 < level < 1` with a stored value of 5.0 and then supplied `__rsub__` to
+    `(1.0 - level) / 2.0` inside `percentile_interval`, i.e. it chose its own interval tails. Same
+    inspect-before-normalise pattern as `_check_margin`; see `_plain_number`."""
+    f = _plain_number(level)
+    if f is None or not 0 < f < 1:
         raise ValueError("level must be in (0, 1)")
+    return f
 
 
 def percentile_interval(stats: Sequence[float], level: float) -> tuple[float, float]:
     """Percentile interval of already-computed resample statistics (type-7 quantiles at
     (1-level)/2 and 1-(1-level)/2)."""
-    _check_level(level)
+    level = _check_level(level)
     s = sorted(stats)
     tail = (1.0 - level) / 2.0
     return quantile(s, tail), quantile(s, 1.0 - tail)
@@ -529,7 +652,7 @@ def bootstrap_means(values: Sequence[float], n_boot: int, rng) -> list[float]:
         raise ValueError("need a nonempty sample and n_boot >= 1")
     n = len(values)
     vals = list(values)
-    _check_finite(vals, "bootstrap")
+    vals = _check_finite(vals, "bootstrap")
     return [_mean(rng.choices(vals, k=n)) for _ in range(n_boot)]
 
 
@@ -609,9 +732,9 @@ def t_ppf(p: float, df: float) -> float:
 
 def t_interval(values: Sequence[float], level: float) -> tuple[float, float]:
     """Two-sided t-interval for the mean, df = n-1 (needs n >= 2)."""
-    _check_level(level)
+    level = _check_level(level)
     values = _as_list(values, "t-interval")
-    _check_finite(values, "t-interval")      # BEFORE any arithmetic: no raw TypeError/OverflowError from _mean
+    values = _check_finite(values, "t-interval")   # BEFORE any arithmetic: no raw TypeError/OverflowError
     n = len(values)
     if n < 2:
         raise ValueError("t-interval needs n >= 2")
@@ -642,9 +765,10 @@ def intervals_disagree(boot: tuple[float, float], tint: tuple[float, float], mar
 
 # ============================================================ interval pair
 def _mv(x: Optional[float], reason: str) -> MetricValue:
-    if x is None or isinstance(x, bool) or not math.isfinite(x):
-        return MetricValue.unmeasured(reason)
-    return MetricValue.measured(float(x))
+    """A number or an explicit absence. `_plain_number` rather than `math.isfinite(x)` then `float(x)`: one
+    operation, so the number recorded is the number checked (see `_plain_number`)."""
+    f = _plain_number(x)
+    return MetricValue.unmeasured(reason) if f is None else MetricValue.measured(f)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -702,9 +826,12 @@ def summarize(name: str, values: Sequence[float], level: float, n_boot: int, bas
               min_n: int = 30, tail_ratio_max: float = 10.0) -> IntervalPair:
     """Spread + percentile bootstrap + t-interval for one series. The bootstrap RNG is
     make_rng(derive_seed(base_seed, "bootstrap:" + name)) so the interval is reproducible from the record."""
-    _check_level(level)
-    vals = [float(v) for v in values]
-    if not all(math.isfinite(v) for v in vals):
+    level = _check_level(level)
+    # `_plain_number`, not `float(v)`: the conversion and the finiteness test must be the same operation on
+    # the same number (see `_plain_number`). A bare `float(v)` honours a `__float__` override, so the value
+    # summarised could differ from the value checked -- and `bool` was admitted as 1.0/0.0.
+    vals = [_plain_number(v) for v in values]
+    if any(v is None for v in vals):
         raise ValueError("values must be finite; filter failed runs before summarising")
     n = len(vals)
     flags = []
@@ -818,6 +945,10 @@ class ComponentResult:
     reason: str = dataclasses.field(init=False)
 
     def __post_init__(self) -> None:
+        # STORE WHAT WAS CHECKED (see `Margins.__post_init__` and `_plain_number`): the field used to keep
+        # the caller's object while only the DERIVED verdict saw the checked value, so `_agg_metrics` wrote
+        # `MetricValue.measured(float(c.margin))` -- a third conversion -- into the record.
+        object.__setattr__(self, "margin", _check_margin(self.margin, "margin"))
         v, why = interval_verdict(self.pair, self.margin, self.direction, self.width_tol, self.min_n)
         object.__setattr__(self, "verdict", v)
         object.__setattr__(self, "reason", why)
@@ -896,7 +1027,10 @@ def evaluate_primary(hid: str, series: Mapping[str, Sequence[float]], margins: M
         for metric, direction, mname in table:
             pair = summarize(f"{hid}:{metric}", series.get(metric, ()), level, cfg.n_boot, base_seed,
                              cfg.min_seeds, cfg.tail_ratio_max)
-            out.append(ComponentResult(metric, direction, float(getattr(margins, mname)), pair, cfg.min_seeds,
+            # NOT `float(getattr(...))`: `Margins.__post_init__` already stores the plain float
+            # `_check_margin` admitted, and a second conversion here would be a second overridable
+            # operation on an already-validated value (see `_plain_number`).
+            out.append(ComponentResult(metric, direction, getattr(margins, mname), pair, cfg.min_seeds,
                                        cfg.width_tol))
         return tuple(out)
 
@@ -919,9 +1053,9 @@ def required_n(pilot_sds: Sequence[float], margins: Margins, level: float, n_flo
     hw_max = 0.5*min(margins); n_req = ceil((z*SD_max/hw_max)^2), z = normal quantile of the adjusted level;
     n_planned = max(n_floor, n_req). Returns (n_planned, n_req, capped) where capped means n_req > n_cap."""
     from statistics import NormalDist
-    _check_level(level)
-    sds = [float(s) for s in pilot_sds]
-    if not sds or any(not math.isfinite(s) or s < 0 for s in sds):
+    level = _check_level(level)
+    sds = [_plain_number(s) for s in pilot_sds]      # normalise before checking; see `_plain_number`
+    if not sds or any(s is None or s < 0 for s in sds):
         raise ValueError("pilot_sds must be nonempty, finite, nonnegative")
     hw = 0.5 * min(margins.delta_S, margins.delta_R, margins.delta_sel)
     if hw <= 0:
@@ -1618,7 +1752,7 @@ def to_experiment_records(res: JointResult, *, study_id: str, base_seed: int, ti
     return recs
 
 
-def _pair_from_record(rec: ExperimentRecord) -> IntervalPair:
+def _pair_from_record(rec: ExperimentRecord, min_n: Optional[int] = None) -> IntervalPair:
     """Rebuild an `IntervalPair` from a stored record. Every scalar is read through the checked reader and a
     missing metric is a ValueError naming the record, so this function's ONLY failure mode is a ValueError
     inside the module's stated error contract.
@@ -1627,18 +1761,41 @@ def _pair_from_record(rec: ExperimentRecord) -> IntervalPair:
     cleared protocol 6.1's minimum-n floor (the floor that `_verdict_from_bounds` applies); a forged `nan`
     escaped as a bare `ValueError: cannot convert float NaN to integer` and a forged `None` as a `TypeError`,
     neither of which this module declares. The `MetricValue` fields (mean, sd, the four bounds) need no check
-    here because `IntervalPair._bound` reads them through the same reader at the point of use."""
+    here because `IntervalPair._bound` reads them through the same reader at the point of use.
+    WHICH `flags` SURVIVE THE ROUNDTRIP, decided and stated because a consumer asked (SR-13 was using only
+    one direction of `flag present => n < min_n` on the assumption that none of them did). `IntervalPair.
+    flags` is a tuple of PRODUCER PROSE and is not stored as a metric: it appears only in the record's
+    `notes`, which this module forbids parsing back as evidence. So it cannot be RESTORED. Two of the four
+    are instead RECOMPUTED here, exactly, from the stored `n_seeds` and the configuration this recompute is
+    already BOUND to:
+      * "n below protocol minimum" -- needs `min_n`, so it is derived only when the caller passes it
+        (`verdict_from_records` passes `cfg.min_seeds`, and the config-hash binding means that IS the
+        producer's `min_seeds`). With `min_n=None` it cannot be derived and is absent; the biconditional
+        `flag present <=> n < min_n` therefore holds whenever `min_n` is given, which is the form a
+        consumer can rely on.
+      * "percentile bootstrap unreliable (n < 20)" -- a fixed constant, so always derived.
+    THE OTHER TWO ARE NOT RECOVERABLE AND ARE DELIBERATELY NOT FAKED: "degenerate: all values tied" needs
+    the raw per-seed values (`sd == 0.0` is NOT equivalent to it -- see `sample_sd`'s float-floor limit),
+    and "heavy tail" is a formatted string whose number is stored (`max_over_median_abs`) but whose text is
+    the producer's. Reconstructing prose is not carrying evidence. A roundtripped pair therefore has a
+    flags tuple that is a SUBSET of the producer's, never a superset, and never a different one."""
     m = rec.metrics
     need = ("n_seeds", "ci_level", "n_boot", "mean", "sd", "iqr", "min", "max", "max_over_median_abs",
             "ci_boot_lo", "ci_boot_hi", "ci_t_lo", "ci_t_hi")
     absent = [k for k in need if k not in m]
     if absent:
         raise ValueError(f"{rec.name}: record is missing the metrics {absent}; cannot rebuild an interval")
-    return IntervalPair(rec.name, _metric_count(m["n_seeds"], f"{rec.name}: n_seeds"),
+    n = _metric_count(m["n_seeds"], f"{rec.name}: n_seeds")
+    flags = []
+    if min_n is not None and n < min_n:
+        flags.append("n below protocol minimum")
+    if n < 20:
+        flags.append("percentile bootstrap unreliable (n < 20)")
+    return IntervalPair(rec.name, n,
                         _metric_required(m["ci_level"], f"{rec.name}: ci_level"),
                         _metric_count(m["n_boot"], f"{rec.name}: n_boot"),
                         m["mean"], m["sd"], m["iqr"], m["min"], m["max"], m["max_over_median_abs"],
-                        m["ci_boot_lo"], m["ci_boot_hi"], m["ci_t_lo"], m["ci_t_hi"])
+                        m["ci_boot_lo"], m["ci_boot_hi"], m["ci_t_lo"], m["ci_t_hi"], tuple(flags))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1752,7 +1909,19 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: Optional[Benc
     # the converged-budget series can be measured on fewer seeds than are OK. This is the `pair.n` defect
     # of round 3 in its records form: there, two consumers disagreed about n and a forged n bought a
     # decisive verdict; the lesson applied here is that n must be CHECKED against something, not trusted.
-    joint_n = _metric_count(gm["n_seeds"], "JOINT: n_seeds") if "n_seeds" in gm else None
+    # IT FAILS CLOSED ON AN ABSENT SECOND SOURCE, and that is a deliberate change: this used to read
+    # `... if "n_seeds" in gm else None`, so deleting one dict entry SKIPPED the check silently and n was
+    # trusted after all -- in the one guard whose stated purpose is that it is not. Deciding it rather
+    # than defaulting it: `to_experiment_records` writes `n_seeds` into EVERY JOINT record, so no honest
+    # producer in this kit can omit it, and `verdict_from_records` already raises for a missing `margin`,
+    # `ci_level` or any of `_pair_from_record`'s thirteen metrics. A missing `n_seeds` is therefore the
+    # same class of malformed record as those, and it gets the same answer. (`toy.dashboard`'s version of
+    # this cross-check fails closed for a different reason: its two sources are required dataclass fields
+    # with no absent case at all.)
+    if "n_seeds" not in gm:
+        raise ValueError("JOINT: record stores no n_seeds metric; the component-n cross-check cannot run, "
+                         "and a stored n that is not checked against a second source is a trusted n")
+    joint_n = _metric_count(gm["n_seeds"], "JOINT: n_seeds")
 
     def comp(tag, metric, direction):
         r = by[tag]
@@ -1766,8 +1935,18 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: Optional[Benc
         lv = _metric_required(r.metrics["ci_level"], f"{tag}: ci_level")
         if abs(lv - want_level) > 1e-12:
             raise ValueError(f"{tag}: ci_level {lv!r} is not the adjusted level {want_level!r} (m={N_PRIMARY})")
+        # `_pair_from_record(r)`, NOT `(r, cfg.min_seeds)`: the recomputed `flags` would be
+        # UNOBSERVABLE here. `flags` is consumed by nothing in this module's verdict logic (its only
+        # other use is `to_experiment_records` writing it into `notes`, which is not evidence), and
+        # `RecomputedVerdict` carries no pair -- so passing the minimum at this call site would be dead
+        # code dressed as a guard. A measured mutant proved it: dropping the argument changed no test.
+        # A DIRECT caller of `_pair_from_record` that wants the flag passes `min_n` itself, and both
+        # directions of `flag present <=> n < min_n` are pinned there. The n-below-minimum FACT still
+        # reaches the verdict by the route that always carried it: `_verdict_from_bounds` compares
+        # `pair.n` with `min_n` itself and returns INCONCLUSIVE, which is asserted across the whole
+        # declared range of `min_seeds` by `test_the_declared_input_RANGE_is_swept_not_just_the_default`.
         pair = _pair_from_record(r)
-        if joint_n is not None and pair.n > joint_n:
+        if pair.n > joint_n:
             raise ValueError(f"{tag}: stored n_seeds {pair.n} exceeds the study's {joint_n} measured seeds "
                              f"(a component cannot be measured on more seeds than succeeded)")
         # `_check_margin` runs again inside `_verdict_from_bounds`; calling it here only buys an error

@@ -5,12 +5,18 @@ construction (oracle / degrader / identity) or of hand-computed statistics. None
 method, and none says anything about RFdiffusion or any real model. The protocol's actual experiment (the
 erasure arm E scored as a study) is deliberately NOT run here."""
 import ast
+import copy
 import dataclasses
+import functools
+import gc
 import hashlib
 import inspect
 import itertools
 import json
 import math
+import operator
+import os
+import pickle
 import random
 import sys
 import unittest
@@ -18,13 +24,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from toy import benchmark as bm
+from toy import robustness as rb
+from toy import schema as schema_mod
 from unittest import mock
 
-from toy.schema import EvidenceClass, ExperimentRecord, MetricValue, derive_seed, make_rng
+from toy.schema import (EvidenceClass, ExperimentRecord, MetricValue, RunProvenance, derive_seed,
+                        make_rng)
 
 V, J = bm.Verdict, bm.JointVerdict
 SMALL = bm.BenchmarkConfig(n_boot=2000)          # smaller B only to keep the suite fast; the default is 10,000
 FZ = bm.freeze_seed_list(7, 30)
+TS_PROBE = "2000-01-01T00:00:00Z"
 _ORACLE = {}
 
 
@@ -1612,6 +1622,38 @@ class OracleAcrossBaseSeeds(unittest.TestCase):
         mf = {f.name: f.default for f in dataclasses.fields(bm.Margins)}
         self.assertEqual(mf, self.MARGIN_DEFAULTS, self.HINT)
 
+    # N3: the worst-seed converged-budget gradient ratio per base seed, MEASURED. The module docstring
+    # quoted "1.1e-3..3.4e-3" for the gate-12 failure and 3.4e-3 WAS ATTAINED BY NOTHING; the range over
+    # the two failing seeds is 1.0754e-3 .. 1.7810e-3. A doc-only mutant on that figure survived the whole
+    # suite (its docstring-stripped AST was confirmed unchanged, so the mutant was valid) because NO TEST
+    # READ THE FIGURE. This table is why it cannot survive again.
+    GRAD_RATIO = {7: 5.136962118700918e-05, 11: 5.174835583488726e-05, 99: 0.0005277795431588699,
+                  23: 0.0017809917284920913, 5: 0.0010753564206187154}
+
+    def test_the_gate12_marginality_figures_are_the_measured_ones(self):
+        """The ratio is recomputed from the stored per-seed metrics, not parsed out of the gate's reason
+        string, so this pins the NUMBER and not its formatting. It does not depend on `n_boot` -- it comes
+        from training, not from the bootstrap -- confirmed identical at n_boot 2000 and 500."""
+        for base, want in self.GRAD_RATIO.items():
+            with self.subTest(base_seed=base):
+                r = self.run_for(base)
+                worst = max(bm._metric_read(s.metrics["conv_grad_ratio"]) for s in r.seed_scores if s.ok)
+                self.assertEqual(worst, want, f"base {base}: worst gradient ratio moved")
+                failed = {g.name for g in r.gates if not g.passed}
+                self.assertEqual("convergence" in failed, worst > 1e-3, base)
+        failing = sorted(self.GRAD_RATIO[b] for b in (23, 5))
+        self.assertEqual([f"{v:.3g}" for v in failing], ["0.00108", "0.00178"])
+        self.assertEqual(max(self.GRAD_RATIO.values()), self.GRAD_RATIO[23])
+        self.assertLess(max(self.GRAD_RATIO.values()), 3.4e-3)        # the retracted figure, unattained
+        doc = " ".join(bm.__doc__.split())
+        # The retracted figure may appear ONLY as an attributed correction, never as the docstring's own
+        # measurement -- the convention `test_robustness` uses for a falsified claim.
+        self.assertNotIn("gradient ratio 1.1e-3..3.4e-3 vs tau_conv", doc)
+        self.assertIn('USED TO SAY "1.1e-3..3.4e-3"', doc)
+        for needle in ("7 -> 5.137e-05", "11 -> 5.175e-05", "99 -> 5.278e-04", "23 -> 1.781e-03",
+                       "5 -> 1.075e-03", "1.08e-3 .. 1.78e-3", "3.4e-3 IS ATTAINED BY NOTHING"):
+            self.assertIn(needle, doc, needle)
+
     def test_default_parameter_pins(self):
         for base, want in self.EXPECT.items():
             with self.subTest(base_seed=base):
@@ -2484,102 +2526,437 @@ class RecordsAndRecompute(unittest.TestCase):
             bm.HypothesisResult("H1", o.h1.components, verdict=V.SUPPORTED)   # verdicts are derived, not supplied
 
 
-# ====================================================================== SR-15 round 4
-# The three rounds this file now pins against, in order, because the SHAPE repeated and only the
-# location moved: (R2, dashboard) `_interval` gated on `is_measured` while `_metric_cell` checked
-# the value, fixed by a shared helper across a HAND-LISTED set of consumers; (R3, dashboard) two
-# consumers of `pair.n` disagreed and a forged `n` bought a decisive verdict -- the enumeration was
-# ASSERTED, not performed; (R3, benchmark) `IntervalPair._bound` closed the LEFT operand of
-# `lo > margin` and left the RIGHT one (the stored `margin`) on the identical `is_measured`-only
-# gate. Every one of the three was missed by a test that checked an INTERMEDIATE and never asked
-# what was concluded, so every forgery below asserts the verdict AND the reasons tuple.
+# ====================================================================== SR-15 round 5
+# FOUR rounds of this item, in order, because the SHAPE repeated and only the location moved:
+#   (R2, dashboard) `_interval` gated on `is_measured` while `_metric_cell` checked the value --
+#     fixed by a shared helper across a HAND-LISTED set of consumers;
+#   (R3, dashboard) two consumers of `pair.n` disagreed and a forged `n` bought a decisive verdict:
+#     the enumeration was ASSERTED, not performed;
+#   (R3, benchmark) `IntervalPair._bound` closed the LEFT operand of `lo > margin` and left the RIGHT
+#     one (the stored `margin`) on the identical `is_measured`-only gate;
+#   (R4, benchmark) the list of CONSUMERS was replaced by a STATIC RULE OVER SPELLINGS -- and the list
+#     of spellings is itself hand-maintained. MEASURED: it caught 2 of 19 spellings of the same read
+#     and 17 evaded it, two of its own four `getattr`-form branches were DEAD CODE (`vars` takes no
+#     second positional argument; `__getattribute__` is an `ast.Attribute`, never an `ast.Name`), and
+#     `MetricValue.to_dict()` already returns `{"value": ...}` so no new code was even needed.
+# THE LESSON, which is the point of this round: ENUMERATING SYNTAX CANNOT WORK FOR THIS. A new spelling
+# defeats it, forever. The protection is therefore THREE OVERLAPPING PARTIAL LAYERS, and the load-bearing
+# one is not a mechanism at all:
+#   L1 RUNTIME RECORDING PROBE (`TheCheckedReaderIsTheOnlyWayToReadAStoredMetric`) -- hooks the carrier
+#      and records the (reader function, attribute) pairs a REAL run actually touches. Catches any read
+#      that goes through the type's attribute protocol, over the paths the run exercises. MEASURED BLIND
+#      SPOTS, pinned in `test_the_probes_blind_spellings_are_pinned_by_measurement`: the base slot
+#      (`object.__getattribute__`) and `gc`-level reflection, which bypass the type entirely; and any
+#      branch the run does not reach. It is NOT spelling-agnostic and NOT path-complete.
+#   L2 BEHAVIOURAL COVERAGE PER READ SITE (`EveryReadSiteIsPinnedByItsConsequence` here and
+#      `EveryMetricReadSiteIsPinnedByItsConsequence` in test_robustness.py) -- forge the metric behind
+#      each site and assert the VERDICT and the REASONS TUPLE. THIS IS THE LAYER THAT ACTUALLY PROTECTS:
+#      it depends on neither spelling nor path, so a site covered this way dies however the read is
+#      written, including through the routes L1 is blind to. The sites that survived a reroute to a fully
+#      unchecked read survived precisely because nothing asserted their consequence.
+#   L3 THE STATIC SPELLING RULE (`TheStaticSpellingRuleIsATripwireNotAGuarantee`), dead branches fixed,
+#      kept only as a cheap tripwire over code no run reaches. Its coverage is MEASURED, not claimed.
+# Every one of the four rounds was missed by a test that checked an INTERMEDIATE and never asked what was
+# concluded, which is why L2 and not L1 is where this round put the weight.
 _SRC_FILES = {"benchmark": Path(bm.__file__), "robustness": Path(bm.__file__).with_name("robustness.py")}
 
-# The ONLY functions allowed to reach a `value` / `is_measured` field, by the `getattr`-with-a-string
-# form. This list names the READERS, not the reads -- the reads are derived from the source below, which
-# is the whole point. The test asserts each of these exists and actually contains such an access, so a
-# stale name here fails rather than silently widening the rule.
-_DECLARED_READERS = {"_metric_read", "_metric_declared_unmeasured", "_enum_value"}
+_OWNED_FILES = {str(p.resolve()): name for name, p in _SRC_FILES.items()}
+_SCHEMA_FILE = str(Path(schema_mod.__file__).resolve())
+_STDLIB_DIR = os.path.dirname(os.__file__)
+_ANON_CODE = {"<listcomp>", "<setcomp>", "<dictcomp>", "<genexpr>", "<lambda>"}
+
+# EVERY (module, function, attribute) triple by which `benchmark.py` or `robustness.py` touches a stored
+# `MetricValue`, MEASURED by the probe below during a real study, a real recompute and the real SR-11
+# probes -- not listed from reading the source. Compared with set equality in BOTH directions, so an
+# added consumer fails naming itself and a reader that stopped reading fails as a rotted entry.
+_DECLARED_METRIC_TOUCHES = {
+    ("benchmark", "_metric_read", "value"),                  # THE checked reader
+    ("benchmark", "_metric_declared_unmeasured", "value"),   # honest-absence seam
+    ("benchmark", "_metric_declared_unmeasured", "reason"),
+    ("benchmark", "_metric_required", "__repr__"),           # names the offending metric in its ValueError
+    ("benchmark", "_metric_strict", "__repr__"),             # ditto
+    ("robustness", "arm_difference", "reason"),              # quotes an absent arm's stated reason
+    ("robustness", "benchmark_outcome.<locals>.outcome", "reason"),       # ditto, for a probe outcome
+    ("robustness", "Scorecard.to_dict", "to_dict"),          # delegates serialisation to the carrier
+}
+# Attribute names a declared reader may NOT use, pinned so the probe's own NON-VACUITY is provable: these
+# are the routes round 4's static rule could not see, and the probe reports them by not seeing them.
+_FORBIDDEN_TOUCHES = ("__dict__", "__dataclass_fields__", "__getattribute__", "__class__", "is_measured",
+                      "__reduce_ex__", "__format__")
 
 
-def _attribute_reads(src):
-    """Every `<expr>.value` / `<expr>.is_measured` attribute access in `src`, as (lineno, text)."""
-    return sorted((n.lineno, ast.unparse(n)) for n in ast.walk(ast.parse(src))
-                  if isinstance(n, ast.Attribute) and n.attr in ("value", "is_measured"))
+def _owning_reader(depth):
+    """(module, qualified function) of the OWNED code that performed the current read, or None.
+
+    THE ATTRIBUTION RULE, clause by clause, because the probe is only as good as this function:
+      * the frame is in `benchmark.py` / `robustness.py`  -> THAT function is the reader;
+      * the frame is in `toy/schema.py`                   -> the carrier's OWN internal read
+        (construction, `is_measured`, `render`, `to_dict`). SR-04 owns and attests those. A read made by
+        an owned module THROUGH one of them is still seen, as a read of the METHOD attribute by the owned
+        frame -- which is why the probe records every attribute name and not just two;
+      * the frame is a dataclass-generated method (`co_filename == "<string>"`) -> likewise the carrier's;
+      * the frame is in the standard library              -> a TRAMPOLINE (`dataclasses.asdict`,
+        `dataclasses.astuple`, `functools.partial`, `copy`), so walk up and attribute to the first
+        non-stdlib frame. This is what makes `dataclasses.asdict(m)["value"]` written inside
+        `benchmark.py` attributable to `benchmark.py` instead of to `dataclasses.py`;
+      * anything else (this test file, `dashboard.py`, a caller-supplied callback) -> NOT an owned read,
+        and ignored. The rule under test is about these two modules, and `dashboard.py` has its own probe.
+    A comprehension or lambda frame is resolved to its enclosing named function (`co_name` is `<listcomp>`
+    on interpreters that do not inline them), so the table does not depend on PEP 709."""
+    f = sys._getframe(depth)
+    while f is not None:
+        fn = f.f_code.co_filename
+        if fn in _OWNED_FILES:
+            g, name = f, getattr(f.f_code, "co_qualname", f.f_code.co_name)
+            while g.f_code.co_name in _ANON_CODE and g.f_back is not None \
+                    and g.f_back.f_code.co_filename == fn:
+                g = g.f_back
+                name = getattr(g.f_code, "co_qualname", g.f_code.co_name)
+            return (_OWNED_FILES[fn], name)
+        if fn == _SCHEMA_FILE or not fn.startswith(_STDLIB_DIR):
+            return None
+        f = f.f_back
+    return None
 
 
-def _getattr_reads(src):
-    """Every `getattr/setattr/vars(x, "value"|"is_measured", ...)` call, as (enclosing function, text).
+class recording_metric_reads:
+    """Context manager: record every way `benchmark.py` / `robustness.py` touches a `MetricValue`.
 
-    Checked as well as the attribute form because otherwise the rule is trivially evaded by spelling
-    the same read through `getattr`, which is precisely how the three declared readers do it."""
-    tree = ast.parse(src)
-    owner = {}
-    for fn in ast.walk(tree):
-        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for sub in ast.walk(fn):
-                owner.setdefault(id(sub), fn.name)
-    out = []
-    for n in ast.walk(tree):
-        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                and n.func.id in ("getattr", "setattr", "vars", "__getattribute__")
-                and len(n.args) > 1 and isinstance(n.args[1], ast.Constant)
-                and n.args[1].value in ("value", "is_measured")):
-            out.append((owner.get(id(n), "<module>"), ast.unparse(n)))
-    return sorted(out)
+    The hooks go on `MetricValue` ITSELF, not on a `__class__`-swapped subclass as `toy.dashboard`'s probe
+    does, and the difference is deliberate: the objects whose reads matter here DO NOT EXIST when the probe
+    starts. They are created inside the study, the serialisation, the recompute and the SR-11 probes, so
+    there is nothing to swap a class on. A class-level hook covers every instance created inside the
+    window, wherever it is created, while `isinstance`, the dataclass `__eq__`/`__hash__` and the frozen
+    semantics are all untouched -- so the code under probe takes exactly its real path.
+    `__repr__` and `__format__` are hooked as well as `__getattribute__`, because `repr(m)` and `f"{m}"`
+    look the method up on the TYPE: `float(repr(m).split("value=")[1].split(",")[0])` reads a forged
+    number with no instance attribute access at all, and it was the only one of 19 ordinary spellings that
+    evaded a `__getattribute__`-only hook. Stringifying a metric is legitimate inside an error message, so
+    it is not forbidden -- it is DECLARED like every other touch.
+    TWO DESIGN CHOICES THAT ARE LOAD-BEARING, and the reason this probe is not simply `toy.dashboard`'s
+    copied over (the dashboard's, measured verbatim, is blind to both of these):
+      * EVERY ATTRIBUTE NAME IS RECORDED, with no filter. The dashboard's probe keeps only names whose
+        value `is_a_stored_number`, which DISCARDS `__dict__` -- so `vars(x)["value"]` and
+        `x.__dict__["value"]` leave it with an empty bucket. Here they are recorded as reads of
+        `__dict__`, which `_FORBIDDEN_TOUCHES` then refuses. Same for `__getstate__`, `__reduce_ex__`
+        and `to_dict`.
+      * THE TABLE IS KEYED BY (module, READER FUNCTION, attribute), not by attribute. A set of attribute
+        names makes a SECOND consumer of an ALREADY-DECLARED number invisible by construction, which is
+        exactly the `pair.n` defect of round 3. Keyed by reader, a second consumer appears as a new triple.
+    WHAT IT STILL CANNOT SEE, measured and pinned, not described: `object.__getattribute__(m, "value")`,
+    `object.__getattribute__(m, "__dict__")["value"]` and `gc.get_referents(m)` bypass
+    `type(m).__getattribute__` altogether, so no hook on the type can observe them. That is the same class
+    as the `object.__setattr__` route this module's threat model already lists (route (b)): a deliberate
+    bypass of the type's own protocol, not a spelling a consumer writes by accident. And the probe sees
+    only the paths its run exercises. Those two limits are why layer 2 exists."""
+
+    HOOKS = ("__getattribute__", "__repr__", "__format__")
+
+    def __enter__(self):
+        self.seen = set()
+        self.saved = {n: MetricValue.__dict__.get(n, _ABSENT) for n in self.HOOKS}
+        orig = {n: getattr(MetricValue, n) for n in self.HOOKS}
+        seen = self.seen
+
+        def hooked_getattribute(obj, name):
+            who = _owning_reader(2)
+            if who is not None:
+                seen.add(who + (name,))
+            return orig["__getattribute__"](obj, name)
+
+        def hooked_repr(obj):
+            who = _owning_reader(2)
+            if who is not None:
+                seen.add(who + ("__repr__",))
+            return orig["__repr__"](obj)
+
+        def hooked_format(obj, spec):
+            who = _owning_reader(2)
+            if who is not None:
+                seen.add(who + ("__format__",))
+            return orig["__format__"](obj, spec)
+
+        MetricValue.__getattribute__ = hooked_getattribute
+        MetricValue.__repr__ = hooked_repr
+        MetricValue.__format__ = hooked_format
+        return self
+
+    def __exit__(self, *exc):
+        for name, value in self.saved.items():
+            if value is _ABSENT:
+                delattr(MetricValue, name)
+            else:
+                setattr(MetricValue, name, value)
+        return False
+
+
+_ABSENT = object()
+
+
+def forge(mv, value):
+    """Install `value` into a built `MetricValue` -- route (b) of the module's own threat model."""
+    object.__setattr__(mv, "value", value)
+    return mv
+
+
+# 19 spellings of ONE read: `m.value` on a metric forged to 1e9. Each is compiled with benchmark.py's own
+# `co_filename` (see `_run_sneak`), so it is code "in benchmark.py" as far as any tool can tell. The
+# second column of the measurement that drove this round -- round 4's STATIC rule caught S0 and S1 only.
+SNEAK_SPELLINGS = [
+    ("S0  plain attribute", "def _sneak(m):\n    return m.value\n"),
+    ("S1  getattr literal", "def _sneak(m):\n    return getattr(m, 'value')\n"),
+    ("S2  getattr concatenated", "def _sneak(m):\n    return getattr(m, 'val' + 'ue')\n"),
+    ("S3  module-level name", "_F = 'value'\ndef _sneak(m):\n    return getattr(m, _F)\n"),
+    ("S4  __dict__.get", "def _sneak(m):\n    return m.__dict__.get('value')\n"),
+    ("S5  vars().get", "def _sneak(m):\n    return vars(m).get('value')\n"),
+    ("S6  dataclasses.asdict", "def _sneak(m):\n    return dataclasses.asdict(m).get('value')\n"),
+    ("S7  operator.attrgetter", "def _sneak(m):\n    return operator.attrgetter('value')(m)\n"),
+    ("S8  itemgetter over vars", "def _sneak(m):\n    return operator.itemgetter('value')(vars(m))\n"),
+    ("S9  destructuring", "def _sneak(m):\n    v, _r = dataclasses.astuple(m)\n    return v\n"),
+    ("S10 comprehension", "def _sneak(m):\n    return [x.value for x in (m,)][0]\n"),
+    ("S11 module-level lambda", "_peek = lambda m: m.value\ndef _sneak(m):\n    return _peek(m)\n"),
+    ("S12 nested function", "def _sneak(m):\n    def inner(x):\n        return x.value\n    return inner(m)\n"),
+    ("S13 method on a new class",
+     "class _Peeker:\n    def peek(self, m):\n        return m.value\ndef _sneak(m):\n    return _Peeker().peek(m)\n"),
+    ("S14 functools.partial",
+     "def _peek(name, m):\n    return getattr(m, name)\ndef _sneak(m):\n    return functools.partial(_peek, 'value')(m)\n"),
+    ("S15 m.__getattribute__", "def _sneak(m):\n    return m.__getattribute__('value')\n"),
+    ("S16 to_dict, the schema contract", "def _sneak(m):\n    return m.to_dict()['value']\n"),
+    ("S17 repr parsing, no attribute read at all",
+     "def _sneak(m):\n    return float(repr(m).split('value=')[1].split(',')[0])\n"),
+    ("S18 is_measured gate", "def _sneak(m):\n    return m.is_measured\n"),
+]
+
+# The ones that WIN against the probe, measured. All three bypass `type(m).__getattribute__` entirely.
+SNEAK_BLIND_SPELLINGS = [
+    ("B1 object.__getattribute__", "def _sneak(m):\n    return object.__getattribute__(m, 'value')\n"),
+    ("B2 object.__getattribute__ for __dict__",
+     "def _sneak(m):\n    return object.__getattribute__(m, '__dict__')['value']\n"),
+    # `gc` reaches the instance's own storage. Two shapes, both handled, because CPython 3.11+ gives a
+    # dataclass instance a MANAGED dict: until something materialises it, `get_referents` hands back the
+    # field VALUES in declaration order (`[value, reason, type]`); afterwards it hands back the dict. The
+    # first form was missed on a first measurement because an earlier `copy.copy` in the same process had
+    # already materialised the dict -- a reminder that a probe measurement is itself order-sensitive.
+    ("B3 gc.get_referents",
+     "def _sneak(m):\n    r = gc.get_referents(m)[0]\n    return r['value'] if isinstance(r, dict) else r\n"),
+]
+
+
+def probe_run():
+    """ONE REAL EXERCISE of both modules. Deliberately NOT a synthetic `MetricValue` fixture: the defect
+    class is "a consumer somewhere in the pipeline reads a stored metric for itself", and a fixture only
+    exercises the consumers the fixture's author thought of. Every call below is a public entry point.
+
+    It covers, and has to cover, every declared read site -- the table is compared in both directions, so
+    a site this run does not reach fails as "declared but NOT read" and the run has to be extended."""
+    res = study(bm.fixture_global_degrader(0.5), "d")
+    recs = bm.to_experiment_records(res, study_id="p", base_seed=7, timestamp_utc=TS_PROBE)
+    bm.verdict_from_records(recs, SMALL)
+    bm.seed_records(res, study_id="p", timestamp_utc=TS_PROBE)
+    for r in recs:                                   # a real serialisation round-trip
+        ExperimentRecord.from_json(r.to_json())
+    failing = synth_scores(FZ.seeds, loss=0.9, gr=1.0)        # gates 11(c) and 12 genuinely fail
+    bm.evaluate_gates(failing, FZ, FZ.digest, SMALL)
+    res2 = bm.analyze_scores(failing, frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL)
+    bm.verdict_from_records(bm.to_experiment_records(res2, study_id="q", base_seed=7,
+                                                     timestamp_utc=TS_PROBE), SMALL)
+    orecs = bm.to_experiment_records(oracle(), study_id="o", base_seed=7, timestamp_utc=TS_PROBE)
+    bm.verdict_from_records(orecs, SMALL)                     # the exempt / fixture decode path
+    j = orecs[-1]
+    for flag in (MetricValue.unmeasured("not recorded by this producer"),   # honestly absent: accepted
+                 forge(MetricValue.measured(1.0), math.inf)):               # malformed: must raise
+        try:
+            bm.verdict_from_records(orecs[:-1] + [dataclasses.replace(
+                j, metrics={**j.metrics, "loss_check_exempt": flag})], SMALL)
+        except ValueError:
+            pass
+    for key in ("margin", "n_seeds"):                # the ValueError paths, which NAME the metric
+        broken = {**recs[0].metrics, key: MetricValue.unmeasured("nope")}
+        try:
+            bm.verdict_from_records([dataclasses.replace(recs[0], metrics=broken)] + recs[1:], SMALL)
+        except ValueError:
+            pass
+    # ---- SR-11: the real probes, both the summarized and the insufficient branch, and a real scorecard
+    cfg = rb.ProbeConfig(3)
+    card = rb.seed_sensitivity_probe(lambda s: float(s % 7), (1, 2, 3, 4, 5), cfg)
+    card.to_dict()
+    card.content_hash()
+    rb.scorecard_to_record(card, run_id="r1", timestamp_utc=TS_PROBE)
+    insuf = rb.seed_sensitivity_probe(lambda s: 1.0 if s < 2 else math.nan, (1, 2, 3, 4, 5), cfg)
+    rb.scorecard_to_record(insuf, run_id="r2", timestamp_utc=TS_PROBE)
+    insuf.to_dict()
+    rb.summarize_seeds([MetricValue.measured(float(i)) for i in range(5)], 3)
+    rb.arm_difference({"C0": MetricValue.measured(0.0), "E": MetricValue.measured(1.0)}, "E", "C0")
+    rb.arm_difference({"C0": MetricValue.measured(0.0), "E": MetricValue.unmeasured("x")}, "E", "C0")
+    rb.probe_missing_inputs(rb.mse_fsum, (1, 2, 3, 4, 5), cfg)
+    rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), (1, 2, 3, 4, 5), cfg)
+    rb.probe_shift(rb.mse_fsum, rb.shift_scale(2.0), (1, 2, 3, 4, 5), cfg)
+    rb.probe_precision("cancellation", 1e8, (1, 2, 3, 4, 5), cfg)
+    rb.precision_sweep("cancellation", (1e6, 1e8), (1, 2, 3, 4, 5), cfg)
+    tiny = bm.BenchmarkConfig(steps=20, steps_conv=25, n_boot=50, n_train=16, n_eval=16)
+    deg = bm.fixture_global_degrader(0.5)
+    rb.seed_sensitivity_probe(rb.benchmark_outcome(deg, "S", tiny), (1, 2, 3), cfg)
+    # ... and an UNMEASURED metric, so `benchmark_outcome` reaches its reason-quoting branch
+    rb.seed_sensitivity_probe(rb.benchmark_outcome(deg, "E_loss_ratio", tiny), (1, 2, 3), cfg)
 
 
 class TheCheckedReaderIsTheOnlyWayToReadAStoredMetric(unittest.TestCase):
-    """SR-15 round 4, and the answer to "how is a future reader PREVENTED from adding an unchecked read".
+    """THE ROUND-5 MECHANISM: a RUNTIME RECORDING PROBE, replacing round 4's static rule over spellings.
 
-    `MetricValue.is_measured` is only `value is not None`, so every consumer that gates on it accepts a
-    post-hoc forged `inf`, `nan`, `True`, `"0"` or `[]` as a number. Rounds 2 and 3 each fixed the
-    consumers they were looking at and kept a hand-maintained list of them; both lists were incomplete
-    within one round. This class replaces the list with a DERIVATION: it parses the two modules and
-    fails on the FIRST attribute access named `value` or `is_measured`, anywhere, with no allowlist of
-    consumers at all. The permitted spelling is `getattr` with a string literal, confined to the three
-    declared reader functions, so a new consumer physically cannot read a stored metric without going
-    through `_metric_read` and having the suite stay green."""
+    Round 4 asserted that "a new consumer physically cannot read a stored metric without going through
+    `_metric_read` and having the suite stay green". THAT CLAIM WAS FALSE and is withdrawn. It rested on an
+    AST walk for `ast.Attribute` nodes named `value`/`is_measured` and `ast.Call` nodes named
+    `getattr`/`setattr`/`vars`/`__getattribute__`; measured against 19 spellings of the same read it caught
+    2 and 17 evaded, and two of its own four call-form branches were unreachable. The list of spellings a
+    static rule must enumerate is itself hand-maintained, which is the exact failure mode of rounds 2 and 3
+    one level of indirection up.
 
-    def test_no_attribute_access_named_value_or_is_measured_exists_in_either_module(self):
-        for name, path in _SRC_FILES.items():
-            found = _attribute_reads(path.read_text())
-            self.assertEqual(found, [], f"{name}.py has {len(found)} unchecked metric reads: {found}; "
-                                        "read stored metrics with _metric_read / _metric_ok / "
-                                        "_metric_required / _metric_count / _metric_strict, and an Enum "
-                                        "payload with robustness._enum_value")
+    A runtime probe hooks the OBJECT rather than the source text, so it does not have to guess at
+    spellings: `recording_metric_reads` installs a recording `__getattribute__` (plus `__repr__` /
+    `__format__`) on `MetricValue` itself; `probe_run` performs a real study, a real serialisation
+    round-trip, three real recomputes, a genuinely failing-gate study and the real SR-11 probes; and
+    `_owning_reader` attributes each read to the function in `benchmark.py` or `robustness.py` that
+    performed it, through a stdlib trampoline if there was one. The observed set is compared with
+    `_DECLARED_METRIC_TOUCHES` by set equality in BOTH directions.
 
-    def test_the_getattr_spelling_is_confined_to_the_three_declared_readers(self):
-        seen = set()
-        for name, path in _SRC_FILES.items():
-            for fn, text in _getattr_reads(path.read_text()):
-                self.assertIn(fn, _DECLARED_READERS, f"{name}.py: {text} in {fn}() evades the rule by "
-                                                     "spelling the read through getattr")
-                seen.add(fn)
-        self.assertEqual(seen, _DECLARED_READERS,
-                         "a declared reader no longer contains such an access: the list is stale, which "
-                         "would silently widen the rule")
-        self.assertEqual(len(_DECLARED_READERS), 3)
-        for fn in ("_metric_read", "_metric_declared_unmeasured"):
-            self.assertTrue(callable(getattr(bm, fn)), fn)
-        from toy import robustness as rb_
-        self.assertTrue(callable(rb_._enum_value))
+    WHAT THIS IS NOT, stated first and in these words because the previous round's OVERCLAIM is the reason
+    this round exists, and because the sentence "a probe sees the read however it is spelled" is FALSE:
+      * IT IS NOT SPELLING-AGNOSTIC. `object.__getattribute__(m, "value")`,
+        `object.__getattribute__(m, "__dict__")["value"]` and `gc.get_referents(m)` reach the value
+        without going through `type(m).__getattribute__`, so no hook on the type can see them. MEASURED
+        and pinned in `test_the_probes_blind_spellings_are_pinned_by_measurement`. (`vars(m)["value"]`,
+        `m.__dict__["value"]`, `dataclasses.asdict`, `attrgetter`, a built string, a comprehension, a
+        lambda and `to_dict()` ARE all seen -- see `recording_metric_reads` for the two design choices
+        that buy that, both of which `toy.dashboard`'s probe lacks.)
+      * IT IS NOT PATH-COMPLETE. It sees only what `probe_run` exercises, demonstrated in
+        `test_the_probes_known_weakness_is_demonstrated_not_asserted`.
+    So this class is layer 1 of three and is NOT the guarantee. The layer that protects is layer 2,
+    `EveryReadSiteIsPinnedByItsConsequence` here and `EveryMetricReadSiteIsPinnedByItsConsequence` in
+    `test_robustness.py`: forge the metric, assert the verdict and the reasons tuple. That one depends on
+    neither spelling nor path, so it covers the routes above as well. Layer 3 is the static rule, kept as
+    a tripwire with its coverage measured. No layer is a guarantee and none of them is described as one."""
 
-    def test_the_rule_can_fail_and_says_where(self):
-        """THE PIN'S OWN PROOF. Both checks are run against deliberately mutated source text, so this
-        class cannot be the kind of test that passes because it never looks at anything."""
-        src = _SRC_FILES["benchmark"].read_text()
-        reinstated = src.replace("        mg = _metric_required(r.metrics[\"margin\"], f\"{tag}: margin\")",
-                                 "        mg = r.metrics[\"margin\"].value", 1)
-        self.assertNotEqual(reinstated, src, "the anchor for the mutation is gone; update this test")
-        ast.parse(reinstated)
-        self.assertEqual([t for _, t in _attribute_reads(reinstated)], ["r.metrics['margin'].value"])
-        dodged = src.replace("def _check_margin(v: Any, what: str) -> float:",
-                             "def _sneak(m):\n    return getattr(m, 'value', None)\n\n\n"
-                             "def _check_margin(v: Any, what: str) -> float:", 1)
-        ast.parse(dodged)
-        self.assertIn(("_sneak", "getattr(m, 'value', None)"), _getattr_reads(dodged))
-        self.assertNotIn("_sneak", _DECLARED_READERS)
+    def test_the_reads_are_observed_at_runtime_not_enumerated_from_the_source(self):
+        with recording_metric_reads() as rec:
+            probe_run()
+        read, declared = rec.seen, _DECLARED_METRIC_TOUCHES
+        self.assertEqual(read, declared, f"""
+The ways benchmark.py / robustness.py actually touched a stored MetricValue do not match the declared table.
+  observed but NOT declared : {sorted(read - declared)}
+  declared but NOT observed : {sorted(declared - read)}
+An observed-but-undeclared touch is an UNCHECKED CONSUMER -- the defect of four rounds running. Read the
+number through _metric_read / _metric_ok / _metric_required / _metric_count / _metric_strict; an Enum
+payload through robustness._enum_value. A declared-but-unobserved touch means either the table has rotted
+(delete the entry) or probe_run no longer reaches that site (extend probe_run: a site the probe does not
+reach is a site the probe does not check).""")
+
+    def test_the_probe_is_not_vacuous_it_does_not_see_reads_that_do_not_happen(self):
+        """If the hooks were not really observing the run, the test above would pass by seeing nothing.
+        So: the reads that DO happen are pinned by value, and the routes round 4's rule was blind to are
+        pinned as ABSENT -- the day one appears, the probe reports it instead of a reviewer noticing.
+        This is `toy.dashboard`'s `test_the_probe_itself_is_not_vacuous` applied to the carrier."""
+        with recording_metric_reads() as rec:
+            probe_run()
+        seen = rec.seen
+        self.assertIn(("benchmark", "_metric_read", "value"), seen)          # it really did observe
+        self.assertGreaterEqual(len(seen), 8)
+        for attr in _FORBIDDEN_TOUCHES:
+            offenders = sorted(t for t in seen if t[2] == attr)
+            self.assertEqual(offenders, [], f"a stored metric was reached through {attr!r}: {offenders}")
+        # no function OTHER than the declared readers touches `value` or `reason` at all
+        self.assertEqual(sorted({t[:2] for t in seen if t[2] in ("value", "reason")}),
+                         [("benchmark", "_metric_declared_unmeasured"), ("benchmark", "_metric_read"),
+                          ("robustness", "arm_difference"),
+                          ("robustness", "benchmark_outcome.<locals>.outcome")])
+        # and the hooks are gone afterwards: the probe cannot leak into another test
+        self.assertNotIn("__getattribute__", MetricValue.__dict__)
+        self.assertNotIn("__format__", MetricValue.__dict__)
+        self.assertEqual(repr(MetricValue.measured(1.0)), "MetricValue(value=1.0, reason=None)")
+
+    def _run_sneak(self, src):
+        """Compile `src` WITH `co_filename` SET TO benchmark.py and run it under the probe.
+
+        That is what makes the result mean something: to the probe's attribution rule, to `inspect`, to a
+        traceback and to the static rule's own `ast.parse` of the file, the function is indistinguishable
+        from code written in `benchmark.py`. The forged metric carries 1e9, which `_metric_read` refuses,
+        so "the spelling reached the value" is checkable."""
+        ns = {"dataclasses": dataclasses, "operator": operator, "functools": functools, "gc": gc,
+              "copy": copy, "pickle": pickle, "MetricValue": MetricValue}
+        exec(compile(src, str(_SRC_FILES["benchmark"].resolve()), "exec"), ns)
+        with recording_metric_reads() as rec:
+            try:
+                got = ns["_sneak"](forge(MetricValue.measured(1.0), 1e9))
+            except Exception as e:                     # a spelling that cannot even run is not a route
+                got = e
+        return sorted(rec.seen), got
+
+    def test_the_probe_catches_the_ordinary_spellings_of_an_unchecked_read(self):
+        """CAN THE MECHANISM BE FOOLED? Measured, against 19 spellings of the same forged read.
+        All 19 are caught, where round 4's static rule caught 2 of them. The list includes
+        `m.to_dict()["value"]`, which needs no new code at all -- `MetricValue.to_dict` already returns
+        `{"value": ..., "reason": ...}` and is a SERIALISATION CONTRACT, so it cannot be removed -- and it
+        is caught as a read of the `to_dict` attribute. It also includes `vars(m)["value"]` and
+        `m.__dict__["value"]`, which are caught ONLY because this probe records every attribute name
+        instead of filtering the bucket to stored numbers; `toy.dashboard`'s probe, measured verbatim, is
+        blind to both. `test_the_probes_blind_spellings_are_pinned_by_measurement` has the ones that win."""
+        results = {label: self._run_sneak(src) for label, src in SNEAK_SPELLINGS}
+        evaded = sorted(k for k, (seen, _) in results.items() if not seen)
+        self.assertEqual(evaded, [], f"spellings the probe did not see: {evaded}")
+        for label, (triples, got) in results.items():
+            # the spelling really did reach the forged number, so none of them is a straw man ...
+            self.assertIn(got, (1e9, True), f"{label} did not reach the forged value: {got!r}")
+            # ... and it is attributed to the SNEAKING function, never laundered onto a declared reader
+            for _, fn, _ in triples:
+                self.assertNotIn(fn, ("_metric_read", "_metric_declared_unmeasured"), (label, fn))
+                self.assertTrue(fn.startswith(("_sneak", "_peek", "_other", "_Peeker")), (label, fn))
+            self.assertNotIn(triples[0], _DECLARED_METRIC_TOUCHES, label)
+        self.assertEqual(len(SNEAK_SPELLINGS), 19)
+
+    def test_a_second_consumer_of_an_ALREADY_DECLARED_number_is_still_caught(self):
+        """The failure mode a probe that compares ATTRIBUTE SETS has by construction, and the reason this
+        table is keyed by (module, reader function, attribute): `value` is already declared -- read by
+        `_metric_read` -- so a set of attribute names cannot distinguish a second, unchecked consumer of
+        it from the first. That is the `pair.n` defect of round 3 ("two consumers that disagreed")
+        reappearing inside the fix for it. Keyed by reader, the second consumer is a new triple."""
+        triples, got = self._run_sneak("def _other_consumer(m):\n    return getattr(m, 'value')\n"
+                                       "def _sneak(m):\n    return _other_consumer(m)\n")
+        self.assertEqual(triples, [("benchmark", "_other_consumer", "value")])
+        self.assertEqual(got, 1e9)
+        self.assertIn(("benchmark", "_metric_read", "value"), _DECLARED_METRIC_TOUCHES)   # same attribute
+        self.assertNotIn(("benchmark", "_other_consumer", "value"), _DECLARED_METRIC_TOUCHES)
+
+    def test_the_probes_blind_spellings_are_pinned_by_measurement(self):
+        """THE PROBE'S REAL LIMIT, measured and pinned rather than described -- and pinned as a FAILING
+        case, so that if a future interpreter or a future hook does start seeing one of these, this test
+        fails and the limit is re-measured instead of being carried forward as folklore.
+
+        All three reach the forged value without going through `type(m).__getattribute__`, which is the
+        only thing a hook on the type can intercept. They are the same class as the `object.__setattr__`
+        route `toy.benchmark`'s own threat model lists as route (b): a deliberate bypass of the type's
+        protocol, not something a consumer writes by accident. They are covered by layer 2 -- a forged
+        metric reaching a verdict is caught by the consequence test whatever syntax read it."""
+        for label, src in SNEAK_BLIND_SPELLINGS:
+            triples, got = self._run_sneak(src)
+            self.assertEqual(triples, [], f"{label}: the probe DID see this; update the measured limit")
+            self.assertEqual(got, 1e9, f"{label} did not reach the forged value: {got!r}")
+        self.assertEqual(len(SNEAK_BLIND_SPELLINGS), 3)
+
+    def test_the_probes_known_weakness_is_demonstrated_not_asserted(self):
+        """THE HONEST LIMIT, measured rather than described: a read on a path `probe_run` does not
+        exercise is INVISIBLE to the probe. Here the identical sneaking read sits in a function that is
+        defined (with benchmark.py's own `co_filename`) and never called, and the probe reports nothing.
+        That is not a bug in the probe; it is the reason the static tripwire and the per-site consequence
+        tests exist, and the reason neither this class nor any docstring may call the probe a guarantee."""
+        ns = {}
+        exec(compile("def _never_called(m):\n    return m.value\n",
+                     str(_SRC_FILES["benchmark"].resolve()), "exec"), ns)
+        with recording_metric_reads() as rec:
+            probe_run()
+        self.assertEqual(sorted(t for t in rec.seen if t[1] == "_never_called"), [])
+        # and it IS a real read: calling it is seen at once, so the blindness is to the PATH, not the code
+        with recording_metric_reads() as rec2:
+            ns["_never_called"](MetricValue.measured(1.0))
+        self.assertEqual(sorted(rec2.seen), [("benchmark", "_never_called", "value")])
 
     def test_the_readers_agree_with_metricvalues_own_construction_rule(self):
         """Not vacuous, and not over-refusing: `_metric_read` accepts exactly what `MetricValue`
@@ -2622,6 +2999,527 @@ class TheCheckedReaderIsTheOnlyWayToReadAStoredMetric(unittest.TestCase):
         for not_an_enum in (MetricValue.measured(1.0), MetricValue.unmeasured("x"), 1.0, None, object()):
             with self.assertRaises(ValueError, msg=repr(not_an_enum)):
                 rb_._enum_value(not_an_enum)
+
+
+# The ONLY functions allowed to reach a `value` / `is_measured` field by a SYNTACTIC spelling the static
+# tripwire below recognises. It names the READERS, not the reads; the reads are derived from the source.
+_DECLARED_READERS = {"_metric_read", "_metric_declared_unmeasured", "_enum_value"}
+
+
+def _attribute_reads(src):
+    """Every `<expr>.value` / `<expr>.is_measured` attribute access in `src`, as (lineno, text)."""
+    return sorted((n.lineno, ast.unparse(n)) for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.Attribute) and n.attr in ("value", "is_measured"))
+
+
+def _getattr_reads(src):
+    """Every CALL that names `value` / `is_measured` as a string argument, as (enclosing function, text).
+
+    THE TWO DEAD BRANCHES THIS FIXES, found by the round-4 review inside round 4's own fix:
+      * `vars` was in the call-name list with `len(n.args) > 1`. `vars` TAKES NO SECOND POSITIONAL
+        ARGUMENT, so that branch could never match anything. `vars(x)["value"]` -- the actual spelling --
+        is a `Subscript` over a `Call`, which the rule never looked at. Now matched.
+      * `__getattribute__` was in the same `isinstance(n.func, ast.Name)` list. `m.__getattribute__(...)`
+        parses as a `Call` whose `func` is an `ast.Attribute`, never an `ast.Name`, so that branch was
+        equally unreachable. Both forms are now matched.
+    Also matched now: a subscript of any of these calls (`vars(m)["value"]`, `asdict(m)["value"]`,
+    `m.to_dict()["value"]`) and `attrgetter`/`itemgetter`. NOT matched, and the reason this is a tripwire
+    and not a rule: a built string (`'val' + 'ue'`), a name bound elsewhere, destructuring, and every
+    read that does not spell the word at the call site at all."""
+    tree = ast.parse(src)
+    owner = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for sub in ast.walk(fn):
+                owner.setdefault(id(sub), fn.name)
+    names = ("getattr", "setattr", "delattr", "vars", "__getattribute__", "to_dict", "asdict", "astuple",
+             "attrgetter", "itemgetter")
+    out = []
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call):
+            continue
+        fname = n.func.id if isinstance(n.func, ast.Name) else getattr(n.func, "attr", None)
+        if fname not in names:
+            continue
+        args = [a.value for a in n.args if isinstance(a, ast.Constant)]
+        subs = [p.slice.value for p in ast.walk(tree)
+                if isinstance(p, ast.Subscript) and p.value is n and isinstance(p.slice, ast.Constant)]
+        if any(v in ("value", "is_measured") for v in args + subs):
+            out.append((owner.get(id(n), "<module>"), ast.unparse(n)))
+    return sorted(out)
+
+
+class TheStaticSpellingRuleIsATripwireNotAGuarantee(unittest.TestCase):
+    """LAYER 3: round 4's static rule, dead branches repaired, demoted to what it actually is.
+
+    Round 4 built this and called it a guarantee: "a new consumer physically cannot read a stored metric
+    without going through `_metric_read` and having the suite stay green." IT IS NOT A GUARANTEE, and the
+    test below MEASURES how far short it falls instead of leaving a reader to trust the sentence. What it
+    is good for is the one thing the runtime probe cannot do: it reads code that NO RUN EXECUTES. A plain
+    `m.value` added to a branch `probe_run` never reaches is invisible to layer 1 and caught here. So the
+    two are kept together, with their coverage stated, and neither is described as sufficient."""
+
+    def test_no_attribute_access_named_value_or_is_measured_exists_in_either_module(self):
+        for name, path in _SRC_FILES.items():
+            found = _attribute_reads(path.read_text())
+            self.assertEqual(found, [], f"{name}.py has {len(found)} unchecked metric reads: {found}; "
+                                        "read stored metrics with _metric_read / _metric_ok / "
+                                        "_metric_required / _metric_count / _metric_strict, and an Enum "
+                                        "payload with robustness._enum_value")
+
+    def test_the_call_spelling_is_confined_to_the_three_declared_readers(self):
+        seen = set()
+        for name, path in _SRC_FILES.items():
+            for fn, text in _getattr_reads(path.read_text()):
+                self.assertIn(fn, _DECLARED_READERS, f"{name}.py: {text} in {fn}() reaches a stored "
+                                                     "metric outside the declared readers")
+                seen.add(fn)
+        self.assertEqual(seen, _DECLARED_READERS,
+                         "a declared reader no longer contains such an access: the list is stale, which "
+                         "would silently widen the rule")
+        self.assertEqual(len(_DECLARED_READERS), 3)
+        for fn in ("_metric_read", "_metric_declared_unmeasured"):
+            self.assertTrue(callable(getattr(bm, fn)), fn)
+        self.assertTrue(callable(rb._enum_value))
+
+    def test_the_two_dead_branches_are_now_live(self):
+        """Round 4's rule listed four call names and TWO OF THEM COULD NEVER MATCH: `vars` takes no second
+        positional argument, and `__getattribute__` is an `ast.Attribute`. Both now match, and the test
+        fails if either stops mattering."""
+        self.assertEqual([t for _, t in _getattr_reads("def f(m):\n    return vars(m)['value']\n")],
+                         ["vars(m)"])
+        self.assertEqual([t for _, t in _getattr_reads("def f(m):\n    return m.__getattribute__('value')\n")],
+                         ["m.__getattribute__('value')"])
+        self.assertEqual([t for _, t in _getattr_reads("def f(m):\n    return m.to_dict()['value']\n")],
+                         ["m.to_dict()"])
+        # the old rule's shape, for contrast: these two produced nothing at all
+        old = [n for n in ast.walk(ast.parse("def f(m):\n    return vars(m)['value']\n"))
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id in ("getattr", "setattr", "vars", "__getattribute__") and len(n.args) > 1]
+        self.assertEqual(old, [])
+
+    def test_how_little_the_static_rule_catches_is_MEASURED_not_claimed(self):
+        """THE NUMBER THAT REPLACES THE WORD "GUARANTEE". Each of the 19 spellings the runtime probe sees
+        is run past BOTH halves of the static rule. MEASURED: the repaired rule catches 11 of 19 and 8
+        evade it; round 4's SHIPPED rule caught 2. So a docstring calling it a guarantee is false by 8
+        counterexamples, which is why this class is named what it is named.
+        The 8 are NOT then chased by adding more call names to the rule, and that is deliberate: every
+        name added is another hand-maintained entry, which is the defect this round exists to stop
+        repeating. They are covered by layers 1 and 2, which do not depend on the spelling."""
+        caught = []
+        for label, src in SNEAK_SPELLINGS:
+            if _attribute_reads(src) or [x for x in _getattr_reads(src) if x[0] not in _DECLARED_READERS]:
+                caught.append(label)
+        self.assertEqual(len(caught), 11, caught)
+        self.assertEqual(len(SNEAK_SPELLINGS) - len(caught), 8)
+        for evades in ("S2  getattr concatenated", "S3  module-level name", "S4  __dict__.get",
+                       "S5  vars().get", "S6  dataclasses.asdict", "S9  destructuring",
+                       "S14 functools.partial", "S17 repr parsing, no attribute read at all"):
+            self.assertNotIn(evades, caught)
+        # all 8 are seen by the runtime probe; that asymmetry is the whole argument for layer 1 over 3
+        self.assertEqual(len(SNEAK_SPELLINGS), 19)
+        # ... and every one of the 12 is caught by layer 1 or layer 2 instead; see
+        # TheCheckedReaderIsTheOnlyWayToReadAStoredMetric and EveryReadSiteIsPinnedByItsConsequence.
+
+    def test_the_withdrawn_guarantee_is_not_reinstated_anywhere_in_either_module(self):
+        """THE OVERCLAIM ITSELF, pinned as source TEXT and not as a docstring, because the sentence that
+        had to go was in a COMMENT -- so `__doc__` cannot see it and a doc-only mutant that put it back
+        SURVIVED this suite on its first measurement. The single worst recurring defect in this project is
+        a guard whose documentation overstates it; this test is the only thing in the suite that reads the
+        prose where that happens."""
+        forbidden = ("physically cannot read a stored metric",
+                     "cannot add one and have the suite stay green",
+                     "a new consumer physically cannot")
+        for name, path in _SRC_FILES.items():
+            src = path.read_text()
+            low = src.lower()
+            for phrase in forbidden:
+                self.assertNotIn(phrase.lower(), low,
+                                 f"{name}.py reinstates the withdrawn guarantee: {phrase!r}. The static "
+                                 f"rule catches 11 of 19 spellings; the probe is blind to "
+                                 f"object.__getattribute__ and to unexercised paths. Neither is a "
+                                 f"guarantee and neither may be described as one.")
+        # ... and the retraction, plus the three-layer description, IS where a reader looks
+        bsrc = _SRC_FILES["benchmark"].read_text()
+        for needle in ("THAT CLAIM WAS FALSE", "2 of 17 spellings of the same read were caught",
+                       "Two of that rule's four `getattr`-form branches were DEAD",
+                       "as a cheap tripwire -- not as a guarantee",
+                       "it sees\n# only what the run it performs exercises"):
+            self.assertIn(needle, bsrc, needle)
+        rdoc = " ".join(rb._enum_value.__doc__.split())
+        self.assertIn("it is a tripwire, not a guarantee, and this docstring used to describe it as one",
+                      rdoc)
+        self.assertIn("MEASURED 11 of 19 spellings", rdoc)
+
+    def test_the_tripwire_can_fail_and_says_where(self):
+        """THE PIN'S OWN PROOF: both halves are run against deliberately mutated source text, so this
+        class cannot be the kind of test that passes because it never looks at anything."""
+        src = _SRC_FILES["benchmark"].read_text()
+        reinstated = src.replace("        mg = _metric_required(r.metrics[\"margin\"], f\"{tag}: margin\")",
+                                 "        mg = r.metrics[\"margin\"].value", 1)
+        self.assertNotEqual(reinstated, src, "the anchor for the mutation is gone; update this test")
+        ast.parse(reinstated)
+        self.assertEqual([t for _, t in _attribute_reads(reinstated)], ["r.metrics['margin'].value"])
+        dodged = src.replace("def _check_margin(v: Any, what: str) -> float:",
+                             "def _sneak(m):\n    return getattr(m, 'value', None)\n\n\n"
+                             "def _check_margin(v: Any, what: str) -> float:", 1)
+        ast.parse(dodged)
+        self.assertIn(("_sneak", "getattr(m, 'value', None)"), _getattr_reads(dodged))
+        self.assertNotIn("_sneak", _DECLARED_READERS)
+        # and the mutation the tripwire CANNOT see, stated as a test so the limit is on the record
+        evasive = src.replace("def _check_margin(v: Any, what: str) -> float:",
+                              "def _sneak(m):\n    return getattr(m, 'val' + 'ue', None)\n\n\n"
+                              "def _check_margin(v: Any, what: str) -> float:", 1)
+        ast.parse(evasive)
+        self.assertEqual(_attribute_reads(evasive), [])
+        self.assertEqual([x for x in _getattr_reads(evasive) if x[0] not in _DECLARED_READERS], [])
+
+
+class EveryReadSiteIsPinnedByItsConsequence(unittest.TestCase):
+    """LAYER 2, AND THE LAYER THAT ACTUALLY PROTECTS: one test per stored-metric read site in
+    `benchmark.py`, each forging the metric BEHIND that site and asserting the VERDICT and the REASONS
+    TUPLE -- never an intermediate.
+
+    WHY THIS IS THE LOAD-BEARING LAYER and not the probe. A reroute experiment replaced each read site in
+    turn with a fully unchecked read and ran the whole suite: the sites that stayed GREEN were exactly the
+    sites where no test asserted the CONSEQUENCE of the read. A consequence test does not care how the
+    read is spelled, so it covers the three spellings the runtime probe is blind to
+    (`object.__getattribute__`, `gc`) and the branches the probe's run does not reach. A spelling rule
+    covers neither. Four rounds of this item were all missed by a test that checked an intermediate.
+
+    THE THREE SITES A REVIEW OFFERED TO LET THROUGH AS "genuinely equivalent over the public API" are
+    NOT accepted on that argument, because the argument turned out to be unnecessary: each of them is
+    checked, and the check is asserted here by consequence like every other site. An equivalence argument
+    about who can call what is a PROVENANCE argument, and this module has already shipped one of those
+    offered as a validity argument."""
+
+    FORGED = (math.inf, -math.inf, math.nan, True, False, 0, 1, "1.0", "", [1.0], {}, None, object())
+
+    def test_B_seedscores_ok_a_forged_primary_metric_cannot_buy_a_verdict(self):
+        """SeedScores.ok, the site whose reroute ESCALATED: with only the primary series forged to `inf`
+        on 3 of 40 seeds and every gate input honest, an unchecked read took the study from
+        JOINT_INCONCLUSIVE to JOINT_SUPPORTED, `n_failed` from 3 to 0, the failed-gate list from
+        ['failure_rate'] to [] and left `reasons = ()`. All five consequences are asserted."""
+        fz = bm.freeze_seed_list(7, 40)
+        cfg = dataclasses.replace(SMALL, min_seeds=30)
+        honest = bm.analyze_scores(synth_scores(fz.seeds), frozen=fz, registered_digest=fz.digest,
+                                   subject="x", cfg=cfg, subject_kind="fixture", fixture_name="f")
+        self.assertIs(honest.verdict, J.JOINT_SUPPORTED)          # the control: it CAN say yes
+        self.assertEqual((honest.n_attempted, honest.n_failed), (40, 0))
+        self.assertEqual([g.name for g in honest.gates if not g.passed], [])
+        self.assertEqual(honest.h1.components[0].pair.n, 40)
+        for bad in self.FORGED:
+            scores = synth_scores(fz.seeds)
+            for s in scores[:3]:
+                for k in ("S", "L", "delta", "delta_minus_shuf"):
+                    forge(s.metrics[k], bad)
+            res = bm.analyze_scores(scores, frozen=fz, registered_digest=fz.digest, subject="x", cfg=cfg,
+                                    subject_kind="fixture", fixture_name="f")
+            why = repr(bad)
+            self.assertIs(res.verdict, J.JOINT_INCONCLUSIVE, why)
+            self.assertEqual((res.n_attempted, res.n_failed), (40, 3), why)
+            self.assertEqual([g.name for g in res.gates if not g.passed], ["failure_rate"], why)
+            self.assertEqual((res.h1.verdict, res.h2.verdict, res.h3.verdict),
+                             (V.INCONCLUSIVE,) * 3, why)
+            self.assertIn("gate failed: failure_rate", res.h1.reasons[0], why)
+            # B-series, the same forgery seen at the other read site: the three seeds leave the SERIES,
+            # so the component is measured on 37 and not on 40 silently including three forged numbers
+            self.assertEqual(res.h1.components[0].pair.n, 37, why)
+            # ... and the recompute from the stored records agrees, with no reason recorded
+            recs = bm.to_experiment_records(res, study_id="f", base_seed=7, timestamp_utc=TS_PROBE)
+            rv = bm.verdict_from_records(recs, cfg)
+            self.assertEqual((rv.joint, rv.h1, rv.h2, rv.h3, rv.reasons),
+                             (J.JOINT_INCONCLUSIVE,) + (V.INCONCLUSIVE,) * 3 + ((),), why)
+
+    def test_B_series_each_primary_series_is_read_independently(self):
+        """`analyze_scores`'s series comprehension reads every key through the same checked reader. Forging
+        ONE key must drop those seeds from EVERY series (a seed with an unusable primary metric is not an
+        OK seed at all), which is what makes `SeedScores.ok` and this site agree -- the round-3 defect was
+        two consumers of one number that did NOT agree."""
+        fz = bm.freeze_seed_list(7, 40)
+        cfg = dataclasses.replace(SMALL, min_seeds=30)
+        scores = synth_scores(fz.seeds)
+        for s in scores[:5]:
+            forge(s.metrics["delta"], math.inf)          # H3's series only
+        res = bm.analyze_scores(scores, frozen=fz, registered_digest=fz.digest, subject="x", cfg=cfg,
+                                subject_kind="fixture", fixture_name="f")
+        self.assertEqual([c.pair.n for c in res.h1.components], [35])
+        self.assertEqual([c.pair.n for c in res.h3.components], [35, 35])
+        self.assertEqual(res.n_failed, 5)
+        self.assertIs(res.verdict, J.JOINT_INCONCLUSIVE)
+        self.assertEqual([g.name for g in res.gates if not g.passed], ["failure_rate"])
+
+    def test_B_record_ec_a_forged_mean_downgrades_the_record_and_the_recompute_refuses_it(self):
+        """`to_experiment_records` labels a component UNKNOWN when its mean is not a usable number, and
+        `verdict_from_records` refuses a non-TOY_RESULT record. An unchecked read would label a record
+        carrying a forged `inf` mean TOY_RESULT and recompute a verdict from it."""
+        honest = bm.to_experiment_records(oracle(), study_id="g", base_seed=7, timestamp_utc=TS_PROBE)
+        self.assertEqual({r.evidence_class for r in honest}, {EvidenceClass.TOY_RESULT})
+        self.assertIs(bm.verdict_from_records(honest, SMALL).joint, J.JOINT_SUPPORTED)
+        for bad in self.FORGED:
+            res = study(bm.fixture_oracle_gated, "o2")
+            forge(res.h1.components[0].pair.mean, bad)
+            recs = bm.to_experiment_records(res, study_id="g", base_seed=7, timestamp_utc=TS_PROBE)
+            got = [r.evidence_class for r in recs if r.name.endswith("/H1")]
+            self.assertEqual(got, [EvidenceClass.UNKNOWN], repr(bad))
+            with self.assertRaisesRegex(ValueError, "only TOY_RESULT records", msg=repr(bad)):
+                bm.verdict_from_records(recs, SMALL)
+
+    def test_B_subject_code_a_forged_subject_kind_code_cannot_relabel_a_result(self):
+        """The decode is `code == SUBJECT_KIND_CODE[k]`, so an unchecked read of `True` decodes as
+        'trained' (`True == 1.0`) and of `2` as 'fixture'. Asserted on BOTH shapes of study: one that
+        claims the exemption (must raise) and one that does not (must not silently become a fixture)."""
+        self.assertEqual(bm.SUBJECT_KIND_CODE, {"unknown": 0.0, "trained": 1.0, "fixture": 2.0})
+        exempt = bm.to_experiment_records(oracle(), study_id="g", base_seed=7, timestamp_utc=TS_PROBE)
+        self.assertEqual(bm.verdict_from_records(exempt, SMALL).subject_kind, "fixture")
+        for bad in self.FORGED + (2, 2.0000001, -2.0):
+            recs = [dataclasses.replace(r, metrics={**r.metrics, "subject_kind_code":
+                                                    forge(MetricValue.measured(1.0), bad)})
+                    if r.name.endswith("/JOINT") else r for r in exempt]
+            with self.assertRaises(ValueError, msg=repr(bad)):     # the exemption no longer decodes
+                bm.verdict_from_records(recs, SMALL)
+        # and on a study that claims nothing, a forged code must not manufacture a kind
+        plain = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
+                                  subject="s", cfg=SMALL, subject_kind="unknown")
+        precs = bm.to_experiment_records(plain, study_id="h", base_seed=7, timestamp_utc=TS_PROBE)
+        base = bm.verdict_from_records(precs, SMALL)
+        self.assertEqual(base.subject_kind, "unknown")
+        for bad in (math.inf, math.nan, True, "2.0", None, [2.0], 7.0):
+            recs = [dataclasses.replace(r, metrics={**r.metrics, "subject_kind_code":
+                                                    forge(MetricValue.measured(1.0), bad)})
+                    if r.name.endswith("/JOINT") else r for r in precs]
+            rv = bm.verdict_from_records(recs, SMALL)
+            # the forged code buys NO relabel: not 'fixture' (which would waive gate 11(c)) and not
+            # 'trained' (which a bare `True == 1.0` would have produced), and the verdict does not move
+            self.assertEqual(rv.subject_kind, "unknown", repr(bad))
+            self.assertEqual((rv.joint, rv.h1, rv.h2, rv.h3, rv.reasons),
+                             (base.joint, base.h1, base.h2, base.h3, ()), repr(bad))
+
+    def test_B_exempt_flag_a_malformed_exemption_flag_always_raises(self):
+        """`loss_check_exempt` goes through `_metric_strict`, not `_metric_read`: for a CROSS-CHECK field
+        "unreadable" is evidence of tampering and must not be laundered into "not recorded". The honest
+        unmeasured state must still be accepted, or the fix would be an over-refusal."""
+        exempt = bm.to_experiment_records(oracle(), study_id="g", base_seed=7, timestamp_utc=TS_PROBE)
+        j = exempt[-1]
+
+        def with_flag(mv):
+            return exempt[:-1] + [dataclasses.replace(j, metrics={**j.metrics, "loss_check_exempt": mv})]
+        for bad in self.FORGED[:5] + ("1.0", [1.0], 0.5, 2.0, -1.0):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                bm.verdict_from_records(with_flag(forge(MetricValue.measured(1.0), bad)), SMALL)
+        # honestly unmeasured: accepted, the exemption simply is not claimed, and nothing is concluded
+        rv = bm.verdict_from_records(with_flag(MetricValue.unmeasured("not recorded")), SMALL)
+        self.assertEqual((rv.joint, rv.reasons), (J.JOINT_SUPPORTED, ()))
+        self.assertEqual(rv.subject_kind, "fixture")
+        self.assertIs(bm.verdict_from_records(exempt, SMALL).joint, J.JOINT_SUPPORTED)   # not vacuous
+
+    def test_B_pair_ci_level_is_CHECKED_not_merely_equivalent(self):
+        """A review offered this site as "genuinely equivalent over the public API" because
+        `_pair_from_record`'s only caller validates `ci_level` first. THE ARGUMENT IS NOT NEEDED and is
+        therefore not accepted: `_pair_from_record` reads `ci_level` through `_metric_required` itself, so
+        a forged level raises on the DIRECT call too, and a legal-but-wrong level is caught by the
+        adjusted-level cross-check. Both are asserted, so the site does not depend on who calls it."""
+        recs = bm.to_experiment_records(oracle(), study_id="g", base_seed=7, timestamp_utc=TS_PROBE)
+        h1 = [r for r in recs if r.name.endswith("/H1")][0]
+        rest = [r for r in recs if not r.name.endswith("/H1")]
+        for bad in self.FORGED:
+            r = dataclasses.replace(h1, metrics={**h1.metrics,
+                                                 "ci_level": forge(MetricValue.measured(1.0), bad)})
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                bm._pair_from_record(r)                       # the DIRECT call, with no caller to help
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                bm.verdict_from_records([r] + rest, SMALL)
+        # a LEGAL level that is not the adjusted one: the cross-check, asserted by consequence
+        r = dataclasses.replace(h1, metrics={**h1.metrics, "ci_level": MetricValue.measured(0.5)})
+        self.assertEqual(bm._pair_from_record(r).level, 0.5)
+        with self.assertRaisesRegex(ValueError, "is not the adjusted level"):
+            bm.verdict_from_records([r] + rest, SMALL)
+        self.assertIs(bm.verdict_from_records(recs, SMALL).joint, J.JOINT_SUPPORTED)     # not vacuous
+
+    def test_B_score_seed_and_converged_deltas_fail_closed_under_interposition(self):
+        """The other two sites a review offered as equivalent, on the ground that they read an `ArmScores`
+        built one statement earlier so no caller can interpose. Again the argument is not needed: the
+        consequence is asserted under an interposition STRONGER than any caller can perform -- patching
+        `score_predictor` so the `ArmScores` arrives already forged. The derived contrasts must come out
+        UNMEASURED WITH A REASON, and the seed must stop being an OK seed, which is what keeps the forged
+        number out of every series and out of every verdict."""
+        tiny = bm.BenchmarkConfig(steps=20, steps_conv=25, n_boot=50, n_train=16, n_eval=16)
+        real = bm.score_predictor
+        honest = bm.score_seed(1, bm.fixture_global_degrader(0.5), tiny)
+        self.assertTrue(honest.ok)
+        for key in ("delta_minus_shuf", "delta_conv", "delta_minus_shuf_conv"):
+            self.assertTrue(bm._metric_ok(honest.metrics[key]), key)
+        for bad in (math.inf, math.nan, True, "1.0", None, [1.0]):
+            def forging(fx, pred, c0, g_min=0.0, _r=real, _b=bad):
+                a = _r(fx, pred, c0, g_min)
+                forge(a.delta, _b)
+                return a
+            with mock.patch.object(bm, "score_predictor", forging):
+                s = bm.score_seed(1, bm.fixture_global_degrader(0.5), tiny)
+            self.assertFalse(s.ok, repr(bad))
+            for key in ("delta_minus_shuf", "delta_conv", "delta_minus_shuf_conv"):
+                self.assertFalse(bm._metric_ok(s.metrics[key]), (key, repr(bad)))
+                self.assertTrue(bm._metric_declared_unmeasured(s.metrics[key]), (key, repr(bad)))
+            self.assertEqual(s.metrics["delta_minus_shuf"].reason,
+                             "treatment or C_shuf contrast unmeasured", repr(bad))
+            self.assertEqual(s.metrics["delta_conv"].reason, "converged contrast unmeasured", repr(bad))
+
+
+class TheCrossChecksFailClosedAndTheFlagsSurviveAsFarAsTheyCan(unittest.TestCase):
+    """Two items raised by the SR-13 owner while building the same cross-check on its side.
+
+    (1) THE n CROSS-CHECK WAS FAIL-OPEN ON AN ABSENT SECOND SOURCE. `joint_n = ... if "n_seeds" in gm
+    else None` and then `if joint_n is not None and ...` meant deleting ONE dict entry silently skipped
+    the check -- in the one guard whose stated purpose is that "n must be CHECKED against something, not
+    trusted". Defensible-by-default is what every round of this item has been, so it is now DECIDED: it
+    fails closed, on the grounds that `to_experiment_records` writes `n_seeds` into every JOINT record and
+    that `verdict_from_records` already raises for every other missing required metric.
+
+    (2) `_pair_from_record` DROPPED `flags`, so a roundtripped below-minimum pair lost the producer's own
+    "n below protocol minimum". The two n-derived flags are now RECOMPUTED from the stored `n_seeds` and
+    the bound `cfg.min_seeds`; the two value-derived ones are not recoverable and are deliberately not
+    faked. Both directions are asserted below, so SR-13 can use the biconditional."""
+
+    def recs(self, **cfg_kw):
+        cfg = dataclasses.replace(SMALL, **cfg_kw) if cfg_kw else SMALL
+        res = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
+                                subject="s", cfg=cfg, subject_kind="fixture", fixture_name="f")
+        return bm.to_experiment_records(res, study_id="x", base_seed=7, timestamp_utc=TS_PROBE), cfg
+
+    def test_an_absent_joint_n_seeds_now_fails_closed(self):
+        recs, cfg = self.recs()
+        self.assertIs(bm.verdict_from_records(recs, cfg).joint, J.JOINT_SUPPORTED)   # the control
+        j = recs[-1]
+        self.assertIn("n_seeds", j.metrics, "to_experiment_records stopped writing the second source")
+        stripped = {k: v for k, v in j.metrics.items() if k != "n_seeds"}
+        with self.assertRaisesRegex(ValueError, "no n_seeds metric"):
+            bm.verdict_from_records(recs[:-1] + [dataclasses.replace(j, metrics=stripped)], cfg)
+        # and a forged n_seeds is still caught when the source IS there (the check itself still works)
+        for n in (1e9, 31.0, 1e300):
+            forged = [dataclasses.replace(r, metrics={**r.metrics,
+                                                      "n_seeds": MetricValue.measured(n)})
+                      if r.name.endswith("/H1") else r for r in recs]
+            with self.assertRaisesRegex(ValueError, "exceeds the study", msg=repr(n)):
+                bm.verdict_from_records(forged, cfg)
+
+    def test_the_n_derived_flags_survive_the_record_roundtrip_in_both_directions(self):
+        """`flag present <=> n < min_n`, the form SR-13 wanted and could not previously have."""
+        recs, cfg = self.recs(min_seeds=5)                 # 30 measured seeds, minimum 5
+        h1 = [r for r in recs if r.name.endswith("/H1")][0]
+        self.assertEqual(bm._pair_from_record(h1, cfg.min_seeds).n, 30)
+        self.assertNotIn("n below protocol minimum", bm._pair_from_record(h1, cfg.min_seeds).flags)
+        # <= : a minimum above n puts the flag on, at every value of the minimum
+        for mn in (31, 50, 10 ** 6, 10 ** 6 + 1, 2_000_000, 10 ** 12):
+            p = bm._pair_from_record(h1, mn)
+            self.assertIn("n below protocol minimum", p.flags, mn)
+            self.assertEqual(p.n, 30, mn)
+        # => : at or below n the flag is off, at every value
+        for mn in (0, 1, 5, 20, 29, 30):
+            self.assertNotIn("n below protocol minimum", bm._pair_from_record(h1, mn).flags, mn)
+        # the n<20 flag needs no minimum at all, so it is always derived
+        small, scfg = self.recs(min_seeds=5)
+        few = dataclasses.replace(
+            [r for r in small if r.name.endswith("/H1")][0],
+            metrics={**[r for r in small if r.name.endswith("/H1")][0].metrics,
+                     "n_seeds": MetricValue.measured(7.0)})
+        self.assertEqual(bm._pair_from_record(few).flags, ("percentile bootstrap unreliable (n < 20)",))
+        self.assertEqual(bm._pair_from_record(few, 30).flags,
+                         ("n below protocol minimum", "percentile bootstrap unreliable (n < 20)"))
+        # with no minimum supplied the min_n flag CANNOT be derived, and is absent rather than guessed
+        self.assertEqual(bm._pair_from_record(h1).flags, ())
+
+    def test_the_flags_that_cannot_be_recovered_are_not_faked(self):
+        """A roundtripped flags tuple is a SUBSET of the producer's, never a superset and never a
+        different one. "degenerate: all values tied" and "heavy tail" need the raw per-seed values; the
+        module says so rather than reconstructing the producer's prose from a stored number."""
+        tied = bm.summarize("S", [2.0] * 30, bm.bonferroni_level(0.05, 4), 200, 7, min_n=30)
+        self.assertIn("degenerate: all values tied", tied.flags)
+        heavy = bm.summarize("S", [0.01] * 29 + [50.0], bm.bonferroni_level(0.05, 4), 200, 7, min_n=30)
+        self.assertTrue(any(f.startswith("heavy tail") for f in heavy.flags))
+        for pair in (tied, heavy):
+            rec = ExperimentRecord(
+                name="evalproto/x/agg/H1",
+                provenance=RunProvenance(run_id="r", timestamp_utc=TS_PROBE, seed=7,
+                                         code_version="v", python_version="3.12.4", toy_only=True,
+                                         input_hashes={}),
+                metrics=bm._agg_metrics(pair, 0.1, 0, "fixture"), evidence_class=EvidenceClass.TOY_RESULT)
+            back = bm._pair_from_record(rec, 30)
+            self.assertTrue(set(back.flags) <= set(pair.flags), (pair.flags, back.flags))
+            self.assertNotIn("degenerate: all values tied", back.flags)
+            self.assertFalse(any(f.startswith("heavy tail") for f in back.flags), back.flags)
+        doc = " ".join(bm._pair_from_record.__doc__.split())
+        for needle in ("it cannot be RESTORED", "Reconstructing prose is not carrying evidence",
+                       "a SUBSET of the producer's, never a superset"):
+            self.assertIn(needle, doc, needle)
+
+    def test_flags_influence_no_verdict_which_is_why_the_recompute_does_not_need_them(self):
+        """THE MEASURED REASON `verdict_from_records` does NOT pass `cfg.min_seeds` to
+        `_pair_from_record`. A first draft of the flags fix did, and a mutant that removed the argument
+        SURVIVED the whole suite -- correctly, because the recomputed flags are unobservable there:
+        nothing in this module's verdict logic reads `flags` (its only other use is
+        `to_experiment_records` writing it into `notes`, which is not evidence) and `RecomputedVerdict`
+        carries no pair. Rather than pin dead code, the argument was removed and the PROPERTY that makes
+        it dead is pinned instead -- the same discipline that removed the duplicate `_admitted` check in
+        SR-13: a guard whose removal changes no output is not a guard.
+        The n-below-minimum FACT still reaches the verdict, by the route that always carried it."""
+        # MEASURED, by owner rather than by line number so it cannot rot: `flags` is read in exactly one
+        # place in the module, and that place writes it into free-text `notes`.
+        tree = ast.parse(Path(bm.__file__).read_text())
+        owner = {}
+        for fn in ast.walk(tree):
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for sub in ast.walk(fn):
+                    owner.setdefault(id(sub), fn.name)
+        readers = sorted({owner.get(id(n), "<module>") for n in ast.walk(tree)
+                          if isinstance(n, ast.Attribute) and n.attr == "flags"})
+        self.assertEqual(readers, ["to_experiment_records"],
+                         "a second consumer of IntervalPair.flags appeared; the dropped argument in "
+                         "verdict_from_records may now be observable and this reasoning must be redone")
+        pair = bm.summarize("S", [0.5 + 0.01 * i for i in range(30)], bm.bonferroni_level(0.05, 4), 200, 7)
+        self.assertEqual(pair.flags, ())
+        flagged = dataclasses.replace(pair, flags=("n below protocol minimum", "anything at all"))
+        self.assertEqual(bm.interval_verdict(pair, 0.1, "greater"),
+                         bm.interval_verdict(flagged, 0.1, "greater"))
+        self.assertEqual(bm.ComponentResult("S", "greater", 0.1, pair).verdict,
+                         bm.ComponentResult("S", "greater", 0.1, flagged).verdict)
+        self.assertEqual(bm.ComponentResult("S", "greater", 0.1, pair).reason,
+                         bm.ComponentResult("S", "greater", 0.1, flagged).reason)
+        # the route that DOES carry it: n vs min_n inside _verdict_from_bounds, both directions
+        self.assertIs(bm.interval_verdict(pair, 0.1, "greater", min_n=30)[0], V.SUPPORTED)
+        v, why = bm.interval_verdict(pair, 0.1, "greater", min_n=31)
+        self.assertIs(v, V.INCONCLUSIVE)
+        self.assertEqual(why, "n=30 below protocol minimum 31: no verdict")
+
+    def test_the_declared_input_RANGE_is_swept_not_just_the_default(self):
+        """THE SR-13 OWNER'S GENERALISATION, applied here: an unexercised branch is only invisible while
+        no test exercises the INPUT RANGE that selects it, and the input ranges are enumerable from the
+        declared parameters even when the branches are not. `min_seeds` and `width_tol` are declared
+        `BenchmarkConfig` fields whose stricter direction has a well-defined honest outcome, so each is
+        swept across its range with the VERDICT and the REASONS TUPLE asserted -- which is cheaper and
+        more durable than a mechanism, and covers branches no probe run reaches.
+        Every recompute is run with the cfg the study ran under, so the config-hash binding holds and a
+        reason would mean the binding fired rather than the parameter."""
+        for mn in (5, 29, 30, 31, 50, 10 ** 6, 10 ** 6 + 1, 2_000_000, 10 ** 12):
+            recs, cfg = self.recs(min_seeds=mn)
+            rv = bm.verdict_from_records(recs, cfg)
+            want = J.JOINT_SUPPORTED if mn <= 30 else J.JOINT_INCONCLUSIVE
+            self.assertIs(rv.joint, want, f"min_seeds={mn}")
+            self.assertEqual(rv.reasons, (), f"min_seeds={mn}")        # not the binding failing closed
+            if mn > 30:
+                self.assertEqual((rv.h1, rv.h2, rv.h3), (V.INCONCLUSIVE,) * 3, f"min_seeds={mn}")
+                # and the min-seeds GATE names it, so the page cannot show a bare INCONCLUSIVE
+                res = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
+                                        subject="s", cfg=cfg, subject_kind="fixture", fixture_name="f")
+                self.assertIn("min_seeds", [g.name for g in res.gates if not g.passed], mn)
+                self.assertIn("gate failed: min_seeds", res.h1.reasons[0], mn)
+        for wt in (0.0, 0.01, 0.25, 1.0, 10.0, 10 ** 6, 10 ** 12):
+            recs, cfg = self.recs(width_tol=wt)
+            rv = bm.verdict_from_records(recs, cfg)
+            self.assertEqual(rv.reasons, (), f"width_tol={wt}")
+            self.assertIn(rv.joint, (J.JOINT_SUPPORTED, J.JOINT_INCONCLUSIVE), f"width_tol={wt}")
+            # a tolerance of 0 can only ever make a component LESS decisive, never more
+            if wt == 0.0:
+                self.assertIsNot(rv.joint, J.JOINT_UNSUPPORTED, "width_tol=0 invented an UNSUPPORTED")
 
 
 class NoForgedStoredMetricBuysABetterVerdict(unittest.TestCase):
@@ -2703,6 +3601,16 @@ class NoForgedStoredMetricBuysABetterVerdict(unittest.TestCase):
                     if (rv.joint, rv.h1, rv.h2, rv.h3) != (J.JOINT_UNSUPPORTED, V.SUPPORTED,
                                                            V.UNSUPPORTED, V.UNSUPPORTED):
                         self.assertNotEqual(rv.joint, J.JOINT_SUPPORTED, why)
+        # THE CASE COUNT, PINNED BY VALUE. It was quoted as "492 cases" -- in a task brief and in commit
+        # 57a6f03's message, which cannot be rewritten -- and 492 WAS NEVER MEASURED BY ANYONE: this
+        # assertion used to read `assertGreater(n_cases, 400)`, which 492 and the true figure both
+        # satisfy. The true figure is 2268 = 108 (key, record) pairs x 21 forged values, of which 12 are
+        # carved out, leaving 2256 driven through a recompute. `assertEqual`, not `assertGreater`, so the
+        # number in prose is the number the machine counted.
+        self.assertEqual(n_cases, 2268, "the enumeration changed size; re-derive the quoted figure")
+        self.assertEqual(len(self.LEGAL) + len(self.RAW), 21)
+        self.assertEqual(sum(len(r.metrics) for r in self.recs), 108)
+        self.assertEqual(n_cases - carved, 2256)
         self.assertGreater(n_cases, 400, "the enumeration collapsed; it is no longer covering the metrics")
         # 6 component records x 2 in-bounds float margins in LEGAL (0.0, 30.5); the JOINT record has no
         # `margin` metric. If this number moves, a carve-out was widened and must be re-argued.
@@ -2821,6 +3729,338 @@ class ForgedGateInputsCannotTurnAFailedGateIntoAPass(unittest.TestCase):
         g = {x.name: x.passed for x in bm.evaluate_gates(synth_scores(FZ.seeds), FZ, FZ.digest, SMALL)}
         self.assertTrue(g["control_adequacy"])
         self.assertTrue(g["convergence"])
+
+
+class _SneakyMargin(float):
+    """N1 verbatim: stores one double, answers `abs()` and `float()` with two different other numbers."""
+    def __abs__(self):
+        return 1.0
+
+    def __float__(self):
+        return -1e308
+
+
+class _SneakyBound(float):
+    """A stored metric that compares favourably whatever it holds. `__eq__` is deliberately NOT
+    overridden, because `MetricValue.__post_init__` normalises `value == 0.0` and would replace the
+    instance -- so a lying `__eq__` would make this test pass for the wrong reason."""
+    def __gt__(self, other):
+        return True
+
+    def __lt__(self, other):
+        return False
+
+    def __ge__(self, other):
+        return True
+
+    def __le__(self, other):
+        return False
+
+    def __sub__(self, other):
+        return 0.0
+
+    def __rsub__(self, other):
+        return 0.0
+
+
+class _SneakyCount(float):
+    """A count that passes `v != int(v)` and `v < 0` and then converts to something else entirely."""
+    def __ne__(self, other):
+        return False
+
+    def __lt__(self, other):
+        return False
+
+    def __int__(self):
+        return 10 ** 9
+
+    def __index__(self):
+        return 10 ** 9
+
+    def __hash__(self):
+        return 0
+
+
+class _SneakyLevel(float):
+    """A confidence level that passes `0 < level < 1` holding 5.0, and then picks its own tails."""
+    def __gt__(self, other):
+        return True
+
+    def __lt__(self, other):
+        return True
+
+    def __rsub__(self, other):
+        return 0.5
+
+
+class NormaliseBeforeCheckingEverywhereANumberEnters(unittest.TestCase):
+    """N1 AND THE SWEEP IT ASKED FOR, not the one site it was reported at.
+
+    THE PATTERN: a predicate applied to a value and a conversion of that value are two INDEPENDENTLY
+    OVERRIDABLE operations. Inspecting `v` and then using `float(v)` / `abs(v)` / `int(v)` / `v > m`
+    checks one number and decides on another, and NO TAMPERING PRIMITIVE IS NEEDED -- an `int`/`float`
+    subclass satisfies every `isinstance` test in the module and `math.isfinite` reads the stored double,
+    which the subclass need not lie about. `MetricValue.measured(...)` accepts such an instance through
+    the public API.
+
+    THE REPORTED SITE: `_check_margin` tested `abs(v)` and returned `float(v)`, so `_SneakyMargin(0.0)`
+    came back as -1e+308 -- seven orders outside the function whose docstring calls it "THE ONE validity
+    test for a margin, wherever a margin enters the module" -- and carried SUPPORTED through
+    `interval_verdict`, `ComponentResult` and `HypothesisResult`.
+
+    THE THREE THE SWEEP FOUND, each worse than the reported one:
+      * `_metric_read`, THE checked reader, returned the stored OBJECT. A `MetricValue.measured(Lo(-9.0))`
+        built with no `object.__setattr__` at all made a genuinely NEGATIVE interval read SUPPORTED
+        against an honest margin of 0.1. Every guard in this module that calls itself "the single checked
+        reader" was downstream of that.
+      * `_metric_count` returned `int(v)` after comparing `v != int(v)`: a stored `n_seeds` of 30.0 that
+        converts to 1e9.
+      * `_check_level` returned None, so the caller kept the original object and `percentile_interval`
+        computed `(1.0 - level) / 2.0` on an overridable `__rsub__`.
+      * (`toy.robustness.ProbeConfig` had the same defect on `SEED_FLOOR`; it is pinned in
+        `test_robustness.ThePolicyParametersAreThemselvesPinned`.)
+
+    THE FIX IS ORDERING, in one helper (`_plain_number`) that every validator now calls FIRST, and which
+    reads the value through `float.__float__` / `int.__int__` -- the value the object STORES, which is the
+    same number `math.isfinite` and `MetricValue.__post_init__` inspected. The checked number and the
+    used number cannot differ because they are the same object."""
+
+    SNEAKS = (_SneakyMargin, _SneakyBound, _SneakyCount, _SneakyLevel)
+
+    def pair(self, values=None):
+        return bm.summarize("S", values if values is not None else [0.5 + 0.01 * i for i in range(30)],
+                            bm.bonferroni_level(0.05, 4), 200, 7)
+
+    def test_check_margin_tests_and_returns_the_SAME_number(self):
+        """N1. The stored double is 0.0, which IS a legal margin, so the correct answer is 0.0 -- not a
+        refusal and emphatically not -1e+308. The honest control shows the bound still bites."""
+        self.assertEqual(bm._check_margin(_SneakyMargin(0.0), "m"), 0.0)
+        self.assertIs(type(bm._check_margin(_SneakyMargin(0.0), "m")), float)
+        with self.assertRaisesRegex(ValueError, "MARGIN_MAX"):
+            bm._check_margin(-1e308, "m")                       # the honest value it used to return
+        # and a sneak whose STORED value is out of bounds is still refused, for its stored value
+        with self.assertRaisesRegex(ValueError, "MARGIN_MAX"):
+            bm._check_margin(_SneakyMargin(1e307), "m")
+        for entry in (lambda v: bm.Margins(delta_S=v), lambda v: bm.Margins(delta_R=v),
+                      lambda v: bm.Margins(delta_sel=v),
+                      lambda v: bm.interval_verdict(self.pair(), v, "greater"),
+                      lambda v: bm._verdict_from_bounds(30, (0.4, 0.6), (0.4, 0.6), v, "greater", 30, 0.25),
+                      lambda v: bm.ComponentResult("S", "greater", v, self.pair(), 30, 0.25)):
+            with self.assertRaisesRegex(ValueError, "MARGIN_MAX"):
+                entry(_SneakyMargin(1e307))
+            entry(_SneakyMargin(0.0))                           # the in-bounds stored value is accepted
+        # Margins STORES the checked value, so nothing downstream re-converts it
+        self.assertIs(type(bm.Margins(delta_S=_SneakyMargin(0.0)).delta_S), float)
+        self.assertEqual(bm.Margins(delta_S=_SneakyMargin(0.25)).delta_S, 0.25)
+        self.assertIs(type(bm.ComponentResult("S", "greater", _SneakyMargin(0.1), self.pair()).margin),
+                      float)
+
+    def test_a_forged_float_subclass_bound_cannot_buy_a_verdict(self):
+        """THE WORST OF THE FOUR, and reachable with NO `object.__setattr__`: `MetricValue` accepts a
+        `float` subclass, `_metric_read` used to hand it back with its overrides intact, and `lo > margin`
+        is then whatever the subclass says. Driven on a genuinely NEGATIVE interval against an honest
+        margin, and asserted on the verdict at all three levels plus the reasons tuple."""
+        honest = self.pair([-9.0] * 30)
+        self.assertIs(bm.interval_verdict(honest, 0.1, "greater")[0], V.UNSUPPORTED)
+        forged = dataclasses.replace(
+            honest, boot_lo=MetricValue.measured(_SneakyBound(-9.0)),
+            boot_hi=MetricValue.measured(_SneakyBound(-9.0)),
+            t_lo=MetricValue.measured(_SneakyBound(-9.0)), t_hi=MetricValue.measured(_SneakyBound(-9.0)))
+        self.assertIs(type(forged.boot_lo.value), _SneakyBound)     # the hostile object really is stored
+        self.assertIs(type(bm._metric_read(forged.boot_lo)), float)  # ... and the reader plainifies it
+        self.assertEqual(bm._metric_read(forged.boot_lo), -9.0)
+        v, why = bm.interval_verdict(forged, 0.1, "greater")
+        self.assertIs(v, V.UNSUPPORTED, why)
+        c = bm.ComponentResult("S", "greater", 0.1, forged, 30, 0.25)
+        self.assertIs(c.verdict, V.UNSUPPORTED)
+        h = bm.HypothesisResult("H1", (c,))
+        self.assertIs(h.verdict, V.UNSUPPORTED)
+        self.assertEqual(h.reasons, ("S: whole interval at or below margin",))
+        self.assertIs(bm.combine_joint(h.verdict, V.SUPPORTED, V.SUPPORTED, True), J.JOINT_UNSUPPORTED)
+
+    def test_the_checked_reader_and_the_count_reader_return_plain_floats(self):
+        for sneak in self.SNEAKS:
+            mv = MetricValue.measured(sneak(30.0))
+            got = bm._metric_read(mv)
+            self.assertIs(type(got), float, sneak.__name__)
+            self.assertEqual(got, 30.0, sneak.__name__)
+            self.assertEqual(bm._metric_required(mv, "x"), 30.0, sneak.__name__)
+            n = bm._metric_count(mv, "n")
+            self.assertIs(type(n), int, sneak.__name__)
+            self.assertEqual(n, 30, sneak.__name__)              # NOT 10**9 from __int__
+        # a non-integral stored value is still refused, so the normalisation did not weaken the count rule
+        with self.assertRaises(ValueError):
+            bm._metric_count(MetricValue.measured(_SneakyCount(30.5)), "n")
+
+    def test_check_level_returns_the_level_it_checked(self):
+        self.assertEqual(bm._check_level(_SneakyLevel(0.95)), 0.95)
+        self.assertIs(type(bm._check_level(_SneakyLevel(0.95))), float)
+        for bad in (_SneakyLevel(5.0), _SneakyLevel(0.0), _SneakyLevel(-1.0), _SneakyLevel(1.0)):
+            with self.assertRaises(ValueError, msg=repr(float.__float__(bad))):
+                bm._check_level(bad)
+        # the consequence: the interval's tails come from the checked level, not from `__rsub__`
+        plain = bm.percentile_interval(list(range(101)), 0.95)
+        self.assertEqual(bm.percentile_interval(list(range(101)), _SneakyLevel(0.95)), plain)
+        self.assertEqual(bm.t_interval([1.0, 2.0, 3.0, 4.0, 5.0], _SneakyLevel(0.95)),
+                         bm.t_interval([1.0, 2.0, 3.0, 4.0, 5.0], 0.95))
+
+    def test_the_statistics_layer_computes_on_the_sample_it_validated(self):
+        """`_check_finite` returned None, so `mean` / `sample_sd` / `t_interval` / `bootstrap_means` all
+        went on to compute with the caller's objects. `_constant` is `x == v[0]` and `_mean` then returns
+        `float(v[0])`, so a lying `__float__` on a "constant" sample chose the mean outright."""
+        for sneak in self.SNEAKS:
+            sample = [sneak(0.25)] * 4
+            plain = [0.25] * 4
+            self.assertEqual(bm.mean(sample), bm.mean(plain), sneak.__name__)
+            self.assertIs(type(bm.mean(sample)), float, sneak.__name__)
+            self.assertEqual(bm.sample_sd(sample), 0.0, sneak.__name__)
+            mixed = [sneak(0.1), sneak(0.2), sneak(0.3), 0.4]
+            self.assertEqual(bm.mean(mixed), bm.mean([0.1, 0.2, 0.3, 0.4]), sneak.__name__)
+            self.assertEqual(bm.sample_sd(mixed), bm.sample_sd([0.1, 0.2, 0.3, 0.4]), sneak.__name__)
+            self.assertEqual(bm.t_interval(mixed, 0.95), bm.t_interval([0.1, 0.2, 0.3, 0.4], 0.95))
+        # and the whole summary, which is what reaches a verdict
+        vals = [0.5 + 0.01 * i for i in range(30)]
+        sneaky = bm.summarize("S", [_SneakyBound(v) for v in vals], bm.bonferroni_level(0.05, 4), 200, 7)
+        plain = bm.summarize("S", vals, bm.bonferroni_level(0.05, 4), 200, 7)
+        for f in ("mean", "sd", "iqr", "minimum", "maximum", "boot_lo", "boot_hi", "t_lo", "t_hi"):
+            self.assertEqual(bm._metric_read(getattr(sneaky, f)), bm._metric_read(getattr(plain, f)), f)
+        self.assertEqual(bm.interval_verdict(sneaky, 0.1, "greater"),
+                         bm.interval_verdict(plain, 0.1, "greater"))
+
+    def test_the_whole_entry_point_sweep_agrees_with_the_plain_value(self):
+        """THE SWEEP ITSELF, as a property rather than a list of sites: for every entry point that takes a
+        number, the answer on a hostile subclass must equal the answer on the plain double it stores --
+        or both must raise the same way. A new validator that inspects before normalising fails here
+        without anyone adding a case for it, PROVIDED it is reachable from one of these entry points;
+        that proviso is the honest limit of this test and the reason `_plain_number` is one function."""
+        pair30 = self.pair()
+        entries = {
+            "_check_margin": lambda v: bm._check_margin(v, "m"),
+            "Margins.delta_S": lambda v: bm.Margins(delta_S=v).delta_S,
+            "interval_verdict": lambda v: bm.interval_verdict(pair30, v, "greater"),
+            "ComponentResult": lambda v: bm.ComponentResult("S", "greater", v, pair30).verdict,
+            "_check_level": bm._check_level,
+            "percentile_interval": lambda v: bm.percentile_interval(list(range(101)), v),
+            "mean": lambda v: bm.mean([v, v, 0.5]),
+            "sample_sd": lambda v: bm.sample_sd([v, v, 0.5]),
+            "t_interval": lambda v: bm.t_interval([v, v, 0.5], 0.95),
+            "quantile": lambda v: bm.quantile([0.0, 1.0, 2.0], v),
+            "bonferroni_level": lambda v: bm.bonferroni_level(v, 4),
+            "summarize": lambda v: bm._metric_read(bm.summarize("S", [v, v, 0.5], 0.9875, 50, 7).mean),
+            "_mv": lambda v: bm._metric_read(bm._mv(v, "why")),
+            "_metric_read": lambda v: bm._metric_read(MetricValue.measured(v)),
+            "_metric_count": lambda v: bm._metric_count(MetricValue.measured(v), "n"),
+            "BenchmarkConfig.alpha": lambda v: bm.BenchmarkConfig(alpha=v).config_hash(),
+            "BenchmarkConfig.width_tol": lambda v: bm.BenchmarkConfig(width_tol=v).config_hash(),
+            "required_n": lambda v: bm.required_n([v, 0.1], bm.Margins(), 0.9875),
+        }
+        probes = [sneak(x) for sneak in self.SNEAKS for x in (0.25, 0.5, 30.0, 0.9875)]
+        for name, fn in entries.items():
+            for sneaky in probes:
+                plain = float.__float__(sneaky)
+                with self.subTest(entry=name, stored=plain, sneak=type(sneaky).__name__):
+                    try:
+                        want, want_err = fn(plain), None
+                    except Exception as e:
+                        want, want_err = None, type(e)
+                    try:
+                        got, got_err = fn(sneaky), None
+                    except Exception as e:
+                        got, got_err = None, type(e)
+                    self.assertEqual(got_err, want_err, f"{name}: raised differently for the same number")
+                    self.assertEqual(got, want, f"{name}: answered differently for the same number")
+
+    def test_a_large_int_is_a_ValueError_not_an_OverflowError(self):
+        """N2. `_check_margin` raised `OverflowError` for `10**400` while its own docstring called such a
+        value "not a finite real number" and `interval_verdict`'s promised a `ValueError`. `_check_finite`
+        had always converted it and `mean([10**400])` had always raised `ValueError`, so the module was
+        inconsistent with itself. `test_every_entry_point_for_a_margin_applies_the_same_bound` enumerated
+        nine bad margins and no large int, which is why it was untested."""
+        big = 10 ** 400
+        pair30 = self.pair()
+        for name, fn in (("_check_margin", lambda: bm._check_margin(big, "m")),
+                         ("Margins delta_S", lambda: bm.Margins(delta_S=big)),
+                         ("Margins delta_R", lambda: bm.Margins(delta_R=big)),
+                         ("Margins delta_sel", lambda: bm.Margins(delta_sel=big)),
+                         ("interval_verdict", lambda: bm.interval_verdict(pair30, big, "greater")),
+                         ("_verdict_from_bounds",
+                          lambda: bm._verdict_from_bounds(30, (0.4, 0.6), (0.4, 0.6), big, "greater", 30, 0.25)),
+                         ("ComponentResult", lambda: bm.ComponentResult("S", "greater", big, pair30)),
+                         ("BenchmarkConfig lr", lambda: bm.BenchmarkConfig(lr=big)),
+                         ("BenchmarkConfig alpha", lambda: bm.BenchmarkConfig(alpha=big)),
+                         ("BenchmarkConfig tau_conv", lambda: bm.BenchmarkConfig(tau_conv=big)),
+                         ("_check_level", lambda: bm._check_level(big)),
+                         ("mean", lambda: bm.mean([big])),
+                         ("sample_sd", lambda: bm.sample_sd([big, 1.0])),
+                         ("t_interval", lambda: bm.t_interval([big, 1.0], 0.95)),
+                         ("summarize", lambda: bm.summarize("S", [big], 0.9875, 50, 7)),
+                         ("required_n", lambda: bm.required_n([big], bm.Margins(), 0.9875))):
+            with self.subTest(entry=name):
+                with self.assertRaises(ValueError):
+                    fn()
+                try:
+                    fn()
+                except ValueError:
+                    pass
+                except OverflowError:                 # pragma: no cover - the defect, if it returns
+                    self.fail(f"{name} raised OverflowError, outside the module's error contract")
+        # a stored metric cannot hold one at all (schema refuses it), and the reader says so
+        self.assertIsNone(bm._metric_read(forge(MetricValue.measured(1.0), big)))
+        self.assertIsNone(bm._plain_number(big))
+        self.assertEqual(bm._plain_number(10 ** 300), 1e300)      # not an over-refusal of large ints
+        self.assertEqual(bm._plain_number(5), 5.0)
+        self.assertIsNone(bm._plain_number(True))
+
+    def test_plain_number_reads_the_stored_value_and_refuses_everything_else(self):
+        """`_plain_number`'s own contract, directly, so the sweep above cannot pass by the helper being
+        over-permissive. It reads through `float.__float__` / `int.__int__` ON PURPOSE: those are the
+        values `math.isfinite` and `MetricValue.__post_init__` inspect, so an override is not consulted
+        second -- it is not consulted at all."""
+        self.assertEqual(bm._plain_number(_SneakyMargin(0.0)), 0.0)
+        self.assertEqual(bm._plain_number(_SneakyMargin(2.5)), 2.5)
+        self.assertEqual(bm._plain_number(_SneakyCount(30.0)), 30.0)
+        for good, want in ((0.0, 0.0), (-0.0, -0.0), (1, 1.0), (-7, -7.0), (5e-324, 5e-324),
+                           (sys.float_info.max, sys.float_info.max), (10 ** 300, 1e300)):
+            self.assertEqual(bm._plain_number(good), want, repr(good))
+            self.assertIs(type(bm._plain_number(good)), float, repr(good))
+        for bad in (True, False, math.inf, -math.inf, math.nan, "1.0", "", None, [1.0], {}, (), object(),
+                    10 ** 400, -10 ** 400, bytearray(b"1")):
+            self.assertIsNone(bm._plain_number(bad), repr(bad))
+
+    def test_no_validator_inspects_before_normalising_anywhere_in_the_module(self):
+        """A SOURCE TRIPWIRE over the pattern itself, in the shape `toy.dashboard` uses for its kind
+        functions: `abs(`, `int(` and a bare `float(` may appear only inside `_plain_number` (which is
+        where the normalisation lives) and inside arithmetic that has already been normalised. Listed by
+        OWNER so a new validator that writes `float(v)` in front of a check is named. This is a tripwire,
+        not a proof -- the proof is the behavioural sweep above."""
+        src = Path(bm.__file__).read_text()
+        tree = ast.parse(src)
+        owner = {}
+        for fn in ast.walk(tree):
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for sub in ast.walk(fn):
+                    owner.setdefault(id(sub), fn.name)
+        coercions = sorted({(owner.get(id(n), "<module>"), n.func.id) for n in ast.walk(tree)
+                            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                            and n.func.id in ("float", "int", "abs")})
+        self.assertEqual(coercions, [
+            ("_agg_metrics", "float"),          # IntervalPair.n / .level / .n_boot, validated at build
+            ("_betacf", "abs"),                 # internal continued fraction, local floats only
+            ("_check_margin", "abs"),           # AFTER _plain_number: the N1 fix is this ordering
+            ("_mean", "float"),                 # v[0] of a sample _check_finite already normalised
+            ("_metric_count", "int"),           # AFTER _metric_required, i.e. after _plain_number
+            ("_plain_number", "float"),         # THE normaliser (float(int.__int__(v)) for an int)
+            ("intervals_disagree", "abs"),      # bounds that came out of _metric_read
+            ("quantile", "float"),              # AFTER _plain_number; an element of a checked sample
+            ("quantile", "int"),                # math.floor of an already-normalised position
+            ("sample_sd", "abs"),               # a sample _check_finite already normalised
+            ("score_predictor", "float"),       # locally computed, math.isfinite-checked one line above
+            ("score_seed", "float"),            # fx.G, validated at fixture build
+            ("seed_list_digest", "int"),        # a digest, not a measurement
+            ("summarize", "abs"),               # vals, normalised by _plain_number at entry
+            ("to_experiment_records", "float"),  # counts off JointResult's own validated fields
+            ("verdict_from_records", "abs"),    # |lv - want_level|, both from _metric_required
+        ], "a coercion appeared or moved: check it is applied AFTER _plain_number, not before a test")
 
 
 class AMarginIsBoundedWhereverOneEnters(unittest.TestCase):

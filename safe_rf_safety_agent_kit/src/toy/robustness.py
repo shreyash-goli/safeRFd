@@ -24,16 +24,24 @@ Structural rule against single-example claims (checked at construction, not mere
   `SEED_FLOOR`. `summarize_seeds` and `SeedSummary.from_values` see values, not seeds, so they CANNOT
   detect one example repeated: `summarize_seeds([mv] * 10)` returns a summary. Duplicate SEEDS are
   rejected only on the probe path (`_check_seeds`, used by every probe and by `build_scorecard`).
-* HOW MANY TIMES `SEED_FLOOR` IS DEFENDED, counted rather than remembered, because three different
-  numbers were in circulation (a test docstring said "three times over", `docs/PROGRESS.md` says "five
-  independent points"): there are FOUR direct comparisons against `SEED_FLOOR` in this module --
-  `ProbeConfig.__post_init__`, `SeedSummary.__post_init__`, `SeedSummary.from_values` and
-  `_recheck_summary` -- and six paths reach them, those four plus `Scorecard.__post_init__`'s two
-  delegations (`ProbeConfig(self.min_seeds)` and `_recheck_summary(self.summary)`). The count is
-  asserted against this module's own AST by
-  `test_robustness.ThePolicyParametersAreThemselvesPinned.test_the_number_of_seed_floor_defences_is_counted_not_claimed`,
-  so a fifth number cannot appear by drift. `DEFAULT_MIN_SEEDS = 10` is a separate, weaker thing: a
-  POLICY minimum, not the floor, and it is pinned by value in the same class.
+* HOW MANY TIMES `SEED_FLOOR` IS DEFENDED, counted rather than remembered, because FIVE different
+  numbers have been in circulation here (a test docstring said "three times over", `docs/PROGRESS.md`
+  says "five independent points", a previous version of THIS paragraph said "four direct comparisons and
+  six paths" -- and the count written to stop the drift introduced the fifth number itself):
+  there are FOUR direct comparisons against `SEED_FLOOR` in this module -- `ProbeConfig.__post_init__`,
+  `SeedSummary.__post_init__`, `SeedSummary.from_values` and `_recheck_summary` -- and EIGHT paths reach
+  them: those four plus FOUR delegations, `_pcfg`'s `ProbeConfig()`, `summarize_seeds`'s
+  `ProbeConfig(min_seeds)`, and `Scorecard.__post_init__`'s `ProbeConfig(self.min_seeds)` and
+  `_recheck_summary(self.summary)`. "SIX" WAS WRONG: it counted only the two delegations in `Scorecard`
+  and silently dropped `_pcfg`'s and `summarize_seeds`'s, although `summarize_seeds`'s is the same kind of
+  delegation as `Scorecard`'s and is the one
+  `test_robustness.test_probe_config_defaults_are_constructed_per_call` relies on for its "absolute
+  floor" message. BOTH numbers are now measured from this module's own AST by
+  `test_robustness.ThePolicyParametersAreThemselvesPinned.test_the_number_of_seed_floor_defences_is_counted_not_claimed`
+  -- the path count as well as the comparison count, which is what the previous version left to prose and
+  is why it could be wrong. The comparison sites are deduplicated BY LINE NUMBER, not by owner name,
+  because `ProbeConfig.__post_init__` and `SeedSummary.__post_init__` are both spelled `"__post_init__"`.
+  `DEFAULT_MIN_SEEDS = 10` is a separate, weaker thing: a POLICY minimum, not the floor, pinned by value.
 * `Scorecard.__post_init__` requires exactly one of {summary, insufficient}, checks the status, labels,
   counts and seed digest agree, and RE-VALIDATES the nested summary / insufficient object (exact type,
   recomputed statistics), so `dataclasses.replace` cannot launder a summary that was tampered with
@@ -107,15 +115,21 @@ STANDARD_NON_CLAIMS = (
 def _enum_value(e: Enum) -> Any:
     """Read an `Enum`'s payload.
 
-    This exists only so that the rule enforced on both this module and `toy.benchmark` -- NO attribute
-    access named `value` or `is_measured` anywhere, so that the set of stored-metric reads is derived from
-    the source instead of listed by a reader (see `toy.benchmark`'s `_metric_read` section header) -- needs
-    NO ALLOWLIST. `Enum.value` and `MetricValue.value` are indistinguishable by attribute name, so an
-    allowlist would have to be hand-maintained, which is exactly the failure mode of the previous two
-    fixes. Here an `Enum` payload is spelled `_enum_value(e)`, a stored metric `_metric_read(m)`, and a
-    bare `x.value` anywhere in either module fails
-    `test_benchmark.TheCheckedReaderIsTheOnlyWayToReadAStoredMetric`. The `isinstance` check is not
-    decoration: it is what stops this function being used as a way around the metric reader."""
+    This exists only so that the convention held on both this module and `toy.benchmark` -- no attribute
+    access named `value` or `is_measured` anywhere, so that the set of stored-metric reads does not have
+    to be listed by a reader (see `toy.benchmark`'s `_metric_read` section header) -- needs NO ALLOWLIST.
+    `Enum.value` and `MetricValue.value` are indistinguishable by attribute name, so an allowlist would
+    have to be hand-maintained, which is exactly the failure mode of the previous rounds' fixes. Here an
+    `Enum` payload is spelled `_enum_value(e)` and a stored metric `_metric_read(m)`.
+    WHAT ENFORCES THAT, STATED AS WHAT IT IS: a bare `x.value` in either module is caught by the STATIC
+    TRIPWIRE in `test_benchmark.TheStaticSpellingRuleIsATripwireNotAGuarantee`, which catches a MEASURED
+    11 of 19 spellings of the same read -- it is a tripwire, not a guarantee, and this docstring used to
+    describe it as one. What the modules actually rest on is the runtime recording probe in
+    `test_benchmark.TheCheckedReaderIsTheOnlyWayToReadAStoredMetric` (blind to
+    `object.__getattribute__` / `gc` and to paths its run does not reach) and, load-bearing, the per-site
+    consequence tests in `EveryMetricReadSiteIsPinnedByItsConsequence` below.
+    The `isinstance` check here is not decoration: it is what stops this function being used as a way
+    around the metric reader."""
     if not isinstance(e, Enum):
         raise ValueError(f"_enum_value expects an Enum, got {type(e).__name__} "
                          "(a MetricValue is read with _metric_read, never here)")
@@ -152,6 +166,15 @@ class ProbeConfig:
     def __post_init__(self) -> None:
         if isinstance(self.min_seeds, bool) or not isinstance(self.min_seeds, int):
             raise ValueError("min_seeds must be an int")
+        # NORMALISE BEFORE COMPARING, and store what was compared. MEASURED defect: `self.min_seeds <
+        # SEED_FLOOR` is `type(min_seeds).__lt__`, so an `int` SUBCLASS returning False from `__lt__`
+        # passed this gate with a stored value of 1 -- through the PUBLIC constructor, with no
+        # `object.__setattr__` -- and `summarize_seeds(per_seed, cfg.min_seeds)` then summarised 3 of 10
+        # measured values as if the configured minimum were 1. `SEED_FLOOR` itself still held, because
+        # `SeedSummary.from_values` compares a `len()`, which is not overridable; the CONFIGURED minimum did
+        # not. Same inspect-before-normalise pattern as `toy.benchmark._check_margin`; see
+        # `toy.benchmark._plain_number` for the measurement that found the class.
+        object.__setattr__(self, "min_seeds", int.__int__(self.min_seeds))
         if self.min_seeds < SEED_FLOOR:
             raise ValueError(f"min_seeds must be >= {SEED_FLOOR} (absolute floor: no claims from single examples)")
 
@@ -220,6 +243,8 @@ class SeedSummary:
             if isinstance(v, bool) or not isinstance(v, float) or not math.isfinite(v):
                 raise ValueError("summary values must be finite floats")
         object.__setattr__(self, "values", vals)
+        vals = _plain_summary_fields(self)          # normalise before comparing; see `_plain_summary_fields`
+        object.__setattr__(self, "values", vals)
         exp = _stats(vals)
         got = (self.n, self.mean, self.sd, self.q1, self.q3, self.iqr, self.minimum, self.maximum)
         if got != exp:
@@ -255,7 +280,13 @@ class SeedSummary:
                     f"values must be real numbers, got {t.__name__}: bool and str are refused on purpose "
                     "(a boolean outcome and a number parsed out of text are not measurements)") from None
             try:
-                out.append(float(v))
+                # `float.__float__` for a value that ALREADY IS a float, `float(v)` for everything else
+                # (Decimal, Fraction, int). A bare `float(v)` consults a `__float__` OVERRIDE, so a
+                # `float` subclass could store 1.0 -- which is the number `SeedSummary.__post_init__` and
+                # `math.isfinite` inspect -- and convert to 1e308, which is the number every statistic
+                # would then be computed from. Same inspect-before-normalise pattern as
+                # `toy.benchmark._check_margin`; see `toy.benchmark._plain_number`.
+                out.append(float.__float__(v) if isinstance(v, float) else float(v))
             except OverflowError:   # e.g. 10**400: keep the documented ValueError family
                 raise ValueError("a value is too large to represent as a finite float") from None
             except (TypeError, ValueError) as e:
@@ -270,6 +301,28 @@ class SeedSummary:
                 "min": self.minimum, "max": self.maximum, "values": list(self.values)}
 
 
+_SUMMARY_SCALARS = ("mean", "sd", "q1", "q3", "iqr", "minimum", "maximum")
+
+
+def _plain_summary_fields(obj) -> tuple:
+    """Collapse any `int`/`float` SUBCLASS among a summary's fields to the plain value it STORES, and
+    return the normalised `values` tuple.
+
+    WHY, in one sentence: the values checked must be the values stored, serialized and compared. A `float`
+    subclass satisfies `isinstance(v, float)` and need not lie to `math.isfinite`, yet can override
+    `__eq__` -- which is the operator the "statistics match the values" invariant is written in -- and
+    `__float__`, which `to_dict` / `canonical_json` would consult. Same inspect-before-normalise pattern as
+    `toy.benchmark._check_margin`; see `toy.benchmark._plain_number` for the measurement that found it."""
+    for k in _SUMMARY_SCALARS:
+        x = getattr(obj, k)
+        if isinstance(x, float) and type(x) is not float:
+            object.__setattr__(obj, k, float.__float__(x))
+    n = getattr(obj, "n")
+    if isinstance(n, int) and not isinstance(n, bool) and type(n) is not int:
+        object.__setattr__(obj, "n", int.__int__(n))
+    return tuple(v if type(v) is float else float.__float__(v) for v in obj.values)
+
+
 def _stats(vals: tuple) -> tuple:
     s = sorted(vals)
     q1, q3 = quantile(s, 0.25), quantile(s, 0.75)
@@ -278,7 +331,12 @@ def _stats(vals: tuple) -> tuple:
 
 def summarize_seeds(per_seed: Sequence[MetricValue], min_seeds: int = DEFAULT_MIN_SEEDS):
     """SeedSummary if >= min_seeds measured values, else InsufficientEvidence. Never a bare scalar."""
-    ProbeConfig(min_seeds)  # enforces the floor
+    # The returned object is USED, not discarded: `ProbeConfig.__post_init__` both enforces the floor and
+    # NORMALISES `min_seeds`, and `len(measured) < min_seeds` below is an overridable comparison on whatever
+    # object the caller passed. An `int` subclass whose `__lt__` returns False used to clear the floor here
+    # and reach this function's own comparison unnormalised -- so an InsufficientEvidence(3 of 10) became a
+    # SeedSummary(n=3) with a configured minimum of 10. See `ProbeConfig.__post_init__`.
+    min_seeds = ProbeConfig(min_seeds).min_seeds
     per_seed = tuple(per_seed)
     if not all(isinstance(m, MetricValue) for m in per_seed):
         raise ValueError("per_seed must be MetricValues (absence must be explicit, never a number)")
@@ -308,6 +366,8 @@ def _recheck_summary(s) -> None:
     for v in vals:
         if isinstance(v, bool) or not isinstance(v, float) or not math.isfinite(v):
             raise ValueError("summary values must be finite floats")
+    vals = _plain_summary_fields(s)       # a card can be handed an object built by object.__new__
+    object.__setattr__(s, "values", vals)
     if (s.n, s.mean, s.sd, s.q1, s.q3, s.iqr, s.minimum, s.maximum) != _stats(vals):
         raise ValueError("summary statistics do not match the per-seed values (tampered?)")
 
