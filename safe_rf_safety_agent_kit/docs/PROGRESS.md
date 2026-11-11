@@ -8588,3 +8588,104 @@ without any tampering primitive.
 
 **The fix stands** — it closed what it set out to close and weakened nothing. The probe-side lane and
 both findings go to the residuals register as open, measured, and undeclared-until-now.
+
+## Correction to this journal: a verified-list line of mine dropped SR-04.
+
+**Date:** 2026-11-11. The round-12 entry above states *"**Verified: 10 of 17** — SR-00, SR-01, SR-02,
+SR-03, SR-05, SR-06, SR-07, SR-08, SR-09"* — **nine names under a count of ten. SR-04 is missing from
+the list.** The count was right and the enumeration was wrong.
+
+Measured from the blueprint itself rather than retyped
+(`grep -oE '^- \[[x ]\] \*\*SR-[0-9]+'`):
+
+- **MARKED (10): SR-00, SR-01, SR-02, SR-03, SR-04, SR-05, SR-06, SR-07, SR-08, SR-09** — i.e. SR-00
+  through SR-09 inclusive.
+- **OPEN (8): SR-10, SR-11, SR-12, SR-13, SR-14, SR-15, SR-16, SR-17.**
+
+SR-04 was unmarked in round 5 for the `MetricValue` value-substitution defect and **re-marked in round
+7** after an independent PASS; that is why it belongs in the list. **A verified list is derivable from
+`docs/BUILD_BLUEPRINT.md` and should be derived, not typed** — the same lesson this project has now
+learned about figures in comments, figures in prose, and figures carried between briefs.
+
+## The SR-16 report corrects the orchestrator on five figures. Recorded here as the journal's own errata.
+
+**Date:** 2026-11-11, HEAD `d0441f5`. `docs/SR16_AUDIT_REPORT.md` written (1209 lines, 10 sections).
+It is **not** an SR-16 completion — SR-16 is `[ ]` and depends on open SR-15, and its header says so.
+
+### 1. The suite totals I reported are NOT in this journal. Verified: `grep -c '1351' → 0`.
+
+I ran and reported `1330` and then `1351`, and put them in **commit messages** — not in
+`docs/PROGRESS.md`, which `CLAUDE.md` designates as *"the durable journal; reload it every iteration."*
+The journal's latest recorded run total is **1252**. What the report *could* establish is that
+Σ `scripts/test_baseline.txt` at HEAD = **1351** across 13 modules, counted — so 1351 is MEASURED as a
+baseline **floor**, while the two run totals are **UNKNOWN from the journal**.
+
+**This is a real bookkeeping defect of mine**, and of exactly the class this project keeps finding: the
+durable record and the thing I told people diverged, and the divergence was invisible because the
+commit messages looked like a record. **A figure lives in the journal or it does not live.**
+
+### 2. "Three tasks failed 7–10 consecutive attestations" is not in the source, and the counted figures differ.
+
+I said that to the operator more than once. `grep -i consecutive` returns two hits, **neither about
+attestations**. The report's counted figures: **SR-15 = 10 attestations, all FAIL, never passed;
+SR-13 = 9 consecutive FAILs; SR-11 = 6.** And **the journal's own ordinals disagree with the count** —
+SR-15's last label is "(8th)", SR-13 is labelled "(4th)" at two different entries, SR-11 "(6th)" at two.
+**Which series is authoritative is UNKNOWN.** My "7–10" was a hand-wave over a figure that was
+countable.
+
+### 3. "46 variable-key lookups" is unreproduced.
+
+I carried that figure from the round-12 attestation. The report re-implemented the tripwire's **stated**
+rule and reproduced its pinned figures exactly — **42 literal + 1 f-string, the f-string being
+`f'gate_{n}'` at `benchmark.py:2267`** — but got **83** non-string-key sites, a superset. **The rule
+behind 46 is not recorded re-runnably**, so 46 is attester-reported and **UNREPRODUCED**.
+
+### 4. One UNKNOWN the report raised that I can close, and one I cannot.
+
+**Closed:** the Linux 90 → 95 arithmetic. Measured from the run log, the two notes are
+`4 skip(s) for a case-sensitive filesystem` and `1 skip(s) for an absent optional developer tool` —
+**4 + 1 = 5**, which reconciles it. The report read the docs as accounting for 4 in total; the second
+note is the fifth. **Not** UNKNOWN.
+
+**Open:** the bare skip total **90** against the baseline column's **89**. The column excludes
+PyYAML/exempt-category skips by construction, so the one-skip reconciliation is **INFERENCE** and the
+identity of the excluded skip is **UNKNOWN**.
+
+### 5. A live contradiction in a MARKED task, and it is deliberate
+
+**`docs/EVALUATION_PROTOCOL.md:3`** says *"r10 has not been independently reviewed"* — inside a sentence
+opening *"Version history, stated exactly"* — while **`PROGRESS.md:6362`** records
+*"SR-09 r10: **PASS** … No blocking findings."* **SR-09's `[x]` rests on that PASS, so the artifact
+currently denies its own attestation.**
+
+It is deliberate: editing the file would make the attested and live text differ, *"precisely the defect
+that unmarked SR-09 in the first place."* **The trade is real and it is still a live contradiction in a
+marked task.** It belongs in the residuals register, which is where the report put it.
+
+Second contradiction worth keeping: `test_benchmark.py:4816` states *"29 of 129 … that is the number
+this round is about"* while the journal's sharpening says **"13 escalations of 129 … 29 is not the
+escalation count."** `grep -rn 'escalation' tests/ src/` → **no output**: **the sharpening exists only
+in the journal, not in the test that states the number.** A figure in a test is pinned; a correction in
+a journal is not.
+
+### 6. The report caught its own overclaim — the project's defect class, inside the report
+
+Its first draft said three marked tasks rest on attestations whose artifacts moved afterwards. It then
+**ran the round-6 check** and narrowed the sentence:
+
+- **SR-00 — clear.** `git log -- tests/test_toy.py` → **one** commit; the attested file is
+  byte-unchanged. (Its missing `## SR-00 — QA verdict` section is still real: grep → **0**.)
+- **SR-08 — clear.** `checkpoint.py` did change after its attestation, but the change is
+  **11 insertions / 6 deletions, every line inside the module docstring.** No executable line.
+- **SR-06 — UNRESOLVABLE from git.** `stability.py`'s last change **is** `905bbfe`, the commit whose
+  message records SR-06's QA PASS — **and that same commit introduces the errors the journal describes
+  as post-PASS fixes.** The attestation and the changes it does not cover are in one commit. This is
+  *"the commit trail is unreliable, in a kit built on provenance"* landing on a specific checkbox.
+- **SR-14 — clear**, despite a seven-rounds-stale PASS: `claim_ledger.py`'s last commit precedes the
+  round-5 era and **0** later commits touch it (`merge-base --is-ancestor` confirmed).
+
+### 7. I told it the tree was clean. It was not.
+
+`docs/PROGRESS.md` carried my uncommitted 18-line SR-04 correction when that pass began. The report
+**left it untouched** rather than reverting or committing another owner's in-flight work, and recorded
+the discrepancy. Correct call, and my briefing error.
