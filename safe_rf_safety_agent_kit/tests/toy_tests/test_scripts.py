@@ -1,5 +1,6 @@
 """SR-15 tests for the dev/CI scripts. TOY ONLY. Standard library only (PyYAML is used if present, never required)."""
 import ast
+import json
 import os
 import re
 import subprocess
@@ -207,29 +208,92 @@ def _tool_phrase_re():
     return pat
 
 
+def _skip_reason_exprs(source, label):
+    """[(label:line, expression)] for every skip-reason ARGUMENT in a module's source -- the expression a
+    `skip`/`skipIf`/`skipUnless`/`skipTest` call takes its reason from, whether or not it is a literal."""
+    out = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+        if name not in ("skip", "skipIf", "skipUnless", "skipTest"):
+            continue
+        i = 0 if name in ("skip", "skipTest") else 1
+        if len(node.args) <= i:
+            continue
+        out.append((f"{label}:{node.lineno}", node.args[i]))
+    return out
+
+
+def _static_strings(node):
+    """Every string a STATIC reader can see in a reason expression that is not one literal: the constant pieces
+    of an f-string, of a `+` concatenation, of a conditional, of a `join`/`%`/`.format` operand. A `{...}`
+    field contributes NOTHING, which is exactly the point of the check built on this."""
+    if isinstance(node, ast.Constant):
+        return [node.value] if isinstance(node.value, str) else []
+    out = []
+    if isinstance(node, ast.JoinedStr):
+        for v in node.values:
+            out += _static_strings(v)
+    elif isinstance(node, ast.BinOp):
+        out += _static_strings(node.left) + _static_strings(node.right)
+    elif isinstance(node, ast.IfExp):
+        out += _static_strings(node.body) + _static_strings(node.orelse)
+    elif isinstance(node, (ast.Tuple, ast.List)):
+        for e in node.elts:
+            out += _static_strings(e)
+    elif isinstance(node, ast.Call):
+        for arg in [getattr(node.func, "value", None), *node.args]:
+            if isinstance(arg, ast.AST):
+                out += _static_strings(arg)
+    return out
+
+
+def _suite_modules():
+    """Every module the runner DISCOVERS -- `discover -s tests`, so tests/ and not only tests/toy_tests/.
+
+    `tests/test_toy.py` is in the discovered suite and was outside this file's scan, so a skip reason there
+    would have been judged by the runner and by nothing at test time. It carries no skip at all today
+    (measured), which is why widening the scan costs nothing -- and why it is worth doing before it does.
+    """
+    return sorted((ROOT / "tests").rglob("*.py"))
+
+
 def _suite_skip_sites():
-    """[(file:line, reason)] for every LITERAL skip reason in tests/toy_tests/.
+    """[(file:line, reason)] for every LITERAL skip reason in the DISCOVERED suite (tests/, recursively).
+
+    LITERAL is the limit of this scan, and `_suite_computed_skip_sites` is the other half: a reason built with
+    an f-string or a concatenation is not an `ast.Constant` and cannot be judged by `.match`ing a phrase
+    against it, so it is collected separately and held to a narrower rule.
 
     Synthetic reasons built inside this file's laundering tables are NOT skip sites (they are strings handed to
     helpers, or source text for a generated module), so they are invisible here -- which is the point: the scan
     sees what the SUITE will emit.
     """
     out = []
-    for p in sorted((ROOT / "tests" / "toy_tests").glob("*.py")):
-        for node in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.Call):
-                continue
-            fn = node.func
-            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
-            if name not in ("skip", "skipIf", "skipUnless", "skipTest"):
-                continue
-            i = 0 if name in ("skip", "skipTest") else 1
-            if len(node.args) <= i:
-                continue
-            arg = node.args[i]
-            if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
-                continue
-            out.append((f"{p.name}:{node.lineno}", arg.value.strip()))
+    for p in _suite_modules():
+        label = str(p.relative_to(ROOT / "tests"))
+        for where, expr in _skip_reason_exprs(p.read_text(encoding="utf-8"), label):
+            if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+                out.append((where, expr.value.strip()))
+    return out
+
+
+def _suite_computed_skip_sites():
+    """[(file:line, [fragment, ...])] for every skip reason in the discovered suite that is NOT one literal --
+    an f-string, a concatenation, a conditional -- with the strings a static reader can still see in it.
+
+    These are invisible to `_suite_skip_sites`, and therefore to the allowlist equality and to the carrier
+    scan. Two are real (`toy_tests/test_tensor_ops.py:29` and `:31`). What may be done with them is
+    test_no_computed_skip_reason_carries_a_declared_exemption_phrase.
+    """
+    out = []
+    for p in _suite_modules():
+        label = str(p.relative_to(ROOT / "tests"))
+        for where, expr in _skip_reason_exprs(p.read_text(encoding="utf-8"), label):
+            if not (isinstance(expr, ast.Constant) and isinstance(expr.value, str)):
+                out.append((where, _static_strings(expr)))
     return out
 
 
@@ -370,6 +434,46 @@ def _code_string_literals(path):
             if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docs]
 
 
+def _comment_units(path, comments_only):
+    """[(first line number, text)] for each maximal run of COMMENT lines (or, in a document, of non-blank
+    lines), with the comment markers stripped and the run joined into one string.
+
+    Every file this discipline scans is HARD-WRAPPED, so a sentence is not a line: joining the run is what lets
+    a check ask which SENTENCE a retraction marker belongs to. See
+    test_no_withdrawn_guarantee_is_restated_in_a_comment for the measurement that made that necessary.
+    """
+    out, run, start = [], [], None
+    for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        s = line.strip()
+        if (s.startswith("#") if comments_only else bool(s)):
+            if start is None:
+                start = i
+            run.append(re.sub(r"^#+\s?", "", s) if comments_only else s)
+        else:
+            if run:
+                out.append((start, " ".join(run)))
+            run, start = [], None
+    if run:
+        out.append((start, " ".join(run)))
+    return out
+
+
+_SENTENCE_END = re.compile(r"(?<=[.!?;])\s+")
+
+
+def _sentence_lead(text, pos):
+    """The text from the start of the sentence containing `pos` up to `pos` -- i.e. what a reader has already
+    been told when they reach the claim at `pos`.
+
+    A retraction marker counts only if it is HERE. A line window cannot do that: round 8's F3 was a line that
+    carried a withdrawn claim AND a correct history note about a different fact, so the marker the window found
+    belonged to the other claim and the needle passed at every half-width from 0 to 7 (measured).
+    """
+    head = text[:pos]
+    cuts = [m.end() for m in _SENTENCE_END.finditer(head)]
+    return head[cuts[-1]:] if cuts else head
+
+
 def _env(**extra):
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONHASHSEED="0")
     env.update(extra)
@@ -497,6 +601,40 @@ class TestCiWorkflow(unittest.TestCase):
                        '"3.12"', "numpy must stay <2"):
             self.assertIn(needle, t)
         self.assertNotIn("\t", t)
+
+    def test_the_header_discloses_every_remote_fetch_its_own_steps_make(self):
+        """ROUND 8's F2, and the direction the needle test cannot cover.
+
+        The header opened *"Nothing in this workflow reaches a remote host except the pip-install step of the
+        optional-deps job"* while BOTH jobs run `actions/checkout@v4` and `actions/setup-python@v5`: the actions
+        themselves, and this repository, are fetched from github.com before a test runs. The sentence was false
+        for `core-no-deps` INDEPENDENTLY of hermeticity, and it is the same claim README.md retracted in the
+        same round.
+        test_no_withdrawn_guarantee_is_restated_in_a_comment now scans this file and catches the sentence being
+        RESTATED (that is what adding the file to its scope bought). It cannot catch the disclosure being
+        DELETED, which is how a presence check goes vacuous -- the defect this project has now hit four times.
+        So this is derived from the workflow rather than from prose: every third-party action the steps `uses:`
+        must be named in the header, and the header must say where it comes from. Add `actions/cache@v4` and
+        this test asks for a sentence about it.
+        """
+        header = [l.lstrip("# ").rstrip() for l in self.text.splitlines() if l.startswith("#")]
+        flat = re.sub(r"\s+", " ", " ".join(header))
+        self.assertGreaterEqual(len(header), 10, "the normative header is gone; this test reads it")
+        uses = sorted({u.split("@")[0] for u in re.findall(r"(?m)^\s*-\s*uses:\s*(\S+)", self.text)})
+        self.assertGreaterEqual(len(uses), 2, f"this workflow uses {uses}: the parse has gone stale and this "
+                                              f"check is vacuous")
+        for action in uses:
+            self.assertIn(action, flat, f"the header does not name {action!r}, which the steps fetch and run. "
+                                        f"Every action a job uses is a remote fetch before any test runs, and "
+                                        f"the header is where this workflow states its network behaviour.")
+        self.assertIn("github.com", flat, "the header must say where the actions and the repository come "
+                                          "from: both jobs fetch them from github.com before a test runs")
+        # ...and the per-job claim: a job that uses an action may not be described as reaching nothing
+        jobs = re.findall(r"(?m)^  ([\w-]+):$", self.text.split("\njobs:\n", 1)[1])
+        self.assertEqual(sorted(jobs), ["core-no-deps", "optional-deps"], jobs)
+        self.assertRegex(flat, r"BOTH JOBS[^.]*github\.com",
+                         "the header states this workflow's egress and both jobs fetch from github.com; say "
+                         "so about BOTH of them, not about the pip-install step alone")
 
     def test_read_only_no_secrets_no_publish(self):
         body = "\n".join(l for l in self.text.splitlines() if not l.lstrip().startswith("#"))  # prose may say "no deploy"
@@ -667,15 +805,52 @@ class TestNoNetworkImports(unittest.TestCase):
         left the hole exactly where its normative document lives. The doc is scanned WHOLE, not comment-only:
         in a Markdown file the prose IS the claim.
 
-        THE WINDOW IS PER NEEDLE, and that is a measurement rather than a preference. With the +-6-line window
-        the three original needles use, the ``as a word and as a prefix`` sentence PASSED while it was false,
-        because a different sentence six lines above it said "the exclusion used to be an independently typed
-        `\\b(?:py)?yaml\\b`" -- a correct history note about another rule, close enough to launder this one. A
-        +-1-line window fails it, and the two round-6 needles still pass on their own history paragraphs, which
-        is why the half-width is declared per needle instead of lowered for all of them.
+        THE WINDOW IS PER NEEDLE, AND EVERY FIGURE HERE IS A MEASUREMENT -- including the correction to the
+        note that stood here. It said the ``as a word and as a prefix`` sentence passed the +-6 window "because
+        a different sentence six lines above it" carried a history note, and concluded that +-1 was needed.
+        The direction was right and the figure was wrong. MEASURED on the pre-fix document
+        (`git show ff18bd1~1:docs/CLEAN_CLONE.md`): the false sentence is at line 258 and the correct history
+        note ("the exclusion used to be an independently typed `\\b(?:py)?yaml\\b`") at line 256 -- TWO lines
+        above, not six. The minimum passing half-width for that needle was therefore 2, so +-1 is tight by ONE
+        line, not five. And only ONE of the two round-6 needles ever needed a narrow window at all: pre-fix,
+        ``contains "case-sensitive"`` at line 238 fails at EVERY half-width from 0 to 7, so +-6 would have
+        caught it.
+        WHY THE WIDTHS ARE STILL PER NEEDLE is a different reason from the one recorded before, and it is also
+        a measurement -- taken TWICE this round, which is itself the argument. When round 8 began, the
+        ``hide a torch test`` occurrence in docs/CLEAN_CLONE.md failed at half-widths 0-4 and passed from 5
+        (its marker, "passed while it was false", was five lines away), so +-1 for all five needles was RED.
+        That bullet was then rewritten in this round and the marker moved onto the needle's own line, so the
+        same occurrence passes at 0 now -- and the binding occurrence on the CURRENT tree is a COMMENT IN THIS
+        FILE (the ci.yml ceiling note below, minimum half-width 2), so +-1 for all five is STILL red, for a
+        third reason in one round. THAT is the point: a marker's distance is a property of PROSE and changes
+        whenever a paragraph is rewritten, so the width is headroom for a hard-wrapped history paragraph
+        rather than a fact about a needle. The two round-6 needles keep +-1 because they can (both pass at 0
+        today); the other three keep +-6. A needle that must be adjudicated rather than merely given room is
+        what the "sentence" scope below is for.
+        A LINE WINDOW CANNOT ADJUDICATE A CLAIM WHOSE OWN LINE CARRIES AN UNRELATED MARKER -- ROUND 8's F3, and
+        it is why some needles below declare the scope "sentence" instead of a width. `scripts/run_tests.sh`
+        read ``"connection refused" from the local stack and nothing leaves the host. It used to be
+        192.0.2.1:9``: the phrase README.md retracted, and a CORRECT history note about a different fact, on
+        ONE line. As a line-window needle it passes at every half-width from 0 to 7 (measured on that line),
+        because the marker it borrows is its own. Widening MARK is not the answer -- round 8 measured why -- so
+        the mechanism is given a way to tell WHICH claim a marker belongs to: for a "sentence" needle the
+        marker must appear BEFORE the needle and INSIDE ITS OWN SENTENCE, in the comment block joined across
+        the hard wrap (`_comment_units`, `_sentence_lead`). Measured: the restored line fails that rule, and
+        the retraction now in its place (``this comment used to end that sentence "and nothing leaves the
+        host"``) passes it. Residue, stated rather than hidden: one sentence that both asserts a withdrawn
+        claim and marks it as history satisfies this, as it satisfies any window; reading prose is not on offer.
+        ROUND 8's F2 BROUGHT `.github/workflows/ci.yml` INTO THIS DISCIPLINE, and its 24-line normative header
+        was outside it entirely -- while asserting a FALSE egress property ("Nothing in this workflow reaches a
+        remote host except the pip-install step of the optional-deps job") although BOTH jobs fetch
+        `actions/checkout@v4`, `actions/setup-python@v5` and this repository from github.com, independently of
+        hermeticity. It is the same claim README.md retracted in the same round. That file now carries two of
+        the needles below as history, and is scanned comment-only like the two scripts.
         """
         MARK = re.compile(r"used to|was false|WHAT IS NOT TRUE|withdrawn|no longer|retract|NOT the anti|"
                           r"it was false|FALSE for", re.I)
+        # needle -> (SCOPE, why). SCOPE is either a LINE half-width -- the marker may be that many lines away,
+        # which is what a hard-wrapped history paragraph needs -- or "sentence", where the marker must precede
+        # the needle inside its OWN sentence. Every number here is measured; see the docstring for each.
         NEEDLES = {
             "cannot launder": (6, "the category's anti-laundering guarantee (withdrawn in docs/CLEAN_CLONE.md: "
                                   "the wording is a courtesy to the reader, not the defence)"),
@@ -689,24 +864,65 @@ class TestNoNetworkImports(unittest.TestCase):
                                              "the anchored phrase in EXEMPT_CATEGORIES"),
             "as a word and as a prefix": (1, "the package rule as a word-plus-prefix test -- `PKG_EXEMPT` is a "
                                              "CONTAINMENT test, which is what catches `libtorch`"),
+            # ROUND 8's F3: scoped to a 127.0.0.1 connect the sentence is defensible, but it is the phrase
+            # README.md retracted, and the line it lived on also carried "It used to be 192.0.2.1:9" -- a
+            # correct history note about a DIFFERENT fact, which a line window of ANY width reads as the
+            # marker for this one. Hence the sentence scope.
+            "nothing leaves the host": ("sentence", "egress as a property of the host rather than of the "
+                                                    "ADDRESS the script asks for -- retracted in README.md; "
+                                                    "hermeticity is unattested and no network-denied run "
+                                                    "exists"),
+            # ROUND 8's F2, both in .github/workflows/ci.yml: the egress claim that was false for
+            # core-no-deps independently of hermeticity, and the one word that made the loopback claim wrong.
+            "reaches a remote host except the pip-install step":
+                ("sentence", "the workflow's egress claim -- BOTH jobs fetch actions/checkout@v4, "
+                             "actions/setup-python@v5 and the repository from github.com before any test runs"),
+            "no packet reaches an interface":
+                ("sentence", "loopback traffic DOES traverse `lo`; the careful claim in docs/CLEAN_CLONE.md is "
+                             "that no packet reaches a NETWORK interface"),
         }
         hits = dict.fromkeys(NEEDLES, 0)
-        for rel, comments_only in (("scripts/run_tests.sh", True), ("tests/toy_tests/test_scripts.py", True),
-                                   ("docs/CLEAN_CLONE.md", False)):
+        # (file, comments-only, SCOPE CEILING). The ceiling is a measurement about the FILE rather than about a
+        # needle. `.github/workflows/ci.yml` is one 24-line normative header, and that header is itself dense
+        # with CORRECT retraction markers ("this comment used to deny it", "Until SR-15's third round that
+        # test's reason named no package"), so a line window of +-6 there is laundered by the file's own honest
+        # history: measured, an unmarked ``cannot launder`` added to that header PASSES at +-6 and FAILS under
+        # the sentence rule. Everything scanned in that file is therefore held to the sentence rule whatever
+        # the needle declares -- which is also the shape of the general F3 lesson: a line window is only as
+        # good as the sparsity of markers around it.
+        for rel, comments_only, ceiling in (("scripts/run_tests.sh", True, None),
+                                            ("tests/toy_tests/test_scripts.py", True, None),
+                                            (".github/workflows/ci.yml", True, "sentence"),
+                                            ("docs/CLEAN_CLONE.md", False, None)):
             lines = (ROOT / rel).read_text(encoding="utf-8").splitlines()
-            for needle, (half, why) in NEEDLES.items():
+            units = _comment_units(ROOT / rel, comments_only)
+            for needle, (declared, why) in NEEDLES.items():
+                scope = ceiling or declared
+                if scope == "sentence":
+                    for start, text in units:
+                        for m in re.finditer(re.escape(needle), text):
+                            hits[needle] += 1
+                            self.assertRegex(_sentence_lead(text, m.start()), MARK,
+                                             f"{rel}, in the block beginning at line {start}, asserts a "
+                                             f"WITHDRAWN guarantee as if it were current -- {why}. For this "
+                                             f"needle the marker must stand BEFORE the claim IN THE SAME "
+                                             f"SENTENCE: a marker in the next sentence belongs to a different "
+                                             f"claim, which is how round 8's F3 would have passed a line "
+                                             f"window of any width. Mark it as history or delete it.")
+                    continue
                 for i, line in enumerate(lines):
                     if needle in line and (line.lstrip().startswith("#") if comments_only else True):
                         hits[needle] += 1
-                        window = " ".join(lines[max(0, i - half):i + half + 1])
+                        window = " ".join(lines[max(0, i - scope):i + scope + 1])
                         self.assertRegex(window, MARK,
                                          f"{rel}:{i + 1} asserts a WITHDRAWN guarantee as if it were current "
                                          f"-- {why}. Mark it as history or delete it.")
-        # ...and the record of each must survive in at least ONE of the two files: the first needle was only
-        # ever asserted in this file and the second only in the runner, so the presence check is across both.
-        # Deleting a record is how the same sentence comes back a round later, and how this test goes vacuous.
+        # ...and the record of each must survive in at least ONE of the four files: the first needle was only
+        # ever asserted in this file and the second only in the runner, so the presence check is across all of
+        # them. Deleting a record is how the same sentence comes back a round later, and how this test goes
+        # vacuous.
         for needle, n in hits.items():
-            self.assertGreaterEqual(n, 1, f"neither scripts/run_tests.sh nor this file records the withdrawn "
+            self.assertGreaterEqual(n, 1, f"none of the four files this test scans records the withdrawn "
                                           f"guarantee {needle!r} any more: {NEEDLES[needle]}. It was deleted "
                                           f"rather than marked as history, and this check now proves nothing.")
 
@@ -2291,14 +2507,36 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
         *"note: 4 skip(s) for a case-sensitive filesystem (expected on Linux)"* -- round 6's F3 effect through a
         different door, and the figure docs/CLEAN_CLONE.md tells a reader to expect on Linux.
 
-        So the name is required to be bound EXACTLY ONCE, by a module-level assignment whose value is a literal
-        tuple of literal tuples. Parsed as a PROGRAM (`_policy_block` + `ast`), not grepped: any Store or Del of
-        the name anywhere -- a rebind, an augmented assignment, a loop target, a walrus -- is a second binding
-        and fails here. The residue, stated rather than hidden: a binding made through `globals()[...]` or
-        `setattr` is not a Name in Store context and this check cannot see it; the runtime half below is what
-        covers a bad row however it arrives. The runtime half is
-        test_a_category_declared_without_the_guards_is_refused_as_POLICY_INTERNAL, which now drives a duplicate
-        token and a duplicate note (m7b) as POLICY:INTERNAL.
+        So the name is required to be bound EXACTLY ONCE, by a module-level assignment whose value is a
+        literal tuple of literal tuples. Parsed as a PROGRAM (`_policy_block` + `ast`), not grepped: any Store
+        or Del of the name anywhere -- a rebind, an augmented assignment, a loop target, a walrus -- is a
+        second binding and fails here.
+        THE RESIDUE, AND THE SENTENCE THAT USED TO STAND HERE WAS FALSE. The first half was right: a binding
+        made through `globals()[...]` or `setattr` is not a Name in Store context, so this check cannot see it.
+        What followed -- "the runtime half below is what covers a bad row however it arrives" -- was NOT. The
+        runtime half rejects a row that VIOLATES the declaration contract, and round 7's F2 mutant is WELL
+        FORMED, so the acknowledged door admitted exactly the mutant class this test was written for. MEASURED
+        (round 8's F1), with the `globals()` one-liner in place: this test passed in 0.004 s, the module was
+        151 OK rc=0, and at run time the extra category had a working cap and printed its parked skips under a
+        note of its own choosing with NO POLICY token in any mode.
+        WHAT COVERS IT NOW IS A COMPARISON RATHER THAN A HOPE:
+        test_the_registry_the_run_really_uses_equals_the_declared_literal requires the registry listing
+        `scripts/run_tests.sh` prints AT THE POINT OF USE to equal this literal, row for row and column for
+        column, so a row arriving by any route is a red suite. The runtime half,
+        test_a_category_declared_without_the_guards_is_refused_as_POLICY_INTERNAL, is what it always was -- a
+        MALFORMED row: a duplicate token, and a duplicate or NEAR-duplicate note -- and this static half is
+        kept because it localises the defect to a line of source instead of to a listing.
+        THE CONTROL THAT PROVES THE HOLE WAS THE DOOR AND NOT THE ROW, measured rather than hedged (the
+        sentence below this one used to say "at least six" checks, with the count unre-enumerated): on the
+        pre-fix tree, the IDENTICAL row placed INSIDE the literal fails 7 test methods and 8 failure records --
+        test_every_exemption_category_is_declared_with_the_same_guards, ..._has_its_own_cap_and_its_boundary_
+        is_driven, ..._is_claimed_properly_by_the_sites_that_use_it, ..._rejects_the_same_laundering,
+        test_no_reason_may_claim_two_exemption_categories_at_once,
+        test_every_policy_token_is_asserted_by_some_test and
+        test_the_normative_skip_policy_section_states_the_rules_the_script_really_applies. On the CURRENT tree
+        the same row is POLICY:INTERNAL at the declaration (its note is a near-duplicate), so the registry is
+        refused and 112 failure records follow; a row with an unconfusable note is caught by the listing
+        comparison instead.
         """
         src = _policy_block()
         self.assertIn("def claim(", src, "the parsed block is not the skip-policy program; _policy_block has "
@@ -2326,6 +2564,98 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
         self.assertEqual(len(val.elts), len(EXEMPT_CATS),
                          "the literal the policy executes and the one _policy_exempt_categories parses disagree "
                          "about how many rows there are")
+
+    def test_the_registry_the_run_really_uses_equals_the_declared_literal(self):
+        """ROUND 8's F1: the static half above conceded a door and the sentence that said the runtime half
+        covered it was false, so the door admitted the one mutant class that mattered.
+
+        The static check reads SOURCE TEXT; the runtime check rejects a MALFORMED row. A row that arrives
+        through `globals()[...]` or `setattr` is invisible to the first and acceptable to the second. MEASURED
+        before this test existed, ONE line inserted after the literal's `)`:
+
+            globals()["EXEMPT_CATEGORIES"] = EXEMPT_CATEGORIES + (("ZED", r"\\Aonly on this platform\\b", 8,
+                "", (), "for a case-sensitive filesystem (expected on Linux runners)"),)
+
+        -> `tests.toy_tests.test_scripts` 151 OK, rc=0, UNKILLED: the exactly-once test passes (it sees the
+        literal), and the token accounting derives its tokens from the literal too, so no `ZED_CAP` is ever
+        required. At run time: `RESULT: OK`, no POLICY token in any mode, a working cap at 8, and parked skips
+        printed as "note: 4 skip(s) for a case-sensitive filesystem (expected on Linux runners)" -- the figure
+        docs/CLEAN_CLONE.md tells a LINUX reader to expect, under a token nobody declared.
+
+        So the script now ATTESTS the registry it judged with -- one `exemption registry row:` JSON line per
+        row, rendered from the `CATS` value `claim()` reads -- and this test COMPARES that listing against the
+        parsed literal. "However it arrives" stops being a hope: the literal, a rebind, a `globals()` write, a
+        `setattr`, an `exec` all produce a listing the declaration does not match. Both directions are driven
+        below on a COPY of the live script: the `globals()` mutant (still `RESULT: OK` at run time, which is
+        the point) is caught by the listing, and a rebind made AFTER the listing is printed -- the one gap this
+        placement leaves -- is caught inside the script as POLICY:INTERNAL.
+        """
+        r = self.rt({"test_a.py": _pass_module(1)}, expect="any")
+        self.ok(r)
+        want = [{"token": c.token, "phrase": c.phrase, "cap": c.cap, "where": c.where,
+                 "allow": sorted(str(a).lower() for a in c.allow), "note": c.note} for c in EXEMPT_CATS]
+        self.assertIn("exemption registry: ", r.stdout,
+                      "scripts/run_tests.sh no longer attests the registry it judged with, and this test is "
+                      "vacuous without that listing.\n" + r.stdout)
+        self.assertEqual(self._listed_registry(r.stdout), want,
+                         "the exemption registry scripts/run_tests.sh REALLY USED is not the "
+                         "EXEMPT_CATEGORIES literal this file parses. A row reaching the policy by any other "
+                         "route -- a rebind, globals()[...], setattr, exec -- is a fully working environment "
+                         "exemption with a cap, a bucket and a printed note that NO check built from the "
+                         "literal can see. Declare the row inside the one literal.\n" + r.stdout)
+        self.assertIn(f"exemption registry: {len(want)} row(s)", r.stdout,
+                      "the count the run prints disagrees with the rows it listed.\n" + r.stdout)
+        root = self.synth_root(_pass_module(1))
+        script = root / "scripts" / "run_tests.sh"
+        orig = script.read_text(encoding="utf-8")
+        after_literal = "def mandatory_group(pat):"
+        snapshot = "_REGISTRY_USED = list(CATS)\n"
+        for anchor in (after_literal, snapshot):
+            self.assertEqual(orig.count(anchor), 1, f"scripts/run_tests.sh no longer holds {anchor!r} exactly "
+                                                    f"once; the two drives below are anchored on it")
+        self.ok(self.run_default(root))                              # control: the copy is green as copied
+        # The note column decides WHICH defence fires, and both are driven. The m7b note (the real mutant's,
+        # one word longer than the filesystem-case note) is now POLICY:INTERNAL at the DECLARATION, because the
+        # near-duplicate test replaced the exact-string one -- so the mutant the measurement was taken with no
+        # longer even reaches the judging. A note nobody can confuse ("for zed") still gives the fully working,
+        # RUNTIME-SILENT category that the conceded door was always about, and THAT is what the listing
+        # comparison is for. Neither defence stands in for the other: the first is about a reader of the
+        # output, the second about a row the declaration does not contain.
+        zed = ('globals()["EXEMPT_CATEGORIES"] = EXEMPT_CATEGORIES + (("ZED", r"\\Aonly on this platform\\b", '
+               '8, "", (), %s),)\n')
+        try:
+            script.write_text(orig.replace(after_literal, zed % '"for zed"' + after_literal), encoding="utf-8")
+            r2 = self.run_default(root)
+            # the row is WELL FORMED -- the run is GREEN and silent, which is why the conceded door mattered
+            self.ok(r2)
+            self.assertNotIn("POLICY:", r2.stdout)
+            listed = self._listed_registry(r2.stdout)
+            self.assertEqual(len(listed), len(want) + 1, r2.stdout)      # the listing SEES the extra row...
+            self.assertNotEqual(listed, want, r2.stdout)                 # ...so the equality above is a kill
+            self.assertEqual([row["token"] for row in listed][-1], "ZED", r2.stdout)
+            # ...and the measured mutant's own note, which the exact-string duplicate test accepted
+            m7b = '"for a case-sensitive filesystem (expected on Linux runners)"'
+            script.write_text(orig.replace(after_literal, zed % m7b + after_literal), encoding="utf-8")
+            r2b = self.run_default(root)
+            self.assertEqual(r2b.returncode, 1, r2b.stdout + r2b.stderr)
+            self.assertIn("POLICY:INTERNAL", r2b.stdout)
+            self.assertIn("longer tail", r2b.stdout)
+            self.assertNotIn("skip(s) for", r2b.stdout)                  # nothing was judged on that registry
+            # the gap this placement leaves: a rebind made after the listing and before the caps are applied
+            script.write_text(orig.replace(snapshot, snapshot + 'globals()["CATS"] = CATS + CATS[:1]\n'),
+                              encoding="utf-8")
+            r3 = self.run_default(root)
+            self.assertEqual(r3.returncode, 1, r3.stdout + r3.stderr)
+            self.assertIn("POLICY:INTERNAL", r3.stdout)
+            self.assertIn("changed between the listing", r3.stdout)
+        finally:
+            script.write_text(orig, encoding="utf-8")
+
+    @staticmethod
+    def _listed_registry(stdout):
+        """The registry a run of scripts/run_tests.sh attested, parsed back out of its output."""
+        return [json.loads(l.split(": ", 1)[1]) for l in stdout.splitlines()
+                if l.startswith("exemption registry row: ")]
 
     def test_every_declared_exemption_category_is_claimed_properly_by_the_sites_that_use_it(self):
         """THE DERIVATION, generalised from the TOOLS allowlist to every category -- and it is what a real site
@@ -2361,6 +2691,71 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
         self.assertEqual(sorted({c.token for _w, c, _r in carriers}), sorted(c.token for c in EXEMPT_CATS),
                          "a declared category has no skip site in tests/toy_tests/ at all: an exemption with "
                          "no test behind it is a permission nobody needs")
+
+    def test_no_computed_skip_reason_carries_a_declared_exemption_phrase(self):
+        """THE SECOND-ORDER HOLE IN THE DERIVATIONS ABOVE, closed fail-closed instead of argued away.
+
+        `_suite_skip_sites` collected `ast.Constant` reasons only, and only from tests/toy_tests/. Two real
+        skip sites build their reason with an f-string --
+
+            toy_tests/test_tensor_ops.py:29, :31   (f"{_WHY}; " if _WHY else "") + "CUDA not available: ..."
+
+        -- so they were outside BOTH derivations (the per-row allowlist equality and the carrier scan), and
+        `tests/test_toy.py` is in the discovered suite (`discover -s tests`) and was outside the scan
+        altogether. Measured today: 17 literal sites, 2 computed ones (the two above), and `tests/test_toy.py`
+        carries no skip at all, so widening the scan changed no derivation.
+        WHY IT STILL MATTERS: those two reasons are benign because they name no declared phrase and run through
+        torch mode, and because an undeclared NAME is POLICY:TOOL_UNDECLARED at runtime whatever built the
+        string. The UNNAMED category has no such backstop -- the filesystem-case phrase carries no name for the
+        runtime to check -- so a computed reason claiming it would be bounded by FS_CAP (8) and the per-module
+        baseline and by nothing else, with no test-time derivation able to see it.
+        THE RULE, therefore: a reason the static derivations cannot read may not CARRY a declared phrase in any
+        fragment a static reader CAN see. Write it as a literal, or gate the test on something readable. This
+        is fail-closed about a thing no regex can decide -- what the `{...}` fields will hold at run time -- and
+        the cost is one line of rewording at a site that wants both.
+        The extractor is checked against a positive control, because a scan that silently stops finding things
+        is how the round-6 defect hid for a round.
+        """
+        exprs = sum((_skip_reason_exprs(p.read_text(encoding="utf-8"), p.name) for p in _suite_modules()), [])
+        self.assertGreaterEqual(len(exprs), 10, f"the skip-reason scan found {len(exprs)} call sites in the "
+                                                f"discovered suite: it has stopped looking and every "
+                                                f"derivation built on it is vacuous")
+        for where, frags in _suite_computed_skip_sites():
+            for frag in frags:
+                for c in EXEMPT_CATS:
+                    with self.subTest(site=where, category=c.token):
+                        self.assertIsNone(c.loose.search(frag),
+                                          f"the skip reason at {where} is COMPUTED (an f-string, a "
+                                          f"concatenation or a conditional), so neither _suite_category_gates "
+                                          f"(which .match-es a literal) nor _suite_exempt_carriers can judge "
+                                          f"it -- and this fragment carries the {c.token} phrase "
+                                          f"{c.phrase!r}: {frag!r}. The {c.token} category "
+                                          + ("carries a name, so an undeclared one is still "
+                                             f"POLICY:{c.token}_UNDECLARED at run time, but the DERIVATION "
+                                             "that keeps its allowlist honest cannot see this site"
+                                             if c.anchored.groups else
+                                             "carries NO name, so the runtime has nothing to check and the "
+                                             "only bound left is the cap and the baseline")
+                                          + ". Write the reason as one literal, or gate the test on something "
+                                            "the derivation can read.")
+        # POSITIVE CONTROL for the extractor, independent of the tree: an f-string reason carrying the FS
+        # phrase must be SEEN as computed and its constant fragments must be read out of it.
+        control = ("import unittest\n"
+                   "W = 'x'\n"
+                   "class T(unittest.TestCase):\n"
+                   "    @unittest.skipUnless(False, (f'{W}; ' if W else '') + 'case-sensitive filesystem: c')\n"
+                   "    def test_a(self): pass\n")
+        found = [(w, _static_strings(e)) for w, e in _skip_reason_exprs(control, "control.py")
+                 if not (isinstance(e, ast.Constant) and isinstance(e.value, str))]
+        self.assertEqual(len(found), 1, f"the computed-reason scan no longer sees an f-string skip reason at "
+                                        f"all, so the check above is vacuous: {found}")
+        self.assertTrue(any(_cat("FS").loose.search(f) for _w, frags in found for f in frags),
+                        f"the fragment extractor no longer reads the constant pieces of a computed reason, so "
+                        f"the check above is vacuous: {found}")
+        # ...and the scan really covers what the runner discovers, which is tests/ and not tests/toy_tests/
+        mods = {str(m.relative_to(ROOT / "tests")) for m in _suite_modules()}
+        for needed in ("test_toy.py", "toy_tests/test_tensor_ops.py", "toy_tests/test_scripts.py"):
+            self.assertIn(needed, mods, f"the scan no longer covers {needed}, which `discover -s tests` runs")
 
     def test_every_declared_exemption_category_rejects_the_same_laundering(self):
         """ONE TABLE, GENERATED FOR EVERY DECLARED CATEGORY. The fourth FAIL's laundering was re-measured
@@ -2453,6 +2848,9 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
         category. The control run of the unmodified copy is what keeps this from passing for the wrong reason.
         """
         first = EXEMPT_CATS[0]                       # derived, so a renamed category does not make a row stale
+        _tail_note = first.note + " runners"                                   # round 7's m7b, one word longer
+        _loud_note = first.note.upper().replace("(", "[").replace(")", "]")     # the same note, shouted
+        _open_note = " ".join(first.note.split()[:4]) + " that distinguishes case"
         MUT = {
             "no anchor": ('("TUE", r"only on tuesdays\\b", 2, "", (), "for tuesdays"),', "TUE"),
             "no trailing boundary": ('("TUE", r"\\Aonly on tuesdays", 2, "", (), "for tuesdays"),', "TUE"),
@@ -2476,6 +2874,16 @@ class TestRunTestsPolicyDetails(_SyntheticBase):
             # the inserted row comes FIRST, so the "already declared" complaint lands on the REAL row that
             # shares the note -- the needle is therefore the note itself, which is in the message either way
             "a duplicate note": (f'("TUE", r"\\Aonly on tuesdays\\b", 2, "", (), {first.note!r}),', first.note),
+            # ...and the NEAR-duplicates, which the exact-string test ACCEPTED (round 8's F1, second half).
+            # Measured on the pre-fix script, each of these three was RESULT: OK, rc=0, and printed its parked
+            # skips under a note a reader cannot tell from the real one; the "for tuesdays" rows above are the
+            # control that this is not blanket-firing on any added note.
+            "a note one word longer than another":
+                (f'("TUE", r"\\Aonly on tuesdays\\b", 2, "", (), {_tail_note!r}),', first.note),
+            "a note differing only in case and punctuation":
+                (f'("TUE", r"\\Aonly on tuesdays\\b", 2, "", (), {_loud_note!r}),', first.note),
+            "a note opening on the same four words":
+                (f'("TUE", r"\\Aonly on tuesdays\\b", 2, "", (), {_open_note!r}),', first.note),
             "a blank token": ('("", r"\\Aonly on tuesdays\\b", 2, "", (), "for tuesdays"),',
                               "is not a non-blank UPPERCASE identifier"),
             "a blank note": ('("TUE", r"\\Aonly on tuesdays\\b", 2, "", (), "  "),', "TUE"),

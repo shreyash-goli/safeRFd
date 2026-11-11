@@ -382,13 +382,39 @@ same exclusions. Three things about it are load-bearing:
   8, and it is where the next two instances were found:** the normative skip-policy section that a clean clone
   is sent to stated the withdrawn filesystem-case rule (*reason contains "case-sensitive"*) and the withdrawn
   package rule (*as a word and as a prefix*) as if both were current. Its window is half as wide for those two
-  needles than for the three older ones, and that is a measurement: with the wider window the package-rule
-  sentence passed while it was false, because a correct history note about a *different* rule sat six lines
-  above it. The test's name still says "in a comment" because `docs/PROGRESS.md` cites it by name; its scope is
-  the three files listed inside it.
+  needles than for the three older ones. **The figure this bullet recorded was wrong, and the correction is
+  itself a measurement:** the wider window laundered the package-rule sentence because a correct history note
+  about a *different* rule sat **two** lines above it, not six — measured on the pre-fix document, the false
+  sentence at line 258 and the note at line 256 — so ±1 is tight by **one** line rather than five. And only
+  *one* of the two round-6 needles ever needed the narrower window at all: the filesystem-case one failed at
+  every half-width from 0 to 7 before the sentence it names was rewritten. The widths stay per needle for a
+  different and also measured reason, and the measurement was taken **twice in one round**: when round 8 began
+  the third of the three older needles failed at half-widths 0–4 and passed from 5, so ±1 for all five was red;
+  rewriting this bullet moved that marker onto the needle's own line, so the same occurrence passes at 0 now,
+  and the occurrence that binds on the current tree is a comment in `tests/toy_tests/test_scripts.py` with a
+  minimum of 2 — ±1 for all five is **still** red, for a third reason. That is the argument for per-needle
+  widths: a marker's distance is a property of **prose** and moves whenever a paragraph is rewritten, so a
+  width is headroom for a hard-wrapped history paragraph, not a fact about a needle. A needle that has to be
+  *adjudicated* rather than given room is what the sentence scope below is for.
+  **A line window cannot adjudicate a claim whose own line carries an unrelated retraction marker**, which is
+  what round 8 found in `scripts/run_tests.sh`: the canary comment used to say *"'connection refused' from the
+  local stack and nothing leaves the host"* in the same sentence as *"It used to be 192.0.2.1:9"*, a correct
+  history note about a different fact, so a line window of **any** half-width from 0 to 7 reads the second
+  marker as this claim's. A needle like that now declares the scope `sentence` instead of a width: the marker
+  must stand before the claim **inside its own sentence**, in the comment block joined across the hard wrap.
+  **`.github/workflows/ci.yml` was added to this test in the same round** — its 24-line normative header was
+  outside the discipline entirely, while asserting that nothing in the workflow touched a remote host except
+  one pip-install step, which is false for both jobs (each fetches `actions/checkout@v4`,
+  `actions/setup-python@v5` and this repository from github.com, independently of hermeticity). Everything
+  scanned in that file is held to the sentence rule, because its header is itself dense with correct history
+  notes: measured, an unmarked needle added there passes at ±6 and fails under the sentence rule. The test's
+  name still says "in a comment" because `docs/PROGRESS.md` cites it by name; its scope is the four files
+  listed inside it.
   The same sweep found `scripts/run_tests.sh` defining a sound exemption as one that "cannot be
   spent on hiding a package skip" (false — see the bound above) and the filesystem-case exclusion claiming it
-  "cannot ... hide a torch test" (false in the same way). Both are corrected in place.
+  "cannot ... hide a torch test" — **withdrawn** in the same way, since an exemption can hide one and the bound
+  is `FS_CAP` plus the baseline. Both are corrected in place. (The marker is on that line on purpose: this
+  needle's own window was five lines wide and shrank to nothing when the bullet above it grew.)
 - The baseline exclusion applies to **generation**, not only comparison. `scripts/test_baseline.txt` records a
   bare-skip column per module; without the generation-side exclusion a machine without `ruff` would record one
   more skip for `toy_tests.test_scripts` than a machine with it, and the committed file would depend on whose
@@ -578,23 +604,61 @@ What it claimed was that a category "cannot arrive with fewer guards or no tests
   bound **exactly once**, by a module-level assignment whose value is a literal tuple of literal tuples, parsed
   as a program rather than grepped (`test_the_category_registry_is_assigned_exactly_once_and_never_rebound`),
   and the loop rejects a duplicate or blank token **and a duplicate or blank note** as `POLICY:INTERNAL`.
+  **Round 8 found both halves of that fix short, and this is what they are now.** (i) The note test was
+  **exact-string**, so the same variant worded one word longer — *"(expected on Linux runners)"* against
+  *"(expected on Linux)"* — was accepted and printed its parked skips as the Linux figure this document tells a
+  reader to expect. Notes are now compared **folded** (lowercase words, punctuation discarded) and a note may
+  not equal another, contain another, or open on another's first four words; each of the three was measured
+  accepted before and `POLICY:INTERNAL` after, with an unrelated note as the control. (ii) The static
+  "bound exactly once" check conceded that a binding made through `globals()[…]` or `setattr` is invisible to
+  it and then claimed the runtime half covered such a row **however it arrived**. That was false: the runtime
+  half rejects a **malformed** row, and the measured mutant is well-formed. One line after the literal,
+  `globals()["EXEMPT_CATEGORIES"] = EXEMPT_CATEGORIES + (…)`, gave `RESULT: OK` with no `POLICY:` token in any
+  mode, a working cap, parked skips printed under a note of its choosing, and the whole script suite green at
+  151 OK. So **every run now prints the registry it judged with** — one `exemption registry row:` JSON line per
+  row, rendered from the value the policy reads — and
+  `test_the_registry_the_run_really_uses_equals_the_declared_literal` requires that listing to equal the parsed
+  literal, row for row and column for column. A row that arrives by any other route is a red suite; a rebind
+  made between the listing and the caps is `POLICY:INTERNAL` in the script itself.
 
-**What is true now, stated as what the tests do rather than as what they aspire to.** A category declared in
-the one literal is covered the moment it is declared; a declared *untested* category is refused by **at least
-six** independent checks (six were enumerated by an independent attester before this round's two were added, and
-the count has not been re-enumerated since); a bad row is `POLICY:INTERNAL` and **the run stops before judging
-any skip**; and a second
-binding of the name, or a row whose allowlist does not match the suite's own gating sites, is a red suite. The
-residue, since a residue is what the last three rounds were made of: a binding made through `globals()[…]` or
-`setattr` is not an assignment this parse can see, and a row that is *well-formed but dishonest* is bounded by
-the caps and the baseline, never by the declaration.
+**What is true now, stated as what the tests do rather than as what they aspire to, with the count measured
+instead of hedged.** A category declared in the one literal is covered the moment it is declared, and a
+declared *untested* category is refused by **7 test methods / 8 failure records** — measured by placing a
+functional extra row inside the literal on the round-8 tree: `test_every_exemption_category_is_declared_with_
+the_same_guards`, `…_has_its_own_cap_and_its_boundary_is_driven`,
+`…_is_claimed_properly_by_the_sites_that_use_it`, `…_rejects_the_same_laundering`,
+`test_no_reason_may_claim_two_exemption_categories_at_once`,
+`test_every_policy_token_is_asserted_by_some_test` and
+`test_the_normative_skip_policy_section_states_the_rules_the_script_really_applies` (the figure replaces an
+"at least six" that had never been re-enumerated). A bad row is `POLICY:INTERNAL` and **the run stops before
+judging any skip** — with a near-duplicate note that is now 112 failure records across the module, because
+every synthetic run that expects a green script goes red. A second binding of the name, or a row whose
+allowlist does not match the suite's own gating sites, is a red suite.
+**The residue, since a residue is what the last four rounds were made of.** A binding made through
+`globals()[…]` or `setattr` is still not an assignment the static parse can see — what is new is that it no
+longer has to be: the run's own registry listing is compared against the declaration, so the route stops
+mattering. What remains unreachable by any of this: a row that is **well-formed, declared in the literal and
+dishonest** is bounded by the caps and the baseline, never by the declaration; and two notes that a reader
+would confuse but that share no opening and contain nothing of each other (a paraphrase) are still accepted.
 
 **A real site was wrong, and the loose scan found it.** `tests/toy_tests/test_scripts.py` skipped with
 `"filesystem is case-sensitive; case-varied path does not alias the repo"` — the phrase **mid-sentence**,
 claiming nothing. Under the anchored phrase that skip is judged as a package skip, so the documented
 `--expect none` run would have gone red with `POLICY:NONE_REASON` on every case-sensitive filesystem, i.e. on
-both CI runners. It is worded as the declared phrase now, and every skip site in `tests/toy_tests/` that carries
-a declared phrase is driven through the live script and required to be reported as exempt.
+both CI runners. It is worded as the declared phrase now, and every skip site in `tests/` that carries a
+declared phrase is driven through the live script and required to be reported as exempt.
+
+**What that scan could not read, and what is done about it (round 8).** The derivations above collect skip
+reasons that are **one string literal**, and they used to look in `tests/toy_tests/` only. Two real sites build
+their reason with an f-string (`tests/toy_tests/test_tensor_ops.py:29` and `:31`) and `tests/test_toy.py` is in
+the discovered suite (`discover -s tests`) and was outside the scan altogether. Measured today: 17 literal
+sites, 2 computed ones, and no skip at all in `tests/test_toy.py`, so widening the scan to the whole discovered
+suite changed no derivation. It still matters, because the filesystem-case category carries **no name** for the
+runtime to check: a *computed* reason claiming that phrase would have been bounded by `FS_CAP` (8) and the
+per-module baseline and by nothing else, with no test-time derivation able to see it. So a reason the static
+derivations cannot read may not **carry** a declared phrase in any fragment a static reader can see
+(`test_no_computed_skip_reason_carries_a_declared_exemption_phrase`, with a positive control for the extractor);
+write it as one literal, or gate the test on something the derivation can read.
 
 ### `lint.sh` probed one optional linter through PATH and the other through the interpreter
 

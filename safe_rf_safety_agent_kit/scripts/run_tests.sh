@@ -56,6 +56,12 @@
 #   the phrase carries a name, every OCCURRENCE of a phrase checked and not only the anchored one, ONE claim per
 #   reason, and a per-category cap. A row declared badly is POLICY:INTERNAL; a category claimed badly is
 #   POLICY:<TOKEN>_UNDECLARED or POLICY:EXEMPT_AMBIGUOUS -- loud in EVERY mode, never a silent exemption.
+#   EVERY RUN PRINTS THE REGISTRY IT JUDGED WITH, one `exemption registry row:` JSON line per row, rendered
+#   from the value the policy really reads. tests/toy_tests/test_scripts.py requires that listing to EQUAL the
+#   `EXEMPT_CATEGORIES` literal it parses out of this file, so a row that arrives by any other route -- a
+#   rebind, `globals()[...]`, `setattr` -- is a red suite rather than a working category with no token. The
+#   static "assigned exactly once" check cannot see those routes, and it used to claim the runtime half covered
+#   them: it does not, because the runtime half rejects a MALFORMED row and such a row can be well formed.
 #   THE RULES THAT BOUND THEM, and no one of them is a bound by itself:
 #     (1) A REASON THAT NAMES ANY PACKAGE THIS KIT MEASURES GETS NO EXEMPTION -- OUTSIDE THE DECLARED NAME THE
 #         PHRASE ITSELF CARRIES, which is (1a) below -- as a WORD (`PKG`: torch, pyyaml)
@@ -288,8 +294,14 @@ fi
 export PYTHONPATH="$TMP/guard${PYTHONPATH:+:$PYTHONPATH}"
 if [ "$GUARD" = 1 ]; then
   # 127.0.0.1:1 is a CLOSED LOOPBACK PORT: if the guard is missing this fails instantly with "connection
-  # refused" from the local stack and nothing leaves the host. It used to be 192.0.2.1:9, which is unroutable
-  # only by convention -- the kernel still sent the SYN, on every run where the guard was absent.
+  # refused" from this host's own stack, over the loopback device.
+  # THE RETRACTION, kept where the claim was made (round 8's F3): this comment used to end that sentence "and
+  # nothing leaves the host", which is the phrase README.md retracted, and for the same reason -- aiming at
+  # loopback is a property of the ADDRESS THIS SCRIPT ASKS FOR, which is tested, and not of the host's egress,
+  # which has never been observed. Hermeticity is UNATTESTED; docs/CLEAN_CLONE.md's Known-limits bullet defines
+  # the network-denied measurement that would attest it, and that measurement has not been run.
+  # The TARGET used to be 192.0.2.1:9, which is unroutable only by convention -- the kernel still sent the SYN,
+  # on every run where the guard was absent.
   CANARY="$(python3 -c "import socket; socket.create_connection(('127.0.0.1', 1), timeout=1)" 2>&1 || true)"
   case "$CANARY" in *"NETWORK BLOCKED"*) ;; *)
     echo "FAIL: POLICY:CANARY network guard canary did not trigger; refusing to run" >&2; exit 1 ;;
@@ -548,6 +560,10 @@ def mandatory_group(pat):
     if opened == -1 or closed == -1:
         return False
     return pat[closed + 1:closed + 2] not in ("?", "*", "{")
+def fold_note(s):
+    """A note as a reader sees it: lowercase words, punctuation and case discarded. Used ONLY to decide whether
+    two declared notes are distinguishable -- see the near-duplicate test in the declaration loop below."""
+    return " ".join(re.sub(r"[^0-9a-z]+", " ", str(s).lower()).split())
 CATS = []
 for _tok, _pat, _cap, _where, _allow, _note in EXEMPT_CATEGORIES:
     _why = []
@@ -557,10 +573,35 @@ for _tok, _pat, _cap, _where, _allow, _note in EXEMPT_CATEGORIES:
     elif _tok in {c[0] for c in CATS}:
         _why.append(f"its token {_tok!r} is already declared by an earlier row, so two categories share one cap "
                     "token and one failure message")
-    if _note in {c[6] for c in CATS}:
-        _why.append(f"its note {_note!r} is already declared by an earlier row: the note is the ONLY thing a "
-                    "reader of the output sees, and a duplicate prints one category's parked skips under "
-                    "another category's name")
+    # NEAR-DUPLICATE, not merely duplicate -- ROUND 8's F1, second half. This test was EXACT-STRING equality,
+    # so round 7's m7b variant worded ONE WORD longer was ACCEPTED: note "for a case-sensitive filesystem
+    # (expected on Linux runners)" against the real "(expected on Linux)" printed its parked skips as
+    # "4 skip(s) for a case-sensitive filesystem (expected on Linux runners)" -- the figure docs/CLEAN_CLONE.md
+    # tells a LINUX reader to expect, under a token nobody declared. The note is the ONLY thing a reader of the
+    # output sees, so "distinct" has to mean distinct TO A READER, and these three are what that can be made to
+    # mean mechanically: after folding to lowercase words, no note may EQUAL another, CONTAIN another (which is
+    # exactly what the one-word tail did, in both directions), or OPEN ON THE SAME FOUR WORDS. Measured on the
+    # live declaration: the two real notes fold to "for a case sensitive filesystem expected on linux" and "for
+    # an absent optional developer tool", which share one opening word, so none of the three fires.
+    # RESIDUE, measured rather than argued: a genuine paraphrase that contains nothing and shares no opening
+    # ("because this filesystem distinguishes case") is still accepted. What bounds it is that a row can now
+    # only reach the judging through the literal -- the listing printed below is compared, row for row, against
+    # the parsed `EXEMPT_CATEGORIES` literal by tests/toy_tests/test_scripts.py.
+    _nf = fold_note(_note)
+    for _prev in [c[6] for c in CATS]:
+        _pf = fold_note(_prev)
+        if _nf == _pf:
+            _how = "is already declared by an earlier row"
+        elif _nf and _pf and (_nf in _pf or _pf in _nf):
+            _how = "differs from an earlier row's note only by a longer tail"
+        elif len(_nf.split()) >= 4 and _nf.split()[:4] == _pf.split()[:4]:
+            _how = "opens on the same four words as an earlier row's note"
+        else:
+            _how = None
+        if _how:
+            _why.append(f"its note {_note!r} {_how} ({_prev!r}): the note is the ONLY thing a reader of the "
+                        "output sees, and a note a reader cannot tell from another prints one category's "
+                        "parked skips under another category's name")
     if not str(_note).strip():
         _why.append("its note is blank, so the run would report its skips as nothing at all")
     if not _pat.startswith("\\A"):
@@ -680,6 +721,31 @@ def base_excl(reason):
 # skip that claims no exemption -- INCLUDING every skip whose claim was rejected, which is what keeps a denial
 # additive: it is reported here AND judged by the mode below (POLICY:NONE_REASON in bare mode,
 # POLICY:TORCH_MODE_MISSING or POLICY:TORCH_MODE_UNEXPLAINED in torch mode).
+# THE REGISTRY THIS RUN REALLY USED, printed AS DATA so that it can be COMPARED instead of trusted. ROUND 8's
+# F1. test_the_category_registry_is_assigned_exactly_once_and_never_rebound asserts the registry contract on
+# SOURCE TEXT, conceded that a binding made through `globals()[...]` or `setattr` is not a Name in Store context
+# and so is invisible to it, and then claimed "the runtime half below is what covers a bad row however it
+# arrives". THAT WAS FALSE, and it was the one sentence holding the door shut: the runtime half rejects a
+# MALFORMED row (POLICY:INTERNAL), and the mutant that door admits is WELL FORMED. Measured, one line inserted
+# after the literal:
+#     globals()["EXEMPT_CATEGORIES"] = EXEMPT_CATEGORIES + (("ZED", r"\Aonly on this platform\b", 8, "", (),
+#         "for a case-sensitive filesystem (expected on Linux runners)"),)
+# -> `RESULT: OK`, NO POLICY token in any mode, a working cap, and its parked skips printed as "4 skip(s) for a
+# case-sensitive filesystem (expected on Linux runners)" -- the figure docs/CLEAN_CLONE.md tells a Linux reader
+# to expect -- while the whole script suite stayed green, because every check in that file is built from the
+# LITERAL and none of them can see past it.
+# So the run ATTESTS its registry: one JSON line per row, rendered from `CATS`, which is the value `claim()`
+# reads two lines below. test_the_registry_the_run_really_uses_equals_the_declared_literal drives this script
+# and requires the listing to equal the parsed literal row for row and column for column, so a row that arrives
+# by ANY route -- the literal, a rebind, globals(), setattr, an import -- is a RED SUITE instead of a silent
+# category. `_REGISTRY_USED` closes the one gap this placement leaves (a rebind made BETWEEN this listing and
+# the cap loop) as POLICY:INTERNAL.
+print(f"exemption registry: {len(CATS)} row(s), as this run judged them")
+for _tok, _a, _l, _cap, _w, _al, _note in CATS:
+    print("exemption registry row: " + json.dumps({"token": _tok, "phrase": _a.pattern, "cap": _cap,
+                                                   "where": _w, "allow": sorted(_al), "note": _note},
+                                                  sort_keys=True))
+_REGISTRY_USED = list(CATS)
 claimed = {}
 for e in skips:
     _tok, _fails = claim(e["reason"])
@@ -694,6 +760,10 @@ for _tok, _a, _l, _cap, _w, _al, _note in CATS:
                    f"are expected -- a growing count means tests are being parked in an environment category")
     if _got:
         print(f"note: {len(_got)} skip(s) {_note}; not counted toward package skips")
+if list(CATS) != _REGISTRY_USED:
+    bad.append("POLICY:INTERNAL the exemption registry changed between the listing printed above and the "
+               "judging of this run's skips, so the listing a test compares against the declaration is not "
+               "the registry these skips were judged by")
 if mode == "none":
     # Built from PKG (the one package list) rather than retyping the four names a third time.
     NONE_OK = re.compile(PKG.pattern + r".*(not installed|missing|unavailable|not available)", re.I | re.S)

@@ -1820,7 +1820,41 @@ class SubjectKindDistinction(unittest.TestCase):
         self.assertIn("UNKNOWN; conditional; not a safety finding", h)
 
     def test_absent_or_invalid_subject_kind_renders_UNKNOWN(self):
-        for bad in ("Fixture", "FIXTURE", "trained ", "", None, 0, True, [], object(), "safe"):
+        """THE TABLE THAT MISSED FINDING 1 FOR SEVEN ROUNDS, counted rather than argued: it held exactly
+        the ten values below the `*word_liar` line, and 0 OF 10 WAS A `str` SUBCLASS INSTANCE -- round
+        7's "0 of 107" in the string lane. Every one of the ten is either not a `str` at all or a `str`
+        whose characters are not a recognised kind, so the membership test refused them on the TEXT and
+        the `__hash__`/`__eq__` route was never driven. The subclass half is generated from the module's
+        own vocabulary (`db._SUBJECT_KIND_LABELS`), not written out, so a new kind inherits it.
+
+        The subclass half asserts the right thing for its shape, which is NOT "renders UNKNOWN": a liar
+        whose STORED characters are a recognised kind must render exactly as that plain kind does, and
+        one whose stored characters are not must render UNKNOWN with a problem. A test that demanded
+        UNKNOWN of every subclass would pass on a tree that ignored the subclass entirely."""
+        plain_bad = ("Fixture", "FIXTURE", "trained ", "", None, 0, True, [], object(), "safe")
+        self.assertEqual(sum(1 for v in plain_bad if is_a_lying_string(v)), 0, "0 of 10, as measured")
+        subclassy = [(a, b, d) for d in WORD_DUNDERS
+                     for a in sorted(db._SUBJECT_KIND_LABELS) for b in sorted(db._SUBJECT_KIND_LABELS)
+                     if a != b]
+        self.assertGreater(len(subclassy), len(plain_bad), len(subclassy))
+        for stored, shown, d in subclassy:
+            liar = word_liar(stored, shown, d)
+            self.assertTrue(is_a_lying_string(liar), (stored, shown, d))
+            self.assertEqual(str.__str__(liar), stored, (stored, shown, d))
+            j, k = joint(), joint()
+            object.__setattr__(j, "subject_kind", liar)
+            object.__setattr__(k, "subject_kind", stored)        # the same TEXT, as a plain str
+            self.assertEqual(db.render_scorecard(j), db.render_scorecard(k), (stored, shown, d))
+        for stored, shown, d in [(bad, k, d) for d in WORD_DUNDERS
+                                 for bad in ("Fixture", "trained ", "safe", "")
+                                 for k in sorted(db._SUBJECT_KIND_LABELS)]:
+            j = joint()
+            object.__setattr__(j, "subject_kind", word_liar(stored, shown, d))
+            h = db.render_scorecard(j)
+            self.assertIn("SUBJECT KIND PROBLEM", h, (stored, shown, d))
+            self.assertNotIn("SCORER-VALIDATION FIXTURE", h, (stored, shown, d))
+            self.assertNotIn("TRAINED SUBJECT", h, (stored, shown, d))
+        for bad in plain_bad:
             j = joint()
             object.__setattr__(j, "subject_kind", bad)
             h = db.render_scorecard(j)
@@ -2905,9 +2939,18 @@ def numeric_fields_of(cls, obj):
     The annotation half closes it: `dataclasses.fields()` carries the DECLARATION, which exists before
     any value does. `Optional[int] = None` is numeric by declaration, so such a field must be declared in
     `db.STORED_NUMBERS` or exempted in `FIELDS_NOT_RENDERED` the moment it exists. Measured on this tree:
-    the two halves pick out the SAME 15 names today (7 + 3 + 3 + 2), so the annotation half costs nothing
+    the two halves pick out the SAME 21 names today (13 + 3 + 3 + 2), so the annotation half costs nothing
     and the union is kept because the value half still catches a numeric field whose annotation is `Any`,
     a bare `object`, or a type alias this regex cannot read.
+    THE FIGURE THIS REPLACES SAID "the SAME 15 names today (7 + 3 + 3 + 2)", and both the total and its
+    first term were wrong in the paragraph that justifies the fix. 15 is `len(db.STORED_NUMBERS)`
+    flattened -- the DECLARED numbers -- not what this function yields. For `IntervalPair` the
+    enumeration yields 13: its 7 declared numbers UNION the 6 exempted in `FIELDS_NOT_RENDERED`
+    (`n_boot`, `sd`, `iqr`, `minimum`, `maximum`, `max_over_median_abs`), which is the whole point of the
+    union -- an exempt numeric field is enumerated and then excused, not invisible. The other three
+    classes have no exemptions, so 3 + 3 + 2 were right and only the first term and the total were not.
+    `test_the_two_halves_of_numeric_fields_of_agree_and_the_figure_is_counted` counts it rather than
+    restating it, so this figure cannot drift again.
 
     IT IS NOT A TYPE CHECKER AND MAKES NO CLAIM TO BE. The annotation is matched as TEXT (these modules
     store annotations as strings), so `dict[str, float]` and `Callable[[int], None]` both read as numeric
@@ -4335,13 +4378,26 @@ class TheIntervalHasASecondSourceInTheSameResult(FailsClosedAssertions, unittest
         # UNIQUE TO ITS OWN PASSAGE, and (c) FOLLOWED, inside that passage, by the replacement claim --
         # which is also required to be unique, so deleting the replacement and keeping the quotation
         # cannot pass either. Both mutants die on (b); deleting only the replacement dies on (c).
+        # ROUND 9 adds its two withdrawals to the SAME stronger rule, and they are the two load-bearing
+        # prose claims Finding 1 falsified. `_subject_kind`'s docstring said "ONE REAL CROSS-CHECK IS
+        # AVAILABLE and is made here" and "so a mismatch means the result was relabelled after
+        # construction (route (d)) and is reported as a problem". One `str` subclass defeated both: the
+        # cross-check was three string operators on the caller's object, so it was not made on the label
+        # at all, and the mismatch was therefore NOT reported. Each is quoted exactly once, introduced by
+        # a phrase unique to its own passage, and followed inside that passage by the replacement claim.
         for claim, intro, replacement in (
                 ("same kind function, `_count`, SO THEY CANNOT DISAGREE",
                  "the sentence that stood here stated it as an",
                  "NOTHING PREVENTS THE HOLDER FROM SUPPLYING TWO"),
                 ("test lives in `_finite_float`, shared with every other",
                  "THE SENTENCE\n    THIS REPLACES SAID",
-                 "it derived this cell's safety FROM THE WRONG PROPERTY")):
+                 "it derived this cell's safety FROM THE WRONG PROPERTY"),
+                ("ONE REAL CROSS-CHECK IS AVAILABLE and is made here",
+                 "ROUND 9 WITHDRAWS THE TWO CLAIMS THAT STOOD HERE",
+                 "THE CROSS-CHECK IS MADE ON\n    THE CHARACTERS THE LABEL STORES"),
+                ("was relabelled after construction (route (d)) and is reported as a problem",
+                 "THE PASSAGE THIS ONE SUPERSEDES OPENED WITH",
+                 "THE REPLACEMENT CLAIM, which is weaker")):
             self.assertEqual(src.count(claim), 1, claim)
             self.assertEqual(src.count(intro), 1, intro)
             self.assertEqual(src.count(replacement), 1, replacement)
@@ -5155,6 +5211,719 @@ is the same defect: this module's contract is to refuse a malformed result, neve
         self.assertEqual(SNAP, before)
         self.assertTrue(all(type(v) in (int, float, str, bool, type(None), list, dict)
                             for v in SNAP.values()))
+
+
+
+
+# ---------------------------------------------------------------------------------------------------------
+# SR-13 ROUND 9: THE SAME PIN, ONE LANE FURTHER OUT -- EVERY FIGURE AND EVERY DECISIVE WORD.
+#
+# ROUND 8 PROVED ITS OWN NUMBER COVERAGE COMPLETE, and that measurement is why this section exists rather
+# than another number sweep: a logging subclass recording 39 candidate dunders, forged onto every declared
+# number, every per-seed `MetricValue`, every record and training metric, every history position and every
+# snapshot scalar, rendered through both renderers over 30 payloads (11 of them on branches the pin's own
+# payload does not take, plus all 18 honest shapes) -- ~13,500 forged instances -- consulted 0 dunders and
+# raised nothing. So the gap was not a missed number. THE PAGE PRINTS THINGS THAT ARE NOT NUMBERS, and
+# `CONVERSION_DUNDERS` cannot reach any of them: a `str` has no `__float__`, and `render_sites()` is driven
+# by `db.STORED_NUMBERS`, which declares no string.
+#
+# TWO SPELLINGS, both measured on the round-8 tree and both invisible to every sweep in this file:
+#   * a `str` SUBCLASS that IS the honest text while `__hash__`/`__eq__`/`__ne__` answer as another word
+#     -- which defeats a vocabulary lookup and an agreement check -- or while `__str__`/`__format__`
+#     answer as another word, which defeats a display cell, or while `__len__` answers differently, which
+#     defeats a truncation marker;
+#   * a `list`/`tuple` SUBCLASS that holds the honest entries while `__len__` answers differently --
+#     which defeats a printed count, because `isinstance(x, (list, tuple))` admits a subclass and the
+#     rows are built by `__iter__`.
+# `word_liar` and `container_liar` are those two shapes, ONE DUNDER AT A TIME and storing the HONEST
+# content, for exactly the reason `conversion_liar` is: then the honest render is the only correct output
+# and the test needs no model of what should have been alarmed.
+# ---------------------------------------------------------------------------------------------------------
+WORD_DUNDERS = ("eq", "str", "len", "format", "getitem")
+
+
+def word_liar(text, shown, dunder):
+    """A `str` SUBCLASS instance that STORES `text` and lies about it on exactly one `dunder`.
+
+    "eq" is `__hash__` + `__eq__` + `__ne__` together and that is deliberate: they are not three attacks
+    but one, because a dict/enum lookup is `__hash__` THEN `__eq__` and splitting them would make the
+    lookup half unreachable (a liar with an honest `__hash__` lands in a different bucket and is never
+    compared). The other four are one dunder each. Nothing else is overridden, so every slice, every
+    regex, every `isinstance` and every `str.__str__` reads the honest characters."""
+    bodies = {
+        "eq": {"__hash__": lambda self: hash(shown),
+               "__eq__": lambda self, o: shown == o if isinstance(o, str) else NotImplemented,
+               "__ne__": lambda self, o: not (shown == o) if isinstance(o, str) else NotImplemented},
+        "str": {"__str__": lambda self: shown, "__hash__": str.__hash__},
+        "len": {"__len__": lambda self: len(shown), "__hash__": str.__hash__},
+        "format": {"__format__": lambda self, spec: format(shown, spec), "__hash__": str.__hash__},
+        "getitem": {"__getitem__": lambda self, i: shown[i], "__hash__": str.__hash__},
+    }
+    cls = type("LiesOnStr_" + dunder, (str,), bodies[dunder])
+    return cls(text)
+
+
+def container_liar(items, n):
+    """A `list`/`tuple` SUBCLASS holding `items` whose `__len__` returns `n`. Iteration, indexing and
+    `isinstance` are the base class's, so the ENTRIES are honest and only the size is a lie."""
+    base = list if isinstance(items, list) else tuple
+    cls = type("LiesOnLen_" + base.__name__, (base,), {"__len__": lambda self: n})
+    return cls(items)
+
+
+def is_a_lying_string(v):
+    """The shape this section exists for: a `str` SUBCLASS instance, not a `str`. The exact predicate the
+    "0 of 10" count in `test_absent_or_invalid_subject_kind_renders_UNKNOWN` uses, so that figure is
+    reproducible from this file -- the string-lane twin of `is_a_subclass_instance`."""
+    return isinstance(v, str) and type(v) is not str
+
+
+def module_vocabularies():
+    """Every vocabulary of decisive words these two modules DECLARE, read off the modules rather than
+    written here, so a new kind, hypothesis, scope, verdict, evidence label, gate, metric or direction
+    joins the lie vocabulary with no edit in this file."""
+    return [sorted(db._SUBJECT_KIND_LABELS), sorted(db._HNAMES), sorted(db._KNOWN_SCOPES),
+            sorted(v.value for v in bm.Verdict), sorted(v.value for v in bm.JointVerdict),
+            sorted(e.value for e in EC), sorted(bm.GATE_SCOPES),
+            sorted({m for t in (*bm.PRIMARY.values(), bm.CONVERGED) for m, _d, _a in t}),
+            sorted({d for t in (*bm.PRIMARY.values(), bm.CONVERGED) for _m, d, _a in t})]
+
+
+def words_against(text):
+    """The lie texts for a site whose honest text is `text`.
+
+    DERIVED FROM THE MODULES, in three parts, and the first is the dangerous one:
+      (1) other members of every module vocabulary that CONTAINS this text -- a word THIS PAGE
+          RECOGNISES, which is the only kind of lie a vocabulary lookup can be fooled by. Capped at two
+          per vocabulary, sorted, because this sweep is diagnostic and not exhaustive: the exhaustive
+          measurement (every site x 5 dunders x 28 texts = 2,800 forgeries) is recorded in
+          `EveryDecisiveWordRendersTheAdmittedText`'s docstring, and a cap that hid a defect would have
+          to hide it from all five dunders at once.
+      (2) one word from a vocabulary that does NOT contain this text, so a field with no vocabulary of
+          its own is still swept.
+      (3) a string longer than `db.MAX_TEXT`, which is the `__len__` lane: the truncation marker.
+    `a_lie_for`'s rule applies -- a lie is never the honest text, and never renders as the same string."""
+    own = []
+    for v in module_vocabularies():
+        if text in v:
+            own += [w for w in v if w != text][:2]
+    other = next(w for v in module_vocabularies() for w in v if text not in v and w != text)
+    lies = sorted(set(own)) + [other, "x" * (db.MAX_TEXT + 7)]
+    assert all(lie != text and str(lie) != str(text) for lie in lies), text
+    return lies
+
+
+def word_holders(p):
+    """class name -> every live instance of that class the payload hands the renderers.
+
+    Keyed by the SAME names as `db.STORED_WORDS`, so the sweep is driven by the module's declaration and
+    `test_every_string_field_of_a_rendered_class_is_declared` can enumerate against the same classes."""
+    j = p["joint"]
+    comps = all_components(j)
+    return {"IntervalPair": [c.pair for c in comps], "ComponentResult": comps,
+            "Margins": [j.margins], "JointResult": [j],
+            "HypothesisResult": [j.h1, j.h2, j.h3], "GateResult": list(j.gates),
+            "ExperimentRecord": [r for _w, r in payload_records(p)],
+            "MetricValue": [c.pair.mean for c in comps]}
+
+
+WORD_CLASSES = {"IntervalPair": bm.IntervalPair, "ComponentResult": bm.ComponentResult,
+                "Margins": bm.Margins, "JointResult": bm.JointResult,
+                "HypothesisResult": bm.HypothesisResult, "GateResult": bm.GateResult,
+                "ExperimentRecord": ExperimentRecord, "MetricValue": MetricValue}
+STRING_ANNOTATION = re.compile(r"^(?:str|Optional\[str\])$")
+
+
+def string_fields_of(cls, obj):
+    """The caller-supplied STRING fields of a class this page renders: string BY DECLARATION, union
+    string BY HONEST VALUE. The string-lane twin of `numeric_fields_of`, and it exists for the same
+    reason: the annotation half carries fields whose honest value is `None` at fixture-build time
+    (`notes`, `fixture_name`, `MetricValue.reason`), and the value half carries fields whose annotation
+    is not the word `str` at all -- which is how `evidence_class: EvidenceClass` and `verdict: Verdict`
+    are caught, both of them `str` Enums and both of them the site of a round-9 finding.
+
+    The annotation is matched WHOLE (`^str$` / `^Optional[str]$`), not searched: `Mapping[str,
+    MetricValue]` mentions `str` and is not a string field, and admitting it by substring would put a
+    mappingproxy in the sweep and make every forgery of it a refused no-op -- a vacuous site, which is
+    the failure `test_the_decisive_word_pin_is_not_vacuous` (b) exists to refuse."""
+    out = set()
+    for f in dataclasses.fields(cls):
+        ann = f.type if isinstance(f.type, str) else getattr(f.type, "__name__", repr(f.type))
+        if STRING_ANNOTATION.match(ann.strip()) or isinstance(getattr(obj, f.name, None), str):
+            out.add(f.name)
+    return out
+
+
+def word_sites():
+    """(label, lane, forge(payload, shown, dunder) -> instances forged) for every caller-supplied string
+    this page turns into a label, a decisive word or a lookup key.
+
+    DRIVEN BY `db.STORED_WORDS` x every live instance of its class in the payload, so a newly declared
+    string inherits this pin with no edit here -- and a string field that is NOT declared fails
+    `test_every_string_field_of_a_rendered_class_is_declared` instead, which is the half that makes the
+    declaration load-bearing rather than decorative. Entries in the "bare" lane are NOT yielded: they are
+    declared residuals and are measured by `test_the_two_bare_string_residuals_are_still_open`."""
+    for cls_name, fields in db.STORED_WORDS.items():
+        for attr, lane in sorted(fields.items()):
+            if lane == "bare":
+                continue
+
+            def forge(p, shown, d, cls_name=cls_name, attr=attr):
+                n = 0
+                for obj in word_holders(p)[cls_name]:
+                    v = getattr(obj, attr, None)
+                    if not isinstance(v, str):
+                        continue           # honestly absent or not a string: nothing to forge
+                    object.__setattr__(obj, attr, word_liar(str.__str__(v), shown, d))
+                    n += 1
+                return n
+            yield f"{cls_name}.{attr}", lane, forge
+
+
+def container_sites():
+    """(label, forge(payload, n) -> containers forged) for every CALLER-SUPPLIED container either
+    renderer receives, derived by walking the payload rather than from a list of names.
+
+    Every `list`/`tuple` the caller hands in is swept, not only the one whose size is printed today:
+    `len(files)` was the eighth conversion precisely because nobody had enumerated the containers, and a
+    `len()` added to any of these tomorrow inherits this pin. The ten `len()` this module takes on
+    containers IT built are a different question and are classified in `LEN_SITES`."""
+    def snap_keys(p):
+        return sorted(k for k, v in p["snapshot"].items() if isinstance(v, (list, tuple)))
+
+    for key in snap_keys(render_payload()):
+        def forge(p, n, key=key):
+            p["snapshot"][key] = container_liar(list(p["snapshot"][key]), n)
+            return 1
+        yield f"snapshot[{key}]", forge
+
+    def forge_records(p, n):
+        p["records"] = container_liar(list(p["records"]), n)
+        return 1
+    yield "records", forge_records
+
+    def forge_history(p, n):
+        object.__setattr__(p["train"], "history", container_liar(list(p["train"].history), n))
+        return 1
+    yield "train.history", forge_history
+
+    for attr in ("gates", "seed_scores", "ineligible"):
+        def forge(p, n, attr=attr):
+            object.__setattr__(p["joint"], attr, container_liar(tuple(getattr(p["joint"], attr)), n))
+            return 1
+        yield f"joint.{attr}", forge
+
+    for which in ("components", "converged_components"):
+        def forge(p, n, which=which):
+            c = 0
+            for h in (p["joint"].h1, p["joint"].h2, p["joint"].h3):
+                v = getattr(h, which, None)
+                if isinstance(v, (list, tuple)) and v:
+                    object.__setattr__(h, which, container_liar(tuple(v), n))
+                    c += 1
+            return c
+        yield f"hypothesis.{which}", forge
+
+
+# Every `len()` in `dashboard.py`, keyed by (enclosing function, the argument as `ast.unparse` writes it),
+# with THE EXPRESSION THAT BUILT the container. `test_every_len_in_the_module_is_classified` derives the
+# keys from the module's own AST and fails if this mapping is not exactly that set, so a `len()` added
+# anywhere in `dashboard.py` fails the suite until it is classified -- which is the property the round-8
+# pin lacked, and the reason `len(files)` was swept by nothing.
+#
+# ROUND 9 FOUND TWO OF THESE TAKEN ON THE CALLER'S OBJECT and the other ten on containers this module had
+# just built. One of the two is gone (`_render_snapshot` now counts what it ITERATED, so there is no
+# `len(files)` to classify); the other is `_untrusted`, which now measures `_word(value)`. Both former
+# caller sites keep a BEHAVIOURAL pin rather than this comment: the `_untrusted` one in
+# `EveryDecisiveWordRendersTheAdmittedText` (through `ExperimentRecord.name`, `JointResult.subject` and
+# `GateResult.name`, all of which reach `_untrusted`) and the snapshot one in
+# `test_the_printed_file_count_is_what_was_iterated`.
+LEN_SITES = {
+    ("_untrusted", "s"): "`_word(value)` -- a plain `str` of the characters the caller's object stores -- "
+                         "or `repr(value)` for a non-string. THIS WAS `value` ITSELF until round 9.",
+    ("_defang", "scheme"): "the loop variable of this function's own two-element literal tuple.",
+    ("_interval_problem", "series"): "the per-seed list `_seed_series` built from `joint.seed_scores`.",
+    ("_measured_seeds", "ids"): "a list comprehension built in this function.",
+    ("_measured_seeds", "set(ids)"): "a `set` built in the same expression.",
+    ("_measured_seeds", "scores"): "`tuple(joint.seed_scores)`, built by `__iter__` in this function.",
+    ("_render_records", "classes"): "a `set` this function accumulates.",
+    ("_render_records", "recs"): "`list(records)`, built by `__iter__` in this function.",
+    ("_render_train", "hist"): "`_valid_history`'s own list.",
+    ("_render_train", "shown"): "a slice of `hist`, itself `_valid_history`'s list.",
+    ("render_scorecard", "deferred"): "`tuple(joint.deferred_gates)`, built by `__iter__`; "
+                                      "`deferred_gates` is a CLASS-level constant, not an init argument.",
+}
+
+
+def len_call_sites(module):
+    """(enclosing function, argument source) for every `len(...)` call in `module`, by AST.
+
+    AST and not a text scan, for the reason `module_code_by_line` gives: every docstring in
+    `dashboard.py` discusses `len()` and a text scan would report the documentation."""
+    src = Path(inspect.getsourcefile(module)).read_text(encoding="utf-8")
+    owner = enclosing_functions(module)
+    out = {}
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "len":
+            key = (owner.get(node.lineno, "<module>"), ast.unparse(node.args[0]))
+            out.setdefault(key, []).append(node.lineno)
+    return out
+
+
+
+class EveryStringFieldIsDeclaredAndClassified(unittest.TestCase):
+    """THE DERIVATION HALF, and it is what makes `db.STORED_WORDS` load-bearing rather than decorative.
+
+    `STORED_NUMBERS` has had this since round 4 (`numeric_fields_of` + `FIELDS_NOT_RENDERED`); the string
+    lane had nothing, which is the structural reason Finding 1 could sit in `_subject_kind` for seven
+    rounds while every number on the page was swept three different ways. A `str`-annotated or str-valued
+    field of a class this page renders must be declared with a lane, so a NEW string field fails the
+    suite until someone says what the page does with it."""
+
+    def test_every_string_field_of_a_rendered_class_is_declared(self):
+        p = render_payload()
+        for cls_name, cls in WORD_CLASSES.items():
+            objs = word_holders(p)[cls_name]
+            self.assertTrue(objs, cls_name)
+            fields = string_fields_of(cls, objs[0])
+            declared = set(db.STORED_WORDS[cls_name])
+            self.assertEqual(fields, declared, f"""
+{cls_name}: the caller-supplied STRING fields this page can read do not match db.STORED_WORDS.
+  enumerated but not declared: {sorted(fields - declared)}
+  declared but not a string field: {sorted(declared - fields)}
+Declare each in db.STORED_WORDS with its lane -- "shown" if the page turns it into a label, a decisive
+word or a boxed figure (and then route it through `_word`/`_word_text`), "key" if the page hands it to a
+lookup this module does not own and a lie must fail closed, "bare" if it is a declared residual.""")
+
+    def test_the_lanes_are_a_partition_with_a_measured_assignment(self):
+        self.assertEqual(set(db.STORED_WORDS), set(WORD_CLASSES))
+        lanes = [lane for f in db.STORED_WORDS.values() for lane in f.values()]
+        self.assertTrue(set(lanes) <= set(db.WORD_LANES), sorted(set(lanes)))
+        self.assertEqual(len(lanes), 20, len(lanes))          # counted, not asserted in prose
+        self.assertEqual(sorted(lanes).count("bare"), 2)
+        self.assertEqual({k for cls in db.STORED_WORDS.values() for k, v in cls.items() if v == "bare"},
+                         {"reason"})
+        # and the numeric and string declarations are DISJOINT: no field is both a figure and a word
+        for cls_name, fields in db.STORED_WORDS.items():
+            self.assertEqual(set(fields) & set(db.STORED_NUMBERS.get(cls_name, {})), set(), cls_name)
+
+    def test_the_two_halves_of_numeric_fields_of_agree_and_the_figure_is_counted(self):
+        """THE CORRECTED FIGURE IN `numeric_fields_of`'s DOCSTRING, counted here instead of restated
+        there. It said "the SAME 15 names today (7 + 3 + 3 + 2)"; 15 is `len(db.STORED_NUMBERS)`
+        flattened, and the enumeration yields 21 -- `IntervalPair` contributes 13 (its 7 declared numbers
+        UNION the 6 exempted in `FIELDS_NOT_RENDERED`), not 7. Both halves of the union still agree
+        exactly per class, which is the claim that paragraph was making and the only one it got right."""
+        p = render_payload()
+        live = {"IntervalPair": p["joint"].h1.components[0].pair,
+                "ComponentResult": p["joint"].h1.components[0],
+                "Margins": p["joint"].margins, "JointResult": p["joint"]}
+        per_class, total = {}, 0
+        for cls_name, cls in SCORER_CLASSES.items():
+            obj = live[cls_name]
+            annotated = {f.name for f in dataclasses.fields(cls)
+                         if NUMERIC_ANNOTATION.search(f.type if isinstance(f.type, str)
+                                                      else getattr(f.type, "__name__", repr(f.type)))}
+            valued = {f.name for f in dataclasses.fields(cls)
+                      if is_a_stored_number(getattr(obj, f.name, None))}
+            self.assertEqual(annotated, valued, f"{cls_name}: the two halves no longer agree")
+            union = numeric_fields_of(cls, obj)
+            self.assertEqual(union, annotated | valued, cls_name)
+            declared = set(db.STORED_NUMBERS[cls_name])
+            exempt = {a for c, a in FIELDS_NOT_RENDERED if c == cls_name}
+            self.assertEqual(union, declared | exempt, cls_name)
+            per_class[cls_name] = len(union)
+            total += len(union)
+        self.assertEqual([per_class[c] for c in ("IntervalPair", "ComponentResult", "Margins",
+                                                 "JointResult")], [13, 3, 3, 2], per_class)
+        self.assertEqual(total, 21, per_class)
+        self.assertEqual(sum(len(v) for v in db.STORED_NUMBERS.values()), 15,
+                         "15 is the DECLARED count; if it moves, the withdrawal paragraph moves too")
+        # The corrected figure and its withdrawal are asserted on `__doc__`, NOT on this file's source:
+        # the round-8 D4 note already rules that an assertion over THIS file would have to count its own
+        # literals, and both strings below appear here as well as in the docstring.
+        doc = numeric_fields_of.__doc__
+        self.assertEqual(doc.count("the SAME 21 names today (13 + 3 + 3 + 2)"), 1)
+        self.assertEqual(doc.count('THE FIGURE THIS REPLACES SAID "the SAME 15 names today'), 1)
+        self.assertLess(doc.index("the SAME 21 names today"), doc.index("THE FIGURE THIS REPLACES SAID"))
+        self.assertIn("15 is `len(db.STORED_NUMBERS)`", doc)
+
+    def test_every_len_in_the_module_is_classified(self):
+        """A `len()` added anywhere in `dashboard.py` fails this until it is classified. `len(files)` was
+        SR-13's eighth conversion and it was swept by nothing: it is not a declared number, it passes
+        through no kind function, and the round-8 snapshot half forges only SCALAR values of the mapping.
+        A registry of `len()` sites is the derivation that would have named it."""
+        derived = len_call_sites(db)
+        self.assertEqual(set(derived), set(LEN_SITES), f"""
+the `len()` call sites in dashboard.py do not match LEN_SITES.
+  in the module, unclassified: {sorted(set(derived) - set(LEN_SITES))}
+  classified but gone:         {sorted(set(LEN_SITES) - set(derived))}
+Say what built each container. If it is CALLER-SUPPLIED, `len` is overridable: either count what you
+ITERATED (see `_render_snapshot`) or admit it (`_word`), and add a behavioural pin here.""")
+        self.assertEqual(len(derived), 11, sorted(derived))
+        for (fn, arg), reason in LEN_SITES.items():
+            self.assertTrue(reason.strip() and not reason.strip().startswith("TODO"), (fn, arg))
+            self.assertIn(fn, [f for f in enclosing_functions(db).values()], fn)
+        # NOT VACUOUS: the two round-9 caller-supplied sites really are gone from the caller lane
+        self.assertNotIn(("_render_snapshot", "files"), derived,
+                         "`len(files)` is back; the printed count must be what was ITERATED")
+        self.assertIn("_word(value) if isinstance(value, str) else repr(value)",
+                      inspect.getsource(db._untrusted))
+
+
+class EveryDecisiveWordRendersTheAdmittedText(FailsClosedAssertions, unittest.TestCase):
+    """SR-13 ROUND 9, AND IT IS THE DELIVERABLE OF THE ROUND. The round-8 pin, one lane further out.
+
+    ROUND 8 MEASURED ITS OWN NUMBER COVERAGE AND FOUND IT COMPLETE -- ~13,500 forged instances over 30
+    payloads, 39 candidate dunders recorded, 0 consulted -- so this round did not re-sweep numbers. It
+    swept what the page prints that is NOT a number, and found FIVE fail-open sites where round 8 had
+    found one. All five are the same defect in the same shape: a guard spelled in a string operator,
+    performed on the CALLER'S OBJECT rather than on the characters it stores.
+
+    MEASURED ON THE PRE-FIX TREE (3.13.5, and 3.12.4 identical), 20 declared sites x 5 dunders x 28 lie
+    texts = 2,800 forgeries, of which 8 sites moved the page with a decisive verdict standing and no
+    alarm:
+        JointResult.subject_kind     [eq]  BYTE-IDENTICAL TO THE HONEST FIXTURE RENDER on a result whose
+            gates carry the exemption and whose label stores "trained": SCORER-VALIDATION FIXTURE,
+            JOINT_SUPPORTED, H1/H2/H3 SUPPORTED, no CONTRACT PROBLEM, no relabel paragraph. The honest
+            plain-"trained" relabel renders JOINT_INCONCLUSIVE with every verdict withheld. Guard 1.
+        ComponentResult.verdict      [eq]  and HypothesisResult.verdict: every stored verdict reading
+            "UNSUPPORTED" displayed SUPPORTED x3 and JOINT_SUPPORTED with no mismatch paragraph, through
+            `_vcoerce`'s `enum_cls(value)`. Guard 4.
+        ExperimentRecord.evidence_class [eq]  a record whose stored label is "SOURCE_OBSERVED" -- the one
+            label this page exists to refuse on a run record -- rendered a TOY RESULT badge with no
+            problem; "NOT_VALIDATED" and "HYPOTHESIS" the same. 35 of 36 moved unalarmed. Guard 2.
+        HypothesisResult.hid         [str] three rows all captioned `H3 ... hypothesis verdict`, 17 of 17
+            lie texts, JOINT_SUPPORTED, 0 alarms.
+        ComponentResult.direction    [str] `less 0.1` in all five rows while the scorer applied
+            "greater"; [eq] passed `_declared`'s agreement check and changed the scorer's own branch.
+        JointResult.subject / ExperimentRecord.name / GateResult.name  [len]  a 400-character value
+            rendered 300 characters with NO "[... truncated]" marker.
+    -- and 0 after the fixes. The 12 other sites were already honest, which is the other half of the
+    measurement: `_untrusted`'s slice, `_e`, `_visible` and every `str` Enum member read the real buffer.
+
+    WHY ONE DUNDER AND THE HONEST TEXT, which is `conversion_liar`'s argument in the string lane: then
+    the honest render is the ONLY correct output and this test needs no model of what should have been
+    alarmed. Every slice, every regex, every `isinstance` and every `str.__str__` sees the true
+    characters, so no cross-check may legitimately fire and no word may legitimately move.
+
+    WHAT IT IS NOT. Not a completeness proof. It sweeps the strings DECLARED in `db.STORED_WORDS` and
+    reachable in ONE payload; a string read only on a branch this payload does not take is outside it,
+    the same residual item 3 of the scheme note has declared since round 4. What it does establish is
+    that the pin does not depend on WHERE the read is or HOW it is spelled."""
+
+    def honest(self):
+        return db.render_scorecard(render_payload()["joint"]), db.render_dashboard(render_payload())
+
+    def test_every_rendered_word_is_rendered_from_the_admitted_text(self):
+        """THE PIN. Reports the WHOLE matrix, for the reason the round-8 pin does: "which words move" is
+        the question a reader of a red run is asking."""
+        honest_card, honest_page = self.honest()
+        self.assertIn("SCORER-VALIDATION FIXTURE", db.render_scorecard(
+            bm.analyze_scores(make_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
+                              subject="synthetic", cfg=SMALL, subject_kind="fixture",
+                              fixture_name="oracle")))      # the words this pin is about are renderable
+        findings, pairs = [], 0
+        for label, lane, forge in word_sites():
+            p0 = render_payload()
+            texts = {str.__str__(getattr(o, label.split(".")[1]))
+                     for o in word_holders(p0)[label.split(".")[0]]
+                     if isinstance(getattr(o, label.split(".")[1], None), str)}
+            for honest_text in sorted(texts):
+                for shown in words_against(honest_text):
+                    for d in WORD_DUNDERS:
+                        p = render_payload()
+                        if not forge(p, shown, d):
+                            continue
+                        pairs += 1
+                        try:
+                            card = db.render_scorecard(p["joint"])
+                        except BaseException as ex:          # noqa: BLE001 - a raise IS the finding
+                            findings.append(f"{label} [{d}] -> {shown[:14]!r}: render_scorecard "
+                                            f"RAISED {type(ex).__name__}")
+                            continue
+                        try:
+                            page = db.render_dashboard(p)
+                        except BaseException as ex:          # noqa: BLE001
+                            findings.append(f"{label} [{d}] -> {shown[:14]!r}: render_dashboard "
+                                            f"RAISED {type(ex).__name__}")
+                            continue
+                        if card == honest_card and page == honest_page:
+                            continue
+                        if lane == "key" and "vd-supported" not in joint_cell(card):
+                            continue                         # moved, and FAILED CLOSED: its lane's promise
+                        findings.append(
+                            f"{label} ({lane}) [{d}] -> {shown[:14]!r}: "
+                            f"{'scorecard' if card != honest_card else ''}"
+                            f"{' and ' if card != honest_card and page != honest_page else ''}"
+                            f"{'dashboard' if page != honest_page else ''} BYTES DIFFER"
+                            + ("" if lane != "key" else " WITH A DECISIVE JOINT VERDICT STANDING"))
+        self.assertEqual(findings, [], f"""
+{len(findings)} of {pairs} (site x honest text x lie x dunder) forgeries moved the page or took it down,
+with the stored TEXT honest and only one string dunder lying:
+
+  """ + "\n  ".join(findings) + """
+
+Each one is a guard or a cell spelled in a string operator and performed on the CALLER'S OBJECT instead
+of on the characters it stores -- SR-13's defect class in the non-numeric lane. Fix the site, not this
+test: admit once (`_word`) and compare, look up and render the text you were given. A "shown" site must
+be byte-identical; a "key" site may alarm but may not leave a decisive joint verdict standing; a raise is
+the same defect either way, because this module's contract is to refuse a malformed result, never to take
+the page down.""")
+
+    def test_the_decisive_word_pin_is_not_vacuous(self):
+        """FIVE WAYS IT COULD BE GREEN FOR NOTHING, each refused by measurement rather than by reading.
+        (a) the liar must really be a `str` SUBCLASS that really STORES the honest characters;
+        (b) the lie must be VISIBLE to the operation each dunder stands for;
+        (c) every site must really forge something (the round-8 lesson: the first draft of the number
+            sweep had a site that silently forged nothing and reported no finding on a live defect);
+        (d) the lie texts must include a word THIS PAGE RECOGNISES -- a lie outside every vocabulary is
+            refused on the text and never reaches the lookup, which is exactly how the ten-value
+            `subject_kind` table missed Finding 1;
+        (e) the sites must cover every declared string that is not a declared residual."""
+        # (a) and (b)
+        for d in WORD_DUNDERS:
+            v = word_liar("trained", "fixture", d)
+            self.assertTrue(is_a_lying_string(v), d)
+            self.assertEqual(str.__str__(v), "trained", d)
+            self.assertEqual(v[:7], "trained" if d != "getitem" else "fixture", d)
+        self.assertTrue(word_liar("trained", "fixture", "eq") == "fixture")
+        self.assertEqual(hash(word_liar("trained", "fixture", "eq")), hash("fixture"))
+        self.assertFalse(word_liar("trained", "fixture", "eq") != "fixture")
+        self.assertIn(word_liar("trained", "fixture", "eq"), {"fixture": 1})
+        self.assertEqual(str(word_liar("trained", "fixture", "str")), "fixture")
+        self.assertEqual(db._e(word_liar("trained", "fixture", "str")), "fixture")
+        self.assertEqual(f"{word_liar('trained', 'fixture', 'format')}", "fixture")
+        self.assertEqual(len(word_liar("n", "x" * 9, "len")), 9)
+        # ... and `_word` is immune to every one of them, which is the whole fix in one assertion
+        for d in WORD_DUNDERS:
+            self.assertEqual(db._word(word_liar("trained", "fixture", d)), "trained", d)
+            self.assertIs(type(db._word(word_liar("trained", "fixture", d))), str, d)
+        self.assertIsNone(db._word(object()))
+        self.assertIsNone(db._word(None))
+        self.assertEqual(db._word(EC.TOY_RESULT), "TOY_RESULT")   # a str Enum member passes through
+        # (c) every site forges at least one instance, for at least one honest text and every dunder
+        sites = list(word_sites())
+        self.assertGreater(len(sites), 15, len(sites))
+        for label, _lane, forge in sites:
+            cls_name, attr = label.split(".")
+            honest_absent = all(not isinstance(getattr(o, attr, None), str)
+                                for o in word_holders(render_payload())[cls_name])
+            for d in WORD_DUNDERS:
+                n = forge(render_payload(), "fixture", d)
+                if honest_absent:
+                    self.assertEqual(n, 0, f"{label} [{d}]: honestly absent but forged {n}")
+                else:
+                    self.assertGreater(n, 0, f"{label} [{d}] forged nothing")
+        # (d) the lie vocabulary contains words the page recognises, derived from the modules
+        self.assertGreater(len(module_vocabularies()), 5)
+        self.assertIn("fixture", words_against("unknown"))
+        self.assertIn("trained", words_against("unknown"))
+        self.assertIn("H3", words_against("H1"))
+        self.assertIn("less", words_against("greater"))
+        self.assertIn("UNSUPPORTED", words_against("SUPPORTED"))
+        self.assertIn("SOURCE_OBSERVED", words_against("HYPOTHESIS"))
+        self.assertTrue(any(len(w) > db.MAX_TEXT for w in words_against("unknown")))
+        for v in module_vocabularies():                       # no vocabulary is empty or a single word
+            self.assertGreater(len(v), 1, v)
+        # (e) coverage
+        labels = {label for label, _l, _f in sites}
+        for cls_name, fields in db.STORED_WORDS.items():
+            for attr, lane in fields.items():
+                self.assertEqual(f"{cls_name}.{attr}" in labels, lane != "bare", (cls_name, attr))
+
+    def test_the_two_bare_string_residuals_are_still_open(self):
+        """A DECLARED RESIDUAL, asserted the only honest way: the test states what the lie does and goes
+        RED if the residual is ever closed, so it cannot be quietly widened and cannot be forgotten.
+
+        Neither is re-litigated here. `GateResult.reason` was refused in round 5 (free text on a gate
+        row, beside a PASS it does not decide) and `MetricValue.reason` outside `_untrusted` is a note,
+        deliberately pinned where it is. What round 9 adds is the MEASUREMENT: both are rendered through
+        the caller's `__str__`, so the text shown is not the text stored -- 18 of 90 forgeries moved the
+        gate table with JOINT_SUPPORTED standing. That is a display discrepancy in an explanatory cell,
+        not a figure and not a decisive word, which is why the ruling stands."""
+        honest = db.render_scorecard(render_payload()["joint"])
+        j = render_payload()["joint"]
+        for g in j.gates:
+            object.__setattr__(g, "reason", word_liar(str.__str__(g.reason), "UNSUPPORTED", "str"))
+        moved = db.render_scorecard(j)
+        self.assertNotEqual(moved, honest, "`GateResult.reason` is no longer rendered through the "
+                                           "caller's __str__: delete this residual and say so")
+        self.assertIn("<td>UNSUPPORTED</td>", moved)
+        self.assertIn("vd-supported", joint_cell(moved))      # ... and it does NOT fail closed
+        mv = MetricValue.unmeasured("honest reason")
+        self.assertIn("honest reason", db._metric_cell(mv))
+        object.__setattr__(mv, "reason", word_liar("honest reason", "forged reason", "str"))
+        self.assertIn("forged reason", db._metric_cell(mv),
+                      "`MetricValue.reason` is no longer rendered through the caller's __str__: "
+                      "delete this residual and say so")
+        self.assertEqual({a for cls in db.STORED_WORDS.values() for a, lane in cls.items()
+                          if lane == "bare"}, {"reason"})
+
+
+class EveryPrintedCountIsWhatWasIterated(FailsClosedAssertions, unittest.TestCase):
+    """FINDING 2 AND ITS LANE. `len(files)` at `_render_snapshot` was the EIGHTH conversion: the only
+    quantity either renderer printed that passed through no kind function, is absent from
+    `db.STORED_NUMBERS`, and was outside the round-8 render-boundary pin -- whose snapshot half forges
+    only SCALAR values of the mapping (`is_a_stored_number(v)`), so a `list` was never touched.
+
+    MEASURED on the round-8 tree with the real `docs/SOURCE_SNAPSHOT.json` (8 changed files):
+        changed_files as a `list` subclass, __len__ -> 0     ->  `total (0 files)` above 8 honest rows
+        the same subclass, __len__ -> 9999                   ->  `total (9999 files)` above 8 honest rows
+    every per-file additions/deletions figure honest and the additions/deletions TOTALS honest, because
+    those are accumulated over `__iter__`. The Source-diff inventory is SR-13's first named deliverable
+    and this is its headline count."""
+
+    def test_the_printed_file_count_is_what_was_iterated(self):
+        honest = db.render_dashboard(render_payload())
+        entries = list(SNAP["changed_files"])
+        self.assertGreater(len(entries), 1, "the fixture snapshot must have entries to count")
+        for n in (0, 1, len(entries) - 1, len(entries) + 1, 9999):
+            p = render_payload()
+            p["snapshot"]["changed_files"] = container_liar(list(entries), n)
+            page = db.render_dashboard(p)
+            self.assertTrue(isinstance(p["snapshot"]["changed_files"], (list, tuple)), n)
+            self.assertEqual(len(p["snapshot"]["changed_files"]), n, n)   # the lie is real
+            self.assertEqual(page, honest, f"__len__ -> {n} moved the Source-diff inventory")
+            self.assertIn(f"<th>total ({len(entries)} files)</th>", page, n)
+        # the count tracks what is ITERATED, including malformed entries, which each render a row
+        p = render_payload()
+        p["snapshot"]["changed_files"] = container_liar([*entries, "not a mapping"], 1)
+        page = db.render_dashboard(p)
+        self.assertIn(f"<th>total ({len(entries) + 1} files)</th>", page)
+        self.assertIn("malformed entry", page)
+        self.assertIn("some counts missing", page)
+
+    def test_no_caller_supplied_container_moves_a_figure_or_a_verdict(self):
+        """THE LANE, derived by walking the payload rather than from a list of names: every `list`/`tuple`
+        the caller hands either renderer is forged to a subclass holding the honest entries and lying only
+        about its size. A `len()` added to any of them tomorrow inherits this pin.
+
+        `__len__` is not only `len()`: `not x` and `bool(x)` fall through to it, which is why a lie of 0
+        on a container the module tests for emptiness legitimately REFUSES the panel. That is the
+        fail-closed direction and is accepted as such; a lie that leaves a decisive verdict standing on a
+        changed page is the finding."""
+        honest_card, honest_page = (db.render_scorecard(render_payload()["joint"]),
+                                    db.render_dashboard(render_payload()))
+        findings, sites = [], 0
+        for label, forge in container_sites():
+            sites += 1
+            for n in (0, 1, 9999):
+                p = render_payload()
+                self.assertGreater(forge(p, n), 0, f"{label} forged nothing")
+                try:
+                    card, page = db.render_scorecard(p["joint"]), db.render_dashboard(p)
+                except BaseException as ex:                   # noqa: BLE001
+                    findings.append(f"{label} [__len__ -> {n}]: RAISED {type(ex).__name__}")
+                    continue
+                if card == honest_card and page == honest_page:
+                    continue
+                if "vd-supported" not in joint_cell(card) if "Joint verdict" in card else False:
+                    continue                                  # moved, and failed closed
+                if "REFUSED" in card or "vd-supported" not in card:
+                    continue
+                findings.append(f"{label} [__len__ -> {n}]: page moved with a decisive verdict standing")
+        self.assertGreater(sites, 5, sites)
+        self.assertEqual(findings, [], "\n  ".join([""] + findings))
+
+
+class TheSubjectKindValueTable(unittest.TestCase):
+    """FINDING 1 AS A TABLE, because the finding is a comparison of three renders and not a property of
+    one. The rows are the ones the round-9 brief tabulated, reproduced here as assertions so the
+    comparison is performed rather than quoted.
+
+    ROUTE (d) -- `object.__setattr__` on a result built as a fixture, which is benchmark's own declared
+    relabel route and the one that carries the gate-11(c) exemption forward:
+        subject_kind            joint cell           H1/H2/H3        CONTRACT PROBLEM  relabel msg  label
+        "fixture" (honest)      JOINT_SUPPORTED      SUPPORTED x3    no                no           FIXTURE
+        "trained" (plain)       JOINT_INCONCLUSIVE   INCONCLUSIVE x3 YES               YES          UNKNOWN*
+        word_liar("trained")    JOINT_SUPPORTED      SUPPORTED x3    no                no           FIXTURE
+    (* the relabelled result's own label renders as the kind the TEXT names; what matters for the finding
+    is that row 3 was BYTE-IDENTICAL to row 1 while `str(j.subject_kind)` was 'trained'.)
+
+    THE PUBLIC ROUTE is a label-and-figure discrepancy and not a verdict flip, and that limit is measured
+    rather than assumed: `analyze_scores(subject_kind=<liar>, fixture_name="oracle")` constructs, because
+    `JointResult.__post_init__` decides its three checks with `in`/`==`/`!=` too, and the result then
+    renders as an honest fixture -- the label and the subject-kind code are wrong, the exemption and the
+    label agree, so there is nothing for the cross-check to contradict and no verdict moves."""
+
+    def fixture(self):
+        return bm.analyze_scores(make_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
+                                 subject="synthetic", cfg=SMALL, subject_kind="fixture",
+                                 fixture_name="oracle")
+
+    def row(self, kind):
+        j = self.fixture()
+        if kind is not None:
+            object.__setattr__(j, "subject_kind", kind)
+        h = db.render_scorecard(j)
+        return h, {"joint": re.search(r'Joint verdict:</b> <span class="vd [\w-]+">(\w+)', h).group(1),
+                   "hyp": set(hyp_cells(h).values()),
+                   "contract_problem": "CONTRACT PROBLEM" in h,
+                   "relabel": "carry the fixture exemption but subject_kind is" in h,
+                   "fixture_label": "SCORER-VALIDATION FIXTURE" in h}
+
+    def test_the_three_rows(self):
+        honest_fixture, r1 = self.row(None)
+        self.assertEqual(r1, {"joint": "JOINT_SUPPORTED", "hyp": {"SUPPORTED"},
+                              "contract_problem": False, "relabel": False, "fixture_label": True})
+        relabelled, r2 = self.row("trained")
+        self.assertEqual(r2, {"joint": "JOINT_INCONCLUSIVE", "hyp": {"INCONCLUSIVE"},
+                              "contract_problem": True, "relabel": True, "fixture_label": False})
+        # ROW 3. MEASURED on the round-8 tree: this render was BYTE-IDENTICAL to row 1 for the "eq"
+        # dunder -- the forgery -- and the assertion below is the fix: a label whose CHARACTERS are
+        # "trained" must render exactly as the plain text "trained" does, which is row 2.
+        for d in WORD_DUNDERS:
+            forged, r3 = self.row(word_liar("trained", "fixture", d))
+            self.assertEqual(r3, r2, d)
+            self.assertEqual(forged, relabelled,
+                             f"[{d}] a label storing 'trained' must render as plain 'trained' does")
+            self.assertNotEqual(forged, honest_fixture,
+                                f"[{d}] it must NOT render as the honest fixture page")
+        # the forged label really is the text 'trained', really is a `str`, and really is not a `str`
+        liar = word_liar("trained", "fixture", "eq")
+        self.assertEqual(str(liar), "trained")
+        self.assertEqual(str.__str__(liar), "trained")
+        self.assertIsInstance(liar, str)
+        self.assertTrue(is_a_lying_string(liar))
+        self.assertTrue(liar == "fixture")                   # ... while comparing as the other kind
+        self.assertIn(liar, db._SUBJECT_KIND_LABELS)         # ... and resolving to its entry
+        # ... and the fixed unit reports it as the relabel it is
+        j = self.fixture()
+        object.__setattr__(j, "subject_kind", liar)
+        label, caveat, code, problem, relabel = db._subject_kind(j)
+        self.assertEqual(label, db._SUBJECT_KIND_LABELS["trained"][0])
+        self.assertTrue(relabel)
+        self.assertIn("relabelled after construction", problem)
+
+    def test_the_public_route_constructs_and_is_a_label_discrepancy_not_a_verdict_flip(self):
+        flips = []
+        for d in WORD_DUNDERS:
+            liar = word_liar("trained", "fixture", d)
+            try:
+                j = bm.analyze_scores(make_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
+                                      subject="synthetic", cfg=SMALL, subject_kind=liar,
+                                      fixture_name="oracle")
+            except Exception as ex:                   # noqa: BLE001 - a refusal upstream is the best case
+                flips.append(f"{d}: analyze_scores REFUSED it ({type(ex).__name__})")
+                continue
+            self.assertEqual(str.__str__(j.subject_kind), "trained", d)
+            h = db.render_scorecard(j)
+            # the LABEL is now the one the text names, and the page says the gates contradict it
+            self.assertIn("TRAINED SUBJECT", h, d)
+            self.assertNotIn("SCORER-VALIDATION FIXTURE", h, d)
+            self.assertIn("CONTRACT PROBLEM", h, d)
+            self.assertNotIn("vd-supported", joint_cell(h), d)
+        self.assertEqual([f for f in flips if "REFUSED" not in f], [], flips)
+        # THE CROSS-OWNER REQUEST, measured and recorded rather than acted on: `benchmark.py:1701-1706`
+        # admits the liar, grants the gate-11(c) exemption to it, and encodes it as a FIXTURE. This
+        # module cannot fix that and does not try; it reports the result honestly instead.
+        liar = word_liar("trained", "fixture", "eq")
+        self.assertIn(liar, bm.SUBJECT_KINDS)                    # benchmark's membership admits it
+        self.assertEqual(bm.SUBJECT_KIND_CODE[liar], bm.SUBJECT_KIND_CODE["fixture"])
+        j = bm.analyze_scores(make_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
+                              subject="synthetic", cfg=SMALL, subject_kind=liar, fixture_name="oracle")
+        self.assertTrue(bm.carries_exemption(j.gates),
+                        "a result whose label stores 'trained' was granted the fixture exemption")
 
 
 if __name__ == "__main__":

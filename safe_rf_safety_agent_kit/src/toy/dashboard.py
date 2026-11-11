@@ -116,7 +116,18 @@ def _visible(text: str) -> str:
 
 
 def _untrusted(value: Any, label: str = "") -> str:
-    s = value if isinstance(value, str) else repr(value)
+    # `_word(value)`, not `value` itself (round 9; scheme note item 8). This is one of only TWO `len()`
+    # in this module taken on a CALLER-SUPPLIED object -- `_render_snapshot`'s `len(files)` is the other,
+    # and the ten remaining ones are taken on containers this module just built -- and `__len__` is
+    # overridable. MEASURED at the previous HEAD on `ExperimentRecord.name`, `JointResult.subject` and
+    # `GateResult.name`, each by `object.__setattr__`: a `str` subclass holding 400 characters whose
+    # `__len__` returns 0 rendered its first 300 characters with NO "[... truncated]" marker, so the box
+    # asserted it was showing the whole string while withholding a quarter of it; the same subclass
+    # holding "n" with `__len__` -> 9999 rendered a marker for a truncation that never happened. The
+    # slice below reads the real buffer either way, so the TEXT shown was never wrong -- only this
+    # module's claim about whether it was complete. `_word` collapses the subclass to the characters it
+    # stores, so the length measured is the length of the string displayed.
+    s = _word(value) if isinstance(value, str) else repr(value)
     clipped = len(s) > MAX_TEXT
     s = _visible(s[:MAX_TEXT]) + (" [... truncated]" if clipped else "")
     cap = f"UNTRUSTED FREE TEXT{(' (' + label + ')') if label else ''} - NOT EVIDENCE"
@@ -125,9 +136,26 @@ def _untrusted(value: Any, label: str = "") -> str:
 
 # -------------------------------------------------------------------- badges
 def _coerce_class(value: Any, run_record: bool = False) -> tuple[EvidenceClass, Optional[str]]:
-    """Validate a label. Returns (class, problem). Invalid labels degrade to UNKNOWN, never upward."""
+    """Validate a label. Returns (class, problem). Invalid labels degrade to UNKNOWN, never upward.
+
+    IT PARSES THE STORED TEXT, NOT THE CALLER'S OBJECT (round 9; scheme note item 8). `EvidenceClass` is
+    a `str` Enum, so `parse` ends in `cls(value)` -- a lookup in `_value2member_map_`, which is the
+    caller's `__hash__` and `__eq__` and nothing else. MEASURED at the previous HEAD, by
+    `object.__setattr__` on a record (the public route is closed by `schema._normalise_fields`): a `str`
+    subclass STORING "SOURCE_OBSERVED" whose `__hash__`/`__eq__` answer as "TOY_RESULT" parsed to
+    TOY_RESULT, so the record rendered a `TOY RESULT` badge with NO problem where its own stored label is
+    the one label this function exists to refuse on a run record. "NOT_VALIDATED" and "HYPOTHESIS" --
+    both hatched, both captioned NOT EVIDENCE -- rendered `TOY RESULT` the same way, 35 of 36 forgeries
+    moving the page with no alarm. That is structural guard 2 of the module docstring defeated by one
+    object, and the "degrade to UNKNOWN, never upward" promise in the sentence above inverted.
+
+    `_word` hands `parse` the characters the object stores, so the member returned is the member the
+    label NAMES. An `EvidenceClass` member is itself a `str`, and `str.__str__` of one is its own value
+    ("TOY_RESULT"), which `parse` maps straight back to the member -- so passing the module's own enum
+    through this admission is a no-op, exactly as `schema._plain_value` rules for every Enum."""
+    w = _word(value)
     try:
-        ec = EvidenceClass.parse(value)
+        ec = EvidenceClass.parse(value if w is None else w)
     except ValueError:
         return EvidenceClass.UNKNOWN, "invalid evidence label; shown as UNKNOWN"
     if run_record and ec is EvidenceClass.SOURCE_OBSERVED:
@@ -322,6 +350,45 @@ def _panel(title: str, ec: EvidenceClass, body: str, problem: Optional[str] = No
 #      one payload, so an undeclared field reached only on an unexercised branch is outside it, as item 3
 #      has said since round 4.
 #
+#   8. ROUND 9: THE SCHEME COVERED THE NUMBERS COMPLETELY AND THE PAGE PRINTS THINGS THAT ARE NOT
+#      NUMBERS. Round 8's measurement of its own reach is the reason this item exists and the reason it
+#      says what it says: a logging subclass recording 39 candidate dunders, forged onto every declared
+#      number, every per-seed `MetricValue`, every record and training metric, every history position and
+#      every snapshot scalar, rendered through both renderers over 30 payloads -- ~13,500 forged
+#      instances -- consulted 0 dunders and raised nothing. The number lane is not where the next defect
+#      was, and sweeping it again would have found nothing. THE GAP WAS THE NON-NUMERIC LANE, and it was
+#      not one site:
+#        * `_subject_kind` decided all three of its checks on the caller's `__hash__`/`__eq__`/`__ne__`
+#          and then CARRIED THE CALLER'S OBJECT FORWARD as the admitted kind (`kind = raw`) -- the
+#          round-7 re-read pattern in a string lane. A `str` subclass that IS "trained" and compares as
+#          "fixture" rendered BYTE-IDENTICALLY to the honest fixture render, erasing the relabel
+#          paragraph and turning JOINT_INCONCLUSIVE into JOINT_SUPPORTED. Structural guard 1.
+#        * `_vcoerce` resolved a STORED verdict through the enum's `_value2member_map_`, i.e. the
+#          caller's `__hash__`/`__eq__`: a result whose every stored verdict reads "UNSUPPORTED"
+#          displayed H1/H2/H3 SUPPORTED and JOINT_SUPPORTED with no mismatch paragraph. Structural
+#          guard 4.
+#        * `_coerce_class` did the same for an evidence label: a record whose stored label is
+#          "SOURCE_OBSERVED" -- the one label this page exists to refuse on a run record -- displayed a
+#          TOY RESULT badge with no problem. Structural guard 2.
+#        * the row labels (`_e(h.hid)`, `_e(_HNAMES[h.hid])`) and the row's DECISIVE WORD
+#          (`_e(_visible(str(c.direction)))`) printed the caller's `__str__`, so three rows could all be
+#          captioned H3 and every row could read `less` where the scorer applied `greater` -- figures
+#          honest, verdict decisive, no alarm.
+#        * `len(files)` in `_render_snapshot` and `len(s)` in `_untrusted` are the only two `len()` in
+#          this module taken on a CALLER-SUPPLIED object (the other ten are on containers this module
+#          just built): `total (0 files)` above eight honest rows, and a truncated box with no
+#          truncation marker.
+#      THE FIX IS THE SAME SHAPE AS ITEM 6'S, one lane further out: `_word` is the single admission
+#      (`str.__str__`, unoverridable from a subclass), `_word_text` is its display cell, and every
+#      vocabulary lookup, every `==`/`!=` and every printed word in this module now reads the admitted
+#      text. `STORED_WORDS` declares the lane of every caller-supplied string, enumerated against
+#      `dataclasses.fields()` so a NEW string field cannot be added without being classified, and
+#      `EveryDecisiveWordRendersTheAdmittedText` forges all of them through both real renderers.
+#      WHY FIVE SITES AND NOT ONE, counted rather than argued: the suite's own ten-value sweep for this
+#      field (`test_absent_or_invalid_subject_kind_renders_UNKNOWN`) held 0 `str` SUBCLASS INSTANCES out
+#      of 10 -- round 7's "0 of 107" in the string lane, and the same blind spot in the same shape two
+#      lanes apart. A sweep that generates only plain values proves nothing about subclasses.
+#
 # WHAT IS DELIBERATELY NOT IN THE SCHEME is argued at `_valid_history` and `_protocol_params`.
 def _num(x: float) -> str:
     """Render a number one of the four kind functions has ALREADY admitted.
@@ -484,6 +551,87 @@ def _mv_intact(mv: Any) -> Optional[Any]:
 
 
 _NUM_KINDS = {"float": _finite_float, "num": _finite_number, "count": _count, "mv": _mv_intact}
+
+
+# ------------------------------------------------ the NON-NUMERIC lane (round 9; scheme note item 8)
+def _word(x: Any) -> Optional[str]:
+    """THE ONE ADMISSION for a caller-supplied STRING that this page turns into a LABEL, a DECISIVE WORD,
+    a lookup key or a counted length. Returns the plain `str` the object STORES; None means "not a
+    string", which every caller renders as UNKNOWN -- never as a guessed word.
+
+    `str.__str__(x)`, NOT `str(x)` and NOT `x`, for exactly the reason `_finite_float` returns
+    `float.__float__(x)` (scheme note item 6) and `schema._plain_value` states for the whole kit: a `str`
+    SUBCLASS instance passes every `isinstance(x, str)` check and satisfies every regex and every format
+    test, while `__eq__`, `__ne__`, `__hash__`, `__len__` and `__str__` are all overridable -- and those
+    five operators are what this module's string guards are WRITTEN IN. A vocabulary lookup
+    (`raw not in _SUBJECT_KIND_LABELS`, `_HNAMES[hid]`, `EvidenceClass.parse`'s `_value2member_map_`) is
+    `__hash__` plus `__eq__`; a display cell (`_e`, `_visible(str(...))`) is `__str__`; a truncation
+    marker is `__len__`. `str.__str__` reads the characters the object actually holds and is not
+    overridable from a subclass, so the text compared is the text stored and the text displayed is the
+    text compared. `type(x) is str` is NOT special-cased: `str.__str__` of a plain `str` returns that
+    same object, so the no-op costs one call and gains one less branch to be wrong about.
+
+    IT IS NOT A VOCABULARY CHECK and makes no claim to be. It establishes WHICH CHARACTERS the value
+    holds; whether those characters are a word this page recognises is the caller's own test, and every
+    caller still makes it (`_subject_kind` against `_SUBJECT_KIND_LABELS`, `_joint_wellformed` against
+    the slot's own id, `_coerce_class` against the enum)."""
+    return str.__str__(x) if isinstance(x, str) else None
+
+
+def _word_text(x: Any, why: str) -> str:
+    """Render a string admitted by `_word` as a label or a decisive word, or UNKNOWN with `why`.
+
+    The string analogue of `_kind_text`, and it exists for the same reason: ONE admission, and the
+    ADMITTED text is what is rendered. `_e(x)` is `html.escape(str(x))`, so every bare `_e` of a
+    caller-supplied string was a `__str__` the page consulted after whatever check it had made."""
+    w = _word(x)
+    return _e(_visible(w)) if w is not None else _unknown(why)
+
+
+# EVERY caller-supplied STRING this renderer turns into a LABEL, a DECISIVE WORD or a lookup key, by the
+# class that holds it, with its LANE. The non-numeric twin of `STORED_NUMBERS`, keyed by class NAME for
+# the same reason, and -- like it -- a DECLARATION, not a proof: what makes it load-bearing is that
+# `test_every_string_field_of_a_rendered_class_is_declared` enumerates `dataclasses.fields()` of these
+# classes and fails if a `str`-annotated or str-valued field is absent, so a NEW string field cannot be
+# added without being classified, and `EveryDecisiveWordRendersTheAdmittedText` then forges every entry
+# through both real renderers and asserts what its lane promises.
+#
+# THE THREE LANES, which are a PARTITION and are decided by MEASUREMENT, not by reading:
+#   "shown"  the page may turn it into a label, a decisive word or a boxed free-text figure, and
+#            whatever it shows must come from the STORED TEXT. The pin requires a lying subclass to
+#            render BYTE-IDENTICALLY to the plain text it stores. (A field this page does not render at
+#            all satisfies that trivially and is in this lane rather than in an exemption list, because
+#            the day it gains a cell it inherits the assertion with no edit here.)
+#   "key"    the page hands it to a lookup whose table this module does not own, so a lie RE-POINTS the
+#            lookup rather than editing a word, and the component or gate it names is then genuinely not
+#            the one the protocol declares. The pin requires the page to be byte-identical OR to FAIL
+#            CLOSED -- the joint verdict cell must lose its decisive styling. Three entries, each with
+#            the lookup it cannot be normalised in front of:
+#              ComponentResult.metric  -> `_declared` / `_series_of` / `bm.PRIMARY`: re-pointing it makes
+#                  the row a different metric, which MUST alarm rather than render quietly. (Round 8
+#                  measured 32 component x target pairs, every one alarmed or still JOINT_UNSUPPORTED;
+#                  round 9 measures 54 of 54 forgeries withholding the joint verdict.)
+#              HypothesisResult.verdict -> 27 of 27 `__eq__` forgeries render JOINT_INCONCLUSIVE.
+#              GateResult.name -> `benchmark.GATE_SCOPES[self.name]`, read by `GateResult.scope`, which
+#                  is a PROPERTY of another owner's class: this module cannot admit the text in front of
+#                  it. `_gate_set_ok` catches the forgery instead; 54 of 54 withhold the verdict.
+#   "bare"   a DECLARED RESIDUAL: rendered bare, through the caller's `__str__`, and deliberately NOT
+#            pinned. Two entries, both refused by an earlier round on the record and neither re-opened
+#            here: `GateResult.reason` (round 5) and `MetricValue.reason` outside `_untrusted`, which is
+#            a note. The pin MEASURES what a lie does to each and asserts the residual is still OPEN, so
+#            it cannot be forgotten, cannot be silently widened, and goes red if it is ever closed.
+STORED_WORDS = {
+    "IntervalPair": {"name": "shown"},
+    "ComponentResult": {"metric": "key", "direction": "shown", "verdict": "shown", "reason": "shown"},
+    "Margins": {},
+    "JointResult": {"subject": "shown", "seed_list_digest": "shown", "registered_digest": "shown",
+                    "config_hash": "shown", "subject_kind": "shown", "fixture_name": "shown"},
+    "HypothesisResult": {"hid": "shown", "label": "shown", "verdict": "key"},
+    "GateResult": {"name": "key", "reason": "bare"},
+    "ExperimentRecord": {"name": "shown", "notes": "shown", "evidence_class": "shown"},
+    "MetricValue": {"reason": "bare"},
+}
+WORD_LANES = ("shown", "key", "bare")
 
 # EVERY stored number this renderer turns into a figure or feeds to a verdict, by the class that holds
 # it. Keyed by class NAME, not by the class, so this table does not add an import-time dependency on
@@ -663,7 +811,21 @@ def _render_snapshot(snap: Any) -> str:
     if isinstance(files, (list, tuple)):
         tot_a = tot_d = 0
         ok_totals = True
+        # `n_rows`, NOT `len(files)` (round 9; scheme note item 8). THE EIGHTH CONVERSION, and the only
+        # quantity either renderer prints that passes through no kind function, is absent from
+        # `STORED_NUMBERS`, and was outside the round-8 render-boundary pin -- whose snapshot half forges
+        # only SCALAR values of the mapping, so this count was swept by nothing. `isinstance(files,
+        # (list, tuple))` admits a SUBCLASS and the rows below are built by `__iter__`, so MEASURED on
+        # the round-8 tree with the real `docs/SOURCE_SNAPSHOT.json`: a `list` subclass whose `__len__`
+        # returns 0 rendered `total (0 files)` above the same 8 honestly-rendered rows, every per-file
+        # figure honest; `__len__` -> 9999 rendered `total (9999 files)` above the same 8. The
+        # Source-diff inventory is SR-13's first named deliverable, and this is its headline count.
+        # Counting what was ITERATED is not a narrower fix than admitting the length: it is the only
+        # correct one, because the rows and the total then have ONE source. The malformed-entry branch
+        # increments too -- a malformed entry is still an entry, and it renders a row of its own.
+        n_rows = 0
         for f in files:
+            n_rows += 1
             if not isinstance(f, Mapping):
                 rows += f"<tr><td colspan=3>{_unknown('malformed entry')}</td></tr>"
                 ok_totals = False
@@ -676,8 +838,8 @@ def _render_snapshot(snap: Any) -> str:
             rows += (f"<tr><td>{_untrusted(f.get('filename', 'UNKNOWN'), 'path')}</td>"
                      f"<td>{_kind_text(a, 'additions', 'count')}</td>"
                      f"<td>{_kind_text(d, 'deletions', 'count')}</td></tr>")
-        total = (f"<tr><th>total ({_e(len(files))} files)</th><th>{_e(tot_a)}</th><th>{_e(tot_d)}</th></tr>"
-                 if ok_totals else f"<tr><th>total ({_e(len(files))} files)</th><td colspan=2>"
+        total = (f"<tr><th>total ({_e(n_rows)} files)</th><th>{_e(tot_a)}</th><th>{_e(tot_d)}</th></tr>"
+                 if ok_totals else f"<tr><th>total ({_e(n_rows)} files)</th><td colspan=2>"
                  f"{_unknown('some counts missing')}</td></tr>")
         files_html = f"<table><tr><th>file</th><th>additions</th><th>deletions</th></tr>{rows}{total}</table>"
     else:
@@ -814,8 +976,25 @@ def _record_idents(rec: ExperimentRecord) -> str:
 
 # ----------------------------------------------------------------- scorecard
 def _vcoerce(enum_cls, value):
+    """The ONE place a STORED verdict becomes an enum member, for both `Verdict` and `JointVerdict`.
+    None means "not a valid enum value", which every caller renders as UNKNOWN.
+
+    IT COERCES THE STORED TEXT, NOT THE CALLER'S OBJECT (round 9; scheme note item 8), and this was the
+    third enum lookup in this module standing on the caller's `__hash__`/`__eq__` -- `_coerce_class` and
+    `_subject_kind` were the other two. `Verdict` and `JointVerdict` are `str` Enums, so `enum_cls(value)`
+    is a lookup in `_value2member_map_`. MEASURED at the previous HEAD, by `object.__setattr__` on an
+    otherwise honest result: with every `ComponentResult.verdict` and `HypothesisResult.verdict` set to a
+    `str` subclass STORING "UNSUPPORTED" whose `__hash__`/`__eq__` answer as "SUPPORTED", the page
+    rendered JOINT_SUPPORTED with H1/H2/H3 all SUPPORTED and NO mismatch paragraph. The same stored text
+    as a plain `str` renders JOINT_INCONCLUSIVE, every verdict withheld, and says so. THAT IS STRUCTURAL
+    GUARD 4 of the module docstring -- "a stored verdict that disagrees is NOT shown" -- defeated:
+    `_eff_component`/`_eff_hypothesis` test `stored is not rv`, which is sound, on a `stored` this
+    function had resolved from the lie. The recomputation was right and the comparison was made against
+    the wrong member. `_word` hands the enum the characters the object stores, so the member compared is
+    the member the result recorded."""
+    w = _word(value)
     try:
-        return enum_cls(value)
+        return enum_cls(value if w is None else w)
     except ValueError:
         return None
 
@@ -848,21 +1027,56 @@ def _subject_kind(joint: Any) -> tuple:
     and that flag is itself producer-set; and `SUBJECT_KIND_CODE` can be patched. This panel therefore
     reports WHAT THE RESULT CLAIMS ABOUT ITSELF. It is not authentication.
 
-    ONE REAL CROSS-CHECK IS AVAILABLE and is made here: the `control_adequacy` gate may carry
-    `exempt=True` only for subject_kind == 'fixture'. `JointResult.__post_init__` enforces that at
-    construction, so a mismatch means the result was relabelled after construction (route (d)) and is
-    reported as a problem."""
+    ROUND 9 WITHDRAWS THE TWO CLAIMS THAT STOOD HERE, and both halves of the withdrawal are in this
+    passage so a reader of this function sees them together. THE PASSAGE THIS ONE SUPERSEDES OPENED WITH
+    "ONE REAL CROSS-CHECK IS AVAILABLE and is made here" and closed with "so a mismatch means the result
+    was relabelled after construction (route (d)) and is reported as a problem". BOTH HALVES WERE FALSE,
+    and one object defeated them: a `str` SUBCLASS that IS the characters "trained" while its `__hash__`
+    and `__eq__` answer as "fixture".
+
+    MEASURED on the round-8 tree, 3.13.5 and 3.12.4 byte-identical. The cross-check is three string
+    operators and not one of them read the stored text: the membership test below was `raw not in
+    _SUBJECT_KIND_LABELS` (`__hash__` + `__eq__`), the admitted value was `kind = raw` -- THE CALLER'S
+    OBJECT CARRIED FORWARD INSTEAD OF THE ADMITTED KEY, which is the round-7 re-read pattern in a string
+    lane -- and the mismatch test was `kind != "fixture"` (`__ne__`). So on a result whose gates carry the
+    gate-11(c) exemption and whose `subject_kind` stores "trained", the page rendered BYTE-IDENTICALLY to
+    the honest fixture render: SCORER-VALIDATION FIXTURE, JOINT_SUPPORTED, H1/H2/H3 all SUPPORTED, no
+    CONTRACT PROBLEM and no relabel paragraph -- while `str(j.subject_kind)` was 'trained' and
+    `isinstance(j.subject_kind, str)` was True. The honest plain-'trained' relabel renders
+    JOINT_INCONCLUSIVE with every verdict withheld, so the forgery is a verdict flip, not a cosmetic one.
+    THAT DEFEATS STRUCTURAL GUARD 1 of the module docstring ("the result's OWN subject kind ... a declared
+    trained subject says so") and erases the paragraph that withholds every verdict. It also CONSTRUCTS
+    THROUGH THE PUBLIC API -- `analyze_scores(..., subject_kind=<that object>, fixture_name="oracle")` --
+    because `JointResult.__post_init__` decides its three checks with `in`/`==`/`!=` as well; on the
+    public route no VERDICT flip was found over 5 score shapes (the exemption and the label agree, so
+    there is nothing to contradict), and what moves is the LABEL and the subject-kind code figure. The
+    verdict flip needs `object.__setattr__`, benchmark's declared route (d).
+
+    THE REPLACEMENT CLAIM, which is weaker and is the one this panel rests on: THE CROSS-CHECK IS MADE ON
+    THE CHARACTERS THE LABEL STORES, NOT ON THE OBJECT THAT CARRIES THEM. `_word` admits the text once
+    (`str.__str__`, unoverridable from a subclass), the admitted text is what is compared against
+    `_SUBJECT_KIND_LABELS`, what is carried forward as `kind`, and what `relabelled` tests -- so the
+    three operators can no longer disagree with each other or with the page. What the cross-check PROVES
+    is unchanged and is still only this: the `control_adequacy` gate may carry `exempt=True` only for
+    subject_kind == 'fixture', `JointResult.__post_init__` enforces that at construction, so a mismatch
+    proves the result changed after construction. It remains NOT authentication, and the agreement it
+    checks is still between two PRODUCER-ASSERTED fields.
+
+    Why seven rounds missed it, counted rather than argued:
+    `test_absent_or_invalid_subject_kind_renders_UNKNOWN` swept exactly ten values and 0 OF 10 WAS A `str`
+    SUBCLASS INSTANCE -- round 7's "0 of 107" in the string lane. That table now carries the shape."""
     raw = getattr(joint, "subject_kind", _MISSING)
     problem = None
+    text = _word(raw)
     if raw is _MISSING:
         kind = "unknown"
         problem = "subject_kind is absent from this result; shown as UNKNOWN"
-    elif not isinstance(raw, str) or raw not in _SUBJECT_KIND_LABELS:
+    elif text is None or text not in _SUBJECT_KIND_LABELS:
         kind = "unknown"
-        problem = f"subject_kind {_visible(str(raw))[:60]!r} is not one of " \
+        problem = f"subject_kind {_visible(text if text is not None else str(raw))[:60]!r} is not one of " \
                   f"{sorted(_SUBJECT_KIND_LABELS)}; shown as UNKNOWN"
     else:
-        kind = raw
+        kind = text
     label, caveat = _SUBJECT_KIND_LABELS[kind]
     try:
         code = bm.SUBJECT_KIND_CODE[kind]
@@ -1430,12 +1644,23 @@ def _recompute(c: Any, margins: Any, measured_n: Optional[int], series: Mapping)
         margin, mn, wt = nums["margin"], nums["min_n"], nums["width_tol"]
         if margins is not None:
             direction, declared = _declared(c.metric, margins)
-            if declared is None or c.direction != direction or margin != declared:
+            # `_word(c.direction)`, not `c.direction` (round 9; scheme note item 8): the protocol
+            # agreement is a `!=` on the caller's object, so a `str` subclass STORING "less" while its
+            # `__eq__` answers as "greater" satisfied this check and was then handed to
+            # `bm.interval_verdict` below, where `benchmark` compares it against its own literals --
+            # which is how the SAME object could pass the agreement here and still pick a side there.
+            # Comparing the admitted text makes this check and the display cell read one value.
+            if declared is None or _word(c.direction) != direction or margin != declared:
                 return None
         wt_declared, mn_declared = _protocol_params()
         if wt < 0 or mn < 0:
             return None
-        v, _ = bm.interval_verdict(c.pair, margin, c.direction,
+        # ... and the SAME admitted text is what the scorer is handed. `bm.interval_verdict` applies
+        # protocol 6.1 by comparing `direction` against its own literals, so passing `c.direction`
+        # itself meant the agreement check above and the scorer's own branch could consult two different
+        # answers from one object. This module admits its inputs before handing them across the
+        # boundary, exactly as it does for the numbers (`min(wt, wt_declared)`, `max(mn, mn_declared)`).
+        v, _ = bm.interval_verdict(c.pair, margin, _word(c.direction),
                                    min(wt, wt_declared), max(mn, mn_declared))
         return Verdict(v)
     except Exception:  # noqa: BLE001
@@ -1479,10 +1704,10 @@ def _component_sets_ok(h: Any) -> bool:
     `test_the_transplanted_pair_residual_now_costs_the_whole_series`), and the two BOOTSTRAP bounds,
     whose resample is not reproducible from a `JointResult` at all."""
     try:
-        want = sorted(m for m, _d, _a in bm.PRIMARY[h.hid])
+        want = sorted(m for m, _d, _a in bm.PRIMARY[_word(h.hid)])
         if sorted(str(c.metric) for c in h.components) != want:
             return False
-        if h.hid == "H3":
+        if _word(h.hid) == "H3":
             cw = sorted(m for m, _d, _a in bm.CONVERGED)
             if sorted(str(c.metric) for c in (getattr(h, "converged_components", ()) or ())) != cw:
                 return False
@@ -1527,10 +1752,10 @@ def _weaker_than_protocol(joint: Any) -> list:
         for c in comps:
             mn, wt = _count(getattr(c, "min_n", None)), _finite_number(getattr(c, "width_tol", None))
             if mn is not None and 0 <= mn < mn_declared:
-                out.append(f"{h.hid}/{_visible(str(c.metric))[:40]}: min_n={mn} is below the protocol "
+                out.append(f"{_word(h.hid)}/{_visible(str(c.metric))[:40]}: min_n={mn} is below the protocol "
                            f"minimum {mn_declared}")
             if wt is not None and wt > wt_declared:
-                out.append(f"{h.hid}/{_visible(str(c.metric))[:40]}: width_tol={_num(wt)} is wider than "
+                out.append(f"{_word(h.hid)}/{_visible(str(c.metric))[:40]}: width_tol={_num(wt)} is wider than "
                            f"the protocol tolerance {_num(wt_declared)}")
     return out
 
@@ -1568,7 +1793,7 @@ def _n_sources_disagree(joint: Any, measured_n: Optional[int]) -> list:
                 continue        # not a count at all: the kind functions alarm on that, with their words
             p = _n_problem(pair, n, mn, measured_n)
             if p is not None:
-                out.append(f"{h.hid}/{_visible(str(getattr(c, 'metric', '?')))[:40]}: {p}")
+                out.append(f"{_word(h.hid)}/{_visible(str(getattr(c, 'metric', '?')))[:40]}: {p}")
     return out
 
 
@@ -1601,7 +1826,7 @@ def _interval_sources_disagree(joint: Any, series: Mapping) -> list:
                 continue        # ill-typed, not contradicted: the kind functions say so in their words
             p = _interval_problem(nums, _series_of(series, getattr(c, "metric", _MISSING)))
             if p is not None:
-                out.append(f"{h.hid}/{_visible(str(getattr(c, 'metric', '?')))[:40]}: {p}")
+                out.append(f"{_word(h.hid)}/{_visible(str(getattr(c, 'metric', '?')))[:40]}: {p}")
     return out
 
 
@@ -1638,10 +1863,17 @@ def _gate_set_ok(gates: Any) -> bool:
         return False
 
 
-def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool, margins: Any, measured_n: Optional[int],
-                    series: Mapping) -> tuple:
+def _eff_hypothesis(h: Any, hid: str, gates: tuple, contract_bad: bool, margins: Any,
+                    measured_n: Optional[int], series: Mapping) -> tuple:
     """(displayed verdict, mismatch). Decisive only if the stored hypothesis verdict equals an independent
-    recomputation from recomputed component verdicts, scope-aware gates, and (H3) converged components."""
+    recomputation from recomputed component verdicts, scope-aware gates, and (H3) converged components.
+
+    `hid` IS PASSED IN, ADMITTED, rather than re-read off `h` (round 9; scheme note item 8). Three of
+    this function's decisions turn on which hypothesis this is -- the gate-scope match `hid in
+    _gate_scope(g)`, the H3-only `sup_block`, and the H3 convergence requirement -- and all three were
+    `h.hid == "H3"` / `h.hid in ...`, i.e. the caller's `__eq__`. `_joint_wellformed` has already
+    established, on the ADMITTED text, that this object's stored characters are exactly the slot's id, so
+    the caller passes that text and nothing here consults an override."""
     if not _component_sets_ok(h):
         return Verdict.INCONCLUSIVE, True
     rc = [_recompute(c, margins, measured_n, series) for c in h.components]
@@ -1649,10 +1881,10 @@ def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool, margins: Any, meas
     if None in rc:
         return Verdict.INCONCLUSIVE, True
     blocked = bool(getattr(h, "blocking", ())) or any(
-        _failed(g) and (_gate_scope(g) == "all" or h.hid in _gate_scope(g) or _gate_scope(g) not in _KNOWN_SCOPES)
+        _failed(g) and (_gate_scope(g) == "all" or hid in _gate_scope(g) or _gate_scope(g) not in _KNOWN_SCOPES)
         for g in gates)
     sup_block = bool(getattr(h, "supported_blockers", ())) or any(
-        _failed(g) and _gate_scope(g) == "H3" for g in gates) and h.hid == "H3"
+        _failed(g) and _gate_scope(g) == "H3" for g in gates) and hid == "H3"
     if blocked:
         rv = Verdict.INCONCLUSIVE
     elif Verdict.UNSUPPORTED in rc:
@@ -1661,7 +1893,7 @@ def _eff_hypothesis(h: Any, gates: tuple, contract_bad: bool, margins: Any, meas
         rv = Verdict.SUPPORTED
     else:
         rv = Verdict.INCONCLUSIVE
-    if rv is Verdict.SUPPORTED and h.hid == "H3":
+    if rv is Verdict.SUPPORTED and hid == "H3":
         conv = tuple(getattr(h, "converged_components", ()) or ())
         if sup_block or not conv or not all(_recompute(c, margins, measured_n, series) is Verdict.SUPPORTED
                                             for c in conv):
@@ -1701,10 +1933,16 @@ def _combine(h1: Verdict, h2: Verdict, h3: Verdict, gates_ok: bool) -> JointVerd
 
 
 def _joint_wellformed(j: Any) -> bool:
+    """THE SLOT CHECK IS MADE ON THE ADMITTED TEXT (round 9; scheme note item 8). It was `h.hid != hid`,
+    the caller's `__ne__`, and it is the ONE place that establishes which hypothesis each slot holds --
+    every `== "H3"` downstream, `_HNAMES[hid]`, `bm.PRIMARY[hid]` and the row labels all rest on it.
+    `_word(h.hid) != hid` compares two plain `str`s, so a subclass's `__ne__` is not consulted and the
+    text the rest of the card is handed is the text the object stores."""
     if not isinstance(j, JointResult):
         return False
     for h, hid in ((j.h1, "H1"), (j.h2, "H2"), (j.h3, "H3")):
-        if not isinstance(h, HypothesisResult) or h.hid != hid or not isinstance(h.components, tuple) or not h.components:
+        if not isinstance(h, HypothesisResult) or _word(h.hid) != hid \
+                or not isinstance(h.components, tuple) or not h.components:
             return False
         if not all(isinstance(c.pair, IntervalPair) for c in h.components):
             return False
@@ -1748,25 +1986,45 @@ def render_scorecard(joint: Any) -> str:
     eff = {}
     rows = ""
     for h in (joint.h1, joint.h2, joint.h3):
-        ev, mm = _eff_hypothesis(h, gates, bad, joint.margins, measured_n, series)
-        eff[h.hid] = ev
+        # THE HYPOTHESIS ID IS ADMITTED ONCE, HERE, and handed to every decision and every cell below
+        # (round 9; scheme note item 8). `_joint_wellformed` has already refused this card unless
+        # `_word(h.hid)` is exactly "H1"/"H2"/"H3" in its slot, so this value is that text. MEASURED on
+        # the round-8 tree: with `_e(h.hid)` and `_e(_HNAMES[h.hid])` reading the object, a `str`
+        # subclass storing "H1" whose `__str__` returns "H3" rendered `H3 Suppression (S)` and
+        # `H3 hypothesis verdict` over H1's own row -- 17 of 17 lie texts moved the page, with
+        # JOINT_SUPPORTED still displayed and NOT ONE alarm, because every `==` saw the truth and only
+        # the labels moved. Three rows all captioned H3 is a page on which a reader cannot tell
+        # suppression from retention from selectivity, which is the distinction the whole scorecard is.
+        hid = _word(h.hid)
+        ev, mm = _eff_hypothesis(h, hid, gates, bad, joint.margins, measured_n, series)
+        eff[hid] = ev
         if mm or gate_set_bad:
-            mismatch.append(h.hid)
+            mismatch.append(hid)
         groups = [(h.components, "")]
-        conv = tuple(getattr(h, "converged_components", ()) or ()) if h.hid == "H3" else ()
+        conv = tuple(getattr(h, "converged_components", ()) or ()) if hid == "H3" else ()
         if conv:
             groups.append((conv, " (converged-budget)"))
         for comps, suffix in groups:
             for c in comps:
                 pair = c.pair
                 ecv, cmm = _eff_component(c, any_failed, bad, joint.margins, measured_n, series)
-                if cmm and h.hid not in mismatch:
-                    mismatch.append(h.hid)
+                if cmm and hid not in mismatch:
+                    mismatch.append(hid)
                 rows += (
-                    f"<tr><td>{_e(h.hid)} {_e(_HNAMES[h.hid])}{_e(suffix)}</td><td>{_e(_visible(str(c.metric)))}</td>"
+                    f"<tr><td>{_e(hid)} {_e(_HNAMES[hid])}{_e(suffix)}</td>"
+                    f"<td>{_word_text(c.metric, 'metric name')}</td>"
                     # margin: kind "num", the SAME admission `_declared`/`_recompute` now use. These two
                     # disagreed at HEAD (display checked, verdict coerced): G2.
-                    f"<td>{_e(_visible(str(c.direction)))} {_kind_text(c.margin, 'margin', 'num')}</td>"
+                    # direction: the DECISIVE WORD of the row -- which side of the margin supports the
+                    # hypothesis -- and it was `_e(_visible(str(c.direction)))`, the caller's `__str__`.
+                    # MEASURED on the round-8 tree: a `str` subclass storing "greater" whose `__str__`
+                    # returns "less" printed `less 0.1` in all five component rows while
+                    # `bm.interval_verdict` applied the honest "greater" and the page stayed
+                    # JOINT_SUPPORTED with no alarm -- every figure honest, the word that says what the
+                    # figures MEAN inverted. 17 of 17 lie texts, 0 alarms. The `__eq__` spelling of the
+                    # same forgery went the other way and passed `_declared`'s agreement check instead;
+                    # both halves are closed on the admitted text, so this field is in the "shown" lane.
+                    f"<td>{_word_text(c.direction, 'direction')} {_kind_text(c.margin, 'margin', 'num')}</td>"
                     f"<td>{_metric_cell(pair.mean)}</td><td>{_interval(pair.boot_lo, pair.boot_hi)}</td>"
                     f"<td>{_interval(pair.t_lo, pair.t_hi)}</td>"
                     # n: kind "count", the SAME admission `_pair_numbers_ok` now uses. These two
@@ -1774,7 +2032,7 @@ def render_scorecard(joint: Any) -> str:
                     f"<td>{_kind_text(pair.n, 'n', 'count')}</td>"
                     f"<td>{_float_cell(pair.level, 'level')}</td>"
                     f"<td>{_verdict_cell(ecv, kind_caveat=supported_caveat)}</td></tr>")
-        rows += (f"<tr><th colspan=8>{_e(h.hid)} hypothesis verdict</th>"
+        rows += (f"<tr><th colspan=8>{_e(hid)} hypothesis verdict</th>"
                  f"<td>{_verdict_cell(ev, note=' [hypothesis-level]', kind_caveat=supported_caveat)}</td></tr>")
     try:
         stored_j = _vcoerce(JointVerdict, joint.verdict)

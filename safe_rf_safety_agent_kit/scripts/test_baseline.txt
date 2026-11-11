@@ -4,12 +4,12 @@ test_toy 4 0
 toy_tests.test_benchmark 280 0
 toy_tests.test_checkpoint 48 0
 toy_tests.test_claim_ledger 100 0
-toy_tests.test_dashboard 229 0
+toy_tests.test_dashboard 240 0
 toy_tests.test_erasure_demo_edges 17 0
 toy_tests.test_failure_modes 20 2
-toy_tests.test_robustness 153 0
+toy_tests.test_robustness 164 0
 toy_tests.test_schema 55 0
-toy_tests.test_scripts 151 4
+toy_tests.test_scripts 154 4
 toy_tests.test_stability 57 1
 toy_tests.test_teacher_student 55 0
 toy_tests.test_tensor_ops 110 82

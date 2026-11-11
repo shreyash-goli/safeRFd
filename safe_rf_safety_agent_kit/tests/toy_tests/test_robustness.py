@@ -15,6 +15,8 @@ import struct
 import sys
 import types
 import unittest
+from collections.abc import Mapping
+from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -1551,12 +1553,25 @@ class EveryMetricReadSiteIsPinnedByItsConsequence(unittest.TestCase):
             self.assertNotEqual(got, MetricValue.measured(0.0), why)
             self.assertIsNone(got.value, why)
             self.assertEqual(got.reason, f"arm {absent!r} absent", why)
-        # a name that is not a usable name at all is a loud ValueError, not a zero
-        for bad in (None, 7, b"E", "", "  ", ["E"]):
-            with self.assertRaises(ValueError, msg=repr(bad)):
-                rb.arm_difference(present, bad, "C0")
-            with self.assertRaises(ValueError, msg=repr(bad)):
-                rb.arm_difference(present, "C0", bad)
+        # a name that is not a usable name at all is loud, not a zero -- and WHICH LAYER refuses it is
+        # itself measured, because round 9's type requirement at the parameter boundary moved two of
+        # these spellings one layer out: `arm_difference`'s own gate still decides every value that
+        # STORES a scalar (`None`, an `int`, a blank string), while a `bytes` or a `list` offered where
+        # the signature annotates `str` is refused by the boundary before the gate runs. The gate's own
+        # diagnostic for those two is kept pinned through `__wrapped__`, the declared control, so no
+        # coverage is traded for the earlier refusal.
+        for bad in (None, 7, "", "  "):
+            for args in ((present, bad, "C0"), (present, "C0", bad)):
+                with self.assertRaisesRegex(ValueError, "arm name must be a nonblank string",
+                                            msg=repr(bad)):
+                    rb.arm_difference(*args)
+        for bad in (b"E", ["E"]):
+            for args in ((present, bad, "C0"), (present, "C0", bad)):
+                with self.assertRaisesRegex(TypeError, "annotated str", msg=repr(bad)):
+                    rb.arm_difference(*args)
+                with self.assertRaisesRegex(ValueError, "arm name must be a nonblank string",
+                                            msg=repr(bad)):
+                    rb.arm_difference.__wrapped__(*args)
         with self.assertRaises(ValueError):
             rb.arm_difference([("C0", MetricValue.measured(3.0))], "E", "C0")     # not a Mapping
         # the ARMS KEYS are the other half of the same membership test
@@ -2581,6 +2596,97 @@ def _canonical_calls():
     }
 
 
+_DUCK_UNARY = ("neg", "pos", "abs", "invert", "round", "trunc", "floor", "ceil")
+_DUCK_BINARY = ("add", "sub", "mul", "truediv", "floordiv", "mod", "divmod", "pow",
+                "lshift", "rshift", "and", "or", "xor", "matmul")
+_DUCK_COMPARE = ("lt", "le", "eq", "ne", "gt", "ge")
+
+
+def _duck_typed(v):
+    """A NON-SUBCLASS stand-in for the plain `str` / `int` / `float` `v`, or None if `v` is not one.
+
+    THE SECOND SPELLING OF THE SAME LIE, and the round-8 finding it exists for: `toy.schema._plain_value`
+    collapses a `str`/`int`/`float` SUBCLASS to the value it STORES, and returns an object of any other
+    class unchanged (its last line). A duck-typed scalar -- an unrelated class that merely answers the
+    operators a gate, a closure cell or a construction is written in -- therefore passed the parameter
+    boundary untouched and reached the gate, and ALL FOUR routes of
+    `TheParameterBoundaryClosesFourLiveRoutes` came back through it.
+
+    WHY IT LIVES HERE AND NOT BESIDE ITS SIBLING `test_schema._subclassed`. That generator's own
+    docstring states the property it tests -- "the property under test is that the object STORES the
+    plain value" -- and THAT SENTENCE CANNOT BE STATED ABOUT A DUCK, which stores nothing a boundary can
+    read. The two halves assert different things (collapse versus refusal), so this is not a variant of
+    `_subclassed` but its complement. `test_schema.py` also belongs to SR-04 and passed independent
+    attestation on the day this was written; editing an attested file to add a sibling that nothing in
+    `test_schema` consumes would spend a fresh attestation for no gain. Reported as a cross-owner note
+    instead: if a second module ever needs the duck half, this function and `_subclassed` should move
+    together, and `_subclassed`'s rationale paragraph is the one that has to be extended.
+
+    LIKE `_subclassed`, IT DOES NOT LIE: every operator, conversion and comparison delegates to the value
+    it holds, so what the duck-typed half of `_parameter_coverage_complaints` asserts is a property of
+    the TYPE (the callee refuses an object it cannot read a stored scalar out of) and not survival of one
+    particular lie -- a probe built from one lie pins one lie. The four lying ducks that measure the
+    CONSEQUENCE of accepting one are class attributes of
+    `TheParameterBoundaryClosesFourLiveRoutes`. `bool` and `Enum` members are excluded for the reasons
+    `_subclassed` and `toy.schema._plain_value` both give: `bool` cannot be subclassed and an `Enum`
+    member must stay itself."""
+    if v is None or isinstance(v, (Enum, bool)) or type(v) not in (str, int, float):
+        return None
+    ns = {"__init__": lambda self, x=v: object.__setattr__(self, "_v", x),
+          "__repr__": lambda self: repr(self._v), "__str__": lambda self: str(self._v),
+          "__hash__": lambda self: hash(self._v), "__bool__": lambda self: bool(self._v),
+          "__format__": lambda self, spec="": format(self._v, spec)}
+    if isinstance(v, str):
+        ns.update({"__len__": lambda self: len(self._v), "__iter__": lambda self: iter(self._v),
+                   "__getitem__": lambda self, i: self._v[i],
+                   "__contains__": lambda self, x: x in self._v})
+    else:
+        ns.update({"__float__": lambda self: float(self._v), "__int__": lambda self: int(self._v)})
+        if isinstance(v, int):
+            ns["__index__"] = lambda self: self._v.__index__()
+        for op in _DUCK_UNARY:
+            ns[f"__{op}__"] = (lambda o: lambda self: getattr(self._v, f"__{o}__")())(op)
+    for op in _DUCK_BINARY:
+        ns[f"__{op}__"] = (lambda o: lambda self, x: getattr(self._v, f"__{o}__", _duck_undefined)(
+            getattr(x, "_v", x)))(op)
+        ns[f"__r{op}__"] = (lambda o: lambda self, x: getattr(self._v, f"__r{o}__", _duck_undefined)(
+            getattr(x, "_v", x)))(op)
+    for op in _DUCK_COMPARE:
+        ns[f"__{op}__"] = (lambda o: lambda self, x: getattr(self._v, f"__{o}__")(
+            getattr(x, "_v", x)))(op)
+    return type(f"Duck{type(v).__name__.capitalize()}", (object,), ns)()
+
+
+def _duck_undefined(_):
+    return NotImplemented
+
+
+def _duck_elements(v):
+    """(`v` rebuilt with every plain scalar LEAF duck-typed, how many leaves were replaced).
+
+    The duck-typed half of the coverage probe stops at the PARAMETER, because a duck-typed scalar is a
+    spelling of a scalar; this is how far it does NOT reach, measured rather than described, by
+    `test_the_duck_half_stops_at_the_parameter_and_the_container_case_is_measured`. A leaf that is not a
+    plain scalar (a `MetricValue`, a strict `bool`, an `Enum`) is left alone, and the count is what lets
+    that test skip a parameter where nothing was actually replaced -- otherwise an all-`bool` mask would
+    be reported as "accepting a duck" when the call it made was entirely honest."""
+    d = _duck_typed(v)
+    if d is not None:
+        return d, 1
+    if isinstance(v, Mapping):
+        out, n = {}, 0
+        for k in v:
+            dk, nk = _duck_elements(k)
+            dv, nv = _duck_elements(v[k])
+            out[dk] = dv
+            n += nk + nv
+        return out, n
+    if isinstance(v, (list, tuple)):
+        items = [_duck_elements(x) for x in v]
+        return (list if isinstance(v, list) else tuple)(x for x, _ in items), sum(n for _, n in items)
+    return v, 0
+
+
 def _spy_behind_the_boundary(name):
     """(callable, dict): a stand-in for `rb.<name>` with the SAME signature, behind the SAME boundary,
     whose body RECORDS WHAT IT RECEIVED and does nothing else.
@@ -2606,14 +2712,34 @@ def _spy_behind_the_boundary(name):
     return rb._plain_arguments(body), seen
 
 
-def _parameter_coverage_complaints(calls=None, boundary=_spy_behind_the_boundary):
+def _parameter_coverage_complaints(calls=None, boundary=_spy_behind_the_boundary, duck_call=None):
     """Every reason the parameter boundary's coverage is incomplete, as a list of strings; [] = covered.
 
+    THE INVARIANT, which the two halves below are derived from rather than from a list of parameter
+    names: for every parameter a public callable binds, EITHER the value arrives at the callee collapsed
+    to the scalar it STORES, OR the call is refused inside the `(ValueError, TypeError, ArithmeticError)`
+    family every probe declares. A parameter satisfying NEITHER disjunct is a complaint.
+      * THE SUBCLASS HALF (round 7) asserts the first disjunct, at the callee, on the argument: handed a
+        `str`/`int`/`float` subclass, the callee receives the plain value.
+      * THE DUCK-TYPED HALF (round 8's finding) CANNOT assert it, and that asymmetry is the whole point:
+        a duck-typed scalar STORES NOTHING for `_plain_value` to read, so there is no "plain value the
+        callee received" to check. It asserts the OTHER disjunct -- that the call is refused -- and a
+        parameter that is neither collapsed nor refused is exactly what re-opened the four routes.
+        `_duck_typed` returns None for a parameter whose honest value is not a plain scalar (a callable,
+        a carrier, a container, an `Enum`, a strict bool), so that half covers the 30 scalar-valued
+        parameters of the 88; `test_every_parameter_is_normalised_or_declared_with_a_reason` pins both
+        counts and cross-checks the set against the one the SIGNATURES name, and
+        `test_the_duck_half_stops_at_the_parameter_and_the_container_case_is_measured` measures what it
+        does not reach.
     A function returning complaints rather than a body of assertions, so that its OWN fail-closure is
     testable: `test_a_new_public_function_fails_closed`, `test_a_new_parameter_fails_closed`,
-    `test_a_declaration_for_a_parameter_that_can_carry_a_scalar_is_refused` and
-    `test_the_assertion_is_on_the_ARGUMENT_not_on_the_called_name` each inject one defect and assert the
-    matching complaint appears -- which is the only way to know this probe is not vacuous."""
+    `test_a_declaration_for_a_parameter_that_can_carry_a_scalar_is_refused`,
+    `test_the_assertion_is_on_the_ARGUMENT_not_on_the_called_name` and -- for the duck-typed half --
+    `test_the_duck_typed_half_is_what_reopened_the_four_routes_and_it_fails_closed` each inject one
+    defect and assert the matching complaint appears, which is the only way to know this probe is not
+    vacuous. `duck_call` names the callable the duck-typed half calls (default: the public one); passing
+    `lambda n: getattr(rb, n).__wrapped__` runs that half against the same tree with the boundary OFF,
+    which is the evidence that it detects what it claims to detect."""
     calls = _canonical_calls() if calls is None else calls
     public = _public_callables()
     out = []
@@ -2637,8 +2763,24 @@ def _parameter_coverage_complaints(calls=None, boundary=_spy_behind_the_boundary
         declared = dict(rb._PARAMETER_NO_SCALAR.get(name, {}))
         probe, seen = boundary(name)
         probe(**{p: ts._subclassed(v) for p, v in given.items()})
+        duck_target = getattr(rb, name) if duck_call is None else duck_call(name)
         for p in params:
             lies = ts._impure(ts._subclassed(given[p]), f"{name}.{p}")
+            # --- the duck-typed half, run for EVERY parameter (declared or not) whose honest value is a
+            # plain scalar: there is nothing to collapse, so refusal is the only disjunct available.
+            duck = _duck_typed(given[p])
+            if duck is not None:
+                try:
+                    duck_target(**dict(given, **{p: duck}))
+                except (ValueError, TypeError, ArithmeticError):
+                    pass
+                except Exception as e:                      # noqa: BLE001 -- the point of the check
+                    out.append(f"{name}.{p}: a duck-typed value raised {type(e).__name__}, OUTSIDE the "
+                               "(ValueError, TypeError, ArithmeticError) family every probe declares, so "
+                               "it escapes a probe's own fail-closed handler")
+                else:
+                    out.append(f"{name}.{p}: a duck-typed value that is not a subclass was ACCEPTED -- "
+                               "nothing collapsed it (it stores no scalar) and nothing refused it")
             if p in declared:
                 if not str(declared[p]).strip():
                     out.append(f"{name}.{p}: declared in _PARAMETER_NO_SCALAR with no reason recorded")
@@ -2669,6 +2811,14 @@ class EveryPublicParameterIsNormalisedOrExplicitlyExempt(unittest.TestCase):
     declarations self-policing rather than an escape hatch -- that a declared parameter PROVABLY cannot
     carry a collapsible scalar in the first place. Asserted at the CALLEE, on the argument, never on the
     name of a function called: see `_spy_behind_the_boundary`.
+    AND, SINCE ROUND 8, IN TWO SPELLINGS, because the round-7 proof swept only one of them. A subclass
+    probe can assert "the callee received a plain value"; a DUCK-TYPED probe cannot, because a duck
+    stores nothing to collapse, so its half asserts the other disjunct of the invariant -- the callee,
+    `deep_freeze` or the boundary's own type requirement REFUSES it -- and a parameter satisfying NEITHER
+    is a complaint. That is what the four routes of `TheParameterBoundaryClosesFourLiveRoutes` were:
+    with the subclass half alone this class certified, in the attester's words, "only the half of the
+    class it sweeps". See `_duck_typed` for why that generator lives in this file and not beside
+    `test_schema._subclassed`.
     WHAT IT DOES NOT COVER, so the coverage is not read as larger than it is: a method of a class (a
     dataclass's arguments are its fields, which `EveryDataclassFieldIsNormalisedOrExplicitlyExempt`
     covers from `dataclasses.fields()`; `SeedSummary.from_values` casts with `float.__float__` itself);
@@ -2690,11 +2840,23 @@ class EveryPublicParameterIsNormalisedOrExplicitlyExempt(unittest.TestCase):
         calls = _canonical_calls()
         n_params = sum(len(inspect.signature(getattr(rb, n)).parameters) for n in calls)
         n_declared = sum(len(v) for v in rb._PARAMETER_NO_SCALAR.values())
-        self.assertEqual((n_params, n_declared), (88, 30),
-                         "the parameter / declaration counts moved. This is not a rubber stamp: confirm "
-                         "the new parameter is covered (it is, by default) or declare it with the "
-                         "mechanism that protects it, then update the count -- a count that is remembered "
-                         "rather than measured is how five numbers got into circulation for SEED_FLOOR.")
+        n_duck = sum(1 for n in calls for v in calls[n].values() if _duck_typed(v) is not None)
+        self.assertEqual((n_params, n_declared, n_duck), (88, 30, 30),
+                         "the parameter / declaration / duck-typed-half counts moved. This is not a "
+                         "rubber stamp: confirm the new parameter is covered (it is, by default) or "
+                         "declare it with the mechanism that protects it, then update the count -- a "
+                         "count that is remembered rather than measured is how five numbers got into "
+                         "circulation for SEED_FLOOR.")
+        # THE TWO DERIVATIONS OF THE SAME SET, cross-checked: the parameters the SIGNATURES annotate as
+        # scalars (what `rb._annotated_scalar_parameters` makes the boundary enforce) and the parameters
+        # whose CANONICAL VALUE is a scalar (what the duck-typed half covers). A parameter in the second
+        # set but not the first has a type requirement nobody wrote; one in the first but not the second
+        # has a requirement nothing exercises. Neither can appear silently.
+        annotated = {f"{n}.{p}" for n in calls
+                     for p in rb._annotated_scalar_parameters(inspect.signature(getattr(rb, n)))}
+        ducked = {f"{n}.{p}" for n in calls for p, v in calls[n].items() if _duck_typed(v) is not None}
+        self.assertEqual(annotated, ducked)
+        self.assertEqual(len(annotated), 30)
 
     def test_what_the_two_boundaries_leave_is_measured_not_described(self):
         """"Methods are not covered" is a sentence a reader has to trust. This MEASURES the set: every
@@ -2868,6 +3030,121 @@ class EveryPublicParameterIsNormalisedOrExplicitlyExempt(unittest.TestCase):
         with self.assertRaises(rb.InsufficientEvidenceError):
             rb.require_summary(SimpleNamespace(n=12, mean=0.0, values=(1.0, 2.0, 3.0)))
 
+    def test_the_duck_typed_half_is_what_reopened_the_four_routes_and_it_fails_closed(self):
+        """THE EVIDENCE THAT THE NEW HALF IS NOT VACUOUS, which is the only thing that makes it a pin.
+        The duck-typed half is run against THE SAME TREE WITH THE BOUNDARY OFF -- `__wrapped__`, this
+        module's declared before/after control -- and the parameters round 8 measured as accepting a
+        duck-typed scalar come back as complaints, by name.
+        TWELVE, NOT THIRTEEN, and the difference is a measurement rather than a discrepancy: the full
+        pre-fix sweep of this tree found 13 accepting parameters, of which `standard_shifts`'s
+        `reorder_rel_tol` is refused HERE because it is forwarded to `shift_reorder_rows`, whose own
+        boundary is still on in this control. Unwrapping one function at a time cannot see a parameter
+        that is protected one call down -- which is also why it is the honest control to use."""
+        complaints = _parameter_coverage_complaints(duck_call=lambda n: getattr(rb, n).__wrapped__)
+        accepted = sorted(c.split(":")[0] for c in complaints if "was ACCEPTED" in c)
+        self.assertEqual(accepted, ["benchmark_outcome.metric", "make_measure_fixture.magnitude_spread",
+                                    "make_measure_fixture.noise", "make_measure_fixture.rows",
+                                    "make_measure_fixture.width", "make_order_sensitive_fixture.big",
+                                    "probe_precision.param", "shift_jitter.eps",
+                                    "shift_reorder_rows.rel_tol", "shift_scale.degree",
+                                    "shift_scale.factor", "shift_translate.c"])
+        self.assertEqual(sorted(complaints), sorted(c for c in complaints if "was ACCEPTED" in c),
+                         "the boundary-off control produced some OTHER complaint; the subclass half and "
+                         "the registry clauses must be unaffected by it")
+        # and with the boundary ON -- the shipped tree -- there is nothing to complain about
+        self.assertEqual(_parameter_coverage_complaints(), [])
+
+    def test_the_type_requirement_is_derived_from_the_signature_and_the_probe_covers_its_fail_open(self):
+        """The rule the boundary enforces is READ FROM THE SIGNATURE (`_annotated_scalar_parameters`), so
+        a NEW parameter annotated `int` / `float` / `str` is refused a duck without anyone listing it.
+        It FAILS OPEN on an annotation spelled another way, or absent -- stated in that helper's
+        docstring, and demonstrated here rather than left as a caveat, together with the clause that
+        makes that safe: the duck-typed half of the probe complains about exactly such a parameter."""
+        def annotated(eps: float, extra_tolerance: float = 1.0):
+            return eps                      # a stand-in body: what is under test is the signature
+
+        def unannotated(eps: float, extra_tolerance=1.0):
+            return eps
+        for fn in (annotated, unannotated):
+            fn.__module__ = "toy.robustness"
+            fn.__name__ = "shift_jitter"
+        with self.assertRaises(TypeError) as cm:                 # covered by default, named nowhere
+            rb._plain_arguments(annotated)(1e-6, _duck_typed(1.0))
+        self.assertIn("'extra_tolerance' is annotated float", str(cm.exception))
+        self.assertIsNotNone(rb._plain_arguments(unannotated)(1e-6, _duck_typed(1.0)))   # fails OPEN
+        calls = dict(_canonical_calls(), shift_jitter={"eps": 1e-6, "extra_tolerance": 1.0})
+        for fn, expected in ((annotated, []), (unannotated, ["ACCEPTED"])):
+            with mock.patch.object(rb, "shift_jitter", rb._plain_arguments(fn)):
+                got = [c for c in _parameter_coverage_complaints(calls=calls)
+                       if "shift_jitter.extra_tolerance" in c]
+            self.assertEqual([t for t in ("ACCEPTED",) if any(t in c for c in got)], expected,
+                             f"{fn} -> {got}")
+        self.assertEqual(_parameter_coverage_complaints(), [])      # and the real module is still clean
+
+    def test_the_duck_half_stops_at_the_parameter_and_the_container_case_is_measured(self):
+        """WHERE THE DUCK-TYPED HALF STOPS, measured rather than described -- the mistake round 7's
+        proof made was to leave its own limit as a sentence. A duck-typed scalar is a spelling of a
+        PARAMETER; this sweeps every container-valued parameter with every plain scalar LEAF duck-typed
+        instead, and enumerates the ones that accept it. Four do, and each is left open deliberately,
+        with its reason:
+          * `arm_difference.arms` -- the KEYS. A duck key hashes and compares as its own text, and the
+            consequence of a lying one is already pinned by
+            `test_R_arm_diff_an_unusable_arm_gives_unmeasured_never_zero`: an absent arm is an
+            unmeasured `MetricValue` with a reason, never a zero.
+          * `plain_loop_mean.values` and `shift_column_offsets.offsets` -- data, not a claim. Both only
+            move the numbers a measure is computed FROM; neither is read by a bound, a declared
+            expectation or a card field, so a lie there is indistinguishable from different data.
+          * `thaw.x` -- the inverse of `deep_freeze`, which asserts nothing about what it returns.
+        `precision_sweep.params` is NOT in the set, and that is the transitive half of the fix: each
+        element crosses the boundary again as `probe_precision`'s `param`, which now refuses it."""
+        accepted = []
+        for name, given in sorted(_canonical_calls().items()):
+            for p, v in sorted(given.items()):
+                if _duck_typed(v) is not None or not isinstance(v, (Mapping, list, tuple)):
+                    continue
+                ducked, n = _duck_elements(v)
+                if not n:                       # nothing was actually replaced: an honest call
+                    continue
+                try:
+                    getattr(rb, name)(**dict(given, **{p: ducked}))
+                except (ValueError, TypeError, ArithmeticError):
+                    continue
+                accepted.append(f"{name}.{p}")
+        self.assertEqual(accepted, ["arm_difference.arms", "plain_loop_mean.values",
+                                    "shift_column_offsets.offsets", "thaw.x"],
+                         "a container-valued parameter started or stopped accepting duck-typed "
+                         "elements: state its mechanism here, or close it")
+        self.assertNotIn("precision_sweep.params", accepted)
+
+    def test_a_rational_where_a_float_is_annotated_is_refused_and_the_exact_helpers_are_not(self):
+        """THE OVER-REFUSAL THE TYPE REQUIREMENT BUYS, measured rather than assumed. What it newly
+        refuses on the 30 scalar-annotated parameters is any number that is not a `str`/`int`/`float`:
+        a `Fraction`, a `Decimal`, a third-party scalar. This kit is stdlib-only and nothing in it hands
+        one to a public robustness callable, and the two places that genuinely take them are untouched --
+        `exact_masked_mse` because its parameters carry no annotation, and `SeedSummary.from_values`
+        because a classmethod is not behind this boundary at all. A plain scalar of the WRONG type is
+        also still the callee's own business, which is what keeps a dozen pinned diagnostics alive."""
+        from decimal import Decimal
+        from fractions import Fraction
+        for bad in (Fraction(4, 1), Decimal("4")):
+            with self.assertRaises(TypeError, msg=repr(bad)) as cm:
+                rb.shift_scale(bad, 2)
+            self.assertIn("'factor' is annotated float", str(cm.exception))
+        self.assertEqual(rb.exact_masked_mse(((Fraction(1),), (Fraction(3),)),
+                                             ((Fraction(0),), (Fraction(0),)), (True, True)), Fraction(5))
+        self.assertEqual(rb.SeedSummary.from_values([Decimal("1"), Decimal("2"), Decimal("3")]).values,
+                         (1.0, 2.0, 3.0))
+        # an `int` where a `float` is annotated is a number, and is accepted: refusing it would be the
+        # int-vs-float destruction `_plain_parameter` exists to avoid
+        self.assertEqual(rb.make_measure_fixture(1, noise=0).pred, rb.make_measure_fixture(1).target)
+        self.assertEqual(rb.shift_scale(4, 2).name, "scale_4")
+        self.assertIsNone(rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), SEEDS, CFG,
+                                         probe_id=None).details.get("probe_id"))
+        # and a plain scalar of the wrong type still reaches the callee, which raises its OWN diagnostic
+        with self.assertRaises(TypeError) as cm:
+            rb.make_measure_fixture(1, rows="4")
+        self.assertNotIn("annotated int", str(cm.exception))
+
     def test_the_boundary_is_invisible_to_honest_data(self):
         """A normalisation that moved an honest byte, or rebuilt an honest container, would be a breaking
         change for every stored `content_hash` and a behaviour change a reader cannot see. Asserted as
@@ -2927,7 +3204,139 @@ class TheParameterBoundaryClosesFourLiveRoutes(unittest.TestCase):
     only in the operator the gate or the construction is written in -- `isinstance`, `str.__str__`,
     `repr`, `float.__float__`, `int.__int__` and `math.frexp` are all honest, which is why the card the
     pre-fix run produced looks exactly like an honest one. The assertion in each case is the strongest
-    available: the lying run's card is byte-identical to the honest run's."""
+    available: the lying run's card is byte-identical to the honest run's.
+
+    IN TWO SPELLINGS SINCE ROUND 8, AND THE CLAIM THIS DOCSTRING USED TO MAKE WAS FALSE WITHOUT THE
+    SECOND. What stood here pinned only `str`/`int`/`float` SUBCLASSES -- the spelling `_plain_value`
+    collapses -- while claiming the four routes were closed. They were not: a DUCK-TYPED scalar of an
+    unrelated class stores nothing to collapse, passed the boundary untouched, and re-opened all four
+    (and `probe_precision.param` as a fifth, with no status flip but a card describing a probe other than
+    the one it ran). The `*_duck_typed` twin of each test below MEASURES THE ROUTE in the same tree with
+    the boundary off (`__wrapped__`) and then asserts the refusal the shipped tree makes, so each test
+    carries its own before and after.
+    THE ASYMMETRY BETWEEN THE TWO HALVES, since it changes what can be asserted: for a subclass the
+    strongest available assertion is byte-identity of the two cards, because the collapsed value IS the
+    honest value. For a duck there is no honest value to collapse to -- the call is REFUSED -- so the
+    twin asserts the refusal, its error type (inside the `(ValueError, TypeError, ArithmeticError)`
+    family every probe declares), and that the card a probe still produces carries no measurement."""
+
+    class DuckEps:
+        """Stores 1e-6; every multiplication it takes part in answers 1e9. NOT a `float` subclass, so
+        `_plain_value` has nothing to read out of it: the round-8 spelling of `LyingEps`."""
+        def __init__(self, v):
+            self.v = v
+
+        def __neg__(self):
+            return -self.v
+
+        def __sub__(self, other):
+            return self.v - other
+
+        def __rsub__(self, other):
+            return other - self.v
+
+        def __add__(self, other):
+            return self.v + other
+
+        __radd__ = __add__
+
+        def __mul__(self, other):
+            return 1e9
+
+        __rmul__ = __mul__
+
+        def __float__(self):
+            return self.v
+
+        def __repr__(self):
+            return repr(self.v)
+
+    class DuckFactor:
+        """Stores 4.0; `factor ** degree` answers 4.0 for every degree. Not a `float` subclass."""
+        def __init__(self, v):
+            self.v = v
+
+        def __mul__(self, other):
+            return self.v * other
+
+        __rmul__ = __mul__
+
+        def __pow__(self, other, mod=None):
+            return 4.0
+
+        def __float__(self):
+            return self.v
+
+        def __repr__(self):
+            return repr(self.v)
+
+    class DuckTol:
+        """Stores 0.0, multiplies to 1e9. Not a `float` subclass -- which is also why the in-body
+        `_plain_parameter` of `shift_reorder_rows` leaves it alone, making `__wrapped__` a VALID
+        before/after control for this factory in the duck-typed spelling (it is not, for a subclass)."""
+        def __init__(self, v):
+            self.v = v
+
+        def __mul__(self, other):
+            return 1e9
+
+        __rmul__ = __mul__
+
+        def __float__(self):
+            return self.v
+
+        def __repr__(self):
+            return repr(self.v)
+
+    class DuckRows:
+        """Stores its value; answers False to every ordering comparison, so `rows < 4` is False. Not an
+        `int` subclass, and `__index__` / `__int__` are honest, so `range(rows)` and `rng.sample` work."""
+        def __init__(self, v):
+            self.v = v
+
+        def __lt__(self, other):
+            return False
+
+        def __gt__(self, other):
+            return False
+
+        def __le__(self, other):
+            return False
+
+        def __ge__(self, other):
+            return False
+
+        def __index__(self):
+            return self.v
+
+        def __int__(self):
+            return self.v
+
+        def __repr__(self):
+            return repr(self.v)
+
+    class DuckParam:
+        """Stores 40.0; `int(param)` (the number of values accumulated) answers 400, `float(param)` (the
+        number the card records) answers 40.0. Not a `float` subclass."""
+        def __init__(self, v):
+            self.v = v
+
+        def __float__(self):
+            return float(self.v)
+
+        def __int__(self):
+            return 10 * int(self.v)
+
+        def __index__(self):
+            return 10 * int(self.v)
+
+        def __mul__(self, other):
+            return self.v * other
+
+        __rmul__ = __mul__
+
+        def __repr__(self):
+            return repr(self.v)
 
     class LyingKind(str):
         """Stores "magnitude"; compares and hashes as "cancellation"."""
@@ -3078,6 +3487,204 @@ class TheParameterBoundaryClosesFourLiveRoutes(unittest.TestCase):
             self.assertIn("ValueError", m.reason)
         # and the error family every probe declares is the one the module documents
         self.assertIn("(ValueError, TypeError, ArithmeticError)", rb.make_measure_fixture.__doc__)
+
+    # ---------------------------------------------------------------- the duck-typed twins (round 8)
+    def test_F2_duck_typed_a_jitter_eps_that_is_not_a_subclass_is_refused_not_collapsed(self):
+        """ROUND 8's RE-OPENING OF F2, with its own before and after. The subclass above is collapsed;
+        this one stores nothing to collapse, so with the boundary off it reaches the `bound` closure and
+        reproduces the finding exactly -- SENSITIVITY_EXCEEDS_BOUND -> SENSITIVITY_WITHIN_BOUND with
+        `max_abs_dev` IDENTICAL, the proof that the applied jitter never changed and only the bound
+        moved. `__wrapped__` is a valid control here (this factory has no in-body normalisation of
+        `eps`). The shipped tree REFUSES it, by type, at the parameter boundary."""
+        fac = lambda s: rb.make_measure_fixture(s, noise=1e-9)        # noqa: E731
+        honest = rb.probe_shift(rb.abs_bias_fsum, rb.shift_jitter(1e-6), SEEDS, CFG, fixture_factory=fac)
+        self.assertIs(honest.status, PS.SENSITIVITY_EXCEEDS_BOUND)   # the control: the bound IS exceeded
+        e = self.DuckEps(1e-6)
+        self.assertNotIsInstance(e, float)                           # the spelling the proof never swept
+        self.assertEqual(float(e), 1e-6)
+        self.assertEqual(2.0 * e, 1e9)                               # and the lie is the operator
+        pre = rb.probe_shift(rb.abs_bias_fsum, rb.shift_jitter.__wrapped__(e), SEEDS, CFG,
+                             fixture_factory=fac)
+        self.assertIs(pre.status, PS.SENSITIVITY_WITHIN_BOUND)       # BOUNDARY OFF: the route is real
+        self.assertEqual(pre.details["n_violations"], 0)
+        self.assertEqual(pre.details["max_abs_dev"], honest.details["max_abs_dev"])
+        self.assertNotEqual(pre.content_hash(), honest.content_hash())
+        with self.assertRaises(TypeError) as cm:                     # BOUNDARY ON: refused by type
+            rb.shift_jitter(e)
+        self.assertIn("'eps' is annotated float", str(cm.exception))
+        self.assertIn("stores no float to normalise", str(cm.exception))
+
+    def test_F3_duck_typed_a_scale_factor_that_is_not_a_subclass_is_refused_not_collapsed(self):
+        """ROUND 8's RE-OPENING OF F3. With the boundary off, a duck-typed `factor` whose `__pow__`
+        answers 4.0 for every degree certifies a degree-1 measure as satisfying a DECLARED degree-2
+        invariance, exactly as the subclass did: INVARIANCE_DEFECT (12 violations) -> INVARIANCE_HOLDS
+        with n_bitwise_equal 12, on a card still reading INVARIANCE_EXACT and `scale_4.0`."""
+        honest = rb.probe_shift(rb.abs_bias_fsum, rb.shift_scale(4.0, 2), SEEDS, CFG)
+        self.assertIs(honest.status, PS.INVARIANCE_DEFECT)           # the control: degree 1 != degree 2
+        f = self.DuckFactor(4.0)
+        self.assertNotIsInstance(f, float)
+        self.assertEqual(math.frexp(f)[0], 0.5)                      # the classifier stays honest
+        self.assertEqual(f ** 2, 4.0)                                # the lie
+        spec = rb.shift_scale.__wrapped__(f, 2)
+        self.assertEqual(spec.name, "scale_4.0")
+        self.assertIs(spec.kind, SK.INVARIANCE_EXACT)
+        pre = rb.probe_shift(rb.abs_bias_fsum, spec, SEEDS, CFG)
+        self.assertIs(pre.status, PS.INVARIANCE_HOLDS)               # BOUNDARY OFF: the route is real
+        self.assertEqual(pre.details["n_bitwise_equal"], 12)
+        with self.assertRaises(TypeError) as cm:                     # BOUNDARY ON
+            rb.shift_scale(f, 2)
+        self.assertIn("'factor' is annotated float", str(cm.exception))
+
+    def test_a_duck_typed_reorder_tolerance_is_refused_and_the_in_body_call_is_why_wrapped_is_valid(self):
+        """ROUND 8's RE-OPENING OF `rel_tol`, and A CORRECTION TO THE RECORD that cuts both ways.
+        `__wrapped__` is NOT a valid before/after control for this factory with a SUBCLASS, because the
+        kept in-body `rel_tol = _plain_parameter(rel_tol)` still fires on one -- that correction stands.
+        It IS valid with a DUCK, because `_plain_parameter` returns a non-subclass unchanged, and this
+        test MEASURES that rather than assuming it (the cell holds the duck itself). With the boundary
+        off: INVARIANCE_DEFECT (12 violations) -> INVARIANCE_HOLDS (0), with the honest `max_abs_dev`
+        still serialised on the card beside the zero -- the self-contradiction this kit keeps producing
+        when a comparison and a stored number come from two different objects."""
+        tol_kind, d = SK.INVARIANCE_TOLERANCE, self.DuckTol(0.0)
+        honest = rb.probe_shift(row_weighted_mse, rb.shift_reorder_rows(tol_kind, 0.0), SEEDS, CFG)
+        self.assertIs(honest.status, PS.INVARIANCE_DEFECT)           # the control
+        spec = rb.shift_reorder_rows.__wrapped__(tol_kind, d)
+        cells = dict(zip(spec.bound.__code__.co_freevars, spec.bound.__closure__))
+        self.assertIs(cells["rel_tol"].cell_contents, d,             # `_plain_parameter` left it alone
+                      "the in-body call collapsed a NON-subclass, which would make this control invalid")
+        pre = rb.probe_shift(row_weighted_mse, spec, SEEDS, CFG)
+        self.assertIs(pre.status, PS.INVARIANCE_HOLDS)               # BOUNDARY OFF: the route is real
+        self.assertEqual(pre.details["n_violations"], 0)
+        self.assertEqual(pre.details["max_abs_dev"], honest.details["max_abs_dev"])
+        for call in (lambda: rb.shift_reorder_rows(tol_kind, d),
+                     lambda: rb.standard_shifts(tol_kind, d)):       # and the forwarding path too
+            with self.assertRaises(TypeError) as cm:
+                call()
+            self.assertIn("annotated float", str(cm.exception))
+
+    def test_F4_duck_typed_a_row_count_that_is_not_a_subclass_is_refused_not_collapsed(self):
+        """ROUND 8's RE-OPENING OF F4, the route whose docstring claim this round had to retract. With
+        the boundary off, `rows=DuckRows(3)` builds the 3-row fixtures the module refuses to build and
+        the probe goes INSUFFICIENT_EVIDENCE / (NOT_VALIDATED, UNKNOWN) -> INVARIANCE_HOLDS /
+        (NOT_VALIDATED, TOY_RESULT) with a 12-seed summary. The shipped tree refuses it by type, and the
+        probe records the refusal as an unmeasured seed -- which is why the card is byte-comparable to
+        the honest INSUFFICIENT one in status and labels but NOT in content hash: the per-seed reasons
+        name a `TypeError` where the honest run names its own `ValueError`."""
+        r3 = self.DuckRows(3)
+        self.assertNotIsInstance(r3, int)
+        self.assertFalse(r3 < 4)                                     # the lie, in the gate's operator
+        self.assertEqual(len(rb.make_measure_fixture.__wrapped__(1, rows=r3).pred), 3)
+        pre = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), SEEDS, CFG,
+                             fixture_factory=lambda s: rb.make_measure_fixture.__wrapped__(s, rows=r3))
+        self.assertIs(pre.status, PS.INVARIANCE_HOLDS)               # BOUNDARY OFF: the route is real
+        self.assertIn(EvidenceClass.TOY_RESULT, pre.evidence_labels)
+        self.assertEqual(pre.summary.n, 12)
+        with self.assertRaises(TypeError) as cm:                     # BOUNDARY ON
+            rb.make_measure_fixture(1, rows=r3)
+        self.assertIn("'rows' is annotated int", str(cm.exception))
+        honest = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), SEEDS, CFG,
+                                fixture_factory=lambda s: rb.make_measure_fixture(s, rows=3))
+        card = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), SEEDS, CFG,
+                              fixture_factory=lambda s: rb.make_measure_fixture(s, rows=r3))
+        self.assertIs(card.status, PS.INSUFFICIENT_EVIDENCE)
+        self.assertEqual(card.status, honest.status)
+        self.assertIsNone(card.summary)
+        self.assertNotIn(EvidenceClass.TOY_RESULT, card.evidence_labels)
+        self.assertEqual(sorted(e.name for e in card.evidence_labels),
+                         sorted(e.name for e in honest.evidence_labels))
+        for m in card.per_seed:
+            self.assertFalse(bm._metric_ok(m))
+            self.assertIn("TypeError", m.reason)
+
+    def test_the_empty_choice_branch_is_guarded_not_argued_away(self):
+        """THE DECISION ROUND 8 FALSIFIED, and what the earlier refusal to guard this got wrong. The
+        recorded reason not to add a guard was "with the gate seeing the stored value the branch is
+        unreachable, and an unpinnable guard is decoration"; the journal endorsed it. BOTH HALVES RESTED
+        ON A PREMISE THAT WAS NEVER MEASURED. The gate did NOT see the stored value of a duck-typed
+        `rows`, so the branch was reachable through a fully public route -- `rng.choice([])` raised
+        `IndexError: Cannot choose from an empty sequence`, outside the
+        `(ValueError, TypeError, ArithmeticError)` family every probe declares, out of a public probe.
+        And the guard IS pinnable: `__wrapped__` is this module's own declared before/after control, it
+        reaches the body with the boundary off, and it is what this test pins the guard with. A guard
+        that states a local invariant is not decoration just because another layer also holds."""
+        r2 = self.DuckRows(2)
+        with self.assertRaises(TypeError) as cm:            # the public route: refused one layer out
+            rb.make_measure_fixture(1, rows=r2)
+        self.assertIn("'rows' is annotated int", str(cm.exception))
+        with self.assertRaises(ValueError) as cm:           # the body's own invariant, boundary OFF
+            rb.make_measure_fixture.__wrapped__(1, rows=r2)
+        self.assertNotIsInstance(cm.exception, IndexError)
+        self.assertIn("no row is left to mask out", str(cm.exception))
+        self.assertIn("need rows >= 4", str(cm.exception))  # the documented diagnostic, not a new one
+        # the honest gate still fires FIRST for a plain value, so the guard changed no honest path
+        with self.assertRaisesRegex(ValueError, "need rows >= 4 and width >= 1$"):
+            rb.make_measure_fixture.__wrapped__(1, rows=2)
+        self.assertEqual(len(rb.make_measure_fixture(1, rows=4).pred), 4)
+        self.assertIn(False, rb.make_measure_fixture(1, rows=4).mask)
+        self.assertIn("no row is left to mask out", inspect.getsource(rb.make_measure_fixture))
+
+    def test_the_three_claims_round_8_falsified_are_corrected_where_they_were_MADE(self):
+        """A FALSIFIED CLAIM IS NOT FIXED BY A FIX; it is fixed where it was written, and this is the
+        doc-only mutant's death. Three sentences were measured false in round 8:
+          1. `make_measure_fixture.__doc__`: "Both are closed by the gate now seeing the value the object
+             STORES" -- false for a duck-typed `rows`, which stores nothing to collapse;
+          2. this class's docstring, which pinned only the SUBCLASS spelling while claiming the four
+             routes were closed;
+          3. the recorded decision not to guard `rng.choice([])`, whose stated reason ("with the gate
+             seeing the stored value the branch is unreachable, and an unpinnable guard is decoration")
+             rested on a premise nobody measured -- the branch was publicly reachable and the guard is
+             pinnable.
+        Restoring any of the three is a doc-only mutant, and it dies here."""
+        doc = rb.make_measure_fixture.__doc__
+        flat = " ".join(doc.split())
+        false_claim = "Both are closed by the gate now seeing the value the object STORES"
+        self.assertEqual(flat.count(false_claim), 1,
+                         "the retracted sentence may appear exactly once, QUOTED inside its own "
+                         "retraction; a second occurrence is the claim being made again")
+        self.assertIn(f'ROUND 8 FALSIFIED THE SENTENCE THAT STOOD HERE -- "{false_claim}" -- and it is '
+                      "worth keeping the correction rather than the claim", flat)
+        self.assertIn("closed FOR AN `int` SUBCLASS by the gate seeing the value the object STORES", flat)
+        self.assertIn("rested on a premise that was never measured", flat)
+        self.assertIn("AND THE EMPTY-CHOICE BRANCH IS GUARDED BELOW rather than argued away", flat)
+        self.assertIn("an unpinnable guard is decoration", flat)        # quoted, as the claim it was
+        cls = " ".join(type(self).__doc__.split())
+        self.assertIn("IN TWO SPELLINGS SINCE ROUND 8, AND THE CLAIM THIS DOCSTRING USED TO MAKE WAS "
+                      "FALSE WITHOUT THE SECOND", cls)
+        self.assertIn("What stood here pinned only `str`/`int`/`float` SUBCLASSES", cls)
+        for name in ("shift_jitter", "shift_scale", "shift_reorder_rows"):
+            self.assertIn("ROUND 8 RE-OPEN", " ".join(getattr(rb, name).__doc__.split()).upper(),
+                          f"{name}'s docstring still records the subclass spelling only")
+        self.assertIn("either the boundary collapses the value the object stores, or the call is "
+                      "refused", " ".join(rb.__doc__.split()))
+
+    def test_the_round_8_note_a_duck_typed_precision_param_runs_a_probe_the_card_does_not_describe(self):
+        """THE FIFTH PARAMETER, and the note round 8 asked to address or refuse with a measurement:
+        ADDRESSED, by the same type requirement. `probe_precision`'s `param` is used as `int(param)` (how
+        many values are accumulated) and recorded as `float(param)`, two independently overridable
+        conversions. MEASURED with the boundary off, 12 seeds, kind "accumulation", param 40.0: NO status
+        flip (PRECISION_OK both ways), but `max_stability_rel_err` MOVED because 400 values were summed
+        instead of 40 -- on this module's `SEEDS`, 1.3380112246529956e-16 -> 8.443887765016109e-17, and
+        on the twelve seeds round 8 used, 1.0629659232098665e-16 -> 1.1383077957012963e-16. The
+        DIRECTION is a property of the seed set and not of the defect, which is why the assertion below
+        is that the number moved at all; what does not move is the card, still reading
+        `probe_id='precision:accumulation:40.0'` and `details["param"] = 40.0`, with a DIFFERENT
+        `content_hash` -- a card describing a probe other than the one it ran. The shipped tree refuses
+        it; the subclass spelling of the same note is pinned by
+        `AMeasureCannotDecideItsOwnProbe.test_a_lying_param_cannot_make_the_card_describe_another_probe`."""
+        d = self.DuckParam(40.0)
+        self.assertEqual((float(d), int(d)), (40.0, 400))
+        honest = rb.probe_precision("accumulation", 40.0, SEEDS, CFG)
+        pre = rb.probe_precision.__wrapped__("accumulation", d, SEEDS, CFG)
+        self.assertIs(honest.status, PS.PRECISION_OK)
+        self.assertIs(pre.status, PS.PRECISION_OK)                   # no status flip: hence a note
+        self.assertEqual((pre.probe_id, pre.details["param"]), (honest.probe_id, 40.0))
+        self.assertNotEqual(pre.details["max_stability_rel_err"],
+                            honest.details["max_stability_rel_err"])
+        self.assertEqual((honest.details["max_stability_rel_err"], pre.details["max_stability_rel_err"]),
+                         (1.3380112246529956e-16, 8.443887765016109e-17))
+        self.assertNotEqual(pre.content_hash(), honest.content_hash())
+        with self.assertRaises(TypeError) as cm:
+            rb.probe_precision("accumulation", d, SEEDS, CFG)
+        self.assertIn("'param' is annotated float", str(cm.exception))
 
 
 class AClosureVariableOfAFactoryIsItsParameter(unittest.TestCase):

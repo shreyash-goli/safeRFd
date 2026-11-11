@@ -7090,3 +7090,627 @@ The owner's first 3.12.4 baseline failed on `test_lint_script_passes` because **
 in-flight `robustness.py` carried `from types import FunctionType`**, which `lint.sh` bans by name —
 independently corroborating the SR-11 owner's note about that constraint, from the opposite side. Both
 owners measured it; neither guessed.
+
+## Round 8, SR-11: **FAIL** (6th). The boundary is real; its PROOF only ever swept subclasses.
+
+**Date:** 2026-11-11, HEAD `ff18bd1`. Interpreter **3.12.4**, environment
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src` and nothing else. Baseline re-measured in a verified
+`git archive HEAD` copy: **488 OK**. The repository was never written to.
+
+### The finding: a duck-typed scalar is not a subclass, so it has nothing to collapse
+
+`_plain_value` collapses `str`/`int`/`float` **subclasses** (and containers of them). `src/toy/schema.py:190`
+is the fall-through — `return x`, "an arbitrary object is returned unchanged". **A caller's object that
+is not a subclass stores no value for `_plain_value` to read, is returned identically, and reaches the
+gate.**
+
+**The blind spot is written into the probe's own rationale.** `tests/toy_tests/test_schema.py:850`
+`_subclassed()` rebuilds values with `type("FloatSub",(float,),{})` and nothing else, and its docstring
+states the design choice that causes this: *"The subclasses do not lie about anything. That is
+deliberate: the property under test is that the object STORES the plain value."* **A duck-typed object
+has no stored value**, so the property the probe tests cannot be stated about it — and
+`_parameter_coverage_complaints` feeds only `ts._subclassed(v)`. The boundary was proven over exactly
+half the class.
+
+**This is in none of the four declared residuals** — not a method, not a carrier parameter, not a
+container, not a callable's return. And `_plain_arguments`'s own *"ONE LIMIT INHERITED FROM
+`_plain_value`, stated rather than left to be discovered"* names only the **container** limit.
+
+### Four status flips and the error escape, all re-opened
+
+| route | honest | duck-typed | consequence |
+|---|---|---|---|
+| **F2** `shift_jitter.eps` | `SENSITIVITY_EXCEEDS_BOUND`, 12 viol | `SENSITIVITY_WITHIN_BOUND`, 0 viol | flip, with `max_abs_dev` **identical** (2.416164653623794e-07) — the jitter unchanged, only the bound moved |
+| **F3** `shift_scale.factor` | `INVARIANCE_DEFECT`, n_bitwise_equal 0 | `INVARIANCE_HOLDS`, n_bitwise_equal 12 | a degree-1 measure certified under a declared degree-2 invariance |
+| **`rel_tol`** (past the *kept* `_plain_parameter` line, which leaves a non-number untouched by design) | `INVARIANCE_DEFECT`, 12 viol | `INVARIANCE_HOLDS`, 0 viol | `max_abs_dev = 6.436e-04` serialised in **both** cards |
+| **F4** `make_measure_fixture.rows` | `INSUFFICIENT_EVIDENCE`, `UNKNOWN` | `INVARIANCE_HOLDS`, **`TOY_RESULT`**, n=12 | a 12-seed measurement on 3-row fixtures the module refuses to build |
+| **F4(b)** | documented `ValueError` | **`IndexError`** | propagates out of a public probe, outside the declared `(ValueError, TypeError, ArithmeticError)` family |
+
+### Three claims falsified — and one of them is mine
+
+1. `make_measure_fixture.__doc__`: *"Both are closed by the gate now seeing the value the object
+   STORES"* — a duck-typed `rows` **has** no stored value.
+2. The fix's test-class docstring pins only the subclass spelling, and the `IndexError` test asserts
+   closure using `LyingRows(2)` alone.
+3. **The recorded decision not to add `try/except IndexError` rests on a premise measured FALSE.** The
+   reason was *"with the gate seeing the stored value the branch is unreachable, and an unpinnable guard
+   is decoration."* **The branch is reachable and the guard is pinnable** — the reproducer pins it.
+   **I endorsed that refusal in this journal in the owner's own words.** I was wrong to; the premise was
+   never tested, and "an unpinnable guard is decoration" is a good rule that was applied to a guard
+   that turned out to be pinnable. **A refusal is only as good as the measurement under its premise.**
+
+### Why this is inconsistency rather than scope — the measurement that makes it actionable
+
+The attester mapped where the class **is** defended: **every numeric parameter serialised into the card
+is caught by `deep_freeze`'s type whitelist, and every type-checked one is caught by its check.** The
+duck-typed spellings of `kind`, `tol`, `min_seeds`, `seeds`, `c` and `big` were all **refused**
+(`ValueError: cannot freeze DuckKind into a scorecard`, `min_seeds must be an int`, `seed must be an
+int, got DuckInt`, or no movement at all).
+
+**So the invariant that actually holds today is: "either the boundary collapses the stored value, OR
+`deep_freeze`/an `isinstance` refuses the object" — and `eps`, `factor`, `rel_tol`, `rows` are exactly
+the four that satisfy neither disjunct, because they are the four that only ever live in a closure or
+in control flow.** That is a four-item gap in a real defence, not an absent defence.
+
+### Verification items: all six confirmed, with two corrections to the owner's figures
+
+**No exemption list** — confirmed by source *and* at runtime: **32 public callables, 32 behind the
+boundary**, 88 parameters, 30 declarations, and the attester additionally checked for a callable the
+`isfunction` selector could miss (`partial`, callable instance, module-level `staticmethod`): **none
+exists**. **A declaration for a collapsible parameter fails** — 4 failures. **Method census**
+independently recomputed as exactly the three claimed; adding a public method kills exactly the one
+test. **Honest-data invisibility** — **88/88 parameters identity-preserved**, three `content_hash`
+equalities through vs around the boundary.
+
+Two corrections: **`__wrapped__` is not a valid before/after control for `shift_reorder_rows`**, because
+the kept in-body `rel_tol = _plain_parameter(rel_tol)` still fires — it is valid for `shift_jitter` and
+`shift_scale` only. And **the "13 tests" figure is 13 *entries* = 10 distinct test methods** (one
+contributes 4 via subTests); moreover `test_the_assertion_is_on_the_ARGUMENT_not_on_the_called_name`
+**does not fail** under that mutant, because it builds its own inert boundary and is therefore
+independent of the real one.
+
+### Notes, no status consequence
+
+`probe_precision.param` duck-typed: both runs read `PRECISION_OK` and both cards say
+`param = 40.0`, but `max_stability_rel_err` moved (1.0630e-16 → 1.1383e-16) because **400 values were
+summed, not 40** — **a card describing a probe other than the one it ran**, `content_hash` differing, no
+flip. And `schema.py:173`'s `changed = type(x) is not dict` means a non-`dict` `Mapping` (e.g. a
+`mappingproxy`) is returned as a **new plain dict** — the only hole in the identity property.
+
+### The fix this calls for is in the PROBE, not only the boundary
+
+The attester's shape, which I accept: the four live parameters need either a refusal or a numeric-type
+requirement — **and the probe that proves coverage needs a second spelling alongside `_subclassed`, a
+liar that is *not* a subclass, "or it will keep certifying only the half of the class it sweeps."**
+Same meta-pattern as every round: the defence was sound where applied, and **the generator that proves
+coverage swept one spelling.**
+
+## Round 8, SR-13: **FAIL** (6th). The render pin covers every NUMBER completely. The page prints non-numbers.
+
+**Date:** 2026-11-11, HEAD `ff18bd1`. Interpreter **3.13.5** ambient, `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src`.
+Baseline reproduced: **509 OK** / `test_dashboard` **229 OK**. All mutation in a verified `git archive HEAD`
+copy. **The literal acceptance clause holds** — no missing result renders as `0`.
+
+### First, the negative result, because it is the strongest measurement in this project
+
+A logging subclass of `int`/`float` storing the honest value and recording **39 candidate dunders** when
+consulted (`__bool__`, `__trunc__`, `__round__`, `__ceil__`, `__floor__`, `__hash__`, all six
+comparisons, `__len__`, `__iter__`, `__getitem__`, `__contains__`, the arithmetic and reflected set,
+`__complex__`, `__reduce__`, plus the seven already swept) was forged onto **every** declared number,
+every per-seed `MetricValue`, every record/training metric, every history position and every snapshot
+scalar, and rendered through both renderers over **30 payloads** — the pin's own plus **11 branches it
+does not take** (malformed snapshot, `MAX_TABLE_ROWS` truncation, non-`ExperimentRecord` entries,
+malformed history, `laundered_below_minimum`, the relabelled-fixture branch, a failing gate, the
+CONDITIONAL branch, the heavy-tailed 6.3 study) and all 18 honest shapes.
+
+**~13,500 forged instances. 0 dunders consulted. Nothing raised.** Probe non-vacuity measured rather
+than assumed: on the reverted tree it reports exactly `IntervalPair.mean.__float__` and nothing else.
+**So there is no eighth conversion on a number, and the declared residual — "a field read only on a
+branch the payload does not take" — was tested over 11 such branches and is empty.** The render
+boundary's coverage over numbers is, as far as this can be measured, complete.
+
+**The gap is that the page prints things that are not numbers.**
+
+### Finding 1 — `subject_kind`, the page's one verdict-bearing STRING, re-read after admission
+
+`src/toy/dashboard.py:860` tests membership with the caller's `__hash__`/`__eq__`; **`:865` is
+`kind = raw`** — *the admitted object carried forward instead of the admitted key*, **the round-7
+re-read pattern exactly, in a string lane**; and `:884` is
+`relabelled = bool(exempt) and kind != "fixture"`, decided by the caller's `__ne__`. All verified by me.
+
+A `str` subclass that **is** the text `"trained"` but hashes and compares as `"fixture"`:
+
+| `subject_kind` | joint cell | H1/H2/H3 | CONTRACT PROBLEM | relabel message | label |
+|---|---|---|---|---|---|
+| `"fixture"` (honest) | JOINT_SUPPORTED | SUPPORTED ×3 | no | no | SCORER-VALIDATION FIXTURE |
+| `"trained"` (honest) | **JOINT_INCONCLUSIVE** | INCONCLUSIVE ×3 | **yes** | **yes** | TRAINED SUBJECT |
+| `FakeStr("trained")` | **JOINT_SUPPORTED** | **SUPPORTED ×3** | **no** | **no** | **SCORER-VALIDATION FIXTURE** |
+
+**Byte-identical to the honest fixture render**, while `str(j.subject_kind) == 'trained'` and
+`isinstance(..., str)` is True. This defeats structural **guard 1** of the module docstring — the
+verdict-styled element must carry "the result's OWN subject kind … a declared trained subject says so"
+— and erases the relabel paragraph that would have withheld every verdict.
+
+**And it constructs through the PUBLIC API.** `JointResult.__post_init__` (`benchmark.py:1701-1706`)
+decides all three of its checks with `in`/`==`/`!=`, so `analyze_scores(..., subject_kind=FakeStr("trained"),
+fixture_name="oracle")` builds, `carries_exemption` is True, gate 11(c) is taken, and the page prints
+`SUBJECT_KIND_CODE 2.0` while the result declares trained. **CLAUDE.md's own rule earned its keep
+again** — *"I needed `object.__setattr__` → re-check the public route"* — and the public route exists.
+Honest limit, measured over 5 score shapes: the exemption changed no `control_adequacy` outcome, so the
+public route is a **label/figure** discrepancy and the `object.__setattr__` route is the verdict flip.
+
+**Two load-bearing prose claims are false.** `_subject_kind`'s docstring: *"**ONE REAL CROSS-CHECK IS
+AVAILABLE and is made here** … a mismatch means the result was relabelled after construction and **is
+reported as a problem**."* **Both halves are defeated by one object.**
+
+**Why seven rounds missed it, counted rather than argued:**
+`test_absent_or_invalid_subject_kind_renders_UNKNOWN` sweeps exactly ten values — `"Fixture"`,
+`"FIXTURE"`, `"trained "`, `""`, `None`, `0`, `True`, `[]`, `object()`, `"safe"` — and **0 of 10 is a
+`str` subclass instance.** That is round 7's *"0 of 107 … were `int`/`float` subclass instances"*, in a
+different module, in the same round, **found independently by a different attester.** The SR-11 attester
+found the mirror in `schema.py` the same hour: *"the probe rebuilds values with
+`type('FloatSub',(float,),{})` and nothing else."* **Two modules, two attesters, one shape: the
+generator that proves coverage sweeps one spelling.**
+
+Fix diagnosed by the round-7 rule — normalise at admission: `str.__str__(raw)` at both `:860` and
+`:865`, which reads the stored text and is not overridable from a subclass, the exact argument
+`_count`'s `int.__int__` rests on. With it, all three rows go honest and `test_dashboard` is **229 OK**.
+
+### Finding 2 — `len(files)` is the eighth conversion, and it is not on a number
+
+`dashboard.py:679` **and `:680`** (both branches): `f"total ({_e(len(files))} files)"`. **The only
+quantity either renderer prints that passes through no kind function, is absent from `STORED_NUMBERS`,
+and is not swept by the render pin** — whose snapshot half forges only the mapping's *scalar* values.
+`isinstance(files, (list, tuple))` admits a subclass and the rows are built by `__iter__`, so the two
+disagree: a `list` subclass whose `__len__` returns 0 renders **`total (0 files)` above the same 8
+honestly-rendered rows**, every per-file figure honest. **The Source-diff inventory is SR-13's first
+named deliverable.** Honest-threat-model only (`load_snapshot()` yields plain lists) but
+`render_dashboard(data)` is public and `_int_cell`'s own docstring declares the snapshot hostile.
+Unkilled by `test_dashboard`.
+
+### Verification items: all five confirmed, with one figure correction and one measured vindication
+
+Reverting the fix gives **exactly 14 of 182** — confirmed. A declaration-table-only sweep would have
+reported **4 of the 14** and left every record and training metric cell open — confirmed, so the
+four-way derivation was load-bearing. All **four** D4 doc-only mutants die. `numeric_fields_of`'s two
+halves **agree exactly per class**, both mechanisms kill the `extra_count` mutant (exactly 2 failures,
+227/229 green so the kill is attributable), and **with the annotation half deleted the mutant is
+unkilled — reproducing round 7's blind spot exactly.**
+
+**Figure correction:** `numeric_fields_of` yields **21 names, not 15** (`13 + 3 + 3 + 2`). The doc states
+`IntervalPair`'s contribution as its *declared* 7 where the enumeration yields 13 (7 declared ∪ 6
+exempt); **15 is `len(STORED_NUMBERS)`, not the union.** Doc-only, in the paragraph that justifies the
+fix → note.
+
+**And the exemption-table widening is vindicated by measurement, not taste.** Against a new cross-check
+consuming the exempt `IntervalPair.n_boot`, the **pre-round-8 five ill-typed values moved the page
+0/5**; the round-8 legal half moved it **2/5**. The old table was blind to that class **by
+construction**.
+
+### Bounces worth keeping
+
+`IntervalPair.flags` as a `tuple` subclass with a lying `__contains__` → JOINT_INCONCLUSIVE unchanged
+(source (1) carries it alone, as `_n_problem`'s one-directional argument says it should).
+`HypothesisResult.blocking` as a `tuple` subclass with `__bool__` → False on the all-blocking shape →
+**not one byte moved**. `ComponentResult.metric` as a `str` subclass re-pointing `_declared`/`_series_of`
+at another protocol metric → **32 component×target pairs, every one alarmed or still JOINT_UNSUPPORTED**
+(the `direction != … or margin != declared` pair refuses the transplant). A **duck-typed** non-`str`
+`subject_kind` → refused by `isinstance` → UNKNOWN + problem. Every other `len()` is taken on a
+container the module just built.
+
+### Cross-owner item, recorded not acted on
+
+`benchmark.py:1701-1706` needs the mirror treatment — it is the public route's origin. **That file is
+SR-10's and SR-10 passed attestation today**, so it is not being edited: the render-side fix closes the
+consequence, and the attester found **no public-route verdict flip**. Recorded for SR-12's lane.
+
+## Round 8, SR-15: **FAIL**. The declared residual's stated mitigation is false.
+
+**Date:** 2026-11-11, HEAD `ff18bd1`. **CPython 3.12.4**, pytest 8.4.1, `PYTHONDONTWRITEBYTECODE=1
+PYTHONPATH=src`, nothing else — the attester deliberately never used the ambient 3.13.5 and so never
+needed `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`. Every mutant regenerated from a `git archive HEAD` tar
+(`sha256 a6fef872…`); the repository was never written to.
+
+Per claim: **deterministic PASS**, **pinning PASS** (every limit written down), **offline BLOCKED**,
+**clean-clone PASS** with notes, **complete offline regression suite PASS as a measurement, overstated
+as coverage**. Overall **FAIL** on F1 and F2.
+
+### F1 — the residual IS the hole: "the runtime half covers a bad row however it arrives" is false
+
+`tests/toy_tests/test_scripts.py:2297-2299` concedes the static parse cannot see a
+`globals()[…]`/`setattr` binding, then states the mitigation: *"the runtime half below is what covers a
+bad row however it arrives."* **The runtime half only rejects rows that VIOLATE the declaration
+contract. Round 7's F2 mutant was a well-formed row.** So the acknowledged door admits **precisely the
+mutant class the new test was written for**, and nothing covers it.
+
+Measured — one line, `globals()["EXEMPT_CATEGORIES"] = EXEMPT_CATEGORIES + (("ZED", …, 8, "", (), "for a
+case-sensitive filesystem (expected on Linux runners)"),)`:
+- `test_scripts` → **151 OK, rc=0. Unkilled.** The exactly-once test passes in 0.004 s; the
+  token-coverage test derives tokens from the parsed **literal**, so no `ZED_CAP` is ever required.
+- Runtime → `RESULT: OK`, **no POLICY token in any mode**, with a working cap, and it prints
+  *"note: 4 skip(s) for a case-sensitive filesystem (expected on Linux runners)"* — **the figure
+  `CLEAN_CLONE.md` tells a Linux reader to expect, under a token nobody declared.**
+- **The note defence is exact-string** (`_note in {c[6] for c in CATS}`), so a **near-duplicate**
+  ("…Linux **runners**") is accepted; the verbatim duplicate *is* caught, dying before any skip is
+  judged.
+- **Control proving the hole is the DOOR and not the row:** the identical row placed **inside** the
+  literal fails **7 test methods**.
+
+### F2 — `.github/workflows/ci.yml:3` still asserts an egress property, and it is false
+
+> *"Nothing in this workflow reaches a remote host except the pip-install step of the optional-deps job."*
+
+Both jobs run `actions/checkout@v4` and `actions/setup-python@v5`: **the actions and the repository
+contents are fetched from github.com.** False for `core-no-deps` **independently of hermeticity** — and
+it is **the same claim `README.md:33` retracted this round.** Nothing pins it: the withdrawn-guarantee
+test reads `run_tests.sh`, `test_scripts.py` and `CLEAN_CLONE.md`, so **`ci.yml`'s 24-line normative
+header is outside the discipline entirely.** Sub-note, verified by me: `ci.yml:10` says the loopback
+attempts mean *"no packet reaches an interface"* while `CLEAN_CLONE.md:773` says the careful version,
+*"no packet reaches a network **interface**"* — **loopback traffic does traverse `lo`.**
+
+### F3 — a retracted phrase survives, and it is unpinnable by the mechanism as built
+
+`scripts/run_tests.sh:291` still reads *"…'connection refused' from the local stack and **nothing leaves
+the host**"* — the exact phrase `README.md:30` retracted this round. Scoped to a `127.0.0.1` connect it
+is defensible, **but the mechanism cannot adjudicate it either way**: added as a needle it would **pass
+at every half-width 0–7**, because *the same line* carries *"It used to be 192.0.2.1:9"* — a correct
+history note about a different fact. Verified by me: both the claim and its decoy are on line 291.
+**A line-window retraction check cannot pin a claim whose line also carries an unrelated retraction
+marker.** That is the ±1 laundering shape, still open for this phrase, and the shared `MARK` regex —
+correctly not widened — is what makes it so.
+
+### Two figure corrections, one of them to the fix's own justification
+
+**The window measurement's direction was right and its figure was wrong.** The pre-fix laundering
+history note is at line **256 — two lines above, not six** — so the minimum passing half-width is **2**,
+and `test_scripts.py:672-673`'s *"a different sentence six lines above it"* **misstates its own
+measurement**: ±1 is tight by **one** line, not five. Further: pre-fix `contains "case-sensitive"`
+**fails at both ±1 and ±6**, so **only one of the two new needles actually required the narrower
+window.** And in the other direction, on the current tree `CLEAN_CLONE.md:391` **fails at ±1** and
+passes at ±6 — **so lowering all five needles to ±1 would turn the suite red.** Per-needle widths are
+right, for a reason different from the one recorded.
+
+**The "at least six" hedge holds:** independently counted as **7 test methods / 8 failure records**.
+
+### A second-order note worth more than its size
+
+`_suite_skip_sites` collects only `ast.Constant` reasons, and only from `tests/toy_tests/*.py`. **Two
+real skip sites build their reasons with an f-string and are outside both derivations**
+(`test_tensor_ops.py:29` and `:31`), and `tests/test_toy.py` is in the discovered suite and outside the
+scan too. Currently benign — those reasons carry no declared phrase and run through torch mode — and an
+undeclared **named** claim still lands as `POLICY:TOOL_UNDECLARED` at runtime whatever built the string.
+But **a computed reason claiming the unnamed FS category would have no runtime backstop beyond FS_CAP 8
+and the baseline.**
+
+### Bounces, including one correctly refused escalation
+
+`--expect any` with an unexplained reason → OK, no token: residual 4 as designed. The substring-rule
+residues all still exempt, **plus the attester's own addition — `tоrch` with a Cyrillic `о`** — and it
+**correctly classified the homoglyph as a new instance of the declared class, not a new class**, with
+the same bound. The declared legitimate-deny trade re-measured. An alternation behind a mandatory group
+→ `POLICY:INTERNAL`. `TOOLS = ("ruff", "torch")` → `POLICY:INTERNAL`, run stops;
+`TOOLS = ("ruff", "torchfix")` exempt at runtime **but the per-row equality test fails on it at test
+time**, so F3's declared cost is bounded exactly as claimed.
+
+## SR-11 fix (round 9): the duck-typed spelling. **The gap was 13 parameters, not 4.**
+
+**Date:** 2026-11-11. `robustness.py` +165/−11, `test_robustness.py` +639/−16.
+**`test_robustness` 153 → 164 OK** on **3.12.4 and 3.13.5**; the three modules **488 → 499 OK** on both.
+
+### The headline: the systematic probe found 9 parameters the targeted search missed
+
+Round 8's attester found **four** routes with status flips. The duck-typed half of the coverage probe,
+run against the pre-fix tree, returned **13 complaints**: `benchmark_outcome.metric`,
+`make_measure_fixture.{rows,width,noise,magnitude_spread}`, `make_order_sensitive_fixture.big`,
+`probe_precision.param`, `shift_jitter.eps`, `shift_reorder_rows.rel_tol`, `shift_scale.{factor,degree}`,
+`shift_translate.c`, `standard_shifts.reorder_rel_tol`. **The gap was 13, not 4** — and
+`shift_translate.c` and `make_order_sensitive_fixture.big` are the two that *bounced* in round 8's
+subclass sweep, so the duck spelling is strictly stronger there, not merely different.
+
+**This is the clearest evidence yet for the round-8 meta-finding:** a generator derived from the
+invariant outperformed a skilled targeted search by a factor of three, in a module two attesters had
+already swept.
+
+### The invariant is now a DISJUNCTION, and both halves are asserted
+
+> **Either the value arrives at the callee collapsed to the scalar it stores, or the call is refused
+> inside `(ValueError, TypeError, ArithmeticError)`.**
+
+The subclass half asserts the first disjunct *at the callee, on the argument*; the **duck** half asserts
+the second by calling the real callable with one ducked argument. **A parameter satisfying neither is a
+complaint — and so is one refused OUTSIDE the declared family.** That last clause is what makes the
+`IndexError` class structurally unrepeatable rather than fixed once.
+
+Mechanism: a parameter **annotated** `int`/`float`/`str` must receive a value this module can read a
+stored scalar out of, else `TypeError`. Derived from the signature the boundary already reads, so **a
+new annotated parameter is covered by default**. It deliberately does *not* pre-empt a plain scalar of
+the wrong type — `rows="4"` still gets the callee's own diagnostic.
+
+**Annotations are matched as TEXT and never evaluated**, with the reason recorded: `lint.sh` names
+`typing.get_type_hints` as a string-evaluating escape, and *"this must not be a fresh instance of that
+class."* The fix refused to create the defect class it was written to close.
+
+**Two independent derivations of the 30-parameter duck set are cross-checked**: the parameters the
+*signatures* annotate as scalars (what the boundary enforces) against the parameters whose *canonical
+value* is a scalar (what the duck half exercises). Equal at 30; a parameter in one and not the other
+fails.
+
+### Pins, each watched failing
+
+**Mutant T** (delete only the 6-line type requirement) → **KILLED, 14 entries = 14 distinct test
+methods** (12 failures, 2 errors, no subTests) — and **as round 8's correction predicted,
+`test_the_assertion_is_on_the_ARGUMENT_not_on_the_called_name` is NOT among them**, because it builds
+its own inert boundary. The corrected figure was used correctly one round later.
+**Mutant G** (delete only the 2-line empty-choice guard) → **KILLED, 1 method.** *"That is the guard's
+pinnability, demonstrated."*
+
+Against the pre-fix tree, the 12 new/changed tests gave **10 failures + 2 errors**, and the two errors
+are the right ones. The permanent pin requires **12** named parameters, not 13 — **measured, not
+fudged**: `standard_shifts.reorder_rel_tol` is refused in that control because it forwards to
+`shift_reorder_rows`, whose own boundary is still on. *"Unwrapping one function at a time cannot see a
+parameter protected one call down."*
+
+### The refusal I endorsed is now definitively closed, and the diagnosis is exact
+
+`:942-950` binds the spare-row list and raises `ValueError("need rows >= 4 and width >= 1: no row is
+left to mask out")` before `rng.choice(spare)`, keeping the documented text so the existing F4 regex pin
+still holds.
+
+**What the earlier refusal got wrong, in the owner's words:** *"it inferred unreachability from a
+property of a different layer — the boundary one function out — and had never measured that layer
+against anything but a subclass. The branch was reachable through a public parameter; and 'unpinnable'
+was false because this module's own declared control reaches the body with the boundary off. Both halves
+of that reasoning were premises, not measurements."*
+
+**And a refinement of round 8's correction to me:** `__wrapped__` **is** a valid before/after control
+for all four routes *for a duck*, because the kept in-body `_plain_parameter` returns a non-subclass
+unchanged — **asserted, not assumed** (the closure cell holds the duck itself). Round 8's correction was
+right about subclasses and the fix measured the other half rather than inheriting it.
+
+### Honest limits, stated rather than papered over
+
+The duck F4 card is **not** byte-identical to the honest `INSUFFICIENT_EVIDENCE` one — status, labels and
+absent summary match, but the per-seed reasons name `TypeError` where the honest run names its own
+`ValueError`. Stated in the test. The annotation rule **fails open** on `float | None`, `Union[...]` or
+no annotation — stated *and demonstrated* at `:3057`, together with the clause that makes it safe: the
+duck half complains about exactly such a parameter, shown by injecting both an annotated and an
+unannotated new parameter.
+
+**Over-refusal measured, not assumed:** `Decimal`/`Fraction` still work where unannotated
+(`exact_masked_mse`, `SeedSummary.from_values`); an `int` where `float` is annotated is still accepted;
+`None` for `Optional[str]` still accepted. **One real casualty, in a file the owner owns**, and the way
+it was handled is the point: `arm_difference`'s test passed `b"E"`/`["E"]` and asserted the *callee's*
+`ValueError`, which the boundary now refuses one layer out. The owner **split the loop by which layer
+refuses what** rather than loosening the assertion — `None`/`7`/`""`/`"  "` must still reach the gate
+and raise its original message, and `b"E"`/`["E"]` assert the boundary's `TypeError` **while keeping the
+gate's `ValueError` pinned through `__wrapped__`**. *"No coverage traded."*
+
+### Not closed, pinned as a SET
+
+Duck scalars inside **container-valued** parameters: exactly **four** accept, each with a stated reason
+why a lie there is inconsequential (`arm_difference.arms` keys — already pinned as an unmeasured
+`MetricValue`, never a zero; `plain_loop_mean.values` and `shift_column_offsets.offsets` — data only,
+read by no bound, declared expectation or card field; `thaw.x` — the inverse of `deep_freeze`). **A
+fifth now fails that test.** And `precision_sweep.params` is explicitly **not** in the set, because each
+element re-crosses the boundary as `probe_precision.param` and is refused.
+
+### Two cross-owner requests, both correctly not acted on
+
+1. **`schema.py:173`'s `changed = type(x) is not dict`** (SR-04, freshly attested). Measured:
+   `build_scorecard(details_always=<mappingproxy>)` reaches the callee as a **rebuilt `dict`**, so
+   **the 88/88 identity property holds only because every canonical call passes a plain `dict`.** The
+   card is unaffected (`content_hash` identical), so the defect is confined to the allocation-identity
+   claim `_plain_value`'s own comment makes — **and `MappingProxyType` is the type `deep_freeze` itself
+   produces**, so round-tripping a frozen `details` through a public parameter hits it. Two one-line
+   resolutions offered; SR-04's call.
+2. **`test_schema._subclassed`'s rationale paragraph**, which states a property true of only half the
+   class. Not edited, because nothing in `test_schema` consumes the duck half and *"spending a fresh
+   attestation for a sibling definition is the trade that unmarked SR-09."*
+
+## SR-15 fix (round 9): the run now ATTESTS the registry it judged with.
+
+**Date:** 2026-11-11. `run_tests.sh` +76/−6, `test_scripts.py` +≈420/−40, `ci.yml` +18/−5,
+`CLEAN_CLONE.md` +≈85/−20; `lint.sh` needed no change. **`test_scripts` 151 → 154 OK** on **3.12.4**
+and on **3.13.5** (with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`). `lint.sh` → `LINT: OK`. Implied baseline
+line `toy_tests.test_scripts 154 4` — third column unchanged, the three new tests never skip.
+
+### F1 — "however it arrives" is now a comparison instead of a hope
+
+**The run prints the registry it actually judged with**, at the point of use immediately before the
+`claim()` loop: `exemption registry: N row(s)` plus one JSON line per row rendered from `CATS`, with
+`_REGISTRY_USED` re-compared after the cap loop (`POLICY:INTERNAL` if it changed between listing and
+judging). The test requires that **listing** to equal the parsed `EXEMPT_CATEGORIES` literal
+**row-for-row**.
+
+**The measurement that proves this was the right shape:** on the note-neutral `globals()` variant — the
+general well-formed row — the script still runs `RESULT: OK` with **no POLICY token** and prints **3**
+rows, and **the new test fails on the row-equality assertion**. In the same runs
+`test_the_category_registry_is_assigned_exactly_once_and_never_rebound` and
+`test_every_policy_token_is_asserted_by_some_test` **passed** — *"confirming, by measurement, that they
+cannot see past the literal."* The static half's false sentence is replaced by what is true, with a
+pointer to the comparison.
+
+**Near-duplicate notes closed by folding, not by exact string:** no note may equal, contain, or share
+the first four words of another. Measured pre-fix → post-fix: a one-word tail, a case-and-punctuation
+variant, and a same-opening-four-words note were all **rc=0 OK** and are now **`POLICY:INTERNAL`** —
+while an unrelated note is still accepted, so it is not blanket-firing.
+
+### F2 — `ci.yml` is inside the discipline, with a measured per-file ceiling
+
+`ci.yml:3`'s false egress claim and `:10`'s *"no packet reaches an interface"* are both rewritten with
+the old wording quoted as history, naming that **both jobs reach github.com before a test runs**
+(`actions/checkout@v4` and `actions/setup-python@v5` are themselves fetched) and that hermeticity is
+**unattested**. `:10` now says *"over the loopback device, and no packet reaches a network interface …
+wrong in the one word that matters: loopback traffic DOES traverse `lo`."*
+
+`test_no_withdrawn_guarantee_is_restated_in_a_comment` now scans **four** files including `ci.yml`
+(comment-only), with three new needles. **And a per-file scope ceiling, measured rather than assumed:
+an unmarked needle added to `ci.yml`'s header PASSES at ±6**, because its 24-line header is dense with
+its own correct markers — so everything scanned there is held to the **sentence** rule instead.
+
+**Plus the opposite failure the needle test structurally cannot catch:**
+`test_the_header_discloses_every_remote_fetch_its_own_steps_make`, derived from the workflow's own
+`uses:` entries and job names, kills **deletion** of the disclosure — mutant replacing the paragraph
+with *"The suite reaches no remote host."* → FAIL on `'actions/checkout' not found`.
+
+### F3 — the mechanism can now tell which claim a marker belongs to
+
+`run_tests.sh:291` is reworded so the live claim is scoped to loopback, the retracted phrase is kept
+**as history in its own sentence**, and the `192.0.2.1` note is a separate sentence. **And `MARK` was
+not widened** (round 8 measured why): a needle may now declare scope `"sentence"`, requiring the marker
+**before the needle inside its own sentence**, in the comment block joined across hard wraps.
+
+Measured: the restored line-291 wording **passes a line window at every half-width 0–7** — its own line
+carries "used to" — **and fails the sentence rule**, which prints the lead it judged. Residue stated in
+the docstring: *one sentence that both asserts and marks a claim satisfies this, as it satisfies any
+window.*
+
+### The window figures corrected — and a third independent reason in one round
+
+- Pre-fix, the false sentence is at **258** and the correct history note at **256**: **two** lines, not
+  six. Minimum passing half-width **2**, so **±1 was tight by one line, not five**.
+- Pre-fix `contains "case-sensitive"` **fails at every half-width 0–7**, so **only one of the two
+  round-6 needles ever needed a narrow window.**
+- The per-needle decision is now justified by what was actually measured, **three times in one round**:
+  at round 8's start `hide a torch test` failed at 0–4 and passed from 5; this round's doc rewrite moved
+  that marker onto the needle's own line (passes at 0); and the binding occurrence on the final tree is
+  a comment in `test_scripts.py` with minimum **2** — **so uniform ±1 is still red, for a third reason.**
+- **The lesson recorded is better than the fix:** *"marker distance is a property of prose, so a width
+  is headroom, not a fact about a needle."*
+- The hedged "at least six" is replaced by the **measured 7 methods / 8 failure records**, named
+  individually and verified independently. Footnote worth keeping: on the *current* tree the same ZED
+  row produces **112** failure records, because its note is now a near-duplicate, so the registry is
+  refused and every synthetic green-run expectation goes red. Loud but unambiguous.
+
+### The second-order note: addressed, and the widening changed nothing
+
+`_suite_skip_sites` now scans the **whole discovered suite** recursively — `tests/test_toy.py`
+included — and a new `_suite_computed_skip_sites` collects reasons that are not one literal, with the
+fragments a static reader can see (f-strings, `+`, conditionals, call operands). New test: **a reason
+the derivations cannot read may not carry a declared exemption phrase**, with a tree-independent
+positive control for the extractor.
+
+Measured today: **17 literal sites, 2 computed** (`test_tensor_ops.py:29`, `:31`), and **no skip at all
+in `tests/test_toy.py`** — so the widening changed **no** derivation (gates still `{ruff}`, carriers
+still 3). Pin verified by failure. **No cross-owner request required**: those two computed reasons carry
+no declared phrase, with a heads-up recorded for that file's owner if they are ever reworded.
+
+### Residues stated in code rather than hidden
+
+A note that is a genuine **paraphrase** (shares no opening, contains nothing) is still accepted. A row
+that is **well-formed, declared in the literal and dishonest** is bounded only by the caps and the
+baseline — never by the declaration. A single sentence that both asserts and retracts defeats any
+marker rule. **"offline" stays BLOCKED**; no network-denied run was attempted and the positive control
+is left defined and unrun.
+
+## SR-13 fix (round 9): the pin extends from every FIGURE to every FIGURE AND DECISIVE WORD.
+
+**Date:** 2026-11-11. `dashboard.py` +332/−40, `test_dashboard.py` large. **`test_dashboard` 229 → 240
+OK** on **3.13.5 and 3.12.4**; combined with `test_benchmark` **509 → 520 OK** on both.
+**Cost flag: `test_dashboard` roughly doubles in wall-clock** (600 forgeries × 2 full renders). The
+owner deliberately did **not** trim it, because the 600 is where the findings were and *"trimming after
+the fact would have invalidated the measurement matrix."*
+
+### Four more fail-open sites, none of them in my brief
+
+Found by sweeping **every** `str`-declared or str-valued field of the eight rendered classes — 20 fields
+× 5 string dunders × 28 lie texts = **2,800 forgeries**. **Not one of the six was killed at HEAD; the
+suite was 229 OK with all of them live.**
+
+1. **`_vcoerce` — the STORED VERDICT, structural guard 4.** `enum_cls(value)` is a
+   `_value2member_map_` lookup, i.e. the caller's `__hash__`/`__eq__`. A result whose every
+   `ComponentResult.verdict` and `HypothesisResult.verdict` **stores the text `"UNSUPPORTED"`** rendered
+   **H1/H2/H3 SUPPORTED and JOINT_SUPPORTED with no mismatch paragraph.** The same text as a plain
+   `str` renders JOINT_INCONCLUSIVE with every verdict withheld. *"The recomputation was right;
+   `stored is not rv` was compared against the wrong member."* **This is the most severe site found in
+   the project: the stored verdict itself.**
+2. **`_coerce_class` — the EVIDENCE BADGE, structural guard 2.** A record whose stored label is
+   `"SOURCE_OBSERVED"` — **the one label the module docstring says is invalid on a run record** —
+   rendered a **TOY RESULT** badge with no problem; `"NOT_VALIDATED"` and `"HYPOTHESIS"` likewise.
+   **35 of 36 forgeries moved the page unalarmed**, and that function's own first sentence promises
+   "degrade to UNKNOWN, never upward" — **inverted**.
+3. **`HypothesisResult.hid`** — three rows all captioned `H3`, JOINT_SUPPORTED, 0 alarms, every figure
+   honest.
+4. **`ComponentResult.direction`** — `less 0.1` printed in all five rows while `bm.interval_verdict`
+   applied the honest `greater`; the `__eq__` spelling passed `_declared`'s agreement check **while
+   changing the scorer's own branch**.
+
+### A correction to my brief, and a second one to my own table
+
+**I told the owner that every `len()` other than `len(files)` is taken on a container the module just
+built. That is false.** `_untrusted`'s `len(s)` at `:120` reads **the caller's object**: a 400-character
+`name`/`subject`/`GateResult.name` whose `__len__` returns 0 rendered **300 characters with no
+`[... truncated]` marker** — the box asserting completeness while withholding a quarter of the string —
+and `__len__ → 9999` on `"n"` marked a truncation that never happened. The same site's `s[:MAX_TEXT]`
+reads `__getitem__`, which produced **38 of the 47** findings when that fix is reverted.
+
+**And my Finding-1 table mislabelled a row.** The middle row is the **`object.__setattr__` relabel**
+route, not `analyze_scores(subject_kind="trained")` — measured, the latter renders JOINT_SUPPORTED with
+a TRAINED SUBJECT label and **no** problem, *"because it is granted no exemption and so has nothing to
+contradict."* Consistent with the honest limit I had stated; the row was wrong.
+
+### The extended pin: three mechanical halves, three lanes, and a vocabulary
+
+Site list derived three ways, **no names in the test file**: `db.STORED_WORDS` × every live instance (18
+sites, so a newly declared string inherits the pin); `string_fields_of` = annotation ∪ honest value,
+**required to EQUAL `STORED_WORDS`, so a new string field fails the suite until it is classified** — and
+the value half is what caught `evidence_class` and `verdict`, both `str` Enums, both round-9 findings;
+and `LEN_SITES` by AST (**11 sites, all module-built**) plus `container_sites()` derived by **walking the
+payload** (9), so a `len()` on any caller container tomorrow inherits a behavioural pin.
+
+Three lanes, assigned by measurement: **`"shown"`** (15 fields) must render byte-identically;
+**`"key"`** (3) must render byte-identically **or fail closed** (the joint cell loses `vd-supported`);
+**`"bare"`** (2) are declared residuals **asserted still open, so they go red if ever closed** — a
+residual that cannot be forgotten or silently widened.
+
+**The insight that makes it work:** the lie *texts* come from **nine module vocabularies**
+(`_SUBJECT_KIND_LABELS`, `_HNAMES`, `_KNOWN_SCOPES`, `Verdict`, `JointVerdict`, `EvidenceClass`,
+`GATE_SCOPES`, and the metric and direction columns of `PRIMARY`/`CONVERGED`) — *"so the lie is always
+a word **this page recognises**, which is the only kind a vocabulary lookup can be fooled by, and the
+exact thing the ten-value table lacked."*
+
+**Eight reverts, each watched failing.** R8 (= HEAD behaviour) gives **99 of 600 findings across 10
+distinct sites, identical on both interpreters**: 28 `GateResult.name [getitem]`, 14 `hid [eq]`, 14
+`hid [str]`, 7 `name [len]`, 6+6 `direction [eq]/[str]`, 4 `verdict [eq]`, 4 `evidence_class [eq]`, 4
+`subject_kind [eq]`, and the rest. Non-vacuity measured in five parts, including that `_word` is immune
+to all five dunders and returns exactly `str`.
+
+### Both false claims withdrawn, and the round-8-beating shape now dies
+
+`_subject_kind`'s two claims are quoted and withdrawn in one passage with the measurement — *"The
+cross-check is three string operators and not one of them read the stored text"* — replaced by the
+weaker true claim: **"THE CROSS-CHECK IS MADE ON THE CHARACTERS THE LABEL STORES, NOT ON THE OBJECT
+THAT CARRIES THEM."** **All six D4 doc-only mutants die, including the two "restore the absolute IN
+PLACE" shapes that beat the round-8 loop.**
+
+The 21-name figure is corrected **and now counted rather than restated**: per class `[13, 3, 3, 2]`,
+total 21, with `sum(len(v) for v in STORED_NUMBERS.values()) == 15` asserted separately so the two are
+never confused again.
+
+And the `subject_kind` table: the **"0 of 10" is now asserted**, so the blind spot cannot return
+silently; plus **30** `str` subclass instances generated as `3 kinds × 2 other kinds × 5 dunders` **from
+the module's own label table** (not written out, so a new kind inherits them) and **60** more whose text
+is not a kind.
+
+### Refusals, each with a measurement, and each pinned as still-open
+
+`GateResult.reason` — new measurement: **18 of 90 forgeries moved the gate table with JOINT_SUPPORTED
+standing**, but it is *"an explanatory cell beside a PASS it does not decide"*; declared `"bare"` and
+**red if ever closed**. `MetricValue.reason` likewise. `ComponentResult.metric` — round 8's bounce is
+now a standing assertion, **54 of 54 withhold the verdict**; only its display cell was routed through
+`_word_text`, so the page alarms *and* prints the true name. `GateResult.name` — **54 of 54**
+fail-closed; its `__eq__` half re-points a lookup inside **another owner's property**, unreachable from
+here. `HypothesisResult.verdict` — **27 of 27** render JOINT_INCONCLUSIVE. **No number was re-swept**;
+round 8's negative result taken as given.
+
+### Cross-owner request, measured and correctly not applied
+
+`benchmark.py:1701-1706` decides all three `subject_kind` checks on the caller's object. Measured:
+`liar in SUBJECT_KINDS` → **True**; `SUBJECT_KIND_CODE[liar] == SUBJECT_KIND_CODE["fixture"]` → **True**,
+so the stored `subject_kind_code` metric is **2.0 for a label that reads "trained"**;
+`analyze_scores(...)` constructs and **`carries_exemption` is True** — the gate-11(c) exemption granted
+to a result whose label stores "trained". `benchmark.py` already has the **numeric** half and
+`schema.py` the general one, *"which is why `ExperimentRecord`/`MetricValue` string fields are closed on
+the public route and `JointResult.subject_kind` is not."* **The ask is the string half.** Both files
+left untouched, attestation intact — and `dashboard.py` now **reports it honestly rather than relying on
+it**: the public-route forgery renders TRAINED SUBJECT, a CONTRACT PROBLEM, and no `vd-supported`.

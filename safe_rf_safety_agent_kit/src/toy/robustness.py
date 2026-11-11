@@ -108,6 +108,15 @@ Structural rule against single-example claims (checked at construction, not mere
   requires every other parameter to be PROVEN to arrive plain AT THE CALLEE (it asserts the ARGUMENT, not
   the name of the function called), and refuses an entry in `_PARAMETER_NO_SCALAR` whose own probe value
   turns out to be collapsible after all.
+  ROUND 8 FOUND THE HALF OF THE CLASS THAT PROOF NEVER SWEPT, and it is recorded here because the
+  sentence above was read as more than it was: `_plain_value` collapses a `str`/`int`/`float` SUBCLASS,
+  and a DUCK-TYPED scalar of an unrelated class stores nothing to collapse, so it passed the boundary
+  untouched. All four routes above came back through it, measured on both interpreters. The invariant that
+  actually holds is a DISJUNCTION -- either the boundary collapses the value the object stores, or the
+  call is refused -- so the boundary now also REFUSES, by type, a parameter annotated `int` / `float` /
+  `str` that is handed an object storing no such scalar (`_annotated_scalar_parameters`), and
+  `test_robustness._parameter_coverage_complaints` runs BOTH spellings, a subclass and a non-subclass
+  liar, requiring collapse or refusal for each.
   What NEITHER boundary reaches, stated plainly: what a caller-supplied CALLABLE returns (normalised
   where it is consumed -- `_to_metric`, `_plain_measure`, `MeasureFixture.__post_init__` -- each with a
   consequence test), a closure variable of a PRIVATE helper that is not a parameter of anything public,
@@ -894,10 +903,27 @@ def make_measure_fixture(seed: int, rows: int = 16, width: int = 3, noise: float
     `rows=Lo(2)` reached `rng.sample(range(2), 2)`, forced BOTH indices True, and then
     `rng.choice([])` raised `IndexError: Cannot choose from an empty sequence` -- OUTSIDE the
     `(ValueError, TypeError, ArithmeticError)` family every probe declares, so it escaped `probe_shift`'s
-    own fail-closed handler and propagated out of a public probe. Both are closed by the gate now seeing
-    the value the object STORES (`_plain_arguments`): `rows=Lo(2)` raises the documented `ValueError`,
-    which the probe records as an unmeasured seed. Pinned by
-    `test_robustness.TheParameterBoundaryClosesFourLiveRoutes`."""
+    own fail-closed handler and propagated out of a public probe. Both are closed FOR AN `int` SUBCLASS by
+    the gate seeing the value the object STORES (`_plain_arguments`): `rows=Lo(2)` raises the documented
+    `ValueError`, which the probe records as an unmeasured seed.
+    ROUND 8 FALSIFIED THE SENTENCE THAT STOOD HERE -- "Both are closed by the gate now seeing the value
+    the object STORES" -- and it is worth keeping the correction rather than the claim. A DUCK-TYPED
+    `rows`, an object of an unrelated class answering `__lt__` with False and NOT an `int` subclass,
+    stores nothing for `_plain_value` to read, so it passed the boundary unchanged and BOTH consequences
+    came back. RE-MEASURED on 3.12.4 and 3.13.5 through this public parameter with no
+    `object.__setattr__`: `rows=Duck(3)` built the 3-row fixtures again and the 12-seed probe went
+    INSUFFICIENT_EVIDENCE / (NOT_VALIDATED, UNKNOWN) -> INVARIANCE_HOLDS / (NOT_VALIDATED, TOY_RESULT)
+    with n_bitwise_equal 12, and `rows=Duck(2)` raised `IndexError: Cannot choose from an empty sequence`
+    out of a public probe again. Closed now by the TYPE requirement at the same boundary
+    (`_annotated_scalar_parameters`): a parameter annotated `int` must receive something that stores an
+    int, so a duck-typed `rows` raises `TypeError` -- inside the declared family -- before this gate runs.
+    AND THE EMPTY-CHOICE BRANCH IS GUARDED BELOW rather than argued away. Round 8 recorded a decision not
+    to guard it, reasoning that "with the gate seeing the stored value the branch is unreachable, and an
+    unpinnable guard is decoration"; both halves rested on a premise that was never measured and are
+    false. The branch was reachable through a fully public duck-typed route, and the guard IS pinnable --
+    `make_measure_fixture.__wrapped__`, this module's own declared before/after control, reaches the body
+    with the boundary off. Pinned by `test_robustness.TheParameterBoundaryClosesFourLiveRoutes` (the
+    `*_duck_typed` twins) and `test_the_empty_choice_branch_is_guarded_not_argued_away`."""
     if rows < 4 or width < 1:
         raise ValueError("need rows >= 4 and width >= 1")
     rng = make_rng(derive_seed(seed, "robustness:fixture"))
@@ -913,7 +939,15 @@ def make_measure_fixture(seed: int, rows: int = 16, width: int = 3, noise: float
     for i in forced:
         mask[i] = True
     if all(mask):
-        mask[rng.choice([i for i in range(rows) if i not in forced])] = False
+        spare = [i for i in range(rows) if i not in forced]
+        # `rows >= 4` and `len(forced) == 2` make this list nonempty, so with a PLAIN `rows` the line
+        # below cannot raise -- but that is a property of a gate twelve lines up and of a boundary one
+        # function out, and round 8 measured both failing at once: `rng.choice([])` raised `IndexError`,
+        # OUTSIDE the `(ValueError, TypeError, ArithmeticError)` family every probe declares, and it
+        # propagated out of a public probe. This states the local invariant instead of inheriting it.
+        if not spare:
+            raise ValueError("need rows >= 4 and width >= 1: no row is left to mask out")
+        mask[rng.choice(spare)] = False
     return MeasureFixture(seed, tuple(p), tuple(t), tuple(mask))
 
 
@@ -1103,7 +1137,16 @@ def shift_reorder_rows(kind: ShiftKind = ShiftKind.INVARIANCE_EXACT, rel_tol: fl
     (`_plain_arguments`); it is kept for the reason `_plain_text` records, and MEASURED: a mutant
     deleting it is unkilled by `test_robustness` + `test_schema` + `test_benchmark` BECAUSE the boundary
     covers it, not because it never did anything, and it would carry the guarantee alone again if the
-    boundary regressed."""
+    boundary regressed.
+    ROUND 8 RE-OPENED THIS ROUTE TOO, with a DUCK-TYPED `rel_tol` storing 0.0 whose `__mul__` answers
+    1e9: RE-MEASURED on 3.12.4 and 3.13.5 through this factory, INVARIANCE_DEFECT (12 violations,
+    max_abs_dev 9.115e-03) -> INVARIANCE_HOLDS (0 violations) with that same `max_abs_dev` still
+    serialised on the card. Closed by the TYPE requirement the boundary now applies to a parameter
+    annotated `float` (`_annotated_scalar_parameters`). ONE CORRECTION TO THE RECORD, because it cuts the
+    other way for this factory: `__wrapped__` is NOT a valid before/after control here for a SUBCLASS,
+    since the `_plain_parameter` line below still fires on one -- but it IS valid for a DUCK, because
+    `_plain_parameter` returns a non-subclass unchanged. The duck-typed before/after measurement above was
+    taken that way."""
     rel_tol = _plain_parameter(rel_tol)
 
     def tf(fx, rng):
@@ -1141,7 +1184,12 @@ def shift_scale(factor: float, degree: int = 2) -> ShiftSpec:
     max_abs_dev 1.225e-01) -> INVARIANCE_HOLDS with `n_bitwise_equal = 12`, i.e. a degree-1 measure
     certified as satisfying a DECLARED degree-2 invariance. A closure variable is not a field, which is
     why the field boundary could not reach it; it IS this factory's own parameter, which is why the
-    parameter boundary does. Pinned by
+    parameter boundary does.
+    ROUND 8 RE-OPENED IT WITH A DUCK-TYPED `factor`: not a `float` subclass, so nothing to collapse.
+    RE-MEASURED on 3.12.4 and 3.13.5, `abs_bias_fsum` under a declared degree 2: INVARIANCE_DEFECT (12
+    violations, max_abs_dev 1.225e-01) -> INVARIANCE_HOLDS with n_bitwise_equal 12 -- the same
+    certification of a degree-1 measure, through the same public factory. Closed by the TYPE requirement
+    the boundary now applies to a parameter annotated `float` (`_annotated_scalar_parameters`). Pinned by
     `test_robustness.TheParameterBoundaryClosesFourLiveRoutes` and
     `AClosureVariableOfAFactoryIsItsParameter`."""
     pow2 = math.frexp(factor)[0] == 0.5
@@ -1188,8 +1236,15 @@ def shift_jitter(eps: float) -> ShiftSpec:
     max_dev_over_bound 1.287e-16), with `max_abs_dev` IDENTICAL in both runs (2.573404667950953e-07) --
     which is the proof that the applied jitter was unchanged and only the BOUND moved. The card then
     serialises that `max_abs_dev` beside `n_violations = 0`, the exact self-contradiction
-    `shift_reorder_rows`'s docstring records. Pinned by
-    `test_robustness.TheParameterBoundaryClosesFourLiveRoutes` and
+    `shift_reorder_rows`'s docstring records.
+    ROUND 8 RE-OPENED THIS ROUTE WITH THE SPELLING THE PROOF NEVER SWEPT: the subclass is collapsed, but a
+    DUCK-TYPED `eps` -- an unrelated class storing 1e-6 whose `__mul__` / `__rmul__` answer 1e9 -- stores
+    nothing to collapse and reached the cell unchanged. RE-MEASURED on 3.12.4 and 3.13.5 through this
+    factory with no `object.__setattr__`: SENSITIVITY_EXCEEDS_BOUND (12 violations,
+    max_dev_over_bound 2.924e+04) -> SENSITIVITY_WITHIN_BOUND (0 violations, 1.287e-16), with
+    `max_abs_dev` IDENTICAL at 2.573404667950953e-07 in both runs. Closed by the TYPE requirement the boundary now applies to a parameter annotated `float`
+    (`_annotated_scalar_parameters`): a duck-typed `eps` raises `TypeError` at the boundary, inside the
+    declared family. Pinned by `test_robustness.TheParameterBoundaryClosesFourLiveRoutes` and
     `AClosureVariableOfAFactoryIsItsParameter`."""
     def tf(fx, rng):
         return _rebuild(fx, [[x + rng.uniform(-eps, eps) for x in r] for r in fx.pred])
@@ -1644,8 +1699,87 @@ _PARAMETER_NO_SCALAR = MappingProxyType({
 })
 
 
+# THE SECOND HALF OF THE BOUNDARY, and round 8's correction to it: `_plain_value` can only collapse an
+# object that STORES a plain scalar, i.e. a `str`/`int`/`float` SUBCLASS. A DUCK-TYPED scalar -- an object
+# of an unrelated class that merely answers the operators a gate is written in -- stores nothing to
+# collapse, so `toy.schema._plain_value` returns it unchanged (its last line) and before this round it
+# passed through the boundary untouched and reached the gate. The blind spot was written into the proof:
+# the coverage probe's generator swept SUBCLASSES only, for the stated reason that "the property under
+# test is that the object STORES the plain value" -- a property that cannot be stated about a duck.
+# MEASURED on 3.12.4 and 3.13.5, through public parameters with no `object.__setattr__`, over the 30
+# scalar-annotated parameters of this module: 17 were already refused by a downstream `isinstance` /
+# `check_mask` / `deep_freeze`, and 13 were ACCEPTED -- the four routes round 7 reported closed
+# (`shift_jitter.eps`, `shift_scale.factor`, `shift_reorder_rows.rel_tol`, `make_measure_fixture.rows`),
+# plus `probe_precision.param`, `shift_scale.degree`, `shift_translate.c`,
+# `make_order_sensitive_fixture.big`, `benchmark_outcome.metric` and `rows`'s three siblings
+# `width` / `noise` / `magnitude_spread`.
+# THE INVARIANT, stated so the rule is derived from it and not from those thirteen names: for every
+# parameter this boundary binds, EITHER the value arrives at the callee collapsed to the scalar it stores,
+# OR the call is refused inside the `(ValueError, TypeError, ArithmeticError)` family every probe
+# declares. The re-opened routes were exactly the parameters that satisfied NEITHER disjunct -- the ones
+# whose only guard is a closure cell or a control-flow gate, which is why the field boundary and the
+# collapse half of this one both missed them.
+# WHAT IS REFUSED, AND WHAT DELIBERATELY IS NOT. A parameter ANNOTATED `int`, `float` or `str` (read from
+# the same signature this boundary already reads, so a new annotated parameter is covered without anyone
+# remembering) must receive a value this module can read a stored scalar out of: `None`, an `Enum`
+# member, or an instance of `str` / `int` / `float` (`bool` included, as an `int`). Anything else is
+# refused BY TYPE, here, before any gate runs. A PLAIN SCALAR OF THE WRONG TYPE IS STILL THE CALLEE'S OWN
+# BUSINESS -- `rows="4"` reaches `make_measure_fixture` and gets its own diagnostic -- because once
+# subclasses are collapsed a plain scalar cannot lie to a gate, and pre-empting those messages would
+# replace a dozen pinned diagnostics with one paraphrase, which is the reason arity errors are forwarded
+# untouched too.
+# OVER-REFUSAL, MEASURED RATHER THAN ASSUMED: what this newly refuses on those 30 parameters is any
+# number that is not a `str`/`int`/`float` -- a `Decimal`, a `Fraction`, a third-party scalar. This kit is
+# stdlib-only and nothing in it hands one to a public robustness callable; the two places that really do
+# take a `Fraction` or a `Decimal` are untouched, `exact_masked_mse` because its parameters carry no
+# annotation and `SeedSummary.from_values` because a classmethod is not behind this boundary at all.
+# Pinned by `test_robustness.test_a_rational_where_a_float_is_annotated_is_refused_and_the_exact_helpers_are_not`.
+_SCALAR_ANNOTATIONS = frozenset({"int", "float", "str"})
+
+
+def _annotated_scalar_parameters(sig) -> MappingProxyType:
+    """{parameter: annotation text} for every parameter of `sig` annotated as a bare scalar.
+
+    `from __future__ import annotations` is in force, so an annotation here is the STRING a reader wrote.
+    It is matched AS TEXT and never evaluated: `scripts/lint.sh` names `typing.get_type_hints` as a
+    string-evaluating escape from its import blocklist, and this helper must not become a fresh instance
+    of that class. `Optional[X]` is read as `X`, because `None` is accepted for every scalar parameter
+    anyway and what a missing value means is the callee's own business. A real type object is accepted
+    too, for a caller whose module does not use the future import.
+    AN ANNOTATION SPELLED ANOTHER WAY (`float | None`, `Union[int, str]`, or none at all) YIELDS NOTHING
+    HERE, so this rule FAILS OPEN -- which is exactly why it is not the only line of defence. The
+    duck-typed half of `test_robustness._parameter_coverage_complaints` requires every parameter whose
+    honest value is a scalar to be refused or declared, and cross-checks the set derived from annotations
+    against the set derived from the canonical calls, so a parameter that this helper stops recognising
+    fails a test rather than quietly losing its guard."""
+    out = {}
+    for name, par in sig.parameters.items():
+        if par.kind in (par.VAR_POSITIONAL, par.VAR_KEYWORD):
+            continue
+        text = par.annotation.__name__ if isinstance(par.annotation, type) else par.annotation
+        if not isinstance(text, str):
+            continue
+        text = text.strip()
+        if text.startswith("Optional[") and text.endswith("]"):
+            text = text[len("Optional["):-1].strip()
+        if text in _SCALAR_ANNOTATIONS:
+            out[name] = text
+    return MappingProxyType(out)
+
+
+def _stores_a_scalar(v: Any) -> bool:
+    """True if there is a plain `str`/`int`/`float` here for `_plain_value` to have read, or nothing to read.
+
+    `None` and an `Enum` member are accepted for the reasons `_plain_value` already states: a default a
+    callee fills in itself, and a `str`-subclass enum whose collapse would destroy the `isinstance` checks
+    that refuse a forged spelling. `bool` is an `int` and is accepted as one; the gates that must refuse a
+    bool (`_check_seed`, `check_mask`, `SeedSummary.from_values`) do so by their own type checks."""
+    return v is None or isinstance(v, (Enum, str, int, float))
+
+
 def _plain_arguments(fn):
-    """Wrap `fn` so that EVERY argument it is called with is the plain value the caller's object STORES.
+    """Wrap `fn` so that EVERY argument it is called with is the plain value the caller's object STORES,
+    or the call is REFUSED because the object stored no scalar where the signature annotates one.
 
     `inspect.signature(fn)` is read ONCE, at wrap time; each call binds the actual arguments to it and
     passes every bound argument through `toy.schema._plain_value`. Nothing is skipped and no name is
@@ -1681,8 +1815,11 @@ def _plain_arguments(fn):
     consumed), and so is `fn.__wrapped__`, which `functools.wraps` leaves reachable and which this
     module's tests use deliberately as the before/after control. Those are bypasses of the type's own
     protocol, not spellings a caller writes by accident. It is the guarantee that the value a gate
-    INSPECTED is the value the caller's object stores."""
+    INSPECTED is the value the caller's object stores -- OR that the call was refused because the object
+    stored no such value, which is the second disjunct the block of comments above this function states
+    and measures."""
     sig = inspect.signature(fn)
+    scalars = _annotated_scalar_parameters(sig)     # read ONCE, with the signature: see the comments above
 
     @functools.wraps(fn)
     def at_parameter_boundary(*args, **kwargs):
@@ -1693,6 +1830,12 @@ def _plain_arguments(fn):
         for name in list(bound.arguments):
             given = bound.arguments[name]
             plain = _plain_value(given)
+            if name in scalars and not _stores_a_scalar(plain):
+                raise TypeError(
+                    f"{fn.__name__}() parameter {name!r} is annotated {scalars[name]} but was given a "
+                    f"{type(given).__name__}, which stores no {scalars[name]} to normalise: a duck-typed "
+                    "scalar is refused AT THE PARAMETER BOUNDARY rather than passed to a gate, a closure "
+                    "cell or a card that it would then decide")
             if plain is not given:
                 bound.arguments[name] = plain
         return fn(*bound.args, **bound.kwargs)
