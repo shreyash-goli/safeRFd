@@ -10187,3 +10187,186 @@ The **raising-`__class__` channel** stays unpinned as the kit-wide finding; a ne
 
 **SR-13 stays `[ ]`** — the fixer is not the attester, and SR-13 depends on SR-10, which depends on
 SR-06. **Verified stays 9 of 17.**
+
+## Round 18 — SR-11 fails eighth on the same mechanical cause as SR-13, then it is closed
+
+**Date:** 2026-11-12. HEAD at attestation `4f06749`.
+
+### The same cause, a third time, found because the brief carried it across modules
+
+SR-13's tenth attestation (round 17) found that its word and key lanes were built from the number
+lane's liar template **with the `RAISE` member dropped**, while keeping the stronger prose. SR-11's
+brief carried that lead over, and it reproduced: **`test_robustness.py` has zero `RAISE` members in
+any lane, and six sweeps carry an `except Exception … "OUTSIDE the (ValueError, TypeError,
+ArithmeticError) family every probe declares"` branch.** Every one of those six fail-closed promises
+outran its sweep — the branch can fire and nothing in the file could make it fire.
+
+**A figure of mine was wrong and nearly argued the lead away.** I told the attester the file had
+*"5 `RAISE` references and 19 raise-defining dunder methods"*, so it was *"not the same clean
+omission"*. The 5 are **one in prose plus four uses of a `_RAISED` result sentinel**; the 19 were
+dunder *definitions*, none of which raise. My grep counted definitions and I labelled them as raising.
+**The only reason the finding survived my own figure is that I wrote "that is a count, not an answer"
+in the same paragraph** — a hedge that happened to be load-bearing. The lesson is narrower than "check
+your greps": **a count of a construct is not a measurement of its behaviour, and a brief that reports
+one as the other hands the owner a reason to stop looking.**
+
+### The cheapest possible proof, then the real number
+
+The attester added **one** limb to **one** lane, monkeypatched in-process with nothing on disk changed,
+and ran the module's own unaltered generator: **0 → 6 complaints**, hitting 4 of the 7 parameters
+`_WHY_CALLABLE_NUMBER` covers. The fixer then added the member to every lane: **0 → 47** (17 reason +
+30 parameter), a factor of eight over the single-lane probe. **The 30 are the parameter boundary's own
+refusal message at every scalar-annotated parameter it has.** Post-fix both generators return `[]`.
+
+### FINDING 1 — the record was taken inside the classifier that reads it
+
+`robustness.py:1518`, `_run_cases`: `out[name] = ("SILENT_VALUE", repr(v))` sat inside the `try` whose
+`except` writes `("RAISED", …)`. **A failure in the recording was recorded as the opposite outcome.**
+
+| | PRE | POST |
+|---|---|---|
+| invocations | 180 | 180 |
+| status | **`MISSING_INPUT_HANDLED`** | **`SILENT_DEFAULT_DEFECT`** |
+| `n_silent_value_total` | **0** | **180** (15 cases × 12 seeds) |
+| every `case_table` row | `{raised: 12, silent_value: 0, types: ['ValueError']}` | `{raised: 0, silent_value: 12, types: ()}` |
+| `assert_no_silent_default` | **`None` = CERTIFIED** | **raises `SilentDefaultError`** |
+
+Fully public, no `object.__setattr__`. The forged card differed from an honest one in **exactly one
+key**. And `_WHY_CALLABLE_NUMBER` already said the return *"is normalised where it is CONSUMED —
+`_to_metric`, `_plain_measure`, each with its own consequence test"*: `guarded` type-checks,
+**`_run_cases` was the one consumer that did not**, and it is where round 11 added its own fix — whose
+new refusal message, `type(measure).__name__`, **escaped the family it was written to honour.**
+
+**A sub-finding of the same class that no brief listed: the `[SILENT ZERO]` tag was forgeable.** A
+`float` subclass storing `0.0` whose `__repr__` answers `"1.0"` moved the tag from **45 of 45 to 0 of
+45** while the complaint still fired — so the thing `assert_no_silent_default`'s docstring promises to
+*"separately name"* could be made to vanish. Post-fix 45 for both the plain zero and the liar.
+
+### FINDING 2 — 18 escapes closed, and round 16's valid-input shape in two spellings
+
+**`{RET 20, IN 22, OUT 18}` → `{RET 28, IN 32, OUT 0}`**, byte-identical on both interpreters: 10 of the
+18 became a fail-closed card or an unmeasured `MetricValue`, 8 became an in-family refusal, **and none
+became a claim** — the new pin fails on a clean status or a measured metric at any of the 60 positions.
+The 4 the probe scored as remaining `OUT` are `assert_no_silent_default` raising its **own documented
+`SilentDefaultError`**; pre-fix those same positions were `RET None`, i.e. **they moved from a silent
+certification to a loud documented refusal.**
+
+**Round 16's shape, found here in two new spellings:**
+
+1. **A message on a correct fail-closed path.** An exception whose own `__str__` raises is caught in
+   family by `probe_shift` / `probe_precision` / `seed_sensitivity_probe` / `guarded` — each of which
+   then **died building `f"{type(e).__name__}: {e}"`, the reason string of the unmeasured seed it had
+   already decided to record.** Four positions.
+2. **A message on the fully valid path, after measurement.** `f"shift:{measure.__name__}:{spec.name}"`
+   and `f"missing_inputs:{measure.__name__}"` are bare interpolations of caller-owned objects: a
+   callable whose `__name__` has a raising `__format__` took `probe_shift`, `probe_missing_inputs` and
+   `scorecard_to_record` out **while labelling a card whose measurements were complete.**
+
+`mse_fsum`'s underflow message is the local analogue of `stability._sq` and measured **in family** on
+valid input, because `check_finite_matrix` returns plain floats — **routed anyway, so the site does not
+depend on another owner's normalisation**, and declared as such. That is the right instinct: a guard
+that is safe only because of a neighbour's behaviour is safe by coincidence.
+
+### The derivation failed four times, and two would have shipped a hole behind a passing check
+
+Each failure is injected back into the source text and pinned:
+
+1. walking `ast.FunctionDef` only → a site in the **module body or a class body** is invisible;
+2. skipping `ast.Lambda` bodies as *"a nested scope is its own subject"* — **true of a `FunctionDef`,
+   false of a lambda**, and `ShiftSpec.expected`/`bound`/`tf` *are* lambdas;
+3. counting `{x!r}` and `type(x).__name__` but **not the bare `{x}`** — the interpolation four
+   fail-closed handlers were escaping through;
+4. **missing `getattr(x, "__name__")` entirely** — four public positions stayed open behind a passing
+   set-equality check until the protocol list was widened and the escape measured (`getattr`'s default
+   answers only `AttributeError`).
+
+**Three rounds running, every derivation has failed two to four times first, and in five of those
+failures the flaw would have been encoded into the declared table while set-equality reported
+success.** The class is spelled once each now — `_shown`, `_type_name`, `_name_attr` — with **75 sites
+in 79 occurrences** declared in writing and set-equality asserted.
+
+### FINDING 3 — declared, not closed, and the alternative was measured rather than argued
+
+The undeclared `vars()` / `__dict__` write route into a "genuinely immutable" `Scorecard`: six routes
+change `content_hash()` with no exception; `pop`/`clear` leave a card that raises out of `to_json()`;
+`does_not_establish = ("This IS a safety finding.",)` serialises and `scorecard_to_record` accepts it;
+and `vars(c)["min_seeds"] = 10` on a real 3-seed card **reproduces round 10's lie without
+`object.__setattr__`.**
+
+Declared as `Scorecard` honest limit **(4)** and in the module docstring, naming every spelling —
+because it grants nothing limit (1) does not already grant, **and limit (2) exists for exactly that
+reason, in those words.** The closure was tried and **measured, not dismissed**:
+`@dataclass(frozen=True, slots=True)` **does** close every route and keeps `test_schema` green — but
+`slots=True` makes `dataclasses` rebuild the class while the generated `__setattr__` keeps a cell for
+the old one, so `card.new_attribute = 1` raises `TypeError: super(type, obj): obj … is not an instance
+or subtype of type` and an existing immutability test **fails on both interpreters**. **Trading a route
+that grants no new capability for an incoherent refusal on the supported path is the wrong trade** —
+and knowing that required building it. The sweep now **fails if a route starts raising while the
+declaration still says it does not**, closed in both directions.
+
+### `-OO` closed, including a case a `None` check cannot see
+
+All 11 items → **197 OK under `-OO` on both interpreters**. The 8 errors were `__doc__` is `None`; the
+**3 failures had the same cause and a different surface**: `@dataclass` **substitutes its synthesised
+signature string** for a stripped class docstring, so the read does not crash — it compares the needle
+against `"SeedSummary(n: 'int', mean: 'float', …)"`. Detection is **not a text pattern**: it
+reconstructs the substitution with the expression `dataclasses` itself evaluates
+(`cls.__name__ + str(inspect.signature(cls)).replace(" -> None", "")`), so **if `dataclasses` ever
+changes that expression the helper stops suppressing and the pin fails loudly rather than passing for
+the wrong reason.** That is the right failure direction for a guard whose job is to suppress.
+
+The file now has **no skip mechanism at all** — the lone `@skipUnless(PY312, …)` is gone, replaced by a
+plain `if` whose `else` asserts the environmental fact — **which is what makes the bare-mode skip
+column verifiable rather than assumed** (measured 197 OK, 0 skips, with numpy *and* torch blocked).
+
+### Two vacuous shapes fixed, both latent rather than live
+
+`:752`'s `assertIs(sc.status, PS.PRECISION_OK if PY312 else sc.status)` compared a value with itself on
+CPython < 3.12; its `else` now asserts a real property (a status the tolerance can produce, never
+`INSUFFICIENT_EVIDENCE`, every seed measured). `:457`'s `continue` gated on `not PY312` now **runs the
+probe and asserts**. Neither was reachable on a project interpreter — **latent traps, fixed as shapes
+rather than defended as unreachable**, which is the right call after this project found five disabled
+assertions in a sibling module whose every one would have passed.
+
+### Measurements
+
+| run | interpreter / environment | result |
+|---|---|---|
+| `test_robustness` | 3.12.4 (user-site numpy 2.4.6, torch 2.7.1) | **197 OK**, 4.85 s (was 181, 2.97 s) |
+| `test_robustness` | 3.13.5 miniconda (numpy 2.4.4, no torch) | **197 OK**, 4.66 s |
+| `test_robustness` | both, **`-OO`** | **197 OK** (was FAILED f=3 e=8) |
+| `test_robustness` | numpy **and** torch blocked | **197 OK, 0 skips**, both |
+| `test_stability` / `test_benchmark` / `test_schema` | both | 100 / 338 / 55 OK, unchanged |
+| **full suite** | **3.12.4** | **1460 ran, 2 skipped, 0 failed**, rc=0 |
+| **full suite** | **3.13.5**, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` | **1460 ran, 84 skipped, 0 failed**, rc=0 |
+
+1444 + 16 = 1460. Wall clock +1.8 s, itemised per class and per lane, with the trim **derived and
+rejected on its own measurement** (memoising `_canonical_calls()` buys 0.4 ms). New test file against a
+pristine archive tree: **FAILED (failures=23, errors=10) — 33 failing tests, identical on both
+interpreters**, so every new pin was watched failing pre-fix.
+
+### Cross-owner, both SR-10's
+
+1. **`benchmark.py:2094` — one open escape, reported not patched.** `score_seed` builds its fail-closed
+   record as `SeedScores.failed(seed, f"numerical failure: {e}", …)`, so a `factory` raising an
+   **in-family** exception whose own `__str__` raises turns benchmark's failed-seed record into a
+   propagating `RuntimeError` that leaves the public `robustness.benchmark_outcome`. Attributed **by
+   traceback**, declared with its measurement, and **held to being reachable: remove the declaration
+   and exactly one complaint appears, so when SR-10 closes it this test fails and the entry must go.**
+   That is the first cross-owner declaration in this project that cannot rot.
+2. **`test_benchmark` is red under `-OO` at HEAD** — f=2, e=19, reproduced on a pristine archive tree.
+   The same docstring-stripping class now closed in `test_stability`, `test_dashboard` and
+   `test_robustness`. SR-10's call.
+
+### Left open deliberately, and pinned as open
+
+**The adjacent raising-attribute-lookup channel:** a duck `ShiftSpec` whose `name` is a raising
+`property` still takes `probe_shift` outside the family. **Not closable by a check** — reading any
+attribute of a caller's object runs the caller's code — so it is stated in the module with its
+measurement and **pinned as OPEN rather than pinned as closed.** The **raising-`__class__` channel** was
+re-measured to confirm it is untouched: `{IN 2, OUT 16}` over the 18-callable surface, **identical to
+HEAD**, because `type(x)` ignores a `__class__` property and the escape is the `isinstance` call itself.
+Still the three owners' joint decision.
+
+**SR-11 stays `[ ]`** — the fixer is not the attester, and SR-11 depends on SR-10 → SR-06. **Verified
+stays 9 of 17.**

@@ -121,11 +121,31 @@ Structural rule against single-example claims (checked at construction, not mere
   where it is consumed -- `_to_metric`, `_plain_measure`, `MeasureFixture.__post_init__` -- each with a
   consequence test), a closure variable of a PRIVATE helper that is not a parameter of anything public,
   and `object.__setattr__`.
+* AND THE THIRD BOUNDARY, ROUND 12: the one every MESSAGE crosses. Normalisation makes the value a GATE
+  reads the value the caller's object stores; it says nothing about the value a MESSAGE reads, and a
+  message is built from `repr` / `str` / `format` / `type(x).__name__` -- four protocols the caller
+  implements, applied at the moment this module has decided to refuse. MEASURED on both interpreters,
+  through public callables with no `object.__setattr__`: 18 of 60 driven positions ended OUTSIDE the
+  `(ValueError, TypeError, ArithmeticError)` family every probe declares, including `guarded`, whose
+  docstring promise is that rejection becomes a `MetricValue`; four fail-closed handlers died building
+  the reason string of the unmeasured seed they had already decided to record; and two probe ids,
+  interpolated after a probe's measurements were complete, took the probe out with a `RuntimeError`.
+  Worse than an escape, in `_run_cases`: `repr(v)` sat INSIDE the handler that decides whether the
+  measure raised, so a failure in the RECORDING was recorded as the opposite outcome and a measure that
+  answered all 15 missing-input cases with a value was CERTIFIED as handling them. The four protocols
+  are spelled ONCE each now, in `_shown` and `_type_name`, which degrade to a placeholder rather than
+  lose the refusal; every other diagnostic site in this file is decided in writing in
+  `test_robustness._DIAGNOSTIC_SITES`, which re-derives the set from this module's AST and fails closed
+  on a new one. See the comment block above `_shown`.
 Honest limits: Python cannot make this impossible. `object.__setattr__`, `object.__new__`, and
 SUBCLASSING `SeedSummary` / `InsufficientEvidence` with a `__post_init__` that skips the checks all build
 unvalidated nested objects (a `Scorecard` still refuses such an object, via the exact-type check, but a
 bare unvalidated subclass instance exists). `gc.get_referents` reaches the writable dict behind a
-`MappingProxyType` (see `Scorecard`, limit (2)). Edits to module constants also defeat the floor. The
+`MappingProxyType` (see `Scorecard`, limit (2)). `vars(obj)` / `obj.__dict__` is the SAME writable dict
+for every frozen dataclass here, so a plain subscript assignment replaces any field of a built
+`Scorecard` or `SeedSummary` (see `Scorecard`, limit (4)): this list named `object.__setattr__` and `gc`
+and did not name the plainest spelling of the two, which is why it is written down now. Edits to module
+constants also defeat the floor. The
 guarantee is "no supported API path", not a security boundary. The same caveat applies to every "frozen"
 claim below.
 
@@ -190,6 +210,159 @@ STANDARD_NON_CLAIMS = (
 )
 
 
+# ======================================================= diagnostic construction
+# THE THIRD ENUMERATION, derived the same mechanical way as the field list (`dataclasses.fields()`) and
+# the parameter list (`inspect.signature`), and for the reason both of those exist: A MESSAGE IS CODE.
+# The code that builds one runs on an object the CALLER supplied, usually at the exact moment this
+# module has decided to refuse it -- so `repr`, `str`/`format` and `type(x).__name__` are three
+# protocols a caller implements, applied where nothing has validated anything, and every one of them can
+# RAISE instead of returning text. WHAT THAT COSTS, measured on this module before this round on 3.12.4
+# and 3.13.5, through public callables with no `object.__setattr__`:
+#   * the family escape. 60 driven positions gave TALLY {RET 20, IN 22, OUT 18}: 18 outcomes OUTSIDE
+#     the `(ValueError, TypeError, ArithmeticError)` family every probe declares. A caller-callable's
+#     return whose `__repr__` raises `RuntimeError`/`KeyError` escaped from `probe_missing_inputs`,
+#     `assert_no_silent_default`, `guarded`, `probe_shift` and `require_summary` -- `guarded`'s own
+#     docstring promise ("rejection becomes `MetricValue.unmeasured(reason)` instead of an exception")
+#     breached outright -- and a metaclass answering `__name__` with a raising property escaped from
+#     `make_measure_fixture`, `probe_precision`, `shift_scale`, `seed_sensitivity_probe`,
+#     `arm_difference` (x2), `deep_freeze` and `probe_missing_inputs`. Three of those eight were the
+#     PARAMETER BOUNDARY'S OWN refusal message, and one was round 11's own new `TypeError` in
+#     `_run_cases`: the fix's refusal escaped the family it was written to honour.
+#   * THE FAIL-CLOSED HANDLER DEFEATED WHILE IT IS HANDLING CORRECTLY, which is the sharper half and the
+#     shape round 16 found one module over on VALID input. An exception whose OWN `__str__` raises is
+#     caught by `probe_shift` / `probe_precision` / `seed_sensitivity_probe` / `guarded`, all four of
+#     which then die building `f"{type(e).__name__}: {e}"` -- the reason string of the unmeasured seed
+#     the handler had already decided to record. And on the fully VALID path, after a probe has finished
+#     measuring: `f"shift:{measure.__name__}:{spec.name}"` is a bare interpolation of two caller-owned
+#     objects, so a callable object whose `__name__` has a raising `__format__`, or a duck-typed
+#     `ShiftSpec` whose `name` has one, took `probe_shift`, `probe_missing_inputs` and
+#     `scorecard_to_record` out with `RuntimeError` while LABELLING a card whose measurements were
+#     already complete.
+#   * the forged DIAGNOSTIC. `_run_cases` recorded `repr(v)` of a measure's unvalidated return, and
+#     `assert_no_silent_default` reads that text to name a returned 0.0 -- "the most dangerous
+#     substitution", by its own docstring. A `float` SUBCLASS storing 0.0 whose `__repr__` answers "1.0"
+#     moved the `[SILENT ZERO]` tag count from 45 of 45 to 0 of 45 while the complaint still fired.
+# SO: a caller's object is described in ONE place, `_shown` (which also covers `str`/`format`, via
+# `how=str`), named by type in ONE place, `_type_name`, and asked for its own `__name__` in ONE place,
+# `_name_attr`. The first two DEGRADE to a placeholder instead of losing the refusal, because the
+# exception TYPE -- what a caller branches on -- matters and the description does not; the third
+# REFUSES in family, because a card's label is not a description and cannot be a placeholder. Every
+# other diagnostic site in this file is decided in writing by `test_robustness._DIAGNOSTIC_SITES`,
+# which re-derives the set from this file's AST -- module body, class bodies, functions AND lambdas --
+# and fails closed on a new one. The counts it re-derives and asserts, 75 sites in 79 occurrences:
+#   `{x!r}`            -- 8 sites. Every one is a plain `str`/`int`/`float`: SIX by the PARAMETER
+#                         BOUNDARY (measured -- with the boundary off, those six are exactly the
+#                         positions an undescribable value escapes from), ONE by an `isinstance` gate
+#                         plus `_plain_value` in the same function (`arm_difference`'s arm name), and
+#                         ONE a parameter NAME this module read off its own signature. [decided]
+#   repr()             -- 1 call, `_silent_detail`, on the plain double `_plain_number` returned.
+#                         That one is load-bearing and NOT a description: it is what makes the
+#                         `[SILENT ZERO]` tag unforgeable.                                [decided]
+#   bare `{x}`         -- 60 sites, of which 35 interpolate a string one of the three helpers above
+#                         already built, 19 this module's own data (a constant, a `len()`, a literal
+#                         field name), 4 a boundary-plain scalar and 2 a gated one.        [routed]
+#   type(x).__name__   -- 5 sites: ONE read, in `_type_name`; three assignments or reads of this
+#                         module's own function objects; one annotation text from a signature it
+#                         wrote itself.                                                   [routed]
+#   getattr(x,"__name__") -- 1 site, in `_name_attr`.                                     [routed]
+#   `{x!s}` / `{x!a}`  -- 0. Both run a caller's protocol and both belong in `_shown`.    DISCHARGED
+# NOT re-decided here, because the parameter boundary already answers it and an attester re-measured
+# the answer: this module's own `float()` calls (9 by AST, 8 live) are all on values already plain, or
+# `_plain_parameter`-collapsed, or annotated `float`/`int` and so refused by
+# `_annotated_scalar_parameters` when they store no scalar. The one exception,
+# `scorecard_to_record`'s `float(sc.min_seeds)` on a hand-built namespace, is already a `_WHY_CARRIER`
+# note. `len()` is taken 40 times, every one on a tuple or list this module built.
+# AND WHAT THIS DOES NOT CLOSE, stated with its measurement rather than left for the next round to
+# find: a raising ATTRIBUTE LOOKUP on a caller's object. A duck-typed `ShiftSpec` whose `name` is a
+# `property` that raises `RuntimeError` still takes `probe_shift` outside the declared family --
+# measured on both interpreters -- and so does any other field of any carrier this module reads,
+# because reading an attribute runs code the caller wrote. It is not closable by a check here, for the
+# same reason the raising-`__class__` channel is held open kit-wide (an `isinstance` call is itself the
+# lookup), and it is a different channel from this one: `type(x)` ignores a `__class__` property and
+# `_name_attr` converts the ONE attribute read whose only consumer is a label. Pinned as OPEN by
+# `test_robustness.EveryDiagnosticInThisModuleIsDecidedInWriting`
+# `.test_the_adjacent_attribute_channel_is_stated_and_left_open`.
+_UNCONVERTED = (MemoryError, RecursionError, SystemError)   # spelled as in `toy.stability`, same policy
+
+
+def _shown(v: Any, how=repr) -> str:
+    """`repr(v)` -- or `str(v)`, with `how=str` -- for a MESSAGE, degraded when the caller's own
+    protocol raises instead of describing the object.
+
+    A message is DIAGNOSTIC. Losing a refusal because the object being refused cannot describe itself
+    is strictly worse than losing the description, and the exception TYPE, which is what every probe's
+    `except (ValueError, TypeError, ArithmeticError)` branches on, is unaffected either way. This is the
+    same helper, with the same policy, as `toy.stability._shown`; it is written here rather than
+    imported because that module is another owner's and this one must not depend on its internals.
+    `how=str` is the spelling for a bare `{x}` interpolation, including `{e}` of a caught exception --
+    which is the position where a raising `__str__` defeated four fail-closed handlers while they were
+    handling correctly. `BaseException`-only exits and `_UNCONVERTED` still propagate."""
+    try:
+        return how(v)
+    except _UNCONVERTED:
+        raise
+    except Exception as e:      # noqa: BLE001 -- the point of the helper
+        return f"<undescribable {_type_name(v)}: {_type_name(e)} raised while describing it>"
+
+
+def _type_name(v: Any) -> str:
+    """`type(v).__name__` for a message, degraded the same way `_shown` is.
+
+    `type(v)` is safe -- it ignores a `__class__` property, which is why the raising-`__class__` channel
+    is a SEPARATE and still-open finding rather than this one -- but `__name__` on the resulting class
+    is an attribute lookup, and a metaclass can answer it with an exception. Measured: eight public
+    positions, three of them the parameter boundary's own refusal message."""
+    try:
+        return type(v).__name__
+    except _UNCONVERTED:
+        raise
+    except Exception:           # noqa: BLE001 -- the point of the helper
+        return "<unnamed type>"
+
+
+def _name_attr(fn: Any, default: str) -> Any:
+    """`fn.__name__` where there is one, `default` where there is none -- and a REFUSAL, inside the
+    family every probe declares, where READING it raises.
+
+    THE SITE THE FIRST DERIVATION OF THIS ROUND MISSED, and it is recorded because the miss is the
+    lesson: the derived set covered `repr` / `str` / `format` / `type(x).__name__` and
+    `getattr(x, "__name__")` is none of the four, so four public positions stayed open while a
+    set-equality check over the other seventy reported success. `getattr`'s third argument only answers
+    an `AttributeError`: a class whose `__name__` is a PROPERTY that raises anything else propagates.
+    MEASURED on 3.12.4 and 3.13.5, with a callable OBJECT (not a function -- a function's `__name__` is
+    a plain `str` slot) whose class answers `__name__` with a raising property: `probe_shift`,
+    `probe_missing_inputs`, `seed_sensitivity_probe` and `guarded` all propagated `RuntimeError`.
+    A `ValueError` rather than a placeholder, and that asymmetry with `_shown` / `_type_name` is
+    deliberate: those two describe an object this module has ALREADY decided about, so degrading the
+    description costs nothing, while this one is the LABEL a card carries and a card cannot honestly
+    carry a name whose source refused to be read."""
+    try:
+        return getattr(fn, "__name__", default)
+    except _UNCONVERTED:
+        raise
+    except Exception as e:      # noqa: BLE001 -- the point of the helper
+        raise ValueError(f"reading __name__ of a supplied callable raised {_type_name(e)}: a probe "
+                         "labels its card with that name and will not take it from an attribute that "
+                         "refuses to be read") from None
+
+
+def _callable_name(fn: Any) -> str:
+    """The text a card LABELS a caller's callable with, as a string THIS module built.
+
+    `getattr(fn, "__name__", "measure")` returns whatever object the caller put there: a FUNCTION's
+    `__name__` must be a `str`, but a callable OBJECT's can be anything, and the two probe ids that
+    interpolate it are built on the VALID path, after every measurement of the probe is complete.
+    MEASURED on both interpreters before this round: with a callable object whose `__name__` has a
+    raising `__format__`, `probe_shift` and `probe_missing_inputs` both propagated `RuntimeError` out of
+    a finished probe -- the shape round 16 found one module over, where a message on a correct path
+    replaced the module's own outcome.
+    `details["measure"]` deliberately keeps the RAW object instead of calling this: `deep_freeze` refuses
+    a non-`str` there with a `ValueError`, inside the family every probe declares, and a card refusing to
+    carry an object that only pretends to be a name is the right outcome. This helper is for the LABEL,
+    and widening it to the field would turn a refusal into an acceptance."""
+    return _shown(_name_attr(fn, "measure"), how=str)
+
+
 def _enum_value(e: Enum) -> Any:
     """Read an `Enum`'s payload.
 
@@ -209,7 +382,7 @@ def _enum_value(e: Enum) -> Any:
     The `isinstance` check here is not decoration: it is what stops this function being used as a way
     around the metric reader."""
     if not isinstance(e, Enum):
-        raise ValueError(f"_enum_value expects an Enum, got {type(e).__name__} "
+        raise ValueError(f"_enum_value expects an Enum, got {_type_name(e)} "
                          "(a MetricValue is read with _metric_read, never here)")
     return getattr(e, "value")
 
@@ -374,7 +547,7 @@ class SeedSummary:
             t = type(v)
             if isinstance(v, bool) or not (hasattr(t, "__float__") or hasattr(t, "__index__")):
                 raise ValueError(
-                    f"values must be real numbers, got {t.__name__}: bool and str are refused on purpose "
+                    f"values must be real numbers, got {_type_name(v)}: bool and str are refused on purpose "
                     "(a boolean outcome and a number parsed out of text are not measurements)") from None
             try:
                 # `float.__float__` for a value that ALREADY IS a float, `float(v)` for everything else
@@ -387,7 +560,7 @@ class SeedSummary:
             except OverflowError:   # e.g. 10**400: keep the documented ValueError family
                 raise ValueError("a value is too large to represent as a finite float") from None
             except (TypeError, ValueError) as e:
-                raise ValueError(f"values must be real numbers: {e}") from None
+                raise ValueError(f"values must be real numbers: {_shown(e, how=str)}") from None
         vals = tuple(out)
         if len(vals) < SEED_FLOOR:
             raise ValueError(f"a summary needs >= {SEED_FLOOR} measured seeds, got {len(vals)}")
@@ -504,7 +677,7 @@ def require_summary(result) -> SeedSummary:
     """Loud accessor: raises unless `result` is a real SeedSummary."""
     if isinstance(result, SeedSummary):
         return result
-    raise InsufficientEvidenceError(f"no scalar summary exists: {result!r}")
+    raise InsufficientEvidenceError(f"no scalar summary exists: {_shown(result)}")
 
 
 def _recheck_summary(s) -> None:
@@ -574,7 +747,7 @@ def _plain_measure(v: Any, what: str) -> float:
     measurement that made this necessary, and `toy.benchmark._plain_number` for the normaliser."""
     f = _plain_number(v)
     if f is None:
-        raise ValueError(f"{what} is not a finite real number: {v!r}")
+        raise ValueError(f"{what} is not a finite real number: {_shown(v)}")
     return f
 
 
@@ -600,9 +773,9 @@ def _to_metric(outcome: Callable[[int], float], seed: int) -> MetricValue:
     try:
         v = outcome(seed)
     except (ValueError, TypeError, ArithmeticError) as e:
-        return MetricValue.unmeasured(f"{type(e).__name__}: {e}")
+        return MetricValue.unmeasured(f"{_type_name(e)}: {_shown(e, how=str)}")
     if isinstance(v, bool) or not isinstance(v, float):
-        return MetricValue.unmeasured(f"outcome must be a float, got {type(v).__name__}")
+        return MetricValue.unmeasured(f"outcome must be a float, got {_type_name(v)}")
     if not math.isfinite(v):
         return MetricValue.unmeasured("outcome is non-finite")
     return MetricValue.measured(v)
@@ -623,11 +796,11 @@ def deep_freeze(x: Any) -> Any:
     if isinstance(x, Mapping):
         for k in x:
             if not isinstance(k, str):
-                raise ValueError(f"scorecard mapping keys must be str, got {type(k).__name__}")
+                raise ValueError(f"scorecard mapping keys must be str, got {_type_name(k)}")
         return MappingProxyType({k: deep_freeze(x[k]) for k in sorted(x)})
     if isinstance(x, (list, tuple)):
         return tuple(deep_freeze(v) for v in x)
-    raise ValueError(f"cannot freeze {type(x).__name__} into a scorecard")
+    raise ValueError(f"cannot freeze {_type_name(x)} into a scorecard")
 
 
 def thaw(x: Any) -> Any:
@@ -663,7 +836,38 @@ class Scorecard:
         in one method, closed by making all three exact-type. It is recorded here because the sentence
         that said this list was complete was wrong, and a list claimed to be complete has to name what
         proved it was not.
-    The card stores no hash of itself (only `seed_digest`, a hash of the seed list), so tampering by EITHER
+    (4) `vars(card)["probe_id"] = "TAMPERED"`, and every spelling of it -- `card.__dict__[...] = ...`,
+        `vars(card).update(...)`, `vars(card.summary)["mean"] = 9.0`, `vars(card).pop(...)`,
+        `vars(card).clear()`. A frozen dataclass's freeze is `__setattr__`, and `vars()` does not go
+        through it: the instance `__dict__` is an ordinary writable dict. MEASURED, a fresh card per
+        route on both interpreters: six routes changed `content_hash()` with no exception, and the two
+        that DELETE a field leave a card that raises `AttributeError` out of `to_json()` -- outside the
+        family every probe declares. `vars(c)["does_not_establish"] = ("This IS a safety finding.",)`
+        serialises that text as the card's only disclaimer and `scorecard_to_record` accepts it, which
+        is the outcome `_plain_text`'s docstring names as the worst case; and
+        `vars(c)["min_seeds"] = 10` on a real 3-seed card reproduces round 10's lie (JSON
+        `min_seeds: 10` beside `summary.n: 3`) with no `object.__setattr__` at all.
+        IT GRANTS NOTHING (1) DOES NOT ALREADY GRANT, which is exactly why it is written down: limit (2)
+        is here for that same reason, in those words, and this is the PLAINEST spelling of the two --
+        one subscript, no `gc`, no `object.__setattr__`, and a spelling the rest of this kit already
+        treats as a protocol bypass when it READS it (`toy.benchmark`, `toy.dashboard` and their tests).
+        It was unstated at the one place in the kit that enumerates WRITE routes.
+        NOT CLOSED, and the alternative was MEASURED rather than argued about:
+        `@dataclasses.dataclass(frozen=True, slots=True)` on `Scorecard` and `SeedSummary` does close
+        every route above -- `vars(card)` then raises `TypeError: vars() argument must have __dict__
+        attribute` -- and `test_schema` (55) still passes, so the field boundary and the
+        `object.__setattr__` writes in `__post_init__` survive it. What it costs is the freeze's own
+        error contract: `slots=True` makes `dataclasses` build a NEW class object while the generated
+        `__setattr__` keeps a cell for the old one, so `card.new_attribute = 1` raises
+        `TypeError: super(type, obj): obj (instance of Scorecard) is not an instance or subtype of type
+        (Scorecard)` instead of refusing coherently, and
+        `TestImmutability.test_direct_assignment_and_deletion_raise` FAILS on both 3.12.4 and 3.13.5
+        (193 tests, errors=1; `setattr` on an existing field still gives `FrozenInstanceError`, and
+        `dataclasses.replace` still works). So the trade is a route that grants nothing against the
+        legibility of the refusal every supported path already gets, and the route is DECLARED. Swept by
+        `test_robustness.TestImmutability.test_the_vars_write_route_is_declared_not_discovered`, which
+        drives every spelling and fails if one of them starts raising WITHOUT this list changing.
+    The card stores no hash of itself (only `seed_digest`, a hash of the seed list), so tampering by ANY
     route is detectable only by comparing a freshly recomputed `content_hash()` with a hash recorded EARLIER,
     for example the one `scorecard_to_record` places in the record's `input_hashes["scorecard"]`; not
     impossible, and not detectable without such a recorded value."""
@@ -856,14 +1060,16 @@ def scorecard_to_record(sc: Scorecard, *, run_id: str, timestamp_utc: str, code_
     for key, val in (("mean", s.mean if s else None), ("sd", s.sd if s else None), ("iqr", s.iqr if s else None),
                      ("min", s.minimum if s else None), ("max", s.maximum if s else None)):
         metrics[key] = (MetricValue.measured(val) if val is not None else
-                        MetricValue.unmeasured(f"INSUFFICIENT_EVIDENCE: {sc.insufficient.reason}"))
+                        MetricValue.unmeasured(
+                            f"INSUFFICIENT_EVIDENCE: {_shown(sc.insufficient.reason, how=str)}"))
     prov = RunProvenance(run_id=run_id, timestamp_utc=timestamp_utc, seed=sc.seeds[0], code_version=code_version,
                          python_version=current_python_version(), toy_only=True,
                          input_hashes={"seed_list": sc.seed_digest, "scorecard": sc.content_hash()})
     return ExperimentRecord(
-        name=f"robustness:{sc.probe_id}", provenance=prov, metrics=metrics,
+        name=f"robustness:{_shown(sc.probe_id, how=str)}", provenance=prov, metrics=metrics,
         evidence_class=EvidenceClass.TOY_RESULT if s else EvidenceClass.UNKNOWN,
-        notes=f"status={_enum_value(sc.status)}; structured status is on the scorecard (hash in input_hashes); "
+        notes=f"status={_shown(_enum_value(sc.status), how=str)}; structured status is on the scorecard "
+              "(hash in input_hashes); "
               "this string is not evidence and must not be parsed")
 
 
@@ -880,7 +1086,7 @@ def seed_sensitivity_probe(outcome: Callable[[int], float], seeds: Sequence[int]
     return build_scorecard(
         probe_id=probe_id, probe_kind="seed_sensitivity", seeds=seeds, per_seed=per_seed, cfg=cfg,
         status_if_summarized=ProbeStatus.MEASURED,
-        details_always={"outcome_name": getattr(outcome, "__name__", "outcome")},
+        details_always={"outcome_name": _name_attr(outcome, "outcome")},
         details_if_summarized={"n_unmeasured": len(per_seed) - len(vals), "n_distinct_values": len(set(vals)),
                                "zero_variance_warning": len(set(vals)) == 1},
         non_claims=("Spread across seeds is a property of the fixture generator and scorer, not of any method.",
@@ -1024,7 +1230,8 @@ def mse_fsum(pred, target, mask) -> float:
                 d = a - b
                 sq = d * d
                 if sq == 0.0 and a != b:   # same policy as toy.stability._sq: never a silent zero
-                    raise _UNDERFLOW(f"squared error underflowed to 0.0 from distinct inputs ({a!r}, {b!r})")
+                    raise _UNDERFLOW("squared error underflowed to 0.0 from distinct inputs "
+                                     f"({_shown(a)}, {_shown(b)})")
                 terms.append(sq)
     if not all(math.isfinite(x) for x in terms):
         raise stability.NonFiniteError("squared error overflowed")
@@ -1080,7 +1287,14 @@ def exact_masked_mse(pred, target, mask) -> Fraction:
     `test_a_rational_where_a_float_is_annotated_is_refused_and_the_exact_helpers_are_not`), and it
     therefore still answers some malformed-matrix cases with a value: after this fix
     `probe_missing_inputs(exact_masked_mse)` remains SILENT_DEFAULT_DEFECT on the matrix cases, which is
-    the honest report for a helper that validates its mask and not its data."""
+    the honest report for a helper that validates its mask and not its data. THE POST-FIX FIGURES, here
+    rather than only in the test, because round 11's record claimed they were "named and counted in both
+    the test and the docstring" and they were in the test alone: `n_silent_value_total` 48 -> 36, and the
+    12 remaining silent cases per seed are exactly THREE -- `inf_in_masked_out_row`,
+    `nan_in_masked_out_row` and `ragged_columns` (3 x 12 seeds = 36), with all four mask cases
+    (`all_false_mask`, `empty_mask`, `mask_is_none`, `mask_truthy_not_bool`) now at 0 silent and 12
+    raised. Asserted against this docstring by
+    `test_robustness.AProbeCannotCertifyAMeasureItNeverCalled.test_the_exact_oracle_validates_its_mask_like_its_five_siblings`."""
     M = stability.check_mask(mask, expected_len=len(pred))
     num, cnt = Fraction(0), 0
     for pr, tr, use in zip(pred, target, M):
@@ -1175,7 +1389,7 @@ class ShiftSpec:
         # load-bearing; the operator rule is pinned module-wide by
         # `test_robustness.NoIdentityComparisonDecidesAStatusOrATier`.
         if not isinstance(self.kind, ShiftKind):
-            raise ValueError(f"kind must be a ShiftKind, got {type(self.kind).__name__} "
+            raise ValueError(f"kind must be a ShiftKind, got {_type_name(self.kind)} "
                              "(a plain string of the right spelling is refused: it selects the tier "
                              "this spec is judged against and is serialised as declared_kind)")
 
@@ -1388,17 +1602,17 @@ def probe_shift(measure: Measure, spec: ShiftSpec, seeds: Sequence[int], cfg: Op
             rows.append((s, dev, exp, bound))
             per_seed.append(MetricValue.measured(float(dev / exp)))
         except (ValueError, TypeError, ArithmeticError) as e:
-            per_seed.append(MetricValue.unmeasured(f"{type(e).__name__}: {e}"))
+            per_seed.append(MetricValue.unmeasured(f"{_type_name(e)}: {_shown(e, how=str)}"))
     viol = [r for r in rows if r[1] > r[3]]
     bounded = spec.kind == ShiftKind.SENSITIVITY_BOUNDED   # `==`, not `is`: see `ShiftSpec.__post_init__`
     ok_status = ProbeStatus.SENSITIVITY_WITHIN_BOUND if bounded else ProbeStatus.INVARIANCE_HOLDS
     bad_status = ProbeStatus.SENSITIVITY_EXCEEDS_BOUND if bounded else ProbeStatus.INVARIANCE_DEFECT
     ratios = [r[1] / r[3] for r in rows if r[3] > 0]
     return build_scorecard(
-        probe_id=probe_id or f"shift:{getattr(measure, '__name__', 'measure')}:{spec.name}",
+        probe_id=probe_id or f"shift:{_callable_name(measure)}:{_shown(spec.name, how=str)}",
         probe_kind="benign_shift", seeds=seeds, per_seed=per_seed, cfg=cfg,
         status_if_summarized=bad_status if viol else ok_status,
-        details_always={"measure": getattr(measure, "__name__", "measure"), "transform": spec.name,
+        details_always={"measure": _name_attr(measure, "measure"), "transform": spec.name,
                         "declared_kind": spec.kind, "rationale": spec.rationale,
                         "error_register": ["ER-09 (generic summation-order mechanism only; no device compared)"]
                         if spec.name == "reorder_rows" else
@@ -1433,12 +1647,12 @@ def arm_difference(arms: Mapping[str, MetricValue], treatment: str, control: str
     `toy.schema._normalise_fields` boundary cannot reach it: a function parameter used as a dict key is
     normalised where it is bound."""
     if not isinstance(arms, Mapping):
-        raise ValueError(f"arms must be a mapping, got {type(arms).__name__}")
+        raise ValueError(f"arms must be a mapping, got {_type_name(arms)}")
     arms = _plain_value(arms)       # keys plain, and two keys that collapse to one are refused loudly
     names = []
     for nm in (treatment, control):
         if not isinstance(nm, str) or not nm.strip():
-            raise ValueError(f"arm name must be a nonblank string, got {type(nm).__name__}")
+            raise ValueError(f"arm name must be a nonblank string, got {_type_name(nm)}")
         names.append(_plain_value(nm))
     treatment, control = names
     for nm in (treatment, control):
@@ -1452,16 +1666,23 @@ def arm_difference(arms: Mapping[str, MetricValue], treatment: str, control: str
 
 
 def guarded(measure: Measure) -> Callable[..., MetricValue]:
-    """Wrap a measure so rejection becomes MetricValue.unmeasured(reason) instead of an exception."""
+    """Wrap a measure so rejection becomes MetricValue.unmeasured(reason) instead of an exception.
+
+    THAT SENTENCE WAS BREACHED OUTRIGHT until round 12, and by the two lines that build the reason. A
+    measure returning a value whose `__repr__` raises `RuntimeError`, and a measure raising an exception
+    whose own `__str__` raises, both came OUT of this wrapper as that exception -- measured on 3.12.4 and
+    3.13.5 -- because `{v!r}` and `f"{type(e).__name__}: {e}"` run the caller's protocols after the
+    decision to reject has been taken. Both reasons are built through `_shown` / `_type_name` now, so a
+    rejection this wrapper cannot DESCRIBE is still a rejection it REPORTS."""
     def run(pred, target, mask) -> MetricValue:
         try:
             v = measure(pred, target, mask)
         except (ValueError, TypeError, ArithmeticError) as e:
-            return MetricValue.unmeasured(f"{type(e).__name__}: {e}")
+            return MetricValue.unmeasured(f"{_type_name(e)}: {_shown(e, how=str)}")
         if isinstance(v, bool) or not isinstance(v, float) or not math.isfinite(v):
-            return MetricValue.unmeasured(f"non-float or non-finite result {v!r}")
+            return MetricValue.unmeasured(f"non-float or non-finite result {_shown(v)}")
         return MetricValue.measured(v)
-    run.__name__ = getattr(measure, "__name__", "measure")
+    run.__name__ = _name_attr(measure, "measure")
     return run
 
 
@@ -1507,18 +1728,56 @@ def _run_cases(measure: Measure, fx: MeasureFixture) -> dict:
     # `seed_sensitivity_probe` all return INSUFFICIENT_EVIDENCE with every seed unmeasured; `guarded`
     # returns `MetricValue.unmeasured`), so this is the one that was out of step. `TypeError` is inside
     # the `(ValueError, TypeError, ArithmeticError)` family both public callers declare.
+    # AND ROUND 11'S OWN REFUSAL ESCAPED THE FAMILY IT WAS WRITTEN TO HONOUR: `type(measure).__name__`
+    # on the line below is an attribute lookup on the caller's class, so a metaclass answering it with a
+    # raising property turned this `TypeError` into a propagating `RuntimeError` -- measured on both
+    # interpreters. The type name is read through `_type_name` now, like every other one here.
     if not callable(measure):
-        raise TypeError(f"measure must be callable, got {type(measure).__name__}: every case here counts "
+        raise TypeError(f"measure must be callable, got {_type_name(measure)}: every case here counts "
                         "a raised exception as correct handling, so an uncallable measure would be "
                         "reported as handling every missing input")
     out = {}
     for name, args in missing_input_cases(fx).items():
+        # THE RECORD IS TAKEN OUTSIDE THE CLASSIFIER'S `try`, and that is the whole fix. `repr(v)` used
+        # to sit INSIDE the handler whose only job is to decide whether the measure raised, so a failure
+        # in the RECORDING was recorded as the opposite outcome. MEASURED round 12 on 3.12.4 and 3.13.5,
+        # 12 seeds, `ProbeConfig(10)`, a measure returning a value whose `__repr__` raises `ValueError`:
+        #     invoked 180 times, returned a value for 15 of 15 cases x 12 seeds, and the card read
+        #     MISSING_INPUT_HANDLED, labels [NOT_VALIDATED, TOY_RESULT], summary n=12 mean=0.0,
+        #     `n_silent_value_total` = 0, every `case_table` row {"raised": 12, "silent_value": 0} --
+        #     while the control (a measure returning a plain 0.0) is SILENT_DEFAULT_DEFECT with 180.
+        #     `assert_no_silent_default` returned None, i.e. CERTIFIED it. The forged card differed from
+        #     an honest `mse_fsum` card in ONE key: the `case_table`'s `types` column.
+        # The same verdict flip as round 11's uncallable measure, through the diagnostic instead of
+        # through the call -- so the classification is now decided by WHERE the call returned, and the
+        # record built afterwards, from a value the classifier has already finished with.
         try:
             v = measure(*args)
-            out[name] = ("SILENT_VALUE", repr(v))
         except (ValueError, TypeError, ArithmeticError) as e:
-            out[name] = ("RAISED", type(e).__name__)
+            out[name] = ("RAISED", _type_name(e))
+            continue
+        out[name] = ("SILENT_VALUE", _silent_detail(v))
     return out
+
+
+def _silent_detail(v: Any) -> str:
+    """The diagnostic a SILENT_VALUE case records, built from a measure's UNVALIDATED return.
+
+    `_to_metric` is the model, and an attester called the choice it makes a better one than `repr`: it
+    reads `type(v).__name__`, not the object's own description. Here BOTH are needed -- the number is
+    diagnostically the point, because `assert_no_silent_default` reads this text to name a returned 0.0,
+    "the most dangerous substitution" by its own docstring -- so the NUMBER comes from `_plain_number`,
+    which reads the double the object STORES and consults no `__float__`/`__repr__` override, and
+    anything that is not a number is named by its type with its description appended through `_shown`.
+    WHY, measured: a `float` SUBCLASS storing 0.0 whose `__repr__` answers "1.0" moved the
+    `[SILENT ZERO]` tag from 45 of 45 cases to 0 of 45 on both interpreters, i.e. the measure chose
+    which of its own silent defaults got named, with the complaint still firing. `repr` of a plain
+    `float` cannot raise and cannot lie; a `Fraction` (the exact oracle's return) still gets its value
+    shown, through the admission."""
+    f = _plain_number(v)
+    if f is not None:
+        return repr(f)
+    return f"{_type_name(v)}: {_shown(v)}"
 
 
 def assert_no_silent_default(measure: Measure, seeds: Sequence[int] = (0, 1, 2)) -> None:
@@ -1558,10 +1817,10 @@ def probe_missing_inputs(measure: Measure, seeds: Sequence[int], cfg: Optional[P
     silent_total = sum(r["silent_value"] for r in table.values())
     defect = silent_total > 0 or not all(structural.values())
     return build_scorecard(
-        probe_id=probe_id or f"missing_inputs:{getattr(measure, '__name__', 'measure')}",
+        probe_id=probe_id or f"missing_inputs:{_callable_name(measure)}",
         probe_kind="missing_inputs", seeds=seeds, per_seed=per_seed, cfg=cfg,
         status_if_summarized=ProbeStatus.SILENT_DEFAULT_DEFECT if defect else ProbeStatus.MISSING_INPUT_HANDLED,
-        details_always={"measure": getattr(measure, "__name__", "measure"), "cases": sorted(missing_input_cases(
+        details_always={"measure": _name_attr(measure, "measure"), "cases": sorted(missing_input_cases(
             make_measure_fixture(seeds[0] if seeds else 0))),
             "error_register": ["ER-01 (empty/all-False mask must be loud)", "ER-02 (NaN under a mask)"]},
         details_if_summarized={"case_table": table, "structural_checks": structural,
@@ -1672,7 +1931,7 @@ def probe_precision(kind: str, param: float, seeds: Sequence[int], cfg: Optional
         try:
             r = _precision_outcome(kind, param, s, measure)
         except (ValueError, TypeError, ArithmeticError) as e:
-            per_seed.append(MetricValue.unmeasured(f"{type(e).__name__}: {e}"))
+            per_seed.append(MetricValue.unmeasured(f"{_type_name(e)}: {_shown(e, how=str)}"))
             continue
         per_seed.append(MetricValue.measured(r["stab"]))
         rows.append(r)
@@ -1730,7 +1989,18 @@ _WHY_CALLABLE_NUMBER = (
     "`probe_missing_inputs`, the one probe for which a raised exception is the GOOD outcome: it reported "
     "MISSING_INPUT_HANDLED with a measured mean of 0.0 for `measure=42`, having invoked 0 of 15 cases, "
     "and `assert_no_silent_default(42)` certified the same measure. Both refuse an uncallable measure "
-    "now, in `_run_cases`, where the measurement is written out")
+    "now, in `_run_cases`, where the measurement is written out. "
+    "AND THE SENTENCE ABOVE WAS SHORT BY ONE CONSUMER, which round 12 measured: `_run_cases` never "
+    "normalises and never type-checks this return at all -- `guarded`, four lines of this module away, "
+    "DOES -- it only `repr()`d it, INSIDE the handler that decides whether the measure raised, so a "
+    "measure returning a value whose `__repr__` raises `ValueError` was recorded as having RAISED for "
+    "15 of 15 cases x 12 seeds and certified MISSING_INPUT_HANDLED, and `assert_no_silent_default` "
+    "returned None for it. The classification is taken from WHERE the call returned now, and the record "
+    "is built afterwards by `_silent_detail` -- the number from `_plain_number`, which is what makes the "
+    "`[SILENT ZERO]` tag unforgeable, and anything else from `_type_name` / `_shown`. THE LANE THAT "
+    "FOUND IT is the one this reason is exercised by: `test_robustness._exercise_callable_number` had no "
+    "RAISE member until round 12, and no lane in that file had one, while six sweeps carried an "
+    "`OUTSIDE the declared family` branch that nothing in the file could make fire")
 _WHY_CALLABLE_FIXTURE = (
     "a callable whose return is a fixture; stores no scalar to collapse. STATED AS WHAT IT IS, because "
     "the obvious reason is the wrong one: `probe_shift` does NOT type-check this return, so "
@@ -1978,7 +2248,7 @@ def _plain_arguments(fn):
             if name in scalars and not _stores_a_scalar(plain):
                 raise TypeError(
                     f"{fn.__name__}() parameter {name!r} is annotated {scalars[name]} but was given a "
-                    f"{type(given).__name__}, which stores no {scalars[name]} to normalise: a duck-typed "
+                    f"{_type_name(given)}, which stores no {scalars[name]} to normalise: a duck-typed "
                     "scalar is refused AT THE PARAMETER BOUNDARY rather than passed to a gate, a closure "
                     "cell or a card that it would then decide")
             if plain is not given:

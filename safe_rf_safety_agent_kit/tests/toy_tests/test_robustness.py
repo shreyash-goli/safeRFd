@@ -10,6 +10,7 @@ import functools
 import inspect
 import json
 import math
+import os
 import random
 import struct
 import sys
@@ -43,6 +44,53 @@ CFG = rb.ProbeConfig(10)
 PY312 = sys.version_info >= (3, 12)
 EPS = sys.float_info.epsilon
 TS = "2000-01-01T00:00:00Z"
+
+
+def _doc(obj):
+    """`inspect.cleandoc(obj.__doc__)`, or None when there is no docstring of the object's OWN to read.
+
+    `python -OO` strips docstrings, and 11 pins in this file read one: measured on BOTH interpreters at
+    HEAD, `Ran 181, FAILED (failures=3, errors=8)`. The eight ERRORS are the plain shape every module in
+    this kit has hit (`'NoneType' object has no attribute 'split'`, and one
+    `argument of type 'NoneType' is not iterable`). `-OO` is not a mode this project runs, and the
+    failures are symmetric across interpreters, so this is a latent trap rather than a live defect --
+    but a pin that ERRORS in a mode anyone can run is a pin whose subject nobody is reading.
+
+    THE GUARD IS A PLAIN `if`, NOT `skipUnless`, for the reason `test_stability` and `test_dashboard`
+    both recorded when they closed this: a guard that can SKIP is the hazard, because one firing in the
+    mode the project DOES run hides a pin and still reports OK. This shape cannot skip anything in any
+    mode; it drops the doc half of a pin and leaves every behavioural assertion running, `-OO` included.
+
+    AND THE HALF THOSE TWO MODULES DID NOT HAVE: THREE of this file's 11 sites read a `@dataclass`'s
+    `__doc__`, and `dataclasses` SUBSTITUTES a synthesised signature string when the class has no
+    docstring of its own -- so under `-OO` the read does not crash, it compares the needle against
+    `"SeedSummary(n: 'int', mean: 'float', ...)"` and FAILS. A `None` check cannot see that: the
+    docstring is present and wrong. So the substitution is DETECTED BY RECONSTRUCTING IT, with the
+    expression `dataclasses` itself uses (`_dataclass_signature_doc`), rather than by pattern-matching
+    the text: if the real docstring ever equals its own synthesised signature there is nothing to pin
+    anyway, and if `dataclasses` changes the expression this helper stops suppressing and the pin
+    fails loudly instead of passing for the wrong reason.
+    `test_the_docstring_guard_is_inert_in_a_normal_run_and_sees_the_dataclass_substitution` asserts both
+    halves, in both modes, from `sys.flags.optimize`."""
+    d = getattr(obj, "__doc__", None)
+    if d is None:
+        return None
+    if isinstance(obj, type) and dataclasses.is_dataclass(obj) and d == _dataclass_signature_doc(obj):
+        return None
+    return inspect.cleandoc(d)
+
+
+def _dataclass_signature_doc(cls):
+    """The docstring `@dataclass` synthesises for a class that has none: the class name plus its own
+    signature with the `-> None` stripped, which is the expression `dataclasses.py` itself evaluates."""
+    return cls.__name__ + str(inspect.signature(cls)).replace(" -> None", "")
+
+
+def _flat(obj):
+    """`_doc(obj)` whitespace-normalised, or None. 16 of this file's 21 doc reads normalise this way so
+    that a re-wrapped docstring is not a test failure; the other five use whitespace-free needles."""
+    d = _doc(obj)
+    return None if d is None else " ".join(d.split())
 
 
 def sc_simple(seeds=SEEDS, f=lambda s: float(s % 1000)):
@@ -300,6 +348,82 @@ class TestImmutability(unittest.TestCase):
         with self.assertRaises(AttributeError):
             self.sc.new_attribute = 1          # frozen + no instance dict path for new attrs via setattr
 
+    def test_the_vars_write_route_is_declared_not_discovered(self):
+        """FINDING 3: `vars(card)["probe_id"] = "TAMPERED"` -- and `card.__dict__[...]`,
+        `vars(card).update(...)`, `vars(card.summary)[...]`, `vars(card).pop(...)`, `vars(card).clear()`.
+        A frozen dataclass's freeze is `__setattr__`, and `vars()` does not go through it.
+
+        WHY THIS IS A DEFECT BY THIS MODULE'S OWN STANDARD rather than a new capability: it grants
+        nothing honest limit (1) does not already grant -- and limit (2) was written down for exactly
+        that reason, in those words ("it grants no power (1) does not already grant, but it is a route
+        and this module's standard is that routes are stated"). The `Scorecard` list named
+        `object.__setattr__` and `gc.get_referents`; the module docstring named those plus
+        `object.__new__`, subclassing and module-constant edits; NEITHER named `vars()`, the plainest
+        spelling of the two -- while `toy.benchmark`, `toy.dashboard` and their tests all treat
+        `vars(x)` / `x.__dict__` as a protocol bypass when they READ it. It was unstated at the one
+        place in the kit that enumerates WRITE routes, and `TestImmutability` swept `setattr`,
+        `delattr`, new attributes, the mappingproxy, nested containers, the defensive copy, `replace`
+        and `object.__setattr__` -- not this.
+        DECLARED RATHER THAN CLOSED, with the measurement in limit (4): `slots=True` closes it and
+        breaks the freeze's own error message for a new attribute on both interpreters.
+        This sweep drives every spelling, asserts the consequence, and -- the half that makes it a pin
+        rather than a note -- FAILS IF A ROUTE STARTS RAISING while the declaration still says it does
+        not, so the list cannot go stale in either direction."""
+        import gc
+        changed, unserialisable = [], []
+        routes = (
+            ("vars(card)['probe_id']=", lambda c: vars(c).__setitem__("probe_id", "TAMPERED")),
+            ("vars(card).update(...)", lambda c: vars(c).update(probe_id="TAMPERED")),
+            ("card.__dict__['probe_id']=", lambda c: c.__dict__.__setitem__("probe_id", "TAMPERED")),
+            ("vars(card)['summary']=None", lambda c: vars(c).__setitem__("summary", None)),
+            ("vars(card.summary)['mean']=", lambda c: vars(c.summary).__setitem__("mean", 9.0)),
+            ("vars(card)['does_not_establish']=", lambda c: vars(c).__setitem__(
+                "does_not_establish", ("This IS a safety finding.",))),
+            ("vars(card).pop('seed_digest')", lambda c: vars(c).pop("seed_digest")),
+            ("vars(card).clear()", lambda c: vars(c).clear()),
+        )
+        for label, write in routes:
+            with self.subTest(route=label):
+                card = sc_simple()
+                before = card.content_hash()
+                write(card)                       # no exception: that IS the finding
+                try:
+                    after = card.content_hash()
+                except AttributeError:            # a DELETED field leaves an unserialisable card
+                    unserialisable.append(label)
+                    continue
+                self.assertNotEqual(after, before, f"{label} did not change the card")
+                changed.append(label)
+        self.assertEqual(len(changed), 6)
+        self.assertEqual(unserialisable, ["vars(card).pop('seed_digest')", "vars(card).clear()"])
+        # the two consequences this kit names as the worst shapes, both reproduced with no
+        # `object.__setattr__` anywhere
+        c = sc_simple()
+        vars(c)["does_not_establish"] = ("This IS a safety finding.",)
+        self.assertEqual(c.does_not_establish, ("This IS a safety finding.",))
+        self.assertIn("This IS a safety finding.", c.to_json())
+        rec = rb.scorecard_to_record(c, run_id="r", timestamp_utc=TS)
+        self.assertEqual(rec.evidence_class, EvidenceClass.TOY_RESULT)      # the record accepts it
+        c4 = rb.seed_sensitivity_probe(lambda s: float(s), (1, 2, 3), rb.ProbeConfig(3))
+        vars(c4)["min_seeds"] = 10
+        self.assertEqual(json.loads(c4.to_json())["min_seeds"], 10)
+        self.assertEqual(json.loads(c4.to_json())["summary"]["n"], 3)       # round 10's lie, again
+        # the DECLARATIONS, in both lists, naming this route
+        for doc, needle in ((_flat(rb.Scorecard), '(4) `vars(card)["probe_id"] = "TAMPERED"`'),
+                            (_flat(rb), "`vars(obj)` / `obj.__dict__` is the SAME writable dict")):
+            if doc is None:
+                continue                                                   # -OO: see `_doc`
+            self.assertIn(needle, doc)
+            self.assertIn("limit (4)", _flat(rb) or "limit (4)")           # the cross-reference
+            self.assertIn("NOT CLOSED", _flat(rb.Scorecard) or "NOT CLOSED")
+        # and the supported API is unaffected: every refusal `TestImmutability` already pins still fires
+        card = sc_simple()
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            card.probe_id = "z"
+        with self.assertRaises(TypeError):
+            card.details["x"] = 1
+        self.assertEqual(gc.get_referents(card.details)[0], dict(card.details))   # limit (2), stated
+
     def test_mapping_mutation_raises(self):
         with self.assertRaises(TypeError):
             self.sc.details["n"] = 1.0
@@ -454,7 +578,19 @@ class TestInvariancesAndSensitivities(unittest.TestCase):
         for m in (rb.mse_fsum, rb.mse_naive):
             for sp in (rb.shift_reorder_rows(), rb.shift_masked_out_rows(), rb.shift_scale(2.0 ** 10)):
                 if m is rb.mse_naive and sp.name == "reorder_rows" and not PY312:
-                    continue   # environmental: needs CPython >= 3.12 compensated sum(); QA confirmed a plain loop flips it
+                    # ENVIRONMENTAL, and asserted rather than skipped. `sum()` of floats is compensated
+                    # from CPython 3.12, so on an older interpreter this one pair genuinely flips to
+                    # INVARIANCE_DEFECT (QA confirmed it by patching `sum` to a plain loop). A bare
+                    # `continue` made the branch a hole: it ran NOTHING on an interpreter this project
+                    # does not use, which is the same vacuity shape as `X if PY312 else X`. The probe
+                    # must still produce a card, on one of the two tiers, and record the version that
+                    # decided which -- that holds on every interpreter and is what the card is for.
+                    env = rb.probe_shift(m, sp, SEEDS, CFG)
+                    self.assertIn(env.status, (PS.INVARIANCE_HOLDS, PS.INVARIANCE_DEFECT))
+                    self.assertEqual(env.details["python_version"],
+                                     ".".join(map(str, sys.version_info[:3])))
+                    self.assertEqual(env.details["n_measured"], 12)
+                    continue
                 sc = rb.probe_shift(m, sp, SEEDS, CFG)
                 self.assertIs(sc.status, PS.INVARIANCE_HOLDS, (m.__name__, sp.name))
                 self.assertEqual(sc.details["n_violations"], 0)
@@ -733,12 +869,23 @@ class TestNumericalStability(unittest.TestCase):
         sc16 = rb.probe_precision("cancellation", 16, SEEDS, CFG)
         self.assertIs(sc16.status, PS.PRECISION_OK if PY312 else PS.PRECISION_LOSS)
 
-    @unittest.skipUnless(PY312, "sum() is compensated from CPython 3.12; older versions behave like the plain loop")
     def test_stability_path_is_compensated_on_312_but_that_is_environmental(self):
+        """THE FILE'S ONLY SKIP DECORATOR USED TO BE HERE, and it is a plain `if` now, for the reason
+        `test_stability` and `test_dashboard` both chose one for the same job: a `skipUnless` on
+        `PY312` NEVER FIRES on either interpreter this project runs, so what it buys is nothing and
+        what it costs is a mechanism that CAN hide a pin -- an uncounted skip is how a green run stops
+        meaning the pins ran. `scripts/test_baseline.txt` records 0 skips for this module and that
+        column is what a skip would spend. The claim is interpreter-dependent either way, which the
+        `else` branch states as the environmental fact it is, and both branches assert something."""
         for e in (8, 16, 20):
             sc = rb.probe_precision("cancellation", e, SEEDS, CFG)
-            self.assertLess(sc.details["max_stability_rel_err"], 1e-15)
             self.assertEqual(sc.details["python_version"], ".".join(map(str, sys.version_info[:3])))
+            if PY312:
+                self.assertLess(sc.details["max_stability_rel_err"], 1e-15)
+            else:   # the compensation is absent: the stability path is the plain loop, and that is the
+                    # fact this test exists to RECORD, not to skip over
+                self.assertAlmostEqual(sc.details["max_stability_rel_err"],
+                                       sc.details["max_plain_loop_rel_err"])
 
     def test_long_accumulation_growth(self):
         # positive summands: worst-case relative error of a plain left-to-right sum <= n*u/(1-n*u) (the bound
@@ -749,7 +896,17 @@ class TestNumericalStability(unittest.TestCase):
             res[n] = sc.details
             self.assertLessEqual(res[n]["max_plain_over_bound"], 1.0, n)
             self.assertLessEqual(res[n]["max_fsum_rel_err"], EPS, n)
-            self.assertIs(sc.status, PS.PRECISION_OK if PY312 else sc.status)
+            # `PS.PRECISION_OK if PY312 else sc.status` USED TO STAND HERE, i.e. on CPython < 3.12 it
+            # compared `sc.status` WITH ITSELF -- unreachable on both project interpreters, so a latent
+            # trap rather than a live defect, and this project has already measured one vacuous
+            # assertion ABSORBING the regression it existed to catch. The else branch asserts the
+            # property that holds without the compensated `sum()`: a status from the two the tolerance
+            # can produce, never INSUFFICIENT_EVIDENCE, with every seed measured.
+            if PY312:
+                self.assertIs(sc.status, PS.PRECISION_OK)
+            else:
+                self.assertIn(sc.status, (PS.PRECISION_OK, PS.PRECISION_LOSS))
+                self.assertEqual(sc.summary.n, len(SEEDS))
         self.assertGreater(res[10000]["max_plain_loop_rel_err"], res[10]["max_plain_loop_rel_err"])
         self.assertGreater(res[10000]["max_plain_loop_rel_err"], 1e-15)    # real, quantified loss for the plain loop
         self.assertLess(res[10000]["max_plain_over_bound"], 0.1)           # worst case is not what happens
@@ -1023,8 +1180,9 @@ class TestQAHardening(unittest.TestCase):
         d = rb.seed_sensitivity_probe(lambda s: steps[s], SEEDS[:10], CFG)
         self.assertFalse(d.details["zero_variance_warning"])        # non-constant sample is never flagged
         self.assertEqual(d.details["n_distinct_values"], 3)
-        self.assertIn("2.47e-324", rb.SeedSummary.__doc__)
-        self.assertIn("zero_variance_warning", rb.SeedSummary.__doc__)
+        if _doc(rb.SeedSummary) is not None:                      # see `_doc`: a dataclass under -OO
+            self.assertIn("2.47e-324", _doc(rb.SeedSummary))
+            self.assertIn("zero_variance_warning", _doc(rb.SeedSummary))
 
     def test_zero_variance_warning_distinct_from_sd_at_the_subnormal_floor(self):
         """Regression pin (cross-task, benchmark.sample_sd floor): 29 zeros plus one smallest subnormal is NOT
@@ -1101,11 +1259,12 @@ class TestQAHardening(unittest.TestCase):
         # ... and the probe path could never deliver one anyway: MetricValue refuses non-floats
         with self.assertRaises(ValueError):
             MetricValue.measured(True)
-        doc = " ".join(rb.SeedSummary.from_values.__doc__.split())
-        for needle in ("ACCEPTED NUMERIC CONTRACT", "`__float__` or `__index__`", "is not a `bool`",
-                       "A boolean is never a measurement anywhere in this kit",
-                       "number parsed out of text is not a measurement either"):
-            self.assertIn(needle, doc)
+        doc = _flat(rb.SeedSummary.from_values)
+        if doc is not None:
+            for needle in ("ACCEPTED NUMERIC CONTRACT", "`__float__` or `__index__`", "is not a `bool`",
+                           "A boolean is never a measurement anywhere in this kit",
+                           "number parsed out of text is not a measurement either"):
+                self.assertIn(needle, doc)
 
     def test_mappingproxy_is_a_view_not_a_copy_and_that_limit_is_stated(self):
         """SR-11 item 7: an undocumented immutability bypass. `gc.get_referents(card.details)[0]` hands back
@@ -1132,11 +1291,12 @@ class TestQAHardening(unittest.TestCase):
         d["seeds"].append(999)
         self.assertNotIn("injected", sc.details)
         self.assertEqual(sc.content_hash(), before)
-        doc = " ".join(rb.Scorecard.__doc__.split())
-        for needle in ("HONEST LIMITS -- the routes THIS MODULE KNOWS OF, which is not a claim that "
-                       "they are all of them",
-                       "gc.get_referents(card.details)[0]", "`to_dict()` is a true defensive copy"):
-            self.assertIn(needle, doc)
+        doc = _flat(rb.Scorecard)
+        if doc is not None:
+            for needle in ("HONEST LIMITS -- the routes THIS MODULE KNOWS OF, which is not a claim that "
+                           "they are all of them",
+                           "gc.get_referents(card.details)[0]", "`to_dict()` is a true defensive copy"):
+                self.assertIn(needle, doc)
         # THE CLAIM THAT USED TO BE HERE, and why its own test needle had to move. This docstring said
         # "HONEST LIMITS, the complete list of routes known to this module" and this assertion PINNED
         # that wording, so the sentence was protected by a test while being false: a round-6 attestation
@@ -1146,8 +1306,10 @@ class TestQAHardening(unittest.TestCase):
         # a list of routes is an assertion about ABSENCE and sweeping for routes cannot establish absence.
         # The falsified wording may appear ONLY as an attributed correction, never as the docstring's own
         # claim -- the convention `test_benchmark` and `ThePolicyParametersAreThemselvesPinned` both use.
-        self.assertNotIn("HONEST LIMITS, the complete list of routes", doc)
-        self.assertIn('this sentence used to say "the complete list of routes known to this module"', doc)
+        if doc is not None:
+            self.assertNotIn("HONEST LIMITS, the complete list of routes", doc)
+            self.assertIn('this sentence used to say "the complete list of routes known to this module"',
+                          doc)
         with self.assertRaises(ValueError):          # limit (3), closed: subclasses are refused
             class Sub(MetricValue):
                 pass
@@ -1155,7 +1317,8 @@ class TestQAHardening(unittest.TestCase):
                                per_seed=tuple(Sub(float(i), None) for i in range(1, 11)),
                                cfg=rb.ProbeConfig(10), status_if_summarized=PS.MEASURED,
                                details_always={})
-        self.assertIn("gc.get_referents", " ".join(rb.__doc__.split()))
+        if _flat(rb) is not None:
+            self.assertIn("gc.get_referents", _flat(rb))
 
     def test_probe_config_defaults_are_constructed_per_call(self):
         """Same defect class the dashboard owner found in `benchmark.analyze_scores`: a literal
@@ -1232,7 +1395,8 @@ class TestQAHardening(unittest.TestCase):
         # and the floor is still refused at construction
         with self.assertRaises(ValueError):
             rb.ProbeConfig(rb.SEED_FLOOR - 1)
-        self.assertIn("FRESHLY CONSTRUCTED `ProbeConfig()`", " ".join(rb._pcfg.__doc__.split()))
+        if _flat(rb._pcfg) is not None:
+            self.assertIn("FRESHLY CONSTRUCTED `ProbeConfig()`", _flat(rb._pcfg))
 
     def test_build_scorecard_has_no_shared_container_default(self):
         """QA found the last container default in this module: `details_if_summarized` defaulted to a
@@ -1265,7 +1429,8 @@ class TestQAHardening(unittest.TestCase):
     def test_documented_corner_extreme_summary_is_accepted(self):
         s = rb.SeedSummary.from_values([1.7e308] * 3)      # documented, unguarded: see SeedSummary docstring
         self.assertEqual(s.n, 3)
-        self.assertIn("1.7e308", rb.SeedSummary.__doc__)
+        if _doc(rb.SeedSummary) is not None:
+            self.assertIn("1.7e308", _doc(rb.SeedSummary))
 
     # --- independent oracle check for exact_masked_mse
     def test_exact_masked_mse_against_independent_decimal_arithmetic(self):
@@ -1858,8 +2023,9 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
         self.assertEqual(len(delegations), 4, f"4 delegations expected, got {delegations}")
         self.assertEqual(len(sites) + len(delegations), 8,
                          "the module docstring quotes EIGHT paths; the AST must agree")
-        self.assertIn("EIGHT paths reach", " ".join(rb.__doc__.split()))
-        self.assertNotIn("six paths reach them", " ".join(rb.__doc__.split()))
+        if _flat(rb) is not None:
+            self.assertIn("EIGHT paths reach", _flat(rb))
+            self.assertNotIn("six paths reach them", _flat(rb))
         # Each path is exercised below so the count is not merely syntactic.
         self.assertEqual(len(rb.SeedSummary.from_values([1.0, 2.0, 3.0]).values), 3)
         self.assertEqual(rb._pcfg(None).min_seeds, rb.DEFAULT_MIN_SEEDS)     # delegation 1
@@ -1888,12 +2054,14 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
     def test_the_corrected_count_is_stated_wherever_a_number_is_quoted(self):
         """The circulating numbers, reconciled in the places this owner controls. `docs/PROGRESS.md`
         is NOT in this owner's files; its "five independent points" is reported for routing, not edited."""
-        mine = " ".join(self.test_the_number_of_seed_floor_defences_is_counted_not_claimed.__doc__.split())
-        self.assertIn("There are FOUR direct comparisons and EIGHT paths", mine)
-        self.assertIn("MEASURED the 4 from the AST and merely TEXT-pinned the 6", mine)
+        mine = _flat(self.test_the_number_of_seed_floor_defences_is_counted_not_claimed)
+        if mine is not None:
+            self.assertIn("There are FOUR direct comparisons and EIGHT paths", mine)
+            self.assertIn("MEASURED the 4 from the AST and merely TEXT-pinned the 6", mine)
         # the stale "three times over" is gone from the docstring that carried it
-        stale = " ".join(
-            TestQAHardening.test_probe_config_defaults_are_constructed_per_call.__doc__.split())
+        stale = _flat(TestQAHardening.test_probe_config_defaults_are_constructed_per_call)
+        if stale is None:                                   # -OO: nothing to read, nothing to pin
+            return
         self.assertNotIn("defended three times over", stale)
         # The wrong figure (D8) may appear ONLY as an attributed correction, never as the docstring's
         # own measurement -- the same convention `test_benchmark` uses for a falsified claim.
@@ -1901,7 +2069,7 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
         self.assertIn("Those hold only for a fixture with exactly FOUR measured values", stale)
         self.assertIn("min_seeds 3, 5, 9, 10, 12 -> SeedSummary n=12", stale)
         self.assertIn("used to pass a **dict** as `per_seed`", stale)
-        mod = " ".join(rb.__doc__.split())
+        mod = _flat(rb)
         self.assertIn("FOUR direct comparisons against `SEED_FLOOR`", mod)
         self.assertIn("EIGHT paths reach", mod)
         self.assertIn('"SIX" WAS WRONG', mod)
@@ -2111,7 +2279,9 @@ class ACardCannotAssertAMinimumItDoesNotMeet(unittest.TestCase):
         self.assertEqual(ok.content_hash(), card.content_hash())
 
     def test_the_module_docstring_states_what_these_guards_now_do(self):
-        doc = " ".join(rb.__doc__.split())
+        doc = _flat(rb)
+        if doc is None:
+            return                                          # -OO: see `_doc`
         self.assertIn('THAT SENTENCE NAMES THE ONLY DEFENCE, AND THE DEFENCE WAS DEFEATABLE', doc)
         self.assertIn('THE "COUNTS" HALF OF THAT SENTENCE WAS FALSE', doc)
         self.assertIn("ONE OF THE EIGHT USED TO DEFEND LESS THAN THE COUNT IMPLIED", doc)
@@ -2427,7 +2597,9 @@ class AForgedOutcomeCannotBecomeAZeroVarianceMeasurement(unittest.TestCase):
     def test_the_decision_to_fix_at_the_schema_is_recorded_where_the_cast_is_missing(self):
         """`SeedSummary.from_values` casts with `float.__float__` and says why; `_to_metric` does not,
         and the asymmetry would read as an oversight. Its docstring states the measured reason."""
-        doc = " ".join(rb._to_metric.__doc__.split())
+        doc = _flat(rb._to_metric)
+        if doc is None:
+            return                                          # -OO: see `_doc`
         self.assertIn("WHY THERE IS NO `float.__float__` HERE", doc)
         self.assertIn("it never compares or computes with it", doc)
         self.assertIn("a mutant removing it survives every test", doc)
@@ -2602,8 +2774,16 @@ _DUCK_BINARY = ("add", "sub", "mul", "truediv", "floordiv", "mod", "divmod", "po
 _DUCK_COMPARE = ("lt", "le", "eq", "ne", "gt", "ge")
 
 
-def _duck_typed(v):
+def _duck_typed(v, undescribable=False):
     """A NON-SUBCLASS stand-in for the plain `str` / `int` / `float` `v`, or None if `v` is not one.
+
+    `undescribable=True` is THE RAISE MEMBER of this lane (round 12): the same duck, whose `__repr__` /
+    `__str__` / `__format__` raise `_RAISE_EXC` instead of delegating. Everything a GATE reads still
+    delegates honestly, so what the limb measures is only this: whether the parameter boundary's own
+    refusal -- which reads `type(given).__name__` and interpolates the annotation -- stays inside the
+    `(ValueError, TypeError, ArithmeticError)` family when the object it is refusing cannot be
+    described. It did not before this round: three of the eight measured type-name escapes WERE that
+    refusal.
 
     THE SECOND SPELLING OF THE SAME LIE, and the round-8 finding it exists for: `toy.schema._plain_value`
     collapses a `str`/`int`/`float` SUBCLASS to the value it STORES, and returns an object of any other
@@ -2632,10 +2812,14 @@ def _duck_typed(v):
     member must stay itself."""
     if v is None or isinstance(v, (Enum, bool)) or type(v) not in (str, int, float):
         return None
+    def _refuse(self, *a):
+        raise _RAISE_EXC("describing this duck refuses")
     ns = {"__init__": lambda self, x=v: object.__setattr__(self, "_v", x),
           "__repr__": lambda self: repr(self._v), "__str__": lambda self: str(self._v),
           "__hash__": lambda self: hash(self._v), "__bool__": lambda self: bool(self._v),
           "__format__": lambda self, spec="": format(self._v, spec)}
+    if undescribable:
+        ns.update({"__repr__": _refuse, "__str__": _refuse, "__format__": _refuse})
     if isinstance(v, str):
         ns.update({"__len__": lambda self: len(self._v), "__iter__": lambda self: iter(self._v),
                    "__getitem__": lambda self, i: self._v[i],
@@ -2781,6 +2965,25 @@ def _parameter_coverage_complaints(calls=None, boundary=_spy_behind_the_boundary
                 else:
                     out.append(f"{name}.{p}: a duck-typed value that is not a subclass was ACCEPTED -- "
                                "nothing collapsed it (it stores no scalar) and nothing refused it")
+                # --- THE RAISE MEMBER of this half: the same duck, unable to describe itself. Only
+                # family closure is asserted, because acceptance is already decided by the limb above:
+                # the parameter boundary's REFUSAL builds its message from `type(given).__name__` and
+                # the annotation, so the refusal itself was the escape at three of the eight measured
+                # type-name positions.
+                for lie, why in ((_duck_typed(given[p], undescribable=True),
+                                  "a duck-typed value that cannot describe itself"),
+                                 (_type_name_raises(_RAISE_EXC),
+                                  "a value storing no scalar whose TYPE NAME cannot be read")):
+                    try:
+                        duck_target(**dict(given, **{p: lie}))
+                    except (ValueError, TypeError, ArithmeticError):
+                        continue
+                    except Exception as e:                  # noqa: BLE001 -- the point of the check
+                        if _declared_cross_owner(name, p, e):
+                            continue
+                        out.append(f"{name}.{p}: {why} raised {type(e).__name__}, OUTSIDE the "
+                                   "(ValueError, TypeError, ArithmeticError) family every probe "
+                                   "declares, so the REFUSAL ITSELF escapes the family it enforces")
             if p in declared:
                 if not str(declared[p]).strip():
                     out.append(f"{name}.{p}: declared in _PARAMETER_NO_SCALAR with no reason recorded")
@@ -3060,7 +3263,33 @@ class EveryPublicParameterIsNormalisedOrExplicitlyExempt(unittest.TestCase):
                                     "probe_precision.param", "shift_jitter.eps",
                                     "shift_reorder_rows.rel_tol", "shift_scale.degree",
                                     "shift_scale.factor", "shift_translate.c"])
-        self.assertEqual(sorted(complaints), sorted(c for c in complaints if "was ACCEPTED" in c),
+        # AND THE TWO RAISE-MEMBER GROUPS (round 12), which this control is ALSO the evidence for.
+        # With the boundary off, an undescribable duck escapes from exactly the six positions whose
+        # `{x!r}` site `_DIAGNOSTIC_SITES` declares as protected BY THE BOUNDARY -- so that declaration
+        # is a measurement here, not an assertion -- and a value whose TYPE NAME cannot be read escapes
+        # from five more, every one of them through another module's message (`toy.schema`'s
+        # `derive_seed` / `RunProvenance`), which is why the boundary's TYPE refusal is what closes
+        # them rather than an admission in this file.
+        undescribable = sorted(c.split(":")[0] for c in complaints if "cannot describe itself" in c)
+        self.assertEqual(undescribable, ["benchmark_outcome.metric", "probe_precision.kind",
+                                         "probe_precision.param", "shift_jitter.eps",
+                                         "shift_scale.factor", "shift_translate.c"])
+        for pos in undescribable:                    # each one is a site this table declares PLAIN
+            with self.subTest(position=pos):
+                self.assertTrue(any(why is _D_PLAIN and operand == pos.split(".")[1]
+                                    for (_f, _proto, operand), why in _DIAGNOSTIC_SITES.items()),
+                                f"{pos} escapes with the boundary off but no site of this table "
+                                "declares that parameter as plain-by-the-boundary")
+        self.assertEqual(sorted(c.split(":")[0] for c in complaints
+                                if "TYPE NAME cannot be read" in c),
+                         ["make_measure_fixture.seed", "make_order_sensitive_fixture.seed",
+                          "scorecard_to_record.code_version", "scorecard_to_record.run_id",
+                          "scorecard_to_record.timestamp_utc"])
+        self.assertEqual(len(complaints), 23, complaints)
+        self.assertEqual(sorted(complaints),
+                         sorted(c for c in complaints
+                                if "was ACCEPTED" in c or "cannot describe itself" in c
+                                or "TYPE NAME cannot be read" in c),
                          "the boundary-off control produced some OTHER complaint; the subclass half and "
                          "the registry clauses must be unaffected by it")
         # and with the boundary ON -- the shipped tree -- there is nothing to complain about
@@ -3498,7 +3727,8 @@ class TheParameterBoundaryClosesFourLiveRoutes(unittest.TestCase):
             self.assertFalse(bm._metric_ok(m))
             self.assertIn("ValueError", m.reason)
         # and the error family every probe declares is the one the module documents
-        self.assertIn("(ValueError, TypeError, ArithmeticError)", rb.make_measure_fixture.__doc__)
+        if _doc(rb.make_measure_fixture) is not None:
+            self.assertIn("(ValueError, TypeError, ArithmeticError)", _doc(rb.make_measure_fixture))
 
     # ---------------------------------------------------------------- the duck-typed twins (round 8)
     def test_F2_duck_typed_a_jitter_eps_that_is_not_a_subclass_is_refused_not_collapsed(self):
@@ -3646,8 +3876,9 @@ class TheParameterBoundaryClosesFourLiveRoutes(unittest.TestCase):
              rested on a premise nobody measured -- the branch was publicly reachable and the guard is
              pinnable.
         Restoring any of the three is a doc-only mutant, and it dies here."""
-        doc = rb.make_measure_fixture.__doc__
-        flat = " ".join(doc.split())
+        flat = _flat(rb.make_measure_fixture)
+        if flat is None:
+            return                                          # -OO: see `_doc`
         false_claim = "Both are closed by the gate now seeing the value the object STORES"
         self.assertEqual(flat.count(false_claim), 1,
                          "the retracted sentence may appear exactly once, QUOTED inside its own "
@@ -3817,6 +4048,401 @@ class _SubMetric(MetricValue):
     `ASummaryCannotBeBuiltFromAMetricValueSubclass`."""
 
 
+# =========================================== the DIAGNOSTIC-CONSTRUCTION enumeration (round 12)
+# THE THIRD DERIVED SET IN THIS FILE, after the field list and the parameter list, and it exists for
+# Finding 2: a message is built from protocols the CALLER implements, at the moment this module has
+# decided to refuse, and 18 of 60 driven positions therefore ended OUTSIDE the
+# `(ValueError, TypeError, ArithmeticError)` family every probe declares. A SITE exists wherever
+# `robustness.py` applies one of those protocols to any value: `repr` (as a call or `{x!r}`),
+# `str`/`format` (as a call or a bare `{x}`), `type(x).__name__`, and `getattr(x, "__name__")`. Each is
+# decided HERE, in writing, by the PROVENANCE of its operand, and
+# `EveryDiagnosticInThisModuleIsDecidedInWriting` re-derives the set from the module's own AST and fails
+# closed when a site appears that this table does not decide.
+# THE SCOPE, stated so the boundary of the class is not left to a reader: this table decides DIAGNOSTIC
+# CONSTRUCTION. The ARITHMETIC and COMPARISON dunders are the parameter boundary's own subject and are
+# swept by `_parameter_coverage_complaints`; `float()` / `int()` / `len()` / `bool()` are conversions
+# this module applies to values the boundary already made plain (9 `float()` calls by AST, 8 live, all
+# re-measured by an attester this round); and a raising ATTRIBUTE LOOKUP on a caller's object -- a duck
+# `ShiftSpec` whose `name` is a raising property, measured: `RuntimeError` out of `probe_shift` -- is
+# the ADJACENT channel, which `robustness.py`'s own comment block states and does not close, for the
+# reason the raising-`__class__` channel is held open kit-wide: any attribute of a caller's object can
+# raise, and a check cannot move that.
+_D_ROUTED = ("the operand is a string THIS module already built -- `_shown`, `_type_name`, "
+             "`_callable_name` or `_name_attr` -- so the caller's protocol ran inside an admission "
+             "that degrades instead of propagating")
+_D_OWN = ("this module's own data: a module constant, a literal field name, a `len()`, a signature's "
+          "own annotation text, or a local it computed itself. No caller protocol runs")
+_D_PLAIN = ("a plain `str`/`int`/`float` by the PARAMETER BOUNDARY: a subclass is collapsed to the "
+            "value it stores and an object storing no scalar is refused by type, so the only `repr` "
+            "that can run here is a builtin's. MEASURED, not assumed: with the boundary off "
+            "(`__wrapped__`) these are exactly the six positions an undescribable value escapes from, "
+            "which `test_the_duck_typed_half_is_what_reopened_the_four_routes_and_it_fails_closed` "
+            "asserts as a set equality against this table")
+_D_GATED = ("validated earlier in the same function -- an `isinstance` gate plus `_plain_value`, or a "
+            "`MetricValue`'s own `__post_init__` -- so the operand is a plain `str` or a `float` by "
+            "the time the message is built")
+_D_STORED = ("the plain double `_plain_number` returned, which is the value the object STORES: "
+             "`float.__repr__` on it can neither raise nor lie, and that is what makes the "
+             "`[SILENT ZERO]` tag unforgeable")
+_D_HELPER = "THE one spelling of this protocol in the module: the admission itself"
+_D_NAMES = {}      # id(reason) -> its constant name, so the census below reads as the table does
+_D_WRITE = ("a WRITE of the caller's `__name__` onto this module's own function object, not a read of "
+            "it for a message: a non-`str` raises `TypeError`, inside the declared family, and the "
+            "value itself comes from `_name_attr`")
+
+_DIAGNOSTIC_SITES = {
+    ('__post_init__', '{}', 'SEED_FLOOR'):
+        _D_OWN,
+    ('__post_init__', '{}', '_type_name(self.kind)'):
+        _D_ROUTED,
+    ('__post_init__', '{}', 'len(vals)'):
+        _D_OWN,
+    ('__post_init__', '{}', 'nm'):
+        _D_OWN,
+    ('_annotated_scalar_parameters', '__name__', 'par.annotation'):
+        _D_OWN,
+    ('_enum_value', '{}', '_type_name(e)'):
+        _D_ROUTED,
+    ('_install_parameter_boundary', '{}', 'f'):
+        _D_OWN,
+    ('_install_parameter_boundary', '{}', 'p'):
+        _D_OWN,
+    ('_install_parameter_boundary', '{}', 'unknown'):
+        _D_OWN,
+    ('_name_attr', 'getattr __name__', 'fn'):
+        _D_HELPER,
+    ('_name_attr', '{}', '_type_name(e)'):
+        _D_ROUTED,
+    ('_plain_measure', '{}', '_shown(v)'):
+        _D_ROUTED,
+    ('_plain_measure', '{}', 'what'):
+        _D_OWN,
+    ('_precision_outcome', '!r', 'kind'):
+        _D_PLAIN,
+    ('_precision_outcome', '{}', 'kind'):
+        _D_PLAIN,
+    ('_recheck_summary', '{}', 'SEED_FLOOR'):
+        _D_OWN,
+    ('_run_cases', '{}', '_type_name(measure)'):
+        _D_ROUTED,
+    ('_shown', '{}', '_type_name(e)'):
+        _D_ROUTED,
+    ('_shown', '{}', '_type_name(v)'):
+        _D_ROUTED,
+    ('_silent_detail', 'repr', 'f'):
+        _D_STORED,
+    ('_silent_detail', '{}', '_shown(v)'):
+        _D_ROUTED,
+    ('_silent_detail', '{}', '_type_name(v)'):
+        _D_ROUTED,
+    ('_to_metric', '{}', '_shown(e, how=str)'):
+        _D_ROUTED,
+    ('_to_metric', '{}', '_type_name(e)'):
+        _D_ROUTED,
+    ('_to_metric', '{}', '_type_name(v)'):
+        _D_ROUTED,
+    ('_type_name', '__name__', 'type(v)'):
+        _D_HELPER,
+    ('arm_difference', '!r', 'nm'):
+        _D_GATED,
+    ('arm_difference', '{}', '_type_name(arms)'):
+        _D_ROUTED,
+    ('arm_difference', '{}', '_type_name(nm)'):
+        _D_ROUTED,
+    ('arm_difference', '{}', 'arms[nm].reason'):
+        _D_GATED,
+    ('assert_no_silent_default', '{}', 'case'):
+        _D_OWN,
+    ('assert_no_silent_default', '{}', 'detail'):
+        _D_OWN,
+    ('assert_no_silent_default', '{}', 's'):
+        _D_OWN,
+    ('at_parameter_boundary', '!r', 'name'):
+        _D_OWN,
+    ('at_parameter_boundary', '__name__', 'fn'):
+        _D_OWN,
+    ('at_parameter_boundary', '{}', '_type_name(given)'):
+        _D_ROUTED,
+    ('at_parameter_boundary', '{}', 'fn.__name__'):
+        _D_OWN,
+    ('at_parameter_boundary', '{}', 'scalars[name]'):
+        _D_OWN,
+    ('benchmark_outcome', '__name__', 'outcome'):
+        _D_OWN,
+    ('benchmark_outcome', '{}', 'metric'):
+        _D_PLAIN,
+    ('deep_freeze', '{}', '_type_name(k)'):
+        _D_ROUTED,
+    ('deep_freeze', '{}', '_type_name(x)'):
+        _D_ROUTED,
+    ('from_values', '{}', 'SEED_FLOOR'):
+        _D_OWN,
+    ('from_values', '{}', '_shown(e, how=str)'):
+        _D_ROUTED,
+    ('from_values', '{}', '_type_name(v)'):
+        _D_ROUTED,
+    ('from_values', '{}', 'len(vals)'):
+        _D_OWN,
+    ('guarded', '__name__', 'run'):
+        _D_WRITE,
+    ('mse_fsum', '{}', '_shown(a)'):
+        _D_ROUTED,
+    ('mse_fsum', '{}', '_shown(b)'):
+        _D_ROUTED,
+    ('outcome', '{}', 'm.reason'):
+        _D_GATED,
+    ('outcome', '{}', 'metric'):
+        _D_PLAIN,
+    ('probe_missing_inputs', '{}', '_callable_name(measure)'):
+        _D_ROUTED,
+    ('probe_precision', '!r', 'kind'):
+        _D_PLAIN,
+    ('probe_precision', '!r', 'param'):
+        _D_PLAIN,
+    ('probe_precision', '{}', '_shown(e, how=str)'):
+        _D_ROUTED,
+    ('probe_precision', '{}', '_type_name(e)'):
+        _D_ROUTED,
+    ('probe_precision', '{}', 'kind'):
+        _D_PLAIN,
+    ('probe_shift', '{}', '_callable_name(measure)'):
+        _D_ROUTED,
+    ('probe_shift', '{}', '_shown(e, how=str)'):
+        _D_ROUTED,
+    ('probe_shift', '{}', '_shown(spec.name, how=str)'):
+        _D_ROUTED,
+    ('probe_shift', '{}', '_type_name(e)'):
+        _D_ROUTED,
+    ('require_summary', '{}', '_shown(result)'):
+        _D_ROUTED,
+    ('run', '{}', '_shown(e, how=str)'):
+        _D_ROUTED,
+    ('run', '{}', '_shown(v)'):
+        _D_ROUTED,
+    ('run', '{}', '_type_name(e)'):
+        _D_ROUTED,
+    ('scorecard_to_record', '{}', '_shown(_enum_value(sc.status), how=str)'):
+        _D_ROUTED,
+    ('scorecard_to_record', '{}', '_shown(sc.insufficient.reason, how=str)'):
+        _D_ROUTED,
+    ('scorecard_to_record', '{}', '_shown(sc.probe_id, how=str)'):
+        _D_ROUTED,
+    ('shift_column_offsets', '{}', 'len(offsets)'):
+        _D_OWN,
+    ('shift_jitter', '!r', 'eps'):
+        _D_PLAIN,
+    ('shift_scale', '!r', 'factor'):
+        _D_PLAIN,
+    ('shift_translate', '!r', 'c'):
+        _D_PLAIN,
+    ('summarize_seeds', '{}', 'len(measured)'):
+        _D_OWN,
+    ('summarize_seeds', '{}', 'len(per_seed)'):
+        _D_OWN,
+    ('summarize_seeds', '{}', 'min_seeds'):
+        _D_OWN,
+}
+
+_D_NAMES.update({id(v): k for k, v in dict(globals()).items() if k.startswith("_D_") and k != "_D_NAMES"})
+
+
+def _derive_diagnostic_sites(src=None):
+    """{(subject, protocol, operand): [line numbers]} for every diagnostic-construction site in
+    `robustness.py`, read from its SOURCE and never from a list.
+
+    FOUR PROTOCOLS, because four is what the module applies to an object it was handed: `repr` (a call
+    or an `{x!r}` conversion), `str`/`format` (a call or a bare `{x}`, which is where a caught
+    exception's own `__str__` runs), `type(x).__name__`, and `getattr(x, "__name__")`.
+    EVERY SCOPE IS A SUBJECT -- the module body, every class body, every function AND EVERY LAMBDA --
+    because this derivation FAILED FOUR TIMES while being written, and two of the four would have
+    encoded a flaw into the table while the set-equality check reported success:
+      1. the first version walked `ast.FunctionDef` only, so a site in the MODULE BODY or a CLASS BODY
+         was invisible: the table would have been complete and the sweep blind;
+      2. the second skipped `ast.Lambda` bodies as "a nested scope is its own subject" -- true of a
+         `FunctionDef`, false of a lambda, which is not a `FunctionDef` and so was its own subject
+         nowhere. This module builds `ShiftSpec.expected` / `bound` / `tf` out of lambdas;
+      3. the third counted `{x!r}` and `type(x).__name__` and NOT the bare `{x}`, which is the
+         interpolation that runs a caught exception's `__str__` -- four fail-closed handlers were
+         escaping through exactly that;
+      4. the fourth missed `getattr(x, "__name__")`, which is none of the three spellings above, and
+         FOUR PUBLIC POSITIONS stayed open behind a set-equality check that reported success:
+         `getattr`'s default answers an `AttributeError` and propagates everything else, so a callable
+         object whose `__name__` is a raising property took `probe_shift`, `probe_missing_inputs`,
+         `seed_sensitivity_probe` and `guarded` out with a `RuntimeError`. That one is the reason this
+         docstring exists: a derived set is only as wide as its protocol list, and a protocol list is
+         the same kind of enumeration the derivation was supposed to replace.
+    `test_the_derivation_sees_each_of_the_four_shapes_it_missed` re-injects all four into the SOURCE
+    TEXT and asserts each one is seen."""
+    src = inspect.getsource(rb) if src is None else src
+    tree = ast.parse(src)
+    subjects = [("<module>", tree.body)]
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            subjects.append((n.name, n.body))
+        elif isinstance(n, ast.Lambda):
+            subjects.append(("<lambda>", [n.body]))
+        elif isinstance(n, ast.ClassDef):
+            subjects.append((n.name, n.body))
+    out = {}
+    for name, body in subjects:
+        stack = list(body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                continue                                  # its own subject, above
+            kids = list(ast.iter_child_nodes(node))
+            if isinstance(node, ast.FormattedValue):
+                tag = "!" + chr(node.conversion) if node.conversion != -1 else "{}"
+                out.setdefault((name, tag, ast.unparse(node.value)), []).append(node.lineno)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                    and node.func.id in ("repr", "str", "format"):
+                out.setdefault((name, node.func.id,
+                                ast.unparse(node.args[0]) if node.args else ""), []).append(node.lineno)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                    and node.func.id == "getattr" and len(node.args) >= 2 \
+                    and isinstance(node.args[1], ast.Constant) and node.args[1].value == "__name__":
+                out.setdefault((name, "getattr __name__", ast.unparse(node.args[0])),
+                               []).append(node.lineno)
+            if isinstance(node, ast.Attribute) and node.attr == "__name__":
+                out.setdefault((name, "__name__", ast.unparse(node.value)), []).append(node.lineno)
+            stack.extend(kids)
+    return out
+
+# ----------------------------------------------------- THE RAISE MEMBER (round 12)
+# THE MECHANICAL CAUSE OF THIS ROUND'S FINDINGS, and the same one SR-13 failed its tenth attestation
+# on, one module over in the same session: THERE WAS NO `RAISE` MEMBER IN ANY LANE OF THIS FILE. Every
+# liar here lies in a VALUE -- `_duck_typed` (~45 dunders) delegates honestly, `DuckEps` / `DuckFactor`
+# / `DuckTol` / `DuckRows` lie in `__mul__` / `__pow__` / `__lt__` and each keeps an HONEST `__repr__`,
+# `forge` substitutes a stored value, `ts._subclassed` does not lie at all -- while SIX sweeps in this
+# file carry an `except Exception as e: ... "OUTSIDE the (ValueError, TypeError, ArithmeticError)
+# family every probe declares"` branch. Every one of those six fail-closed promises outran its sweep:
+# the branch could fire and nothing in the file could make it fire.
+# MEASURED BEFORE THE FIX, by adding ONE limb to ONE lane (`_exercise_callable_number`) in-process with
+# nothing on disk changed: `_reason_coverage_complaints()` went from 0 to 6 complaints, identical on
+# 3.12.4 and 3.13.5, affecting 4 of the 7 parameters `_WHY_CALLABLE_NUMBER` covers. With the member in
+# EVERY lane it is more than 6 -- the count is asserted in
+# `ADeclaredReasonIsExercisedOnEveryParameterItCovers.test_the_raise_member_is_in_every_lane`.
+# WHY THESE FOUR SHAPES: they are the protocols a probe applies to an object it was HANDED, which is
+# the set `rb._DIAGNOSTIC_SITES` is derived from -- describing a value (`repr`/`str`/`format`), naming
+# its type (`type(x).__name__`), naming a callable (`getattr(x, "__name__")`), and describing a caught
+# exception (`{e}`, i.e. the exception's own `__str__`). A liar lane lies where a GATE reads; a raise
+# lane raises where a MESSAGE reads. Nothing here needs `object.__setattr__` or `gc`.
+_RAISE_EXC = RuntimeError          # OUTSIDE the declared family: what makes an ESCAPE visible
+_RAISE_IN_FAMILY = ValueError      # INSIDE it: what makes a FORGED CLEAN CLAIM visible (Finding 1)
+
+
+def _describe_raises(exc):
+    """A value whose `__repr__`, `__str__` and `__format__` all raise `exc`, and which lies about
+    nothing else. The RAISE member wherever the subject is a VALUE a probe has to describe."""
+    def boom(self, *a):
+        raise exc("describing this value refuses")
+    return type(f"Undescribable{exc.__name__}", (object,),
+                {"__repr__": boom, "__str__": boom, "__format__": boom})()
+
+
+def _type_name_raises(exc):
+    """An instance whose TYPE answers `__name__` with a raising property -- a metaclass property, no
+    `object.__setattr__` and no `gc`. The RAISE member wherever a refusal message names the offending
+    object BY ITS TYPE, which is 14 interpolations in `robustness.py` and three of them the parameter
+    boundary's own refusal."""
+    class Meta(type):
+        @property
+        def __name__(cls):
+            raise exc("reading this type's name refuses")
+    return Meta("Unnamed", (object,), {})()
+
+
+def _name_attr_raises(exc):
+    """A CALLABLE OBJECT whose own `__name__` is a raising property, and which measures honestly.
+
+    THE SHAPE A LANE BUILT FROM FUNCTIONS CANNOT REACH, which is why it is here: a function's
+    `__name__` is a plain `str` slot, so only a callable OBJECT can refuse to be named -- and four
+    sites in `robustness.py` LABEL a card with `getattr(measure, "__name__", "measure")`, where
+    `getattr`'s default answers an `AttributeError` and propagates everything else."""
+    class M:
+        @property
+        def __name__(self):
+            raise exc("reading this callable's name refuses")
+
+        def __call__(self, *a, **k):
+            if len(a) == 3:
+                return rb.mse_fsum(*a)
+            return float(a[0] % 1000) if a else 1.0
+    return M()
+
+
+def _exception_str_raises(exc):
+    """An exception CLASS inside the declared family whose own `__str__` raises `exc`.
+
+    The RAISE member for every fail-closed HANDLER: the module catches this correctly and then dies
+    building `f"{type(e).__name__}: {e}"` -- the reason string of the unmeasured seed it had already
+    decided to record. Measured at four public positions before this round."""
+    def boom(self):
+        raise exc("describing this exception refuses")
+    return type(f"RefusesToSay{exc.__name__}", (ValueError,), {"__str__": boom})
+
+
+def _raising_measure(value_exc):
+    """A measure that returns a value which cannot be described."""
+    bad = _describe_raises(value_exc)
+    return lambda *a, **k: bad
+
+
+def _undescribable_carrier(v, exc):
+    """A stand-in for the CARRIER `v`: every attribute delegates to it, and the object itself cannot
+    describe itself. The RAISE member for `_WHY_CARRIER`, whose subject is an object a probe reads
+    fields off and then NAMES on a card (`probe_id`, `transform`, a reason)."""
+    def boom(self, *a):
+        raise exc("describing this carrier refuses")
+    return type(f"Undescribable{type(v).__name__}", (object,),
+                {"__repr__": boom, "__str__": boom, "__format__": boom,
+                 "__getattr__": lambda self, name: getattr(v, name)})()
+
+
+# -------------------------------------------- WHOSE module an escape came out of
+# A generator that drives public callables of `toy.robustness` reaches three other modules on the way
+# (`toy.schema`, `toy.benchmark`, `toy.stability`), and round 12's RAISE member found one escape that is
+# NOT this file's to close. An escape is attributed by TRACEBACK -- the deepest `src/toy/...` frame is
+# the module whose message construction propagated -- so the attribution is measured and not asserted,
+# and a cross-owner escape is DECLARED here with that measurement instead of being caught inside this
+# module's adapter and called closed.
+_CROSS_OWNER_ESCAPES = {
+    ("benchmark_outcome", "factory", "benchmark.py"):
+        "MEASURED round 12, identically on 3.12.4 and 3.13.5, and REPORTED rather than patched over: "
+        "`toy/benchmark.py`'s `score_seed` builds its own fail-closed record as "
+        "`SeedScores.failed(seed, f\"numerical failure: {e}\", ...)` (benchmark.py:2094 at HEAD "
+        "4f06749), so a `factory` raising an exception INSIDE the declared family whose own `__str__` "
+        "raises turns that failed-seed record into a propagating RuntimeError, which then leaves the "
+        "public `robustness.benchmark_outcome` adapter. The site belongs to SR-10 and the fix there is "
+        "one admission of the same shape as `robustness._shown`. Closing it from here would mean "
+        "catching another owner's escape inside this module's adapter and reporting the channel closed, "
+        "which is the opposite of reporting it. Pinned by "
+        "`ADeclaredReasonIsExercisedOnEveryParameterItCovers.test_the_one_cross_owner_escape_is_"
+        "declared_and_still_reachable`, which FAILS once the declaration is unreachable -- so when "
+        "SR-10 closes it, this entry has to go.",
+}
+
+
+def _escape_owner(e):
+    """The basename of the deepest `src/toy/...` frame in `e`'s traceback, or None.
+
+    The frame that RAISED is the test's own hostile protocol; the frame that was BUILDING THE MESSAGE is
+    the one an escape belongs to, and it is the last kit frame on the way down."""
+    owner, tb = None, e.__traceback__
+    while tb is not None:
+        f = tb.tb_frame.f_code.co_filename
+        if f"{os.sep}toy{os.sep}" in f:
+            owner = os.path.basename(f)
+        tb = tb.tb_next
+    return owner
+
+
+def _declared_cross_owner(fn, p, e):
+    """True if this escape is a DECLARED one belonging to another module, by traceback attribution."""
+    owner = _escape_owner(e)
+    return owner not in (None, "robustness.py") and (fn, p, owner) in _CROSS_OWNER_ESCAPES
+
+
 def _reason_parameters(mapping=None):
     """{reason: sorted [(function, parameter)]} -- the reason -> parameter mapping, INVERTED out of
     `rb._PARAMETER_NO_SCALAR` rather than written here.
@@ -3888,15 +4514,32 @@ def _exercise_enum(fn, p, calls):
     plain = str(rb._enum_value(v))
     if isinstance(plain, Enum) or type(plain) is not str:
         return [f"{fn}.{p}: the probe could not build a plain-str spelling of {v!r}"]
+    out = []
     try:
         _call_public(fn, calls, **{p: plain})
     except _DECLARED_FAMILY:
-        return []
+        pass
     except Exception as e:                                           # noqa: BLE001
-        return [f"{fn}.{p}: the plain str spelling raised {type(e).__name__}, OUTSIDE the declared family"]
-    return [f"{fn}.{p}: the plain str spelling {plain!r} of {v!r} was ACCEPTED -- the reason claims an "
-            "isinstance refusal or a collapse at the field boundary, and a plain string stores itself, "
-            "so NEITHER disjunct holds"]
+        out.append(f"{fn}.{p}: the plain str spelling raised {type(e).__name__}, OUTSIDE the declared "
+                   "family")
+    else:
+        out.append(f"{fn}.{p}: the plain str spelling {plain!r} of {v!r} was ACCEPTED -- the reason "
+                   "claims an isinstance refusal or a collapse at the field boundary, and a plain "
+                   "string stores itself, so NEITHER disjunct holds")
+    # THE RAISE MEMBER: the refusal this reason rests on NAMES the offending object by its type
+    # (`f"kind must be a ShiftKind, got {type(self.kind).__name__}"`), so a metaclass answering
+    # `__name__` with a raising property took the gate's own refusal out of the family it enforces.
+    try:
+        _call_public(fn, calls, **{p: _type_name_raises(_RAISE_EXC)})
+    except _DECLARED_FAMILY:
+        pass
+    except Exception as e:                                           # noqa: BLE001
+        out.append(f"{fn}.{p}: a spelling whose TYPE NAME cannot be read raised {type(e).__name__}, "
+                   "OUTSIDE the declared family: the isinstance refusal this reason names builds its "
+                   "message from that name")
+    else:
+        out.append(f"{fn}.{p}: a non-enum spelling whose type name cannot be read was ACCEPTED")
+    return out
 
 
 def _exercise_mask(fn, p, calls):
@@ -3907,7 +4550,14 @@ def _exercise_mask(fn, p, calls):
     out = []
     by_check_mask = (stability.MaskTypeError, stability.MaskLengthError, stability.EmptyMaskError)
     for label, bad in (("a truthy int mask", tuple(1 if b else 0 for b in v)),
-                       ("a mask shorter than the data", v[:2])):
+                       ("a mask shorter than the data", v[:2]),
+                       # THE RAISE MEMBER: `bool` cannot be subclassed, so no mask ELEMENT can lie --
+                       # but one can refuse to be described, and `check_mask`'s refusal interpolates
+                       # the element it refuses. The reason names that refusal, so the reason owns the
+                       # message too; this is also the one limb here that measures another owner's
+                       # module (`toy.stability` closed the same channel in its round 16).
+                       ("a mask element that cannot be described",
+                        (_describe_raises(_RAISE_EXC),) + tuple(v[1:]))):
         try:
             r = _call_public(fn, calls, **{p: bad})
         except _DECLARED_FAMILY as e:
@@ -3926,7 +4576,14 @@ def _exercise_carrier_seq(fn, p, calls):
     v = calls[fn][p]
     out = []
     for label, bad in (("a duck-typed carrier", tuple(SimpleNamespace(value=0.0, reason=None) for _ in v)),
-                       ("a MetricValue SUBCLASS", tuple(_SubMetric(0.0, None) for _ in v))):
+                       ("a MetricValue SUBCLASS", tuple(_SubMetric(0.0, None) for _ in v)),
+                       # THE RAISE MEMBER: the exact-type refusal this reason names is taken on objects
+                       # that cannot be described or named, so it must not be the description that
+                       # decides whether the refusal happens.
+                       ("a carrier that cannot be described",
+                        tuple(_describe_raises(_RAISE_EXC) for _ in v)),
+                       ("a carrier whose type name cannot be read",
+                        tuple(_type_name_raises(_RAISE_EXC) for _ in v))):
         try:
             _call_public(fn, calls, **{p: bad})
         except _DECLARED_FAMILY:
@@ -3959,6 +4616,22 @@ def _exercise_carrier(fn, p, calls):
     before, after = _call_public(fn, calls), _call_public(fn, calls, **{p: rebuilt})
     if _digest(before) != _digest(after):
         return [f"{fn}.{p}: a subclassed carrier moved the result: {_digest(before)} != {_digest(after)}"]
+    # THE RAISE MEMBER: a carrier a probe reads fields off and then NAMES on a card -- `spec.name` into
+    # `details["transform"]` and into the probe id, `sc.probe_id` into a record's name, a reason into an
+    # unmeasured metric. Every field here is the real one; only the carrier's own description refuses.
+    # Either the call is refused in family (`require_summary` type-checks) or the result is UNCHANGED,
+    # because a description nobody asked for cannot be what decides a probe's outcome.
+    undescribable = _undescribable_carrier(v, _RAISE_EXC)
+    try:
+        got = _call_public(fn, calls, **{p: undescribable})
+    except _DECLARED_FAMILY:
+        return []
+    except Exception as e:                                           # noqa: BLE001
+        return [f"{fn}.{p}: a carrier that cannot describe itself raised {type(e).__name__}, OUTSIDE "
+                "the declared family"]
+    if _digest(got) != _digest(before):
+        return [f"{fn}.{p}: a carrier that cannot describe itself moved the result: "
+                f"{_digest(before)} != {_digest(got)}"]
     return []
 
 
@@ -3982,6 +4655,46 @@ def _exercise_callable_number(fn, p, calls):
             out.append(f"{fn}.{p}: {label} produced a CLEAN measured claim ({_digest(r)}), from a "
                        "callable that was never usable; the reason claims the return is normalised "
                        "where it is consumed and an unusable one is recorded as unmeasured")
+    # THE RAISE MEMBER, in the two shapes that have a CLAIM to forge: a callable that answers every
+    # input with a value NOBODY CAN DESCRIBE. In family (ValueError) this is Finding 1 -- `_run_cases`
+    # recorded `repr(v)` inside the handler that decides whether the measure raised, so 15 of 15 cases
+    # x 12 seeds were recorded as RAISED and the card read MISSING_INPUT_HANDLED with
+    # `n_silent_value_total = 0`, which `assert_no_silent_default` then certified. Out of family
+    # (RuntimeError) it is the escape. Both properties are asserted: no claim, and no escape.
+    for exc in (_RAISE_IN_FAMILY, _RAISE_EXC):
+        label = f"a callable whose return cannot be described (__repr__ raises {exc.__name__})"
+        try:
+            r = _resolve(_call_public(fn, calls, **{p: _raising_measure(exc)}))
+        except _DECLARED_FAMILY:
+            continue
+        except Exception as e:                                       # noqa: BLE001
+            if not _declared_cross_owner(fn, p, e):
+                out.append(f"{fn}.{p}: {label} raised {type(e).__name__}, OUTSIDE the declared family, "
+                           "so it escapes a probe's own fail-closed handler")
+            continue
+        if _claims_a_measurement(r):
+            out.append(f"{fn}.{p}: {label} produced a CLEAN measured claim ({_digest(r)}), from a "
+                       "callable that returned a value for every input it must reject")
+    # AND THE TWO SHAPES THAT HAVE NO CLAIM TO FORGE, so only family closure is asserted: a callable
+    # that RAISES in family and whose exception cannot say what it was (the handler dies building the
+    # reason string of the seed it had already decided to record), and a callable object whose
+    # `__name__` cannot be read (four sites LABEL a card with it). A measure that measures honestly and
+    # merely refuses to be named may legitimately produce a measurement, which is why this limb does
+    # not assert the absence of one.
+    for label, bad in ((f"a callable raising an in-family exception whose own __str__ raises "
+                        f"{_RAISE_EXC.__name__}",
+                        (lambda E: (lambda *a, **k: (_ for _ in ()).throw(E("refused"))))(
+                            _exception_str_raises(_RAISE_EXC))),
+                       ("a callable object whose __name__ cannot be read",
+                        _name_attr_raises(_RAISE_EXC))):
+        try:
+            _resolve(_call_public(fn, calls, **{p: bad}))
+        except _DECLARED_FAMILY:
+            continue
+        except Exception as e:                                       # noqa: BLE001
+            if not _declared_cross_owner(fn, p, e):
+                out.append(f"{fn}.{p}: {label} raised {type(e).__name__}, OUTSIDE the declared family, "
+                           "so it escapes a probe's own fail-closed handler")
     return out
 
 
@@ -4006,6 +4719,36 @@ def _exercise_callable_fixture(fn, p, calls):
         return out
     if _claims_a_measurement(r):
         out.append(f"{fn}.{p}: a factory returning a non-fixture produced a clean claim ({_digest(r)})")
+    # THE RAISE MEMBER, and the one lane where half of it is INAPPLICABLE BY DECLARATION -- asserted
+    # here rather than left as prose. The applicable half: a factory returning a REAL fixture that
+    # cannot describe itself must leave the card byte-identical, because `probe_shift` interpolates
+    # `spec.name` and the measure's name into the probe id on the VALID path, after the measurements.
+    undescribable = lambda s: _undescribable_carrier(rb.make_measure_fixture(s), _RAISE_EXC)  # noqa: E731
+    try:
+        if _digest(_call_public(fn, calls, **{p: undescribable})) != honest:
+            out.append(f"{fn}.{p}: a factory returning a fixture that cannot describe itself moved "
+                       "the card")
+    except _DECLARED_FAMILY:
+        pass
+    except Exception as e:                                           # noqa: BLE001
+        out.append(f"{fn}.{p}: a factory returning a fixture that cannot describe itself raised "
+                   f"{type(e).__name__}, OUTSIDE the declared family")
+    # The inapplicable half, DECLARED: a factory whose return answers NO attribute at all raises out of
+    # `probe_shift` -- `AttributeError` for a plain object, whatever the attribute raises for a hostile
+    # one -- and `_WHY_CALLABLE_FIXTURE` states that route and states why it is not closable by a check
+    # (the factory is the caller's callable and may raise anything before it returns). So this limb
+    # asserts THE DECLARATION, not a refusal: if the reason ever stops naming the route, the complaint
+    # appears here instead of the escape being re-discovered.
+    try:
+        _resolve(_call_public(fn, calls, **{p: lambda s: _describe_raises(_RAISE_EXC)}))
+    except (AttributeError,) + _DECLARED_FAMILY:
+        if "OUTSIDE the" not in rb._WHY_CALLABLE_FIXTURE or "cannot be closed by a check at all" \
+                not in rb._WHY_CALLABLE_FIXTURE:
+            out.append(f"{fn}.{p}: a factory returning an object with no fixture attributes raises out "
+                       "of the probe, and the reason no longer declares that route")
+    except Exception as e:                                           # noqa: BLE001
+        out.append(f"{fn}.{p}: a factory returning an undescribable object raised {type(e).__name__}, "
+                   "which the reason does not name")
     return out
 
 
@@ -4127,10 +4870,18 @@ class ADeclaredReasonIsExercisedOnEveryParameterItCovers(unittest.TestCase):
         mapping = dict(rb._PARAMETER_NO_SCALAR, mse_lenient={"mask": rb._WHY_MASK})
         with mock.patch.object(rb, "mse_lenient", rb._plain_arguments(mse_lenient), create=True):
             complaints = _reason_coverage_complaints(mapping=mapping, calls=calls)
-            self.assertEqual(len([c for c in complaints if "mse_lenient" in c]), 1, complaints)
-            got = next(c for c in complaints if "mse_lenient" in c)
-            self.assertTrue(got.startswith("mse_lenient.mask: a truthy int mask was ACCEPTED -> "), got)
-            self.assertTrue(got.endswith("the reason claims check_mask refuses it"), got)
+            # TWO complaints since round 12, not one, and the second is the RAISE member catching the
+            # same injected defect independently: a measure that calls `bool(x)` on a mask element
+            # instead of letting `check_mask` refuse it accepts a truthy int AND an element that cannot
+            # be described. Two limbs reaching one defect is what a derived lane is supposed to do.
+            got = sorted(c for c in complaints if "mse_lenient" in c)
+            self.assertEqual(len(got), 2, complaints)
+            self.assertTrue(got[0].startswith("mse_lenient.mask: a mask element that cannot be "
+                                              "described was ACCEPTED -> "), got[0])
+            self.assertTrue(got[1].startswith("mse_lenient.mask: a truthy int mask was ACCEPTED -> "),
+                            got[1])
+            for one in got:
+                self.assertTrue(one.endswith("the reason claims check_mask refuses it"), one)
             self.assertEqual(len(_reason_parameters(mapping)[rb._WHY_MASK]), 7)
             # (3) and the sampled form of the same check does NOT see it
             sampled = [m for m in (rb.mse_naive, rb.mse_fsum, rb.abs_bias_fsum)]
@@ -4150,6 +4901,100 @@ class ADeclaredReasonIsExercisedOnEveryParameterItCovers(unittest.TestCase):
         self.assertIn("probe_shift.no_such_parameter: declared, but there is no canonical value",
                       " ".join(_reason_coverage_complaints(mapping=stale)))
         self.assertEqual(_reason_coverage_complaints(), [])           # and the real module is clean
+
+    def test_the_raise_member_is_in_every_lane(self):
+        """THE CAUSE THIS ROUND FIXED, asserted as a property of the LANES and not of a list of them.
+
+        Before round 12 this file had ZERO `RAISE` members: every liar lied in a VALUE while six sweeps
+        promised to catch an exception OUTSIDE the declared family. (The figure in the brief to the
+        attester -- "5 `RAISE` references" -- was mislabelled: 1 was prose and 4 were uses of the
+        `_RAISED` result sentinel, and the "19 raise-defining dunders" were dunder DEFINITIONS, none of
+        which raise.) Each lane now carries one, and the requirement is DERIVED: every exerciser in
+        `_REASON_EXERCISERS`, and the duck-typed half of the parameter sweep, must reference one of the
+        four factories, so a NEW lane without a RAISE member fails HERE.
+        MEASURED, with the member added to every lane and the same tree at HEAD (`git archive`, own
+        `src/`, this test file): 17 reason complaints and 30 parameter complaints, byte-identical on
+        3.12.4 and 3.13.5, against 0 and 0 on the fixed tree -- and against the 6 the attester got by
+        adding the member to ONE lane. The 30 are the parameter boundary's own refusal message at every
+        scalar-annotated parameter it has."""
+        factories = ("_describe_raises", "_type_name_raises", "_name_attr_raises",
+                     "_exception_str_raises", "_raising_measure", "_undescribable_carrier",
+                     "undescribable=True")
+        lanes = {f.__name__: f for f in _REASON_EXERCISERS.values()}
+        lanes["_parameter_coverage_complaints"] = _parameter_coverage_complaints
+        self.assertEqual(len(lanes), 7)
+        for name, fn in sorted(lanes.items()):
+            with self.subTest(lane=name):
+                src = inspect.getsource(fn)
+                used = [f for f in factories if f in src]
+                self.assertTrue(used, f"{name} has no RAISE member: every lane in this file lacked one "
+                                      "until round 12, and six sweeps promised to catch what no lane "
+                                      "could produce")
+        self.assertEqual(_reason_coverage_complaints(), [])
+        self.assertEqual(_parameter_coverage_complaints(), [])
+
+    def test_the_lanes_fail_closed_when_an_admission_is_removed(self):
+        """THE EVIDENCE THAT THE RAISE MEMBERS ARE NOT VACUOUS, taken in-process rather than quoted:
+        each admission is replaced by the raw protocol it wraps and the lanes report the escapes that
+        the pre-fix tree really had, by name. Nothing on disk changes."""
+        raw_type_name = _reason_coverage_complaints
+        with mock.patch.object(rb, "_type_name", lambda v: type(v).__name__):
+            got = sorted(c.split(":")[0] for c in raw_type_name())
+            self.assertEqual(got, ["shift_reorder_rows.kind", "standard_shifts.reorder_kind"])
+            params = sorted(c.split(":")[0] for c in _parameter_coverage_complaints())
+            self.assertEqual(len(params), 30, params)      # every scalar-annotated parameter
+            self.assertIn("make_measure_fixture.rows", params)
+            self.assertIn("shift_scale.factor", params)
+        with mock.patch.object(rb, "_shown", lambda v, how=repr: how(v)):
+            got = sorted(c.split(":")[0] for c in _reason_coverage_complaints())
+            self.assertEqual(got, ["assert_no_silent_default.measure", "guarded.measure",
+                                   "guarded.measure", "probe_missing_inputs.measure",
+                                   "probe_precision.measure", "probe_shift.measure",
+                                   "probe_shift.measure", "require_summary.result",
+                                   "seed_sensitivity_probe.outcome"],
+                             "nine complaints: `guarded` and `probe_shift` each escape in TWO of the "
+                             "three shapes (an undescribable return and an exception that cannot say "
+                             "what it was), which is why one admission covers both")
+        with mock.patch.object(rb, "_name_attr", lambda fn, default: getattr(fn, "__name__", default)):
+            got = sorted(c.split(":")[0] for c in _reason_coverage_complaints())
+            self.assertEqual(got, ["guarded.measure", "probe_missing_inputs.measure",
+                                   "probe_shift.measure", "seed_sensitivity_probe.outcome"])
+        # and FINDING 1's fix is STRUCTURAL, not the admission: with the record built by a bare `repr`
+        # again, the measure that cannot be described no longer gets certified -- the call is refused in
+        # family instead, because the record is taken OUTSIDE the classifier's `try`.
+        with mock.patch.object(rb, "_silent_detail", repr):
+            with self.assertRaises(ValueError):
+                rb.probe_missing_inputs(_raising_measure(ValueError), SEEDS, CFG)
+        self.assertEqual(_reason_coverage_complaints(), [])                 # and the real module is clean
+
+    def test_the_one_cross_owner_escape_is_declared_and_still_reachable(self):
+        """THE ONE ESCAPE THE RAISE MEMBERS FOUND THAT IS NOT THIS FILE'S TO CLOSE, declared with its
+        measurement in `_CROSS_OWNER_ESCAPES` and attributed BY TRACEBACK rather than by assertion.
+
+        It is reported, not patched over: catching another owner's escape inside this module's adapter
+        would let the channel be called closed. The declaration is held to being REACHABLE -- remove it
+        and exactly one complaint appears -- so when SR-10 closes the site, this test fails and the
+        entry has to go rather than quietly becoming a carve-out for something that no longer happens."""
+        self.assertEqual(len(_CROSS_OWNER_ESCAPES), 1)
+        key, why = next(iter(_CROSS_OWNER_ESCAPES.items()))
+        self.assertEqual(key, ("benchmark_outcome", "factory", "benchmark.py"))
+        self.assertIn("benchmark.py:2094", why)
+        self.assertIn("SR-10", why)
+        with mock.patch.dict(_CROSS_OWNER_ESCAPES, clear=True):
+            complaints = _reason_coverage_complaints()
+        self.assertEqual(len(complaints), 1, complaints)
+        self.assertTrue(complaints[0].startswith("benchmark_outcome.factory: a callable raising an "
+                                                 "in-family exception whose own __str__ raises"),
+                        complaints[0])
+        self.assertIn("OUTSIDE the declared family", complaints[0])
+        # and the attribution is measured: the frame that built the message is in the other module
+        E = _exception_str_raises(RuntimeError)
+        try:
+            rb.benchmark_outcome(lambda *a, **k: (_ for _ in ()).throw(E("refused")), "S", None)(1)
+        except Exception as e:                                           # noqa: BLE001
+            self.assertEqual(_escape_owner(e), "benchmark.py")
+        else:
+            self.fail("the declared cross-owner escape no longer happens; delete the declaration")
 
     def test_the_reason_each_exerciser_tests_is_the_one_the_module_states(self):
         """An exerciser is only honest if it tests the mechanism the reason NAMES, so each reason's
@@ -4526,6 +5371,409 @@ class AProbeCannotCertifyAMeasureItNeverCalled(unittest.TestCase):
         self.assertEqual(rb.probe_shift(rb.mse_fsum, rb.shift_column_offsets("abc"), SEEDS, CFG).status,
                          PS.INSUFFICIENT_EVIDENCE)
 
+
+
+class EveryDiagnosticInThisModuleIsDecidedInWriting(unittest.TestCase):
+    """FINDING 2, closed as a CLASS: every place `robustness.py` builds a diagnostic out of a value,
+    enumerated from its own AST and decided in writing.
+
+    Why the class and not the lines: the attester's smallest honest fix for Finding 1 was moving one
+    `repr(v)` out of one `try`, and that line is one of 79 occurrences of four protocols, 18 of which
+    were measured ending outside the family every probe declares. A fix at the line leaves the other
+    seventeen. So `repr` / `str` / `format` of a caller's object are spelled once each inside `_shown`,
+    `type(x).__name__` once inside `_type_name` and `getattr(x, "__name__")` once inside `_name_attr`,
+    and this table decides every remaining site by the PROVENANCE of its operand.
+    What this class does NOT claim: that no caller protocol can take a probe out. A raising ATTRIBUTE
+    LOOKUP can (measured below) and so can a raising `__class__`; both are stated and open."""
+
+    def test_the_enumeration_is_derived_from_the_module_not_written(self):
+        derived = _derive_diagnostic_sites()
+        self.assertEqual(set(derived), set(_DIAGNOSTIC_SITES),
+                         "a diagnostic protocol is applied at a site this table does not decide: give "
+                         "it a row with the reason its operand cannot refuse, or route it through "
+                         "_shown / _type_name / _name_attr / _callable_name")
+        for key, why in _DIAGNOSTIC_SITES.items():
+            with self.subTest(site=key):
+                self.assertTrue(str(why).strip(), f"{key} has no decision written")
+        counts = {}
+        for _, proto, _ in derived:
+            counts[proto] = counts.get(proto, 0) + 1
+        self.assertEqual(counts, {"{}": 60, "!r": 8, "__name__": 5, "getattr __name__": 1, "repr": 1})
+        self.assertEqual(len(derived), 75)
+        self.assertEqual(sum(len(v) for v in derived.values()), 79)
+        # THE STRUCTURAL CLAIMS, stated exactly rather than as "all go through the helper"
+        self.assertEqual([k for k in derived if k[1] == "__name__"
+                          and _DIAGNOSTIC_SITES[k] is _D_HELPER],
+                         [("_type_name", "__name__", "type(v)")])
+        self.assertEqual([k for k in derived if k[1] == "getattr __name__"],
+                         [("_name_attr", "getattr __name__", "fn")])
+        self.assertEqual([k for k in derived if k[1] == "repr"],
+                         [("_silent_detail", "repr", "f")])
+        self.assertEqual([k for k in derived if k[1] in ("str", "format", "!s", "!a")], [],
+                         "a str()/format() call or an !s/!a conversion appeared: both run a caller's "
+                         "protocol and both belong in _shown")
+        # THE CENSUS, by protocol and by decision, because the module's own comment block quotes these
+        # numbers and a quoted number nobody asserts is a number that drifts.
+        census = {}
+        for key, why in _DIAGNOSTIC_SITES.items():
+            census[(key[1], why)] = census.get((key[1], why), 0) + 1
+        self.assertEqual({(proto, _D_NAMES[id(why)]): n for (proto, why), n in census.items()},
+                         {("!r", "_D_PLAIN"): 6, ("!r", "_D_GATED"): 1, ("!r", "_D_OWN"): 1,
+                          ("repr", "_D_STORED"): 1,
+                          ("{}", "_D_ROUTED"): 35, ("{}", "_D_OWN"): 19, ("{}", "_D_PLAIN"): 4,
+                          ("{}", "_D_GATED"): 2,
+                          ("__name__", "_D_HELPER"): 1, ("__name__", "_D_OWN"): 3,
+                          ("__name__", "_D_WRITE"): 1,
+                          ("getattr __name__", "_D_HELPER"): 1})
+        routed = [k for k, why in _DIAGNOSTIC_SITES.items() if why is _D_ROUTED]
+        self.assertEqual(len(routed), 35)
+        block = inspect.getsource(rb).split("diagnostic construction")[1].split("def _shown")[0]
+        for quoted in ("75 sites in 79 occurrences", "`{x!r}`            -- 8 sites",
+                       "bare `{x}`         -- 60 sites, of which 35", "19 this module's own data",
+                       "type(x).__name__   -- 5 sites", "`{x!s}` / `{x!a}`  -- 0"):
+            self.assertIn(quoted, block,
+                          "the module's comment block quotes a figure this AST does not produce")
+        for subject, proto, operand in routed:
+            self.assertTrue(any(operand.startswith(h) for h in
+                                ("_shown(", "_type_name(", "_callable_name(", "_name_attr(")),
+                            (subject, proto, operand))
+
+    def test_the_derivation_sees_each_of_the_four_shapes_it_missed(self):
+        """WATCHING THE DERIVATION FAIL, which is the only evidence that the table is not decorative.
+        Four flaws, each the version of this derivation that was actually written, and each injected
+        back into the SOURCE TEXT -- nothing on disk is touched. Two of the four (the module body and
+        the lambda) would have left the table complete and the sweep blind; one (`getattr`) did exactly
+        that for four public positions until it was measured."""
+        src = inspect.getsource(rb)
+        base = set(_derive_diagnostic_sites(src))
+        cases = {
+            # 1. a site in the MODULE BODY, outside every function
+            ("<module>", "!r", "CODE_VERSION"):
+                ('CODE_VERSION = "toy-robustness-v1"',
+                 'CODE_VERSION = "toy-robustness-v1"\n_INJECTED = f"{CODE_VERSION!r}"'),
+            # 2. a site in a CLASS BODY
+            ("ProbeConfig", "!r", "DEFAULT_MIN_SEEDS"):
+                ("class ProbeConfig:\n    min_seeds: int = DEFAULT_MIN_SEEDS",
+                 'class ProbeConfig:\n    min_seeds: int = DEFAULT_MIN_SEEDS\n'
+                 '    _INJECTED = f"{DEFAULT_MIN_SEEDS!r}"'),
+            # 3. a site inside a LAMBDA, which is not a FunctionDef and was its own subject nowhere
+            ("<lambda>", "!r", "base"):
+                ("    expected: Callable = lambda base: base",
+                 '    expected: Callable = lambda base: f"{base!r}"'),
+            # 4. the protocol the derivation did not know: getattr(x, "__name__")
+            ("thaw", "getattr __name__", "x"):
+                ("def thaw(x: Any) -> Any:",
+                 'def thaw(x: Any) -> Any:\n    _injected = getattr(x, "__name__", "thaw")'),
+        }
+        for expected, (old, new) in cases.items():
+            with self.subTest(shape=expected):
+                self.assertEqual(src.count(old), 1, old)
+                got = set(_derive_diagnostic_sites(src.replace(old, new)))
+                self.assertEqual(got - base, {expected},
+                                 "the derivation does not see this shape, so a site of it could be "
+                                 "added to the module while the set-equality check passed")
+                self.assertNotIn(expected, _DIAGNOSTIC_SITES)
+        # and the plain shape, for contrast: a new {x!r} inside an ordinary function IS seen
+        got = set(_derive_diagnostic_sites(
+            src.replace("def thaw(x: Any) -> Any:",
+                        'def thaw(x: Any) -> Any:\n    _injected = f"{x!r}"')))
+        self.assertEqual(got - base, {("thaw", "!r", "x")})
+
+    def test_the_eighteen_measured_escapes_are_closed_at_every_position(self):
+        """FINDING 2 MEASURED BEFORE AND AFTER, at the attester's own 60 positions: ten
+        caller-callable-return positions x four exception classes, plus ten type-name positions x two.
+        PRE-FIX, byte-identical on 3.12.4 and 3.13.5: TALLY {RET 20, IN 22, OUT 18}. The 18 are the
+        escapes; this asserts there are none, and that nothing moved to a CLAIM instead."""
+        tally = {"RET": 0, "IN": 0, "OUT": 0}
+        for exc in (ValueError, ZeroDivisionError, RuntimeError, KeyError):
+            boom = _describe_raises(exc)
+            m = lambda p, t, msk: boom                                        # noqa: E731
+            fx = rb.make_measure_fixture(1)
+            for label, call in (
+                    ("probe_missing_inputs", lambda: rb.probe_missing_inputs(m, SEEDS, CFG)),
+                    ("assert_no_silent_default", lambda: rb.assert_no_silent_default(m)),
+                    ("guarded", lambda: rb.guarded(m)(fx.pred, fx.target, fx.mask)),
+                    ("probe_shift", lambda: rb.probe_shift(m, rb.shift_reorder_rows(), SEEDS, CFG)),
+                    ("seed_sensitivity_probe",
+                     lambda: rb.seed_sensitivity_probe(lambda s: boom, SEEDS, CFG)),
+                    ("require_summary", lambda: rb.require_summary(boom)),
+                    ("SeedSummary.from_values", lambda: rb.SeedSummary.from_values([boom] * 3)),
+                    ("probe_precision",
+                     lambda: rb.probe_precision("magnitude", 1.0, SEEDS, CFG, measure=m)),
+                    ("deep_freeze", lambda: rb.deep_freeze({"k": boom})),
+                    ("arm_difference",
+                     lambda: rb.arm_difference({boom: MetricValue.measured(0.0)}, "E", "C0"))):
+                with self.subTest(channel="repr", exc=exc.__name__, position=label):
+                    tally[self._classify(call)] += 1
+        for exc in (RuntimeError, ZeroDivisionError):
+            unnamed = _type_name_raises(exc)
+            for label, call in (
+                    ("make_measure_fixture", lambda: rb.make_measure_fixture(1, rows=unnamed)),
+                    ("probe_precision", lambda: rb.probe_precision(unnamed, 1.0, SEEDS, CFG)),
+                    ("seed_sensitivity_probe",
+                     lambda: rb.seed_sensitivity_probe(lambda s: unnamed, SEEDS, CFG)),
+                    ("guarded", lambda: (lambda fx: rb.guarded(lambda p, t, msk: unnamed)(
+                        fx.pred, fx.target, fx.mask))(rb.make_measure_fixture(1))),
+                    ("arm_difference(arms)", lambda: rb.arm_difference(unnamed, "a", "b")),
+                    ("arm_difference(treatment)",
+                     lambda: rb.arm_difference({"C0": MetricValue.measured(0.0)}, unnamed, "C0")),
+                    ("deep_freeze", lambda: rb.deep_freeze(unnamed)),
+                    ("ProbeConfig", lambda: rb.ProbeConfig(unnamed)),
+                    ("shift_scale", lambda: rb.shift_scale(unnamed)),
+                    ("probe_missing_inputs", lambda: rb.probe_missing_inputs(unnamed, SEEDS, CFG))):
+                with self.subTest(channel="type_name", exc=exc.__name__, position=label):
+                    tally[self._classify(call)] += 1
+        self.assertEqual(sum(tally.values()), 60)
+        self.assertEqual(tally["OUT"], 0,
+                         "a position still ends outside the (ValueError, TypeError, ArithmeticError) "
+                         "family every probe declares")
+        # {RET 20, IN 22, OUT 18} -> {RET 28, IN 32, OUT 0}, and the direction of the 18 is worth
+        # recording: 10 of them became RET -- a fail-closed CARD or an unmeasured `MetricValue`, which
+        # is what the probes promise -- and 8 became an in-family refusal. Nothing became a claim: the
+        # classifier above fails on a clean status or a measured metric at any of the 60.
+        self.assertEqual(tally, {"RET": 28, "IN": 32, "OUT": 0})
+
+    def _classify(self, call):
+        """RET / IN / OUT for one driven position, with the card checked for a forged claim."""
+        try:
+            r = call()
+        except (ValueError, TypeError, ArithmeticError, rb.SilentDefaultError):
+            return "IN"
+        except Exception:                                            # noqa: BLE001
+            return "OUT"
+        if isinstance(r, rb.Scorecard):
+            self.assertNotIn(r.status, _CLEAN_STATUSES - {PS.MISSING_INPUT_HANDLED},
+                             f"a card claiming a clean measurement: {r.probe_id}")
+            if r.status is PS.MISSING_INPUT_HANDLED:
+                self.fail("a measure that answered every missing-input case with a value was "
+                          "certified as handling them")
+        elif isinstance(r, MetricValue):
+            self.assertFalse(bm._metric_ok(r), "an unreadable return became a measured metric")
+        return "RET"
+
+    def test_the_valid_path_channel_is_closed_label_and_name(self):
+        """THE SHAPE ROUND 16 FOUND ONE MODULE OVER, here in two spellings and both on paths where
+        nothing was wrong with the DATA: a probe id interpolated after every measurement is complete,
+        and a `getattr(measure, "__name__")` that a `property` answers by raising. Measured pre-fix,
+        both interpreters: `RuntimeError: format refuses` and `RuntimeError: name refuses` out of
+        finished public probes."""
+        for exc in (RuntimeError, ValueError):
+            unformattable = _describe_raises(exc)
+
+            class M:
+                __name__ = unformattable
+
+                def __call__(self, p, t, msk):
+                    return rb.mse_fsum(p, t, msk)
+
+            with self.subTest(spelling="a __name__ that cannot be formatted", exc=exc.__name__):
+                # the LABEL no longer escapes; the card is refused in family, by `deep_freeze`, because
+                # `details["measure"]` deliberately keeps the raw object
+                for call in (lambda: rb.probe_shift(M(), rb.shift_reorder_rows(), SEEDS, CFG),
+                             lambda: rb.probe_missing_inputs(M(), SEEDS, CFG)):
+                    with self.assertRaises(ValueError) as cm:
+                        call()
+                    self.assertIn("cannot freeze", str(cm.exception))
+            with self.subTest(spelling="a __name__ property that raises", exc=exc.__name__):
+                named = _name_attr_raises(exc)
+                for call in (lambda: rb.probe_shift(named, rb.shift_reorder_rows(), SEEDS, CFG),
+                             lambda: rb.probe_missing_inputs(named, SEEDS, CFG),
+                             lambda: rb.seed_sensitivity_probe(named, SEEDS, CFG),
+                             lambda: rb.guarded(named)):
+                    with self.assertRaises(ValueError) as cm:
+                        call()
+                    self.assertIn("reading __name__ of a supplied callable raised", str(cm.exception))
+            with self.subTest(spelling="a record built from a carrier's reason", exc=exc.__name__):
+                sc = SimpleNamespace(
+                    seeds=(1, 2, 3), per_seed=(MetricValue.measured(1.0),) * 3, summary=None,
+                    insufficient=SimpleNamespace(reason=unformattable), min_seeds=3, probe_id="p",
+                    seed_digest="0" * 64, status=PS.MEASURED, content_hash=lambda: "a" * 64)
+                rec = rb.scorecard_to_record(sc, run_id="r", timestamp_utc=TS)
+                self.assertIn("undescribable", rec.metrics["mean"].reason)
+        # and the honest run is untouched: the label is the measure's name, as it always was
+        honest = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), SEEDS, CFG)
+        self.assertEqual(honest.probe_id, "shift:mse_fsum:reorder_rows")
+        self.assertEqual(honest.details["measure"], "mse_fsum")
+
+    def test_the_fail_closed_handler_is_no_longer_defeated_while_it_is_handling(self):
+        """FOUR HANDLERS, measured pre-fix as propagating `RuntimeError` while they were handling
+        correctly: each had caught an in-family exception and decided to record an unmeasured seed, and
+        each then died building `f"{type(e).__name__}: {e}"` -- the reason string of that very seed."""
+        E = _exception_str_raises(RuntimeError)
+        bad = lambda *a, **k: (_ for _ in ()).throw(E("refused"))                    # noqa: E731
+        fx = rb.make_measure_fixture(1)
+        for label, card in (("probe_shift", rb.probe_shift(bad, rb.shift_reorder_rows(), SEEDS, CFG)),
+                            ("seed_sensitivity_probe", rb.seed_sensitivity_probe(bad, SEEDS, CFG)),
+                            ("probe_precision",
+                             rb.probe_precision("magnitude", 1.0, SEEDS, CFG, measure=bad))):
+            with self.subTest(position=label):
+                self.assertIs(card.status, PS.INSUFFICIENT_EVIDENCE)
+                self.assertEqual(card.insufficient.n_measured, 0)
+                for m in card.per_seed:
+                    self.assertFalse(bm._metric_ok(m))
+                    self.assertIn("undescribable", m.reason)         # the placeholder, not the loss
+                    self.assertTrue(m.reason.startswith("RefusesToSayRuntimeError:"), m.reason)
+        mv = rb.guarded(bad)(fx.pred, fx.target, fx.mask)
+        self.assertFalse(bm._metric_ok(mv))
+        self.assertIn("undescribable", mv.reason)
+
+    def test_the_admissions_degrade_the_description_and_never_the_refusal(self):
+        """What `_shown` / `_type_name` promise: the TYPE a caller branches on is unaffected, the text
+        says what happened, and the three classes this kit never converts still propagate."""
+        self.assertEqual(rb._shown(1.5), "1.5")
+        self.assertEqual(rb._shown("x", how=str), "x")
+        self.assertEqual(rb._type_name(1.5), "float")
+        self.assertEqual(rb._shown(_describe_raises(RuntimeError)),
+                         "<undescribable UndescribableRuntimeError: RuntimeError raised while "
+                         "describing it>")
+        self.assertEqual(rb._type_name(_type_name_raises(RuntimeError)), "<unnamed type>")
+        self.assertEqual(rb._silent_detail(0.0), "0.0")              # the plain double, not the repr
+        self.assertEqual(rb._silent_detail(_describe_raises(RuntimeError)),
+                         "UndescribableRuntimeError: <undescribable UndescribableRuntimeError: "
+                         "RuntimeError raised while describing it>")
+        for exc in rb._UNCONVERTED + (KeyboardInterrupt,):
+            with self.subTest(exc=exc.__name__):
+                with self.assertRaises(exc):
+                    rb._shown(_describe_raises(exc))
+                if exc is not KeyboardInterrupt:                     # _type_name has no BaseException
+                    with self.assertRaises(exc):                     # path of its own to test here
+                        rb._type_name(_type_name_raises(exc))
+        self.assertEqual(rb._UNCONVERTED, (MemoryError, RecursionError, SystemError))
+
+    def test_the_adjacent_attribute_channel_is_stated_and_left_open(self):
+        """WHAT THIS ROUND DID NOT CLOSE, measured so the scope of the claim is a number and not a
+        hope: a raising ATTRIBUTE LOOKUP on a caller's carrier still leaves a public probe outside the
+        family. It is the same tier as the raising-`__class__` channel the kit holds open deliberately
+        -- any attribute of a caller's object can raise, and no check inside this module can move
+        that -- so it is stated in the module and asserted here, not pinned as closed."""
+        spec = rb.shift_reorder_rows()
+
+        class DuckSpec:
+            kind = spec.kind
+            transform = staticmethod(spec.transform)
+            expected = staticmethod(spec.expected)
+            bound = staticmethod(spec.bound)
+            rationale = ""
+
+            @property
+            def name(self):
+                raise RuntimeError("name refuses")
+
+        with self.assertRaises(RuntimeError):
+            rb.probe_shift(rb.mse_fsum, DuckSpec(), SEEDS, CFG)
+        block = inspect.getsource(rb).split("diagnostic construction")[1].split("def _shown")[0]
+        self.assertIn("raising-`__class__` channel", inspect.getsource(rb))
+        self.assertIn("a raising ATTRIBUTE LOOKUP", block)
+        self.assertIn("not closable", block)
+
+
+class ADiagnosticIsNotTakenInsideTheClassifierThatReadsIt(unittest.TestCase):
+    """FINDING 1: a verdict flip, fully public, no `object.__setattr__`. `_run_cases` took its record
+    INSIDE the handler whose only job is to decide whether the measure RAISED, so a failure in the
+    recording was recorded as the opposite outcome.
+
+    MEASURED PRE-FIX on 3.12.4 and 3.13.5, 12 seeds, `ProbeConfig(10)`, a measure returning a value
+    whose `__repr__` raises `ValueError`: invoked 180 times, a value returned for 15 of 15 cases on
+    every seed, and the card read MISSING_INPUT_HANDLED / [NOT_VALIDATED, TOY_RESULT] / summary n=12
+    mean=0.0 / `n_silent_value_total` 0, every `case_table` row `{"raised": 12, "silent_value": 0,
+    "types": ["ValueError"]}`; `assert_no_silent_default` returned None, i.e. certified it. With
+    `liar.__name__ = "mse_fsum"` the forged card differed from the honest one in ONE key, the
+    `case_table`'s `types` column. The control -- a measure returning a plain 0.0 -- is
+    SILENT_DEFAULT_DEFECT with 180."""
+
+    def liar(self, exc):
+        boom = _describe_raises(exc)
+        return lambda p, t, m: boom
+
+    def test_a_return_that_cannot_be_described_is_recorded_as_the_silent_value_it_is(self):
+        for exc in (ValueError, RuntimeError, KeyError, ZeroDivisionError):
+            with self.subTest(exc=exc.__name__):
+                card = rb.probe_missing_inputs(self.liar(exc), SEEDS, CFG)
+                self.assertIs(card.status, PS.SILENT_DEFAULT_DEFECT)
+                self.assertEqual(card.details["n_silent_value_total"], 180)   # 15 cases x 12 seeds
+                self.assertEqual(sorted(card.details["case_table"]),
+                                 sorted(rb.missing_input_cases(rb.make_measure_fixture(1))))
+                for case, row in card.details["case_table"].items():
+                    self.assertEqual((row["raised"], row["silent_value"]), (0, 12), case)
+                    self.assertEqual(tuple(row["types"]), ())
+                self.assertEqual(card.summary.mean, 15.0)        # the COUNT of defects, per seed
+                with self.assertRaises(rb.SilentDefaultError) as cm:
+                    rb.assert_no_silent_default(self.liar(exc))
+                self.assertEqual(str(cm.exception).count("UndescribableAt" if False else
+                                                         "Undescribable"), 90)   # 45 cases x 2 mentions
+
+    def test_the_record_is_taken_outside_the_try_and_the_classifier_sees_only_the_call(self):
+        """The structural half, asserted on the SOURCE so the shape cannot come back: the `try` block
+        of `_run_cases` holds the CALL and nothing else, and the SILENT_VALUE record is taken after
+        it. A mutant moving the record back inside the handler's `try` dies on the test above; this
+        asserts the shape itself, which is what the round-11 sibling needed and did not have."""
+        fn = next(n for n in ast.walk(ast.parse(inspect.getsource(rb)))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_run_cases")
+        tries = [n for n in ast.walk(fn) if isinstance(n, ast.Try)]
+        self.assertEqual(len(tries), 1)
+        self.assertEqual([ast.unparse(st) for st in tries[0].body], ["v = measure(*args)"])
+        self.assertEqual([h.name for h in tries[0].handlers], ["e"])
+        self.assertEqual(ast.unparse(tries[0].handlers[0].type),
+                         "(ValueError, TypeError, ArithmeticError)")
+
+    def test_the_silent_zero_tag_cannot_be_moved_by_a_lying_repr(self):
+        """`assert_no_silent_default`'s docstring promises to "separately name a returned 0.0 (the most
+        dangerous substitution)". MEASURED pre-fix: a `float` SUBCLASS storing 0.0 whose `__repr__`
+        answers "1.0" moved the `[SILENT ZERO]` tag from 45 of 45 cases to 0 of 45 -- the measure chose
+        which of its own silent defaults got named -- because the tag is decided by the TEXT the record
+        holds. The number in that text comes from `_plain_number` now, i.e. from the double the object
+        STORES, which a `__repr__` override cannot reach."""
+        class ZeroLiar(float):
+            def __repr__(self):
+                return "1.0"
+
+        for measure, what in ((lambda p, t, m: 0.0, "a plain 0.0"),
+                              (lambda p, t, m: ZeroLiar(0.0), "a float subclass storing 0.0")):
+            with self.subTest(measure=what):
+                with self.assertRaises(rb.SilentDefaultError) as cm:
+                    rb.assert_no_silent_default(measure)
+                self.assertEqual(str(cm.exception).count("[SILENT ZERO]"), 45)   # 15 cases x 3 seeds
+        card = rb.probe_missing_inputs(lambda p, t, m: ZeroLiar(0.0), SEEDS, CFG)
+        self.assertIs(card.status, PS.SILENT_DEFAULT_DEFECT)
+        self.assertEqual(card.details["n_silent_value_total"], 180)
+
+    def test_the_honest_cards_are_unchanged_and_the_exact_oracle_figures_still_hold(self):
+        """The fix must be invisible to an honest measure: `mse_fsum` rejects every case and
+        `exact_masked_mse` still reports its three matrix cases, 36 of them."""
+        honest = rb.probe_missing_inputs(rb.mse_fsum, SEEDS, CFG)
+        self.assertIs(honest.status, PS.MISSING_INPUT_HANDLED)
+        self.assertEqual(honest.summary.mean, 0.0)
+        self.assertEqual(honest.details["n_silent_value_total"], 0)
+        self.assertEqual(sorted({t for r in honest.details["case_table"].values()
+                                 for t in r["types"]}),
+                         ["EmptyMaskError", "MaskLengthError", "MaskTypeError", "NonFiniteError",
+                          "NonNumericError", "ShapeError"])
+        oracle = rb.probe_missing_inputs(rb.exact_masked_mse, SEEDS, CFG)
+        self.assertEqual(oracle.details["n_silent_value_total"], 36)
+        self.assertIsNone(rb.assert_no_silent_default(rb.mse_fsum))
+        # and the detail a silent case records is the stored value, Fraction included
+        detail = {c: r for c, r in oracle.details["case_table"].items() if r["silent_value"]}
+        self.assertEqual(sorted(detail), ["inf_in_masked_out_row", "nan_in_masked_out_row",
+                                          "ragged_columns"])
+        with self.assertRaises(rb.SilentDefaultError) as cm:
+            rb.assert_no_silent_default(rb.exact_masked_mse)
+        self.assertIn("Fraction", str(cm.exception))
+
+    def test_the_post_fix_figures_are_in_the_docstring_as_well_as_the_test(self):
+        """ROUND 11'S RECORD SAID the three remaining silent cases are "named and counted in both the
+        test and the docstring" and they were in the TEST ONLY: `exact_masked_mse`'s docstring carried
+        48 and 12/12 as the PRE-FIX measurement and no post-fix figure at all. The docstring was
+        honest and the record overstated where the figures lived; the figures are in both now, and
+        this is what keeps them in step."""
+        doc = _flat(rb.exact_masked_mse)
+        if doc is None:
+            return                                                   # -OO: see `_doc`
+        self.assertIn("`n_silent_value_total` 48 -> 36", doc)
+        for case in ("inf_in_masked_out_row", "nan_in_masked_out_row", "ragged_columns"):
+            self.assertIn(case, doc)
+        self.assertIn("3 x 12 seeds = 36", doc)
+        card = rb.probe_missing_inputs(rb.exact_masked_mse, SEEDS, CFG)
+        self.assertEqual(card.details["n_silent_value_total"], 36)
 
 def _impure_rb(v, path):
     return ts._impure(v, path)
