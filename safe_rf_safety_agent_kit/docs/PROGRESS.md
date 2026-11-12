@@ -11310,3 +11310,108 @@ same artefact class as every other finding in this thread.
 
 **SR-06 marking is the orchestrator's call on attestation #9's behavioural evidence.** Nothing in this
 round is behavioural, and the apparatus notes it closes are not evidence for or against the module.
+
+## SR-06 MARKED `[x]` — verified 9 → 10 of 17
+
+**Task** (`docs/BUILD_BLUEPRINT.md:15`): *Implement generic stability checks for finite values, masked
+losses, empty-mask errors and gradient-validity assertions. Depends: SR-05. Verify: adversarial
+numeric unit cases fail safely.*
+
+**Basis for the mark: independent attestation #9 (PASS), at `ab46e0e`.** SR-05 is marked, the
+attester wrote none of the code, and the evidence does not depend on any prior round:
+
+- **11 real-defect mutants across all four named subjects: all KILLED** by `test_stability` alone —
+  narrowed `_materialised` catch, mask truthiness, empty-mask guard off, `_plain_real` identity,
+  `_same` via `isinstance`, `strict_masked_out` default flip, `denominator` decided on the object,
+  degenerate-gradient guard off, `require_parameter_gradient` degeneracy off, underflow guard off,
+  no-op guard off.
+- **1 mutant correctly unkilled and proven EQUIVALENT** (redundant `_finite_at` guard duplicated by
+  `check_finite_scalar`'s own first statement; 0/16 probes differ in type or message). Recorded as
+  equivalence, not as a survivor.
+- **67 verdict-flip cases**: no lying operand turned an honest REFUSE into a PASS at any guard.
+  This was the attester's own correction to its first sweep, which used benign counterparts
+  throughout and so could only ever confirm an already-correct verdict.
+- **~20k cells over six environments** (3.12.4+numpy 2.4.6, 3.13.5+numpy 2.4.4, both numpy-absent,
+  both `-OO`): 0 divergent cells, and every out-of-family outcome in exactly three declared classes
+  (the `__class__` channel, `_UNCONVERTED` `MemoryError`, `TypeError: not callable` on the two
+  carved-out call routes). Nothing out of family outside the declared set.
+- **Single-conversion-read measured, not argued**: a counting `__float__` is invoked exactly once per
+  element on all nine data paths, so "the value SUMMED is the value VALIDATED" is a measurement.
+- A **lying** `__class__` is refused in family; only a **raising** one escapes. The channel is
+  narrower than "any `__class__` hostility".
+- Independent route enumeration written before reading the table gave 46; minus the 2 declared
+  carve-outs = **44**, with the (function, parameter, kind) sets agreeing.
+
+**Commands.** `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m unittest tests.toy_tests.test_stability`
+(and `test_robustness`, `test_checkpoint`) on both interpreters × {normal, `-OO`} × {numpy, no numpy};
+`./scripts/run_tests.sh` equivalent via the two-interpreter matrix. Full suite at the marked tree:
+**1466 ran / 0 failed** on 3.12.4 (skipped 2) and 3.13.5 (skipped 84).
+
+**Commits.** `4982b90` (figure with no measurement; two reword-evadable pins; `{x!s}`/`{x!a}`),
+`ab46e0e` (row routes as caller-facing; the obvious predicate was unsound), `d9a0dfe` (the vacuity
+claim was an artefact; N1 closed per-file; N2, N3). **All three are documentation-and-test only —
+`d9a0dfe` proved at AST level: with docstrings stripped, `stability.py`'s AST is identical to
+`ab46e0e`.** No behaviour under test changed across rounds 21–23.
+
+### Remaining uncertainty, recorded rather than closed
+
+1. **The raising-`__class__` channel is OPEN** — 28 of 44 routes escape as a bare `RuntimeError`, and
+   it reaches every `isinstance` in three modules (19 + 49 + 10 = 78, by AST). Deliberately
+   **unpinned**: a test that pinned an escape would pin a defect and fail on the eventual fix. The
+   fix is the three owners' **joint decision**, not this module's. Marking SR-06 does not close it
+   and must not be read as closing it.
+2. **The raising-attribute-lookup channel** is declared as a fourth intake site and is **not closable
+   by a check** — reading any attribute of a caller's object runs the caller's code. Pinned as OPEN.
+3. **Value substitution through `__float__`/`__int__`** is honoured for `float`/`int` subclasses on
+   data paths (though not for any tolerance or divisor, which read behind the protocol). Behaviour is
+   self-consistent and no non-finite value propagates, but the module's phrase "cannot see behind it"
+   understates its own power: it *chooses* not to for data. In the safe direction; worth a sentence if
+   anyone touches `check_params_changed`, where the threshold is read from storage and the data from
+   the protocol.
+4. **`-OO` is the weakest environment row.** 18 assertions behind 13 doc-gated guards go dark there
+   (figure now derived and asserted, matching both guard spellings), and `PIN_D1`/`D8`/`D9`
+   relative-indent mutants are unkilled under `-OO` while killed normally.
+5. **An unbounded iterable was not driven** into any outer position: `tuple(it)` would consume to
+   `MemoryError`, which is declared, so the outcome distinguishes nothing. An avoided input is a
+   finding; this one is recorded as a choice, not a measurement.
+
+### Method lessons from this task, which cost more than the fix
+
+- **Eight attestations of unchanged behaviour added evidence about the bookkeeping, not the subject.**
+  Only #8 and #9 bear on the blueprint's question. The apparatus reached 3,914 lines and 29 declared
+  tables against a 1,040-line module; a question of the form "is there another axis?" always has an
+  answer, and answering it nine times did not change the verdict. **Attestation #9's own judgement:
+  a tenth would find a tenth axis and it would also be a note. Stop.**
+- **A successful reproduction of someone else's artefact is not confirmation.** The orchestrator
+  "independently verified" #9's vacuity finding by rebuilding the hostile from the attester's
+  *description of the mechanism* rather than from the fixture, got the same numbers, and reported it
+  confirmed. The owner refused to encode it and was right. Sibling rule to the existing
+  *a failed reproduction is not a refutation* — inverted, and harder to notice.
+- **The owner refusing a directive from the orchestrator was the control that worked.** Twice:
+  declining the row routes in round 21 (overridden, and the override was wrong on the mechanism
+  though right on the ledger), and declining the fourth state in round 23.
+- **A derived-figure mechanism built per SENTENCE leaves the FILE unguarded.** Round 21 made one
+  figure an f-string "so prose and table can no longer be kept in step by hand"; four copies drifted
+  anyway, one contradicting its own sentence 19 lines up, and a fifth *correct* copy sat thirty lines
+  from a stale one. Asserting the presence of the right figure is not asserting the absence of a
+  wrong one.
+- **The obvious predicate for a derivation can be unsound in a way its control shares.** "Accepts a
+  benign nested value" cannot distinguish *accepted because this takes a matrix* from *accepted
+  because this was never read*, and the flat control passed for the same vacuous reason. The sound
+  predicate was behavioural (does the module materialise rows out of it).
+- **A benign-substitution control catches "my fixture refuses everything" and cannot catch "my fixture
+  refuses before reaching the hostile."** Only a read-count control catches the second — and it found
+  a real 0-read route (`mmc/values/element` with a mismatched mask length: refused on shape, 0 reads,
+  verdict column saying `escapes`) that no claimed route was.
+- **A mutation harness that asserts on a failed patch but does not fail the RUN prints a false
+  SURVIVE.** Hit once this round.
+- **Five relayed-figure errors by the orchestrator** across this task (42/14/28 split predicted
+  wrong; 16/11 guards where 18/13 was derived; a verification command misquoted so that the quoted
+  form could not produce its reported output; the vacuity artefact; and earlier rounds' 12-vs-16
+  escapes and 40/13/27-vs-41/14/27). **Every figure in this entry was re-derived by the orchestrator
+  at the marked tree, not relayed.**
+
+**SR-06 unblocks SR-10** (`Depends: SR-06, SR-09`; SR-09 marked). Next eligible: **SR-10**, carrying
+two declared-open items — the escape at `benchmark.py:2094` where `f"numerical failure: {e}"` lets an
+in-family exception with a raising `__str__` propagate out of public `robustness.benchmark_outcome`,
+and `test_benchmark` red under `-OO` (f=2, e=19, reproduced on a pristine archive tree).
