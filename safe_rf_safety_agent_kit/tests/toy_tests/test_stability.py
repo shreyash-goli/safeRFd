@@ -1415,10 +1415,33 @@ class TheFifthAxisIsACallablePlacedOperand(unittest.TestCase):
         self.assertEqual({k for k, v in identity.items() if type(v) in (float, int)},
                          {"float subclass", "int subclass"},
                          "_plain_real normalises only int/float: that is why the base decides")
-        # and the figures this module quotes about those 30 cells are these 30 cells
+        # and the figures this module quotes about those 30 cells are these 30 cells, quoted in
+        # ONE PLACE. FINDING M: the measurement was written out three times -- the module docstring
+        # (inside D1), the conversion comment and `_same`'s docstring -- and only D1's copy was
+        # pinned, because an `assertIn` is satisfied by any one occurrence. Measured: a `30` edited
+        # to `29` in the conversion comment or in `_same`'s docstring, and that comment's `12` and
+        # `15` edited by one, were each unkilled by all three permitted suites on both interpreters,
+        # while the identical edit inside D1 died here and in test_d1. Three copies need three pins
+        # or one home. This is the one home, and a COUNT is what keeps it one: a second copy fails
+        # here just as a changed digit does.
         msrc = inspect.getsource(st)
-        self.assertIn("5 operand bases x 3 comparison shapes x 2 callable positions = 30 cells", msrc)
-        self.assertIn("12 bare RuntimeErrors escaped `check_gradient` and 3 were PASS", msrc)
+        product = "5 operand bases x 3 comparison shapes x 2 callable positions = 30 cells"
+        split = ("12 of the 30 left this\n"                 # the figure wraps in the docstring
+                 "module as a bare RuntimeError and 3 were PASS REPORTS WITH THE MUTATION\n"
+                 "UNDETECTED")
+        for figure in (product, split):
+            with self.subTest(figure=figure):
+                self.assertEqual(msrc.count(figure), 1,
+                                 "this figure has exactly ONE home in the module, the docstring "
+                                 "passage D1 pins char-for-char: a second copy is a figure nobody "
+                                 "asserts, and a figure nobody asserts is a figure that drifts")
+                self.assertIn(figure, LoadBearingSentences.D1,
+                              "the one home must be the PINNED passage, not an unpinned copy")
+        # and the two cross-references that replaced the deleted copies are load-bearing: without
+        # them the places that need the figure no longer say where it lives.
+        self.assertIn("THE MEASUREMENT THAT ESTABLISHED THAT HAS ONE HOME", msrc)
+        self.assertIn("The cell-by-cell measurement of what that cost is in the MODULE DOCSTRING",
+                      msrc)
 
     def test_h2_the_rule_is_a_plain_number_or_a_write_and_the_narrowing_is_stated(self):
         """What `_same` now does with each shape of write, INCLUDING the one behaviour change.
@@ -1476,6 +1499,55 @@ class TheFifthAxisIsACallablePlacedOperand(unittest.TestCase):
         doc = _doc(st._same)
         if doc is not None:
             self.assertIn("THE ONE BEHAVIOUR CHANGE", doc)
+
+    def test_h4_the_one_question_still_put_to_the_slot_is_the_declared_class_channel(self):
+        """FINDING L, the prose half. `_same`'s docstring said the object in the slot "is not
+        asked", flat -- and it IS asked, once: `_plain_real`'s own first statement is
+        `isinstance(v, bool)`, and `isinstance` consults `__class__`.
+
+        D1's pinned sentence survives untouched, because what it says is that the guard decides
+        "instead of asking that object whether it is EQUAL", which is strictly true. The PRIVATE
+        docstring claimed something wider than that about the same operand, so the pin and the
+        mechanism disagreed about one object. The docstring is corrected to what is measured and
+        pinned here from `inspect.getsource`, which also makes the pin hold under `-OO`.
+
+        WHAT IS NOT PINNED, deliberately: THE ESCAPE. An object whose `__class__` raises, written
+        into the slot by `fn` or `grad_fn`, takes a bare RuntimeError out of `check_gradient` on
+        both interpreters with numpy present and absent. That is the kit-wide open `__class__`
+        finding, it is one of the 27 escaping rows of `_CLASS_CHANNEL_POSITIONS`, it reproduces
+        identically against HEAD~1 so it is not this round's regression, and a test asserting it
+        would pin a defect and fail on the three owners' joint fix.
+
+        WHAT IS PINNED is that the question is PUT -- observed with a `__class__` that COUNTS
+        instead of raising, the same technique `test_g2d` uses on the eagerly-formatted label --
+        and that the outcome at this operand is in family whenever the object answers at all.
+        """
+        reads = []
+
+        class Counted:
+            @property
+            def __class__(self):
+                reads.append(1)
+                return Counted
+        obj = Counted()
+        self.assertIs(st._plain_real(obj), obj, "normalisation cannot reduce it")
+        self.assertGreaterEqual(len(reads), 1,
+                                "`_plain_real` opens with `isinstance(v, bool)`, which consults "
+                                "`__class__`: that is the one question still put to the slot")
+        reads.clear()
+        self.assertIs(st._same(obj, 1.0), False)
+        self.assertGreaterEqual(len(reads), 1)
+        f, g = _writer("grad_fn", Counted())
+        with self.assertRaisesRegex(st.StabilityError, "grad_fn mutated its input in place"):
+            st.check_gradient(f, g, [1.0, 2.0])
+        same_src = inspect.getsource(st._same)
+        self.assertIn("A WRITE. IT IS NOT ASKED WHETHER IT IS EQUAL.", same_src)
+        self.assertNotIn("A WRITE. It is not asked.", same_src,
+                         "the wider claim is back: `isinstance` inside `_plain_real` does put one "
+                         "question to the object, and it is the declared `__class__` channel")
+        self.assertIn("`_plain_real`'s own first statement is `isinstance(v, bool)`, and", same_src)
+        self.assertIn("`isinstance` consults `__class__`", same_src)
+        self.assertIn("it is NOT closed here", same_src)
 
     def test_h3_the_class_is_derived_and_the_derivation_states_its_own_reach(self):
         """The fail-closed half, and -- the lesson `test_c4` paid for -- its REACH, stated exactly.
@@ -1834,8 +1906,33 @@ _CONVERSION_SITES = {
 # not. A protocol the walker never looks for, or a scope it never walks, is absent from both sides
 # and the set EQUALITY passes -- which is how FINDING I (three unwalked scopes) and the missing
 # `__format__` row both arose, and it is `toy.robustness`' four-public-positions-behind-a-green-check
-# failure in another module. So coverage is two-sided now too: every BUILTIN this module calls must
-# be either in the coercion candidate set that `test_g2d` walks for, or excused here in writing.
+# failure in another module. So coverage is two-sided now too: every CALLABLE THIS MODULE CALLS BY
+# NAME must be either in the coercion candidate set that `test_g2d` walks for, or excused here in
+# writing.
+#
+# FINDING N, and it is FINDING I ONE AXIS OVER: the scope was widened and the SPELLING was not.
+# Both sides matched `ast.Call` nodes whose `func` is an `ast.Name`, and side two then kept only
+# names with `hasattr(builtins, n)`, so the claim above and `test_g2d`'s "a new coercion applied
+# anywhere in the module fails HERE" held for BARE-NAME BUILTIN CALLS and nothing else. Measured
+# blind spots at the commit that found this: 10 distinct dotted spellings in 14 calls
+# (`math.isfinite` x5, `float.__float__`, `int.__int__` and seven `.append`s) considered by neither
+# side, and 38 bare-name non-builtin calls dropped by the `hasattr` filter -- 34 of them this
+# module's own functions and classes, which need no row because the walker visits their bodies,
+# `Fraction`, which the walker DOES look for, and three that are neither (`dataclass`, `exc`,
+# `func`). So 37 bare names and 10 dotted spellings were invisible to BOTH sides at once. Every one
+# of those figures is DERIVED in `test_g2d` rather than merely written here, because a figure in a
+# comment that nothing asserts is this project's recurring defect and this comment is new. Two
+# mutants proved the consequence: a
+# `builtins.len(rows)` and a `from builtins import len as _len` + `_len(rows)` were each unkilled by
+# all three permitted suites on both interpreters, while the identical bare `len(rows)` was killed.
+# There is no behavioural consequence AT HEAD, because no such site exists -- which is exactly how
+# Finding I was classified, and exactly why it is a finding against the stated property rather than
+# against the code. `test_g2d` now canonicalises every call target: an import alias resolves to the
+# name it aliases (`_len` -> `len`, `Fraction` -> `Fraction`), an attribute call on the `builtins`
+# module resolves to the bare builtin (`builtins.len` -> `len`), any other attribute call keeps its
+# dotted spelling, and a target the matcher CANNOT name fails the test rather than vanishing from
+# both sides. Rows for this module's OWN functions and classes are deliberately not required: the
+# walker visits their bodies, so a coercion inside one is seen where it is written.
 _NOT_A_COERCION = {
     "abs": "arithmetic on a float this module already validated, not a coercion of caller data",
     "all": "truth-tests a generator of this module's own bools (`_is_row_like`, `_same`, `x == 0.0`)",
@@ -1854,6 +1951,30 @@ _NOT_A_COERCION = {
     "type": "`type(x)` ignores a `__class__` property and is safe; the `__name__` lookup on its "
             "result IS a protocol and is the _type_name row of the table",
     "zip": "pairs tuples this module built",
+    # FINDING N: the rows the bare-name-only matcher never asked for. Three bare names that are
+    # neither builtins nor defined here, and ten dotted spellings.
+    "dataclass": "the `@dataclass` decorator, applied to this module's own GradientCheckReport at "
+                 "import time: it is an imported callable, invisible to a `hasattr(builtins, ...)` "
+                 "filter, and no caller object exists when it runs",
+    "exc": "an exception CLASS this module passed into `_materialised` itself (ShapeError, "
+           "MaskTypeError): constructed in order to raise, never applied to caller data",
+    "func": "the caller's own `fn`/`grad_fn`, INVOKED -- the documented carve-out, not a coercion. "
+            "The operand it creates is the slot it may WRITE, which is `_same`'s subject",
+    "math.isfinite": "stdlib, on a float `_as_float` or a `check_finite_*` validator already "
+                     "returned; `math` is an import, so the operand is never a caller object",
+    "float.__float__": "a TYPE-LEVEL read in `_plain_real`, deliberately spelled this way instead "
+                       "of `float()` so that an override cannot intercept it: it is the reason the "
+                       "module's table DISCHARGES int() and the same reasoning covers this",
+    "int.__int__": "the same type-level read in `_plain_real`, and the module's own int() row is "
+                   "written about this exact call",
+    "config.append": "a list `check_gradient` built two lines earlier, holding the four validated "
+                     "config floats",
+    "kept.append": "a list `_validated_masked_values` built, holding tuples of validated floats",
+    "num.append": "a list `check_gradient` built, holding finite-difference floats it computed",
+    "out.append": "a list `check_finite_sequence` built, holding `_finite_at` results",
+    "row.append": "a list `_validated_masked_values` built per row, holding `_as_float` results",
+    "rows.append": "a list `_as_rows` built, holding `_materialised` row tuples",
+    "vals.append": "a list `check_gradient` built, holding `check_finite_scalar` results",
 }
 
 
@@ -2021,6 +2142,22 @@ class ConversionIsDerivedNotEnumerated(unittest.TestCase):
         noticed.) And the widening is itself checked from BOTH sides, below: every `ast.Call` and
         `ast.FormattedValue` in the tree must be attributed to exactly one scope, so a scope kind
         the walker does not know about fails instead of being silently empty.
+
+        FINDING N: "anywhere in the module" WAS ALSO FALSE AS TO SPELLING, which is Finding I one
+        axis over -- the SCOPE was widened and the SPELLING was not. Both halves matched only
+        `ast.Call` nodes whose `func` is an `ast.Name`, and side two then kept only names satisfying
+        `hasattr(builtins, n)`, so the property held for BARE-NAME BUILTIN CALLS alone. Measured, at
+        the commit that found it: `import builtins` + `builtins.len(rows)` and
+        `from builtins import len as _len` + `_len(rows)` were each UNKILLED by test_stability,
+        test_robustness and test_checkpoint on both interpreters, while the identical bare
+        `len(rows)` was killed here. Ten distinct dotted spellings (14 calls) and 37 bare names were
+        considered by neither side, and those figures are DERIVED below rather than written in prose,
+        which is the other half of this file's standing lesson. Widening was clean again, so
+        `spelled()` below
+        canonicalises every call target -- import aliases resolved, `builtins.x` reduced to `x`, any
+        other attribute call kept dotted -- and a target it cannot name FAILS rather than falling
+        through both sides. This module's own functions and classes need no excuse, because the
+        walker visits their bodies; everything else does.
         """
         import ast, builtins, re
         src = inspect.getsource(st)
@@ -2069,6 +2206,34 @@ class ConversionIsDerivedNotEnumerated(unittest.TestCase):
                 stack.extend(ast.iter_child_nodes(n))
 
         coercions = ("float", "int", "bool", "len", "repr", "Fraction")
+        # FINDING N, the spelling half. `aliases` maps every name this module imports to its origin,
+        # so an aliased or dotted coercion canonicalises to the same name the bare call has.
+        aliases = {}
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Import):
+                for a in n.names:
+                    aliases[a.asname or a.name.split(".")[0]] = a.name
+            elif isinstance(n, ast.ImportFrom):
+                for a in n.names:
+                    aliases[a.asname or a.name] = f"{n.module}.{a.name}"
+
+        def spelled(func):
+            """The canonical name of a call target, or None when this matcher cannot name it.
+
+            `len` and `builtins.len` and a `from builtins import len as _len` all come out `len`;
+            `fractions.Fraction` imported under any name comes out `Fraction`; any other attribute
+            call keeps its dotted spelling (`math.isfinite`, `rows.append`, `float.__float__`), so
+            it is visible to the coverage check below instead of to neither side.
+            """
+            if isinstance(func, ast.Name):
+                return aliases.get(func.id, func.id).rsplit(".", 1)[-1]
+            if isinstance(func, ast.Attribute):
+                if isinstance(func.value, ast.Name):
+                    base = aliases.get(func.value.id, func.value.id)
+                    return func.attr if base == "builtins" else f"{base}.{func.attr}"
+                return ast.unparse(func)
+            return None
+
         derived, by_proto, shown, typed = set(), {}, 0, 0
         as_float_calls, as_float_lines = 0, set()
         attributed, bare_fmt, label_fmt = [], 0, 0
@@ -2076,16 +2241,17 @@ class ConversionIsDerivedNotEnumerated(unittest.TestCase):
             for node in own_nodes(body):
                 if isinstance(node, (ast.Call, ast.FormattedValue)):
                     attributed.append(id(node))
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                    if node.func.id in coercions:
+                if isinstance(node, ast.Call):
+                    name = spelled(node.func)
+                    if name in coercions:
                         arg = ast.unparse(node.args[0]) if node.args else ""
-                        derived.add((scope, node.func.id, arg))
-                        by_proto[node.func.id] = by_proto.get(node.func.id, 0) + 1
-                    elif node.func.id == "_shown":
+                        derived.add((scope, name, arg))
+                        by_proto[name] = by_proto.get(name, 0) + 1
+                    elif name == "_shown":
                         shown += 1
-                    elif node.func.id == "_type_name":
+                    elif name == "_type_name":
                         typed += 1
-                    elif node.func.id == "_as_float":
+                    elif name == "_as_float":
                         as_float_calls += 1
                         as_float_lines.add(node.lineno)
                 if isinstance(node, ast.FormattedValue):
@@ -2104,20 +2270,47 @@ class ConversionIsDerivedNotEnumerated(unittest.TestCase):
         self.assertEqual(len(set(attributed)), len(attributed), "a node attributed to two scopes")
         self.assertIn("<module>", {s for s, _ in scopes(tree)})
         self.assertIn("GradientCheckReport", {s for s, _ in scopes(tree)})
-        # SIDE TWO: protocol coverage. Every builtin this module CALLS is either a coercion the
-        # walker looks for, or excused in writing. A protocol in neither is the Finding I defect one
-        # axis over: invisible to the walker and to the table at once.
-        called = {n.func.id for n in everything
-                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-        builtin_called = {n for n in called if hasattr(builtins, n)}
-        self.assertEqual(builtin_called - set(coercions), set(_NOT_A_COERCION),
-                         "a builtin this module calls is neither in the coercion candidate set this "
-                         "test walks for nor excused in _NOT_A_COERCION: decide it in writing")
+        # SIDE TWO: protocol coverage, AS TO SPELLING as well as scope (FINDING N). Every callable
+        # this module CALLS BY NAME -- bare, dotted, or through an import alias -- is either a
+        # coercion the walker looks for, or this module's own function or class (whose body the
+        # walker visits), or excused in writing. A protocol in none of the three is the Finding I
+        # defect one axis over: invisible to the walker and to the table at once. `hasattr(builtins,
+        # n)` used to be the filter here, so the 10 dotted spellings and 37 non-builtin bare names
+        # this module calls were dropped by it, and an ALIASED or DOTTED builtin coercion was
+        # dropped by the matcher above at the same time.
+        unnameable = sorted({ast.unparse(n.func) for n in everything
+                             if isinstance(n, ast.Call) and spelled(n.func) is None})
+        self.assertEqual(unnameable, [],
+                         "a call target this matcher cannot name: it is invisible to the coercion "
+                         "walker and to _NOT_A_COERCION at once, which is Finding I's shape")
+        own = {n.name for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+        called = {spelled(n.func) for n in everything if isinstance(n, ast.Call)}
+        foreign = {n for n in called if n not in own and n.split(".")[0] not in own}
+        self.assertEqual(foreign - set(coercions), set(_NOT_A_COERCION),
+                         "a callable this module calls by name is neither in the coercion candidate "
+                         "set this test walks for, nor defined in this module, nor excused in "
+                         "_NOT_A_COERCION: decide it in writing")
         for n, why in _NOT_A_COERCION.items():
-            with self.subTest(builtin=n):
-                self.assertIn(n, builtin_called,
+            with self.subTest(called=n):
+                self.assertIn(n, foreign,
                               f"_NOT_A_COERCION excuses {n}(), which this module no longer calls")
                 self.assertTrue(why.strip())
+        # FINDING N's own figures, DERIVED here and not left in the prose that reports them.
+        attr_calls = [n for n in everything
+                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
+        dotted = {ast.unparse(n.func) for n in attr_calls}
+        bare_non_builtin = {n.func.id for n in everything
+                            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                            and not hasattr(builtins, n.func.id)}
+        self.assertEqual((len(dotted), len(attr_calls)), (10, 14),
+                         "the dotted call spellings the bare-name matcher could not see")
+        self.assertEqual((len(bare_non_builtin), len(bare_non_builtin & own)), (38, 34),
+                         "the bare names the `hasattr(builtins, ...)` filter dropped, and how many "
+                         "of them are this module's own functions and classes")
+        self.assertEqual(sorted(bare_non_builtin - own - set(coercions)),
+                         ["dataclass", "exc", "func"],
+                         "the bare names that were invisible to BOTH sides of this check at once")
         self.assertEqual(derived, set(_CONVERSION_SITES),
                          "a coercion protocol is applied at a site this enumeration does not "
                          "decide: give it a row in _CONVERSION_SITES with the reason it is safe, "
@@ -2405,9 +2598,22 @@ class TheCarveOutWhereItsHalvesMeet(unittest.TestCase):
 # those owners' joint decision, so a test that pinned an escape would pin a defect and fail on the
 # eventual fix.
 #
-# REACH, stated exactly rather than implied: the PARAMETER set is derived and fails closed; the
-# POSITION KINDS (outer / row / element / scalar / a callable's return value) are enumerated here by
-# hand, one row per kind that was driven. A position kind nobody drives is not in this table.
+# REACH, stated exactly rather than implied: the PARAMETER set is derived and fails closed, and so
+# -- since FINDING L -- is the ROUTE set of every CALLABLE-PLACED parameter, cross-checked against
+# `_CALLABLE_PLACED`, which has enumerated those three routes since Finding H. The remaining ROUTE
+# KINDS are enumerated by hand in `_ROUTE_KINDS` below, one row per kind that was driven. A route
+# kind nobody drives is not in this table; a route of a position that IS in this table used to need
+# no row and get no excuse, which is Finding L.
+_ROUTE_KINDS = {
+    "outer": "the argument object itself",
+    "row": "an element of the outer sequence of a 2D argument",
+    "element": "a scalar element, at whatever depth the function reads one",
+    "scalar": "an argument that is a number rather than a sequence",
+    "return value": "the object a caller's CALLABLE returns -- route (2) of _CALLABLE_PLACED",
+    "return element": "an element of the sequence a caller's callable returns",
+    "written slot": "a slot of the list this module handed the callable, which the callable WROTE "
+                    "-- route (3) of _CALLABLE_PLACED, and the left operand of `_same`",
+}
 def _class_boom():
     """A caller object whose `__class__` is a property that raises: iterable, so it reaches past the
     sequence probe wherever one exists."""
@@ -2420,6 +2626,18 @@ def _class_boom():
             return iter([1.0, 2.0])
     return C()
 
+
+# FINDING O. The spellings a figure can take in the one docstring in this file whose whole subject
+# is that figures about the suite's own size rot. The pin written beside that docstring forbade
+# DIGITS -- and the round that wrote it had, in the same breath, replaced a stale digit figure with
+# a WORD-SPELLED HISTORY of the count, which was itself wrong: it omitted the size at the commit it
+# was written against. A one-directional pin is how a correction introduces the defect it corrects,
+# and "no digit may appear" is one-directional. Measured: the same docstring with "one hundred and
+# four tests" added was unkilled by all three permitted suites on both interpreters.
+_NUMBER_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+                 "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+                 "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty",
+                 "sixty", "seventy", "eighty", "ninety", "hundred", "thousand", "dozen", "score")
 
 _IN_FAMILY, _ESCAPES = "in family", "escapes"
 _CLASS_CHANNEL_POSITIONS = (
@@ -2478,6 +2696,27 @@ _CLASS_CHANNEL_POSITIONS = (
      lambda h: st.check_gradient(lambda p: h, lambda p: [2.0], [1.0])),
     ("check_gradient", "grad_fn", "return element", _ESCAPES,
      lambda h: st.check_gradient(lambda p: p[0] ** 2, lambda p: [h], [1.0])),
+    # FINDING L, THE THIRD ROUTE OF TWO POSITIONS THIS TABLE ALREADY HELD. `_CALLABLE_PLACED` has
+    # named three routes per callable position since Finding H -- the call, the returned value, and
+    # the SIDE EFFECT on the list this module hands over -- and this table had rows for the first
+    # two only. The accounting keyed on (function, parameter), both parameters were present, so
+    # `params - covered` was empty and the side-effect route needed no row and got no excuse: the
+    # same shape as Finding H's "a reason that covers two routes of three reads like a reason that
+    # covers the position", one table over and in the same commit. `_same`'s first act is
+    # `_plain_real(a)`, whose first statement is `isinstance(v, bool)`, so the hostile `__class__`
+    # is consulted there and the RuntimeError leaves the module. NOT PINNED AS A BEHAVIOUR: it is
+    # one of the 27 escapes of the declared open channel, like every other escaping row here.
+    ("check_gradient", "fn", "written slot", _ESCAPES,
+     lambda h: st.check_gradient(*_writer("fn", h), [1.0, 2.0])),
+    ("check_gradient", "grad_fn", "written slot", _ESCAPES,
+     lambda h: st.check_gradient(*_writer("grad_fn", h), [1.0, 2.0])),
+    # and route (2) of `grad_fn` ITSELF rather than of its elements: the returned SEQUENCE goes
+    # through `_as_flat_items`, so it is IN FAMILY (ShapeError). The sentence's old escape list
+    # said "the RETURN values of `fn` and `grad_fn`", which is right for `fn`'s scalar and wrong
+    # here -- a third route of a known position, in the WRONG half of the sentence, asserted by
+    # nothing because only the in-family rows carry a behaviour assertion.
+    ("check_gradient", "grad_fn", "return value", _IN_FAMILY,
+     lambda h: st.check_gradient(_F_QUAD, lambda p: h, [1.0, 2.0])),
     ("require_parameter_gradient", "param_grad", "outer", _IN_FAMILY,
      lambda h: st.require_parameter_gradient(h)),
     ("require_parameter_gradient", "param_grad", "element", _ESCAPES,
@@ -2522,7 +2761,7 @@ class FiguresAndDocPinInventory(unittest.TestCase):
     """The figures that were merely WRITTEN, asserted; and the doc-pin counts, derived."""
 
     _WORD = {0: "No", 1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six", 7: "Seven",
-             8: "Eight"}
+             8: "Eight", 9: "Nine"}
 
     def test_the_compensated_summation_figure_is_this_interpreters_behaviour(self):
         """`sum([1e16, 1.0, -1e16])` is 1.0, not 0.0 -- `stability.py`'s `check_gradient`
@@ -2581,16 +2820,17 @@ class FiguresAndDocPinInventory(unittest.TestCase):
 
         It fired as intended when FINDING G1 and G2 added D5, D6 and D7: the figure moved from
         four to seven and this test failed until the docstring said so. It fired again when FINDING
-        K promoted the one keyword pin to D8.
+        K promoted the one keyword pin to D8, and again when FINDING L made `check_gradient`'s
+        unqualified mutation sentence D9.
         """
         passages = {k: v for k, v in vars(LoadBearingSentences).items()
                     if k.startswith("D") and isinstance(v, str)}
         withdrawn = {k for k in passages if k.endswith("_WITHDRAWN")}
         positive = {k for k in passages if k not in withdrawn}
-        self.assertEqual(len(positive), 8, f"positive passages: {sorted(positive)}")
+        self.assertEqual(len(positive), 9, f"positive passages: {sorted(positive)}")
         self.assertEqual(len(withdrawn), 1, f"withdrawn passages: {sorted(withdrawn)}")
         src = inspect.getsource(LoadBearingSentences)
-        self.assertEqual(src.count("assertIn("), 8, "cleandoc'd assertIn doc pins")
+        self.assertEqual(src.count("assertIn("), 9, "cleandoc'd assertIn doc pins")
         self.assertEqual(src.count("assertNotIn("), 2)
         doc = _doc(LoadBearingSentences)
         if doc is not None:
@@ -2655,11 +2895,28 @@ class FiguresAndDocPinInventory(unittest.TestCase):
             `masked_mean_checked`, where the nestedness probe absorbs the hostile `__class__`,
             answers "not a row", and hands the object to the ELEMENT check.
 
-        So the sentence is rewritten from a POSITION-BY-POSITION sweep: 38 driven positions, 13 in
-        family and 25 escaping, identical on 3.12.4 and 3.13.5. The fix to the asymmetry is to
-        ACCOUNT for all 38 instead of asserting 6 -- the (function, parameter) set is derived from
-        the signatures and every pair must be in the table or excused -- while still asserting
-        BEHAVIOUR for the in-family rows only. The escaping rows are asserted about nothing: the
+        So the sentence is rewritten from a POSITION-BY-POSITION sweep: 41 driven positions, 14 in
+        family and 27 escaping, identical on 3.12.4 and 3.13.5 and with numpy absent. The fix to the
+        asymmetry is to ACCOUNT for all 41 instead of asserting 6 -- the (function, parameter) set
+        is derived from the signatures and every pair must be in the table or excused -- while
+        still asserting BEHAVIOUR for the in-family rows only.
+
+        FINDING L, which is that accounting's own defect ONE GRANULARITY DOWN, and it was already
+        true when the paragraph above was written. The rows are
+        (function, parameter, ROUTE, verdict, call) and the accounting compared
+        (function, parameter) sets only, so a ROUTE of a position the table already held needed no
+        row and got no excuse. Three such routes existed. Two of them are the SLOT `fn` and
+        `grad_fn` WRITE into the list `check_gradient` hands them -- route (3) of the three
+        `_CALLABLE_PLACED` has enumerated since Finding H, reached through `_plain_real`'s own
+        `isinstance(v, bool)`, measured OUT OF FAMILY as a bare RuntimeError at both positions on
+        both interpreters with numpy present and absent, and in NEITHER half of the sentence while
+        `fn` and `grad_fn` stood in the escaping half for their return values. The third is the
+        SEQUENCE `grad_fn` returns, as opposed to its elements: `_as_flat_items` materialises it, so
+        it is IN FAMILY, and the escape list claimed it. So the accounting now keys on the ROUTE,
+        and a callable-placed position's route set is cross-checked against `_CALLABLE_PLACED`
+        rather than written freely here. The escapes are still asserted about NOTHING: this is the
+        kit-wide open `__class__` finding, not a round-19 regression (it reproduces identically
+        against HEAD~1), and pinning it would pin a defect and break the joint fix. The escaping rows are asserted about nothing: the
         channel reaches every `isinstance` in this module (19, derived below) and more in its two
         importers, the fix is those owners' joint decision, and a test that pinned an escape would
         pin a defect and fail on that fix. The figure this docstring used to quote -- "~85
@@ -2682,22 +2939,52 @@ class FiguresAndDocPinInventory(unittest.TestCase):
                       "silently inherits another module's retired figure")
         # EVERY parameter of the nine public functions is accounted for, in one table or the other
         params = {(n, p) for n in _CASES for p in inspect.signature(getattr(st, n)).parameters}
-        covered = {(f, p) for f, p, _k, _v, _c in _CLASS_CHANNEL_POSITIONS}
+        routes = {(f, p, k) for f, p, k, _v, _c in _CLASS_CHANNEL_POSITIONS}
+        covered = {(f, p) for f, p, _k in routes}
         self.assertEqual(params - covered, set(_NOT_A_CLASS_CHANNEL_POSITION),
                          "a public parameter is in neither _CLASS_CHANNEL_POSITIONS nor "
                          "_NOT_A_CLASS_CHANNEL_POSITION: that is how input_grad came to be missing "
                          "from BOTH halves of the sentence while this test stayed green")
         for key in _NOT_A_CLASS_CHANNEL_POSITION:
             self.assertIn(key, params, f"{key} is excused but no longer exists")
-        self.assertEqual(len(_CLASS_CHANNEL_POSITIONS), 38, "the driven positions")
+        # FINDING L: THE SAME ACCOUNTING AT ROUTE GRANULARITY, which is the granularity the omission
+        # had. Keyed on (function, parameter) alone, a ROUTE of a position already in the table
+        # needed no row and got no excuse -- `("check_gradient", "fn")` and
+        # `("check_gradient", "grad_fn")` were both here with their RETURN routes, so the set
+        # difference above was empty while the slot each callable WRITES was in neither half of the
+        # sentence. The route set of a callable-placed position is not free-form either: it is
+        # cross-checked against `_CALLABLE_PLACED`, which is itself derived from `_CASES`.
+        self.assertEqual(len(routes), len(_CLASS_CHANNEL_POSITIONS), "a route driven twice")
+        self.assertEqual({(f, p) for f, p, k in routes if k == "written slot"},
+                         set(_CALLABLE_PLACED),
+                         "every callable-placed position's SIDE-EFFECT route -- the slot the "
+                         "callable writes, route (3) of _CALLABLE_PLACED -- needs its own row in "
+                         "_CLASS_CHANNEL_POSITIONS: a reason that covers two routes of three reads "
+                         "like a reason that covers the position")
+        for key in sorted(_CALLABLE_PLACED):
+            with self.subTest(callable_placed=key):
+                self.assertIn((*key, "return value"), routes,
+                              "route (2), the value the callable RETURNS, needs a row of its own "
+                              "too: `grad_fn`'s returned sequence is IN FAMILY while its elements "
+                              "escape, and the sentence used to put both in the escape list")
+        self.assertEqual(sorted({k for _f, _p, k in routes}), sorted(_ROUTE_KINDS),
+                         "a route kind is driven that _ROUTE_KINDS does not define, or defined "
+                         "there and driven nowhere: the enumeration of kinds IS the reach claim")
+        for kind, why in _ROUTE_KINDS.items():
+            with self.subTest(route_kind=kind):
+                self.assertTrue(why.strip(), f"{kind} has no definition written")
+        self.assertEqual(len(_CLASS_CHANNEL_POSITIONS), 41, "the driven positions")
         verdicts = [v for _f, _p, _k, v, _c in _CLASS_CHANNEL_POSITIONS]
-        self.assertEqual((verdicts.count(_IN_FAMILY), verdicts.count(_ESCAPES)), (13, 25),
+        self.assertEqual((verdicts.count(_IN_FAMILY), verdicts.count(_ESCAPES)), (14, 27),
                          "the measured split the sentence is written from")
-        self.assertIn("13 IN FAMILY and 25 escaping", src)
-        self.assertIn("38 driven positions", src)
+        self.assertIn("14 IN FAMILY and 27 escaping", src)
+        self.assertIn("41 driven positions", src)
+        self.assertIn("A POSITION HERE IS A ROUTE, not a parameter", src,
+                      "the sentence must say what it counts, because the figure changed by three "
+                      "without a single parameter being added")
         # and the sentence names each half's members
-        in_family_half = src.split("IN FAMILY (13)")[1].split("ESCAPING (25)")[0]
-        escaping_half = src.split("ESCAPING (25)")[1].split("_NOT_A_SEQUENCE = (")[0]
+        in_family_half = src.split("IN FAMILY (14)")[1].split("ESCAPING (27)")[0]
+        escaping_half = src.split("ESCAPING (27)")[1].split("_NOT_A_SEQUENCE = (")[0]
         # The two kinds the sentence enumerates BY PARAMETER NAME are the outer and the scalar ones;
         # the row, element and return-value kinds it describes as classes, in prose, and they are
         # checked by the split figures above rather than by name. `input_grad` is the row this makes
@@ -2710,7 +2997,7 @@ class FiguresAndDocPinInventory(unittest.TestCase):
                 self.assertIn(f"`{p}`", half,
                               f"{f}({p}=...) at its {kind} position is measured {verdict!r} and "
                               f"the sentence's {verdict!r} list does not name it")
-        # BEHAVIOUR: asserted for the 13 in family, and for nothing else.
+        # BEHAVIOUR: asserted for the 14 in family, and for nothing else.
         for f, p, kind, verdict, call in _CLASS_CHANNEL_POSITIONS:
             if verdict != _IN_FAMILY:
                 continue
@@ -2869,25 +3156,37 @@ class FiguresAndDocPinInventory(unittest.TestCase):
         `scripts/test_baseline.txt`, which the orchestrator owns and regenerates.
 
         Left that way DELIBERATELY, stated rather than overlooked: asserting the count inside the
-        file whose contents determine it creates a second source of truth that drifts on every
+        file whose contents determine it creates a rival source of truth that drifts on every
         legitimate addition, and the baseline file already fails a run that loses tests. What this
         test does assert is the property the count was standing in for -- that no test class here
-        is empty and every one is collected -- which is what a dropped case would actually break.
+        is empty and that each of them is collected -- which is what a dropped case would break.
 
-        AND THIS DOCSTRING NOW QUOTES NO FIGURE AT ALL, by construction and by the assertion below.
-        It used to carry a parenthetical count "before this round" that was STALE BY TWO ROUNDS --
-        derived over history, the suite went from fifty-seven to seventy-two, stayed, rose to
-        eighty-four, then to its present size, so the parenthetical named a figure two rounds old --
-        and it did so in the test whose entire subject is that count, which makes it the latest
-        instance of this project's recurring figure-in-prose defect. The deliberate NON-assertion
-        of the count is settled and correct; it was the history written beside it that rotted. So
-        the parenthetical is gone, and no digit may appear here.
+        AND THIS DOCSTRING QUOTES NO FIGURE AT ALL, in digits or in words, by construction and by
+        the assertion below. FINDING O: it used to carry a parenthetical count, which went stale;
+        the round that removed the parenthetical wrote a WORD-SPELLED HISTORY of the count in its
+        place, and that history was wrong WHEN IT WAS WRITTEN rather than merely stale -- it
+        skipped the size at the very commit it was written against -- in the docstring whose entire
+        subject is that figures about the suite's own size rot. The pin written in the same breath
+        forbade DIGITS, so the words it had just introduced were unkilled by every permitted suite
+        on both interpreters. The history is GONE rather than corrected: a history of the count has
+        no business here, since this docstring's own thesis is that such figures rot, and nothing
+        needs it -- `git log` holds the sizes and `scripts/test_baseline.txt` holds the current
+        size. The assertion below now reaches a figure in either spelling.
         """
+        import re
         doc = _doc(self.test_the_test_count_is_deliberately_not_asserted_here)
         if doc is not None:
             self.assertEqual([c for c in doc if c.isdigit()], [],
                              "this docstring quotes a figure about the suite's own size, which is "
                              "the one thing it exists to say nobody should write down")
+            spelled = sorted({w for w in _NUMBER_WORDS
+                              if re.search(rf"\b{w}\b", doc, re.IGNORECASE)})
+            self.assertEqual(spelled, [],
+                             "this docstring spells a figure in WORDS. The digit half of this pin "
+                             "was ONE-DIRECTIONAL: adding a digit died, and the round that removed "
+                             "a stale digit figure wrote a word-spelled history of the count in "
+                             "its place, got it wrong, and nothing failed. A figure here is a "
+                             f"figure in either spelling: {spelled}")
         classes = [o for o in globals().values()
                    if isinstance(o, type) and issubclass(o, unittest.TestCase)]
         self.assertGreaterEqual(len(classes), 10)
@@ -2898,7 +3197,7 @@ class FiguresAndDocPinInventory(unittest.TestCase):
 
 
 class LoadBearingSentences(unittest.TestCase):
-    """Eight passages that were wider than their mechanism, each pinned to its own passage, plus
+    """Nine passages that were wider than their mechanism, each pinned to its own passage, plus
     one withdrawn sentence pinned ABSENT.
 
     Both figures are ASSERTED, not merely written: `FiguresAndDocPinInventory` re-derives them
@@ -2982,6 +3281,20 @@ UNDETECTED; with it, 30 of 30 are refused in family.""")
     complaint about that argument, and carries on. That is a real loss: an unrelated caller bug
     becomes an expected-and-handled condition.""")
     # FINDING G2: lying versus raising, the distinction the old exclusion did not make.
+    # FINDING L: the only load-bearing sentence about the in-place-mutation guard that was not a
+    # `D` passage, and it was the UNQUALIFIED one -- "if either callable mutates it, that is
+    # detected and raises", with nothing to say that a VALUE-EQUAL write-back of a plain `int`, a
+    # `float` subclass or a `numpy` `float64` still returns a PASS report. That narrowing was
+    # declared in `_same`'s PRIVATE docstring and nowhere a caller reads.
+    D9 = inspect.cleandoc("""Each call
+    receives a FRESH list copy; if either callable mutates it, that is detected
+    and raises (in-place mutation of inputs) -- WITH ONE QUALIFIER, stated here
+    because this is the only sentence about that guard a caller reads. What is
+    compared is VALUE, not identity: a callable that writes back a plain `int`,
+    a `float` subclass or a `numpy` `float64` storing the number that was
+    already in the slot is NOT reported as a mutation and still gets a PASS
+    report. Anything else in the slot is a write, whatever it says about its
+    own equality (`_same`). `point` itself is never modified.""")
     D7 = inspect.cleandoc("""TAKEN AT ITS WORD IS ABOUT LYING, NOT ABOUT RAISING: a
 conversion protocol that RAISES produces no value to take at anyone's word, so
 it is a failed READ of a data argument and is converted to this module's family
@@ -3081,6 +3394,39 @@ it is a failed READ of a data argument and is converted to this module's family
             with self.subTest(raises=exc.__name__):
                 with self.assertRaises(st.NonNumericError):
                     st.check_finite_scalar(_float_raises(exc)())
+
+    def test_d9_the_mutation_sentence_is_qualified_where_a_caller_reads_it(self):
+        """The passage, plus both directions of the narrowing it now discloses.
+
+        FINDING L's last item. The behaviour is right and is consistent with value semantics: the
+        snapshot is a plain `float` this module put in the slot, and a plain `int` or a `float`
+        subclass storing the same number normalises to the same plain number, so the comparison is
+        between two plain numbers and nothing has been written. But the PUBLIC sentence promised
+        that any mutation "is detected and raises" with no qualifier, while `_same`'s private
+        docstring declared the exception under THE ONE BEHAVIOUR CHANGE -- so the one sentence a
+        caller reads about the guard was wider than the guard, and it was the only load-bearing
+        sentence about it that was not pinned at all.
+
+        `numpy` is named in the passage and asserted in `test_h2` rather than here, so that this
+        pin needs no numpy guard and holds in a bare environment.
+        """
+        doc = _doc(st.check_gradient)
+        if doc is not None:
+            self.assertIn(self.D9, doc)
+        for label, obj in (("the same plain float", 1.0),
+                           ("a plain int of the same value", 1),
+                           ("a float subclass storing the same value",
+                            type("D9SubFloat", (float,), {})(1.0))):
+            f, g = _writer("grad_fn", obj)
+            with self.subTest(value_equal_write_back=label):
+                self.assertEqual(st.check_gradient(f, g, [1.0, 2.0]).analytic, (2.0, 3.0))
+        for label, obj in (("a different plain float", 99.0), ("True for 1.0", True),
+                           ("Fraction(1, 1) for 1.0", Fraction(1, 1))):
+            f, g = _writer("grad_fn", obj)
+            with self.subTest(a_write=label):
+                with self.assertRaisesRegex(st.StabilityError,
+                                            "grad_fn mutated its input in place"):
+                    st.check_gradient(f, g, [1.0, 2.0])
 
     def test_d4_compensated_summation_claim_matches_its_accumulation(self):
         """The fourth passage. It was the one load-bearing figure with no pin at all, and it is a

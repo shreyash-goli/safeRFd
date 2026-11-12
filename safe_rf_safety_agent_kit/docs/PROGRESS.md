@@ -10559,3 +10559,166 @@ of the 25 escapes is asserted, so the joint fix will not fail in this file. `tes
 
 **SR-06 stays `[ ]`** — the fixer is not the attester and this fix has had no independent pass.
 **Verified stays 9 of 17.**
+
+## Round 20 — SR-06's sixth axis: Finding H's defect recurring inside Finding J's fix, same commit
+
+**Date:** 2026-11-12. HEAD at attestation `69022ad`.
+
+### Six attestations, six axes — and this one was a route, not a protocol
+
+**provenance → interpreter portability → the intake family → the conversion protocol → the comparison
+protocol → a ROUTE of a position the accounting could not see.** All five named subjects **passed
+behaviourally**, and the attester put that on the record before the reason: *"Not because the numerics
+moved … I want that on the record before the reason, the way the last attester did."* Finding H
+re-measured independently at **30/30 in family** with fresh fixtures, plus 16 further hostile shapes at
+the same operand all in family.
+
+### FINDING L — the known channel at a position in neither half, and the accounting built to prevent that
+
+`_same` reads `type(a)`, which is safe. But **its first statement is `a = _plain_real(a)`, and
+`_plain_real` opens with `isinstance(v, bool)`** — and `isinstance` consults `__class__`. So a plain
+`property` raising on `__class__` escapes at **both** callable-placed slots, while all sixteen other
+hostile shapes at that same slot are in family. Fully public tier: no `object.__setattr__`, no
+metaclass. **Not a round-19 regression** — reproduced identically against `HEAD~1`.
+
+**Why it was a finding and not a re-report of a declared channel:** `_CLASS_CHANNEL_POSITIONS` rows
+carry a **kind**, but the accounting compared `(function, parameter)` pairs **only** — and
+`check_gradient`'s `fn`/`grad_fn` were already present with kinds *"return value"* and *"return
+element"*. So `params − covered` was empty, **the third route's kind needed no row and got no excuse**,
+and two positions were absent from both halves of the sentence while the test stayed green. That test's
+own docstring states its purpose as *"how `input_grad` came to be missing from BOTH halves of the
+sentence while this test stayed green."*
+
+**Round 19's commit message wrote the lesson — *"a reason that covers two routes of three reads like a
+reason that covers the position"* — and it did not generalise one table over, in the same commit.** The
+sharpest form of this project's recurring defect yet: not an unpinned sentence, not even a pinned
+sentence drawn from a bad sample, but **a mechanism built in direct response to the defect, at a
+granularity one level too coarse to see it.**
+
+### The brief said 40/13/27. The derived answer is 41/14/27, and the extra route was in the wrong half
+
+The fixer drove every position independently and found a **third** route the table never held:
+`("check_gradient","grad_fn")`'s **returned sequence object**, as distinct from its elements.
+`_as_flat_items` materialises it, so a hostile sequence gives `ShapeError` — **in family**. The old
+sentence's escape list said *"the RETURN values of `fn` and `grad_fn`"*, correct for `fn`'s scalar and
+**wrong here**: a route of a known position sitting in the **wrong half**, asserted by nothing because
+only the in-family rows carry a behaviour assertion.
+
+`_CALLABLE_PLACED` has named *"(2) the returned sequence"* since Finding H, so a kind-keyed accounting
+demanded that row — *"leaving it out would have re-created the exact defect at the granularity I was
+asked to close."* **The orchestrator's figure was a subset of the truth, and the fix found the
+remainder by being asked to re-derive rather than to apply.**
+
+The accounting is now six checks deep, the load-bearing one being a **two-sided equality between the
+driven table and a set derived from `_CASES` via signatures**, so the side-effect route of any
+callable-placed position cannot be absent. Relabelling the two rows' kind while keeping 41 rows and the
+14/27 split is **killed**. Every kind driven must carry a written definition, and no route may be driven
+twice.
+
+**The escaping behaviour was not pinned, confirmed by inspection:** the behaviour loop still reads
+`if verdict != _IN_FAMILY: continue`, the escaping rows' `call` lambdas are never invoked, and no
+assertion anywhere expects a `RuntimeError` out of any public function. The 27 escapes — the two new
+rows included — are asserted about **nothing** behaviourally, so the three-file joint fix will not fail
+here.
+
+**And the pin and the private docstring now agree.** `_same`'s *"It is not asked."* was measurably
+false — it **is** asked, via `isinstance` inside `_plain_real`, **three `__class__` reads per `_same`
+call** (measured). Now *"IT IS NOT ASKED WHETHER IT IS EQUAL"*, which is what D1's pinned sentence
+always said. The new `test_h4` pins it against `inspect.getsource` (so it holds under `-OO`) and uses
+the **observation** technique rather than an escape: a `__class__` property that **counts instead of
+raising** shows the read happens, with `_same(obj, 1.0) is False` and the mutation correctly reported.
+
+### FINDING M — fixed by deletion, not by three pins
+
+The 30-cell measurement stood in **three** places and `test_h1`'s `assertIn` was satisfied by **any
+one**, so two copies drifted freely — and inside the *same sentence* of `_same`'s docstring the 12/3
+half was pinned and the 30 was not. Four doc-only mutants were **unkilled by all three suites on both
+interpreters**, with two sibling controls dying.
+
+It now has **one home**, inside D1, which `test_d1` pins char-for-char; the other two sites carry
+cross-references, and `test_h1` asserts `count(figure) == 1` **and** that the one home is the pinned
+passage **and** that both cross-references are present. Re-adding a second copy fails with *"this
+figure has exactly ONE home"*. **The four unkilled mutants no longer exist as possible edits — the
+drift surface was removed rather than guarded.** That is the better shape: a figure written in three
+places needs three pins or one home, and one home is cheaper and cannot rot asymmetrically.
+
+### FINDING N — Finding I one axis over: scope was widened, spelling was not
+
+`test_g2d` matched only `ast.Call` whose `func` is an `ast.Name`, with side two filtering on
+`hasattr(builtins, n)`. So `builtins.len(rows)` and `from builtins import len as _len` were both
+**unkilled by all three suites on both interpreters**, while the comment claimed *"every BUILTIN this
+module calls"* and the docstring *"anywhere in the module."* Blind spots at HEAD: **10 attribute calls**
+considered by neither side and **37** bare names invisible to both (the brief said 36; derived, it is
+37, with exactly `["dataclass", "exc", "func"]` invisible to both sides at once).
+
+Widened rather than narrowed: every call target is canonicalised through an alias map built from the
+module's own `ast.Import`/`ast.ImportFrom`, `builtins.X` collapses to the bare builtin, other attribute
+calls keep their dotted spelling, and **anything unnameable fails closed** (`unnameable == []`) instead
+of vanishing from both sides. `_NOT_A_COERCION` grew 14 → 27 rows, each with its provenance decision in
+writing; the module's own 34 functions get **no** rows, deliberately, because the walker visits their
+bodies. All three mutants now killed, plus a new dotted one (`math.copysign`).
+
+### FINDING O — eighth figures-in-prose instance, introduced inside the correction for the seventh
+
+Round 19's replacement history read *"fifty-seven to seventy-two, stayed, rose to eighty-four, then to
+its present size"* and **omitted 100 — the size at the commit it was written against. It was wrong when
+written, not stale.** And the pin added in the same breath, *"no digit may appear in that docstring"*,
+is **one-directional**: a word-spelled figure was measured **unkilled**. It forbade digits, not figures,
+in the docstring whose entire thesis is that such figures rot.
+
+Fixed by **removal**, with the reasoning recorded: a history of the count has no business there at all
+— `git log` holds the sizes and `scripts/test_baseline.txt` holds the current one. The pin now sweeps
+whole-word number words as well as digits; round 19's exact chain, restored as a mutant, fails on
+`['eighty','fifty','four','seven','seventy','two']`. **The derived history is written nowhere in either
+file**, which is the only way that sentence can stop rotting.
+
+### `check_gradient`'s unqualified public sentence — qualified and promoted to D9
+
+*"If either callable mutates it, that is detected and raises"* had **no qualifier**, while a value-equal
+write-back of a plain `int`, a `float` subclass or `np.float64` returns a PASS. It was declared in
+`_same`'s **private** docstring and consistent under value semantics — but it was **the only
+load-bearing sentence about the mutation guard that a caller reads, and it was neither qualified nor
+pinned.** Now the ninth `D` passage, pinned both directions: value-equal write-backs of `1.0`, `1` and
+a `float` subclass all pass; `99.0`, `True` and `Fraction(1,1)` all raise. numpy is named in the passage
+but asserted in `test_h2`, so the pin needs no numpy guard and holds bare.
+
+### Measurements
+
+| run | interpreter / environment | result |
+|---|---|---|
+| `test_stability` | 3.12.4 (user-site numpy 2.4.6, torch 2.7.1) | **106 OK** (was 104) |
+| `test_stability` | 3.13.5 miniconda (numpy 2.4.4, no torch) | **106 OK** |
+| `test_stability` | both, **`-OO`** | **106 OK** |
+| `test_stability` | both, numpy absent | **106 OK, skipped=1** |
+| `test_stability` | both, **`-OO` + numpy absent** | **106 OK, skipped=1** |
+| `test_robustness` / `test_checkpoint` | both | 197 OK / 48 OK |
+| **full suite** | **3.12.4** | **1466 ran, 2 skipped, 0 failed**, rc=0 |
+| **full suite** | **3.13.5**, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` | **1466 ran, 84 skipped, 0 failed**, rc=0 |
+
+1464 + 2 = 1466. Pre-fix verification: the new test file over the pristine module is **`Ran 106,
+FAILED (failures=5)` across 4 tests, identical on both interpreters**, with Finding M's failure
+measuring the three copies directly (`3 != 1`). **20 mutants × 2 interpreters = 40 targeted runs, all
+killed.** `ruff check --select E9,F63,F7,F82` clean on both files. Vacuity still zero after +480/−87
+lines. The driven figures re-measured against the edited module are byte-identical to the HEAD drive in
+all four environments, **which also confirms the module edits are documentation-only.**
+
+### A figure of mine, wrong for the third time in three rounds
+
+**"241/241" exists only in round 19's commit message and is not reproducible.** Measured: **257 `Call` +
+111 `FormattedValue` = 368** at HEAD, 366 at `HEAD~1`. No spelling gives 241, and `"241"` appears in
+neither file. **I inherited it into a brief as an asserted figure.** The mechanism it describes is
+correct and *stronger* than a literal — a relative equality cannot go stale — so this is a note, but it
+is the **third** figure in three rounds that I relayed without deriving (after round 16's diffstat and
+the 867-vs-997 line count), and the second that existed only in a commit message. **The rule this
+project wrote for its own files applies to its briefs: if a figure lives only in a commit message, no
+test can read it — and neither should an orchestrator quote it.** The fixer quotes 241 nowhere.
+
+### Cross-owner
+
+The `__class__` escape set has **one more route** than previously recorded — `_same`'s left operand via
+`_plain_real`'s `isinstance(v, bool)` when a caller's `fn`/`grad_fn` writes the slot — measured out of
+family at both positions on both interpreters, numpy present and absent, and **identically against
+`HEAD~1`**. Declared and unpinned on purpose. `test_benchmark` red under `-OO` and the escape at
+`benchmark.py:2094` remain **SR-10's**, unmeasured here and unclaimed.
+
+**SR-06 stays `[ ]`** — the fixer is not the attester. **Verified stays 9 of 17.**

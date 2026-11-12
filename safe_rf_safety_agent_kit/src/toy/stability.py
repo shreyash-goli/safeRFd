@@ -254,29 +254,49 @@ def _finite_at(v, where: str) -> float:
 #     every scope), not the intake points, so it is not closed here and must not be assumed
 #     closed. MEASURED SCOPE at this commit, because this sentence is what the next owner reads
 #     about an open finding, and it is written from a POSITION-BY-POSITION sweep rather than from
-#     a shape: with a `@property __class__` that raises RuntimeError, 38 driven positions over the
-#     nine public functions give 13 IN FAMILY and 25 escaping as a bare RuntimeError, identically
-#     on 3.12.4 and 3.13.5.
-#     IN FAMILY (13), and only these: every OUTER SEQUENCE position -- `values` (of
+#     a shape: with a `@property __class__` that raises RuntimeError, 41 driven positions over the
+#     nine public functions give 14 IN FAMILY and 27 escaping as a bare RuntimeError, identically
+#     on 3.12.4 and 3.13.5 and with numpy present and absent.
+#     A POSITION HERE IS A ROUTE, not a parameter, and that distinction is this round's correction.
+#     The sweep used to read 38 positions, 13 and 25, and the three it was missing were all ROUTES
+#     OF PARAMETERS IT ALREADY NAMED -- `fn` and `grad_fn`, listed for their return values alone.
+#     An accounting that keys on the PARAMETER cannot see such a route: it needs no row and gets no
+#     excuse. So the test that pins this sentence keys on (function, parameter, ROUTE).
+#     IN FAMILY (14), and only these: every OUTER SEQUENCE position -- `values` (of
 #     `check_finite_sequence` and of `masked_mean_checked`), `m`, `mask` (of all three functions
 #     that take one), `prediction`, `target`, `point`, `param_grad`, `before`, `after` -- because
 #     `_materialised` keeps `isinstance(obj, _NOT_A_SEQUENCE)` inside its `try`; plus
-#     `check_finite_matrix`'s ROW position, because that row goes through `_materialised` too.
-#     ESCAPING (25), which the previous wording of this sentence understated three ways: every
+#     `check_finite_matrix`'s ROW position, because that row goes through `_materialised` too; plus
+#     the SEQUENCE OBJECT `grad_fn` RETURNS, which `_as_flat_items` materialises exactly like a
+#     sequence argument and which therefore comes out as ShapeError.
+#     ESCAPING (27), which the wording before this sentence understated three ways: every
 #     ELEMENT position; every SCALAR position, which is `value`, `expected_len`, `denominator`,
-#     `step`, `rtol`, `atol`, `zero_tol` and `min_abs_change` and NOT just the two this sentence
+#     `step`, `rtol`, `atol`, `zero_tol` and `min_abs_change` and NOT just the two that sentence
 #     used to name; `input_grad` at BOTH its positions, an OUTER argument of a public function
-#     that escapes while the old sentence said outer positions come out in family (its other four
+#     that escapes while the older sentence said outer positions come out in family (its other four
 #     hostile shapes -- `__iter__`, `__getattr__`, `__float__`, `__repr__` raising -- are all
 #     refused as MissingGradientError, so the `__class__` channel is the only one that escapes
 #     there); `masked_mean_checked`'s ROW position, which is NOT in family although
 #     `check_finite_matrix`'s is, because `_is_nested`'s probe absorbs the hostile `__class__`,
-#     answers "not a row" and so hands the object to the ELEMENT check; and the RETURN values of
-#     `fn` and `grad_fn`. So it is NOT absorbed "at the nestedness probe" alone, it is NOT closed,
+#     answers "not a row" and so hands the object to the ELEMENT check; `fn`'s RETURN VALUE, and
+#     the ELEMENTS of the sequence `grad_fn` returns but NOT that sequence itself -- which is what
+#     the previous wording ("the RETURN values of `fn` and `grad_fn`") got wrong, in the one
+#     direction a test asserting only the in-family rows could not catch; and the SLOT A CALLABLE
+#     WROTE, which is `_same`'s left operand, where `fn` or `grad_fn` has replaced a coordinate of
+#     the list this module handed it with an object whose `__class__` raises. That last route
+#     arrives through `_plain_real`'s own first statement, `isinstance(v, bool)`, and it was in
+#     NEITHER half of this sentence while both its parameters stood in the escaping half for their
+#     return values -- a reason that covers two routes of three reading like a reason that covers
+#     the position, which is the defect of the round before this one recurring one table over. The
+#     sixteen other hostile shapes at that same slot (`__getattr__`, `__float__`, `__repr__`,
+#     `__iter__`, `__eq__`, `__bool__`, `__len__`, `__index__` raising, at both callable positions)
+#     are all refused in family, so there too the `__class__` channel is the only escape.
+#     So it is NOT absorbed "at the nestedness probe" alone, it is NOT closed,
 #     and the fix is the three owners' joint decision rather than this module's -- which is why
-#     the test that pins this sentence asserts the 13 in family, accounts for all 38 positions so
-#     a new one cannot be missing from BOTH halves, and asserts NOTHING about the 25, because a
-#     test that pinned the escape would pin a defect and fail on the eventual fix.
+#     the test that pins this sentence asserts the 14 in family, accounts for all 41 positions AT
+#     ROUTE GRANULARITY so a new one cannot be missing from BOTH halves, and asserts NOTHING about
+#     the 27, because a test that pinned the escape would pin a defect and fail on the eventual
+#     fix.
 _NOT_A_SEQUENCE = (str, bytes, Mapping, set, frozenset)
 
 # Exceptions from a caller's object that are NOT converted into this module's family: they report
@@ -298,8 +318,15 @@ _UNCONVERTED = (MemoryError, RecursionError, SystemError)
 # `tests/toy_tests/test_stability.py::test_g2d_...` re-derives the set from the AST and fails
 # closed when a new site appears -- over EVERY SCOPE (module body, class bodies and lambda bodies
 # included: it used to walk `ast.FunctionDef` only, so a coercion in any of those three was
-# invisible to it and to this table alike) and against a decided list of every builtin this module
-# calls, so a protocol missing from BOTH this table and the walker fails too. EIGHT protocols;
+# invisible to it and to this table alike) and against a decided list of every CALLABLE THIS MODULE
+# CALLS BY NAME, so a protocol missing from BOTH this table and the walker fails too. BY NAME means
+# bare (`len(x)`), DOTTED (`math.isfinite(f)`, `float.__float__(v)`, `rows.append(r)`) or through an
+# IMPORT ALIAS (`from builtins import len as _len`, `import builtins` then `builtins.len(x)`), all
+# canonicalised to one spelling: that reach is this round's correction, and it is the SCOPE
+# correction's defect one axis over -- the scope was widened and the SPELLING was not, so an aliased
+# or dotted coercion was invisible to the walker and to this table at once. Measured while the
+# matcher was bare-name-only: `builtins.len(rows)` and `_len(rows)` were each unkilled by all three
+# permitted suites on both interpreters, while the identical bare `len(rows)` was killed. EIGHT protocols;
 # FIVE have reachable sites, FOUR of them converted here and ONE declared:
 #
 #   float()            -- 4 calls in 3 statements: check_finite_scalar,
@@ -362,12 +389,14 @@ _UNCONVERTED = (MemoryError, RecursionError, SystemError)
 # THAT MEASUREMENT USED, which was also the only base the test fixture asserting it used.
 # `_plain_real` normalises `bool`/`int`/`float` and returns everything else UNCHANGED, so for a
 # plain object, a `numbers.Real` subclass or a `Fraction` subclass the bare `==` was still the
-# caller's. Measured over 5 operand bases x 3 comparison shapes x 2 callable positions = 30 cells,
-# byte-identically on 3.12.4 and 3.13.5: 12 bare RuntimeErrors out of `check_gradient` (a raising
-# `__eq__` or `__ne__` on any of those three bases, at the `fn` AND the `grad_fn` position), 3 PASS
-# REPORTS with the in-place mutation UNDETECTED (a lying `__eq__ -> True` on those three bases via
-# `grad_fn`), and 15 in family -- the 15 being the `float` and `int` subclass bases, the only
-# shapes the suite reached. `_same` now decides on the NORMALISED value or not at all; see there.
+# caller's. THE MEASUREMENT THAT ESTABLISHED THAT HAS ONE HOME, the module docstring at the top of
+# this file, and is deliberately not restated here. It used to be written out in three places -- the
+# module docstring, this comment and `_same`'s docstring -- of which only the first was pinned, so
+# the other two were free to drift: measured, a `30` edited to `29` in either of them, and this
+# comment's `12` and `15` edited by one, were each unkilled by all three permitted suites on both
+# interpreters, while the identical edit inside the module docstring died. A figure in three places
+# needs three pins or one home. `_same` now decides on the NORMALISED value or not at all; see
+# there, and see the module docstring for the cell counts.
 #
 # WHY CONVERTED RATHER THAN EXEMPTED: see the module docstring. Taken at its word is about LYING.
 # Measured before this fix, identically on 3.12.4 and 3.13.5: a caller-defined `numbers.Real`
@@ -743,7 +772,13 @@ def check_gradient(fn: Callable[[list], float], grad_fn: Callable[[list], Sequen
 
     fn(point) -> scalar; grad_fn(point) -> sequence of len(point). Each call
     receives a FRESH list copy; if either callable mutates it, that is detected
-    and raises (in-place mutation of inputs). `point` itself is never modified.
+    and raises (in-place mutation of inputs) -- WITH ONE QUALIFIER, stated here
+    because this is the only sentence about that guard a caller reads. What is
+    compared is VALUE, not identity: a callable that writes back a plain `int`,
+    a `float` subclass or a `numpy` `float64` storing the number that was
+    already in the slot is NOT reported as a mutation and still gets a PASS
+    report. Anything else in the slot is a write, whatever it says about its
+    own equality (`_same`). `point` itself is never modified.
 
     Per coordinate i, numeric_i = (fn(p + h e_i) - fn(p - h e_i)) / (2h) with
     h = `step` (absolute). Pass iff |analytic_i - numeric_i| <=
@@ -883,18 +918,30 @@ def _same(a, b) -> bool:
     is compared is the `int`/`float` it STORES. But `_plain_real` normalises only `bool`/`int`/`float`
     and its own docstring says so: a plain object, a `numbers.Real` subclass and a `Fraction` subclass
     come back UNCHANGED (measured: `_plain_real(o) is o`), and for those three the bare `==` was still
-    theirs. Measured over 5 operand bases x 3 comparison shapes x 2 callable positions = 30 cells,
-    identically on both interpreters: 12 bare RuntimeErrors escaped `check_gradient` and 3 were PASS
-    reports with the mutation undetected; only the `float` and `int` bases -- the fixture's own shapes
-    -- were in family.
+    theirs. The cell-by-cell measurement of what that cost is in the MODULE DOCSTRING, which is its
+    one home; it is not restated here, because it was restated in three places and only one of those
+    copies was pinned, which left the other two free to drift.
 
     So the second rule: anything normalisation cannot reduce to exactly `int` or `float` is REPORTED AS
-    A WRITE. It is not asked. That is correct as well as closed -- `b` is a plain `float`, so a slot
-    now holding a `Fraction`, a `numpy` scalar, a `bool` or an arbitrary object HAS been written to,
-    whatever that object says about equality -- and it is what makes the module docstring's "no guard
-    here is decided by the caller's object" true at this operand. `type(...) is` and not `isinstance`,
-    deliberately: `bool` is an `int` subclass that `_plain_real` deliberately does not collapse, and
-    `isinstance` would let `True` pass for the `1.0` it replaced (measured before this: it did).
+    A WRITE. IT IS NOT ASKED WHETHER IT IS EQUAL. That is correct as well as closed -- `b` is a plain
+    `float`, so a slot now holding a `Fraction`, a `numpy` scalar, a `bool` or an arbitrary object HAS
+    been written to, whatever that object says about equality -- and it is what makes the module
+    docstring's "no guard here is decided by the caller's object" true at this operand. `type(...) is`
+    and not `isinstance`, deliberately: `bool` is an `int` subclass that `_plain_real` deliberately
+    does not collapse, and `isinstance` would let `True` pass for the `1.0` it replaced (measured
+    before this: it did).
+
+    THE QUALIFIER THAT RULE NEEDS, corrected here rather than left to be re-measured: this docstring
+    used to say "It is not asked", flat, and that was wider than the mechanism. The object is not
+    asked whether it is EQUAL -- which is the claim that matters, and is the claim the module
+    docstring makes -- but ONE question is still put to it, and it is the `__class__` channel this
+    module declares OPEN. `_plain_real`'s own first statement is `isinstance(v, bool)`, and
+    `isinstance` consults `__class__`: measured, three `__class__` reads per `_same` call, and a slot
+    holding an object whose `__class__` RAISES takes that exception out of `check_gradient`
+    unconverted, byte-identically on 3.12.4 and 3.13.5 with numpy present and absent. That is the
+    route this round added to the MEASURED SCOPE sentence above, where it is one of the 27 escapes;
+    it is NOT closed here, because closing it is the three owners' joint fix, and every other hostile
+    shape at this operand -- sixteen of them, at both callable positions -- is refused in family.
 
     THE ONE BEHAVIOUR CHANGE, stated because it is a real narrowing: a callable that replaces a
     coordinate with a value-EQUAL object of another type -- `True`, `Fraction(1, 1)`, a `numpy`
