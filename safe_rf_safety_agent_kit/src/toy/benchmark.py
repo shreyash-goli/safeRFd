@@ -159,6 +159,119 @@ Matrix = tuple
 Predictor = Callable[[Sequence[Sequence[float]]], Matrix]
 
 
+# ============================================ diagnostic construction (SR-10, item 1)
+# THE CHANNEL THIS SECTION CLOSES, and why it is a section and not a line. A MESSAGE is built by running
+# a PROTOCOL on an object the caller supplied -- `repr` for `{x!r}`, `format`/`str` for a bare `{x}`,
+# `type(x).__name__` for a type name -- and every one of those runs code the caller wrote, INSIDE the
+# path that was handling a refusal correctly. So a value that cannot describe itself does not merely lose
+# its description: it destroys the refusal that was naming it, and the exception the caller branches on
+# changes from the declared one to whatever the describing protocol raised.
+# MEASURED AT a04efa4, BEFORE THIS SECTION EXISTED: SEVENTEEN DISTINCT OCCURRENCES escaped, the same
+# seventeen lines on 3.12.4 and on 3.13.5, every one reached through a PUBLIC entry point and none
+# needing `object.__setattr__`. The DECLARATION NAMED ONE OF THE SEVENTEEN.
+#   * `score_seed`'s fail-closed record -- `SeedScores.failed(seed, f"numerical failure: {e}", ...)`, the
+#     one DECLARED in `test_robustness._CROSS_OWNER_ESCAPES` (benchmark.py:2094 at that HEAD) -- turned a
+#     counted failed seed into a propagating `RuntimeError` out of `robustness.benchmark_outcome`,
+#     `score_seed` and `run_study` alike, for a `factory` raising a `ValueError` SUBCLASS (inside the
+#     declared family) whose own description refuses.
+#   * AND SIXTEEN MORE OCCURRENCES THE DECLARATION DID NOT NAME, which is the point of the section:
+#     benchmark.py:813, 840, 878, 1043, 1305, 1309, 1427, 1585, 1635, 1807, 1956, 1994, 2084, 2136,
+#     2138 and 2192 at a04efa4 -- `score_seed`'s OTHER handler (fixture build), `score_predictor`'s
+#     `prediction failed`, `_arm_fit`'s unknown arm, `GateResult.__post_init__`'s unknown-gate and
+#     non-bool-`passed` refusals, `HypothesisResult.__post_init__`'s and `evaluate_primary`'s
+#     non-primary id, `evaluate_gates`'s not-a-SeedScores refusal, `SeedScores.__post_init__`'s
+#     non-int seed, `_as_list`'s non-sequence refusal (reached by the public `sample_sd`),
+#     `_check_margin`'s non-finite refusal (reached by the public `Margins`), `_metric_required` /
+#     `_metric_strict` on a stored metric, and -- the two that the FIRST TWO PASSES OF THIS FIX EACH
+#     LEFT BEHIND -- `intervals_disagree`'s margin/bound refusal and its `{width_tol:.0%}` FORMAT
+#     SPEC, and `summarize`'s `{tail_ratio_max}`, all three on PUBLIC parameters. A fix at the
+#     declared line alone would have left sixteen, which is this project's most repeated defect --
+#     and the fix for it left one, twice, until the DERIVED set was read instead of the patch list.
+# WHICH PROTOCOLS: `{x}`, `{x!s}`, `{x!r}` and `{x!a}` are FOUR DIFFERENT protocol calls, and so are
+# `str(x)`, `repr(x)`, `ascii(x)`, `"%s" % x`, `"{}".format(x)` and a format SPEC (`f"{x:>10}"` runs
+# `__format__` even though its conversion field is empty). A sweep for `!r` alone misses the rest.
+# MEASURED, and the reason `how=str` is the spelling for a bare `{x}`: a bare `{e}` escaped on a hostile
+# `__str__` AND, independently, on a hostile `__format__` with an honest `__str__` -- because `f"{e}"`
+# calls `format(e, "")`, and `object.__format__` only delegates to `str` when the subclass has not
+# overridden `__format__`. `_shown(e, how=str)` calls `str` INSIDE the try and hands the outer f-string a
+# plain `str`, so neither route survives. A hostile `__repr__` alone never reached a bare `{e}` site.
+# POLICY: `_shown` and `_type_name` DEGRADE to a placeholder rather than lose the refusal, because the
+# exception TYPE is what a caller branches on and the description is not. This is the same helper, with
+# the same policy and the same `_UNCONVERTED` tuple, as `toy.stability._shown` and `toy.robustness._shown`;
+# it is written here rather than imported because those modules belong to other owners and this one must
+# not depend on their internals.
+# EVERY REMAINING SITE IN THIS FILE IS DECIDED IN WRITING, by provenance of its operand, in
+# `test_benchmark._DIAGNOSTIC_SITES`, which RE-DERIVES the set from this file's AST -- module body, class
+# bodies, functions AND lambdas, over seven protocol spellings -- and fails closed on a site it does not
+# decide. The figures it asserts: 123 sites in 153 occurrences, of which 39 are ROUTED through the two
+# helpers below, 47 are this module's own data, 18 are plain by an admission that already ran, 9 are
+# the declared-open record-label channel, 4 are gated, 4 are the helpers, 1 is load-bearing and 1 is a
+# write. AFTER the fix the same harness measures ZERO open diagnostic occurrences on both
+# interpreters, and the five record-label ones unchanged.
+# AND WHAT THIS DOES NOT CLOSE, stated with its measurement rather than left for the next round to find:
+# the RECORD-LABEL channel. `to_experiment_records`, `seed_records` and `planned_slot_records` build an
+# `ExperimentRecord.name`, a `RunProvenance.run_id` and a `notes` string out of caller-supplied
+# identifiers (`study_id`, `res.subject`, `arm`, a seed), and a `str` subclass whose `__format__` raises
+# takes all three of those PUBLIC functions out with a `RuntimeError` -- MEASURED on 3.12.4 and 3.13.5 at
+# benchmark.py:2504, 2506, 2831, 2853 and 2854. It is NOT routed through `_shown`, and that is a decision
+# rather than an oversight: a record's NAME is an identifier a recompute looks records up by, not a
+# description, so degrading it to `<undescribable str: ...>` would file a real study under a placeholder
+# name and `verdict_from_records` would then report `records missing for [...]` -- the same reason
+# `robustness._name_attr` REFUSES instead of degrading where the subject is a card's label. Closing it
+# means an admission on the label fields (collapse a `str` subclass, refuse a non-`str`), which changes
+# what these three public functions ACCEPT, and that is a different task from this one. Declared OPEN,
+# with its measurement, and pinned by `test_benchmark.TheRecordLabelChannelIsStatedAndLeftOpen`, which
+# FAILS when it closes so that this paragraph cannot quietly become false.
+_UNCONVERTED = (MemoryError, RecursionError, SystemError)   # spelled as in `toy.stability`, same policy
+
+
+def _shown(v: Any, how=repr, spec: Optional[str] = None) -> str:
+    """`repr(v)` -- or `str(v)` with `how=str`, or `format(v, spec)` with a `spec` -- for a MESSAGE,
+    degraded when the caller's own protocol raises instead of describing the object.
+
+    A message is DIAGNOSTIC. Losing a refusal because the object being refused cannot describe itself is
+    strictly worse than losing the description, and the exception TYPE -- what every caller of this module
+    branches on -- is unaffected either way. `how=str` is the spelling for a bare `{x}` interpolation,
+    including the `{e}` of a caught exception, and it is what closes the `__format__` route as well as the
+    `__str__` one: the outer f-string then formats a plain `str`. `BaseException`-only exits and
+    `_UNCONVERTED` still propagate.
+    `spec` IS THE FOURTH PROTOCOL AND IT IS WHY THIS PARAMETER EXISTS. An f-string FORMAT SPEC runs
+    `__format__` on the caller's object even when the conversion field is empty, so `f"{x:.0%}"` is a
+    protocol call that a sweep over `!r` / `!s` / `!a` / bare `{x}` does not see. MEASURED: the first
+    pass of this round's fix routed thirty-six sites and LEFT `intervals_disagree`'s
+    `f"widths differ by more than {width_tol:.0%}"` open (benchmark.py:1309 at a04efa4, 1406 after the
+    first pass), reached through the PUBLIC `intervals_disagree` with a `float` subclass whose
+    `__format__` raises -- which is this project's "a fix at one site leaves a sibling" defect
+    happening inside the fix for it. The spec is passed through so the message text is unchanged.
+    IT IS TEXT-PRESERVING FOR AN HONEST VALUE: `_shown(x)` is `repr(x)`, `_shown(x, how=str)` is
+    `str(x)` and `_shown(x, spec=s)` is `format(x, s)` whenever the protocol answers, so no message
+    this module already produced changed wording. Asserted, not assumed, by
+    `test_benchmark.ADiagnosticIsBuiltInOnePlace`."""
+    try:
+        return format(v, spec) if spec is not None else how(v)
+    except _UNCONVERTED:
+        raise
+    except Exception as e:      # noqa: BLE001 -- the point of the helper
+        return f"<undescribable {_type_name(v)}: {_type_name(e)} raised while describing it>"
+
+
+def _type_name(v: Any) -> str:
+    """`type(v).__name__` for a message, degraded the same way `_shown` is.
+
+    `type(v)` is safe -- it ignores a `__class__` property, which is why the raising-`__class__` channel is
+    a SEPARATE and still-open finding kit-wide rather than this one -- but `__name__` on the resulting
+    class is an attribute lookup, and a METACLASS can answer it with an exception. MEASURED at a04efa4 on
+    both interpreters: with a metaclass whose `__name__` is a raising property, the public `sample_sd`,
+    `SeedScores.from_values` and `evaluate_gates` all propagated `RuntimeError` out of a refusal they were
+    making correctly."""
+    try:
+        return type(v).__name__
+    except _UNCONVERTED:
+        raise
+    except Exception:           # noqa: BLE001 -- the point of the helper
+        return "<unnamed type>"
+
+
 # ====================================================== THE checked metric reader
 # WHY THIS SECTION EXISTS AT ALL, and the rule it enforces, because three successive rounds of this audit
 # failed to the SAME defect and each fix closed only the consumer it was looking at:
@@ -810,7 +923,7 @@ def _metric_required(x: Any, what: str) -> float:
     """A stored metric a verdict depends on. No fail-open: unreadable => ValueError naming the metric."""
     v = _metric_read(x)
     if v is None:
-        raise ValueError(f"{what}: stored metric is not a usable finite number ({x!r}); refusing to recompute")
+        raise ValueError(f"{what}: stored metric is not a usable finite number ({_shown(x)}); refusing to recompute")
     return v
 
 
@@ -823,7 +936,7 @@ def _metric_count(x: Any, what: str) -> int:
     `TypeError` -- both outside this module's stated error contract."""
     v = _metric_required(x, what)
     if v != int(v) or v < 0:
-        raise ValueError(f"{what}: stored count {v!r} is not a nonnegative whole number")
+        raise ValueError(f"{what}: stored count {_shown(v)} is not a nonnegative whole number")
     return int(v)
 
 
@@ -837,7 +950,7 @@ def _metric_strict(x: Any, what: str) -> Optional[float]:
         return None
     v = _metric_read(x)
     if v is None and not _metric_declared_unmeasured(x):
-        raise ValueError(f"{what}: stored metric is neither a finite number nor explicitly unmeasured ({x!r})")
+        raise ValueError(f"{what}: stored metric is neither a finite number nor explicitly unmeasured ({_shown(x)})")
     return v
 
 
@@ -875,7 +988,7 @@ def _check_margin(v: Any, what: str) -> float:
     `interval_verdict` promised a `ValueError`; `_plain_number` converts it, as `_check_finite` always did."""
     f = _plain_number(v)
     if f is None:
-        raise ValueError(f"{what} must be a finite number, got {v!r}")
+        raise ValueError(f"{what} must be a finite number, got {_shown(v)}")
     if abs(f) > MARGIN_MAX:
         raise ValueError(f"{what} magnitude {f!r} exceeds MARGIN_MAX={MARGIN_MAX!r}: a threshold that large "
                          f"decides the component without reference to the data (it is not a margin)")
@@ -1040,7 +1153,7 @@ def _as_list(v, what: str) -> list:
     """Accept only real sequences of numbers (list/tuple/range...). None, dicts, sets, strings, scalars and
     generators are refused with ValueError (never a raw TypeError/KeyError from deeper in the arithmetic)."""
     if isinstance(v, (str, bytes)) or not isinstance(v, collections.abc.Sequence):
-        raise ValueError(f"{what} needs a sequence of numbers, got {type(v).__name__}")
+        raise ValueError(f"{what} needs a sequence of numbers, got {_type_name(v)}")
     return list(v)
 
 
@@ -1302,11 +1415,13 @@ def intervals_disagree(boot: tuple[float, float], tint: tuple[float, float], mar
     both widths zero => no width disagreement."""
     for nm, b, t in (("lower", boot[0], tint[0]), ("upper", boot[1], tint[1])):
         if _sign(b, margin) != _sign(t, margin):
-            return True, f"{nm} bound on different sides of margin {margin!r} (bootstrap {b!r}, t {t!r})"
+            return True, (f"{nm} bound on different sides of margin {_shown(margin)} "
+                          f"(bootstrap {_shown(b)}, t {_shown(t)})")
     wb, wt = boot[1] - boot[0], tint[1] - tint[0]
     big = max(wb, wt)
     if big > 0 and abs(wb - wt) / big > width_tol:
-        return True, f"widths differ by more than {width_tol:.0%} (bootstrap {wb!r}, t {wt!r})"
+        return True, (f"widths differ by more than {_shown(width_tol, spec='.0%')} "
+                          f"(bootstrap {_shown(wb)}, t {_shown(wt)})")
     return False, "agree"
 
 
@@ -1424,7 +1539,8 @@ def summarize(name: str, values: Sequence[float], level: float, n_boot: int, bas
     ratio = max(abs(v) for v in vals) / med if med > 0 else None
     mom = _mv(ratio, "median |value| is 0")
     if ratio is not None and ratio > tail_ratio_max:
-        flags.append(f"heavy tail: max|v|/median|v| = {ratio:.3g} > {tail_ratio_max} (flag only)")
+        flags.append(f"heavy tail: max|v|/median|v| = {ratio:.3g} > "
+                         f"{_shown(tail_ratio_max, how=str)} (flag only)")
     if n >= 2:
         bl, bh = bootstrap_ci(vals, level, n_boot, make_rng(derive_seed(base_seed, "bootstrap:" + name)))
         tl, th = t_interval(vals, level)
@@ -1582,7 +1698,7 @@ class HypothesisResult:
         # thing holding it down. See `_plain_word` and `PROBE_LANE_CONSTANT_LOOKUPS`.
         _plain_word_fields(self, "hid")
         if self.hid not in PRIMARY:
-            raise ValueError(f"{self.hid!r} is not a primary hypothesis")
+            raise ValueError(f"{_shown(self.hid)} is not a primary hypothesis")
         if len(self.components) != len(PRIMARY[self.hid]):
             raise ValueError("wrong number of components for " + self.hid)
         if self.hid != "H3" and self.converged_components:
@@ -1592,10 +1708,10 @@ class HypothesisResult:
         if not all(isinstance(c, ComponentResult) for c in self.components + self.converged_components):
             raise ValueError("components must be ComponentResult objects (verdicts are derived, not supplied)")
         vs = [c.verdict for c in self.components]
-        reasons = [f"{c.metric}: {c.reason}" for c in self.components]
+        reasons = [f"{_shown(c.metric, how=str)}: {_shown(c.reason, how=str)}" for c in self.components]
         if self.blocking:
             verdict = Verdict.INCONCLUSIVE
-            reasons = [f"gate failed: {g}" for g in self.blocking] + reasons
+            reasons = [f"gate failed: {_shown(g, how=str)}" for g in self.blocking] + reasons
         elif Verdict.UNSUPPORTED in vs:
             verdict = Verdict.UNSUPPORTED
         elif not all(_enum_member(Verdict, v) is Verdict.SUPPORTED for v in vs):
@@ -1604,7 +1720,8 @@ class HypothesisResult:
             verdict = Verdict.SUPPORTED
         elif self.supported_blockers:
             verdict = Verdict.INCONCLUSIVE
-            reasons += [f"cannot be SUPPORTED, gate failed: {g}" for g in self.supported_blockers]
+            reasons += [f"cannot be SUPPORTED, gate failed: {_shown(g, how=str)}"
+                    for g in self.supported_blockers]
         elif len(self.converged_components) != len(CONVERGED):
             verdict = Verdict.INCONCLUSIVE
             reasons.append("converged-budget requirement (4.1) not evaluated")
@@ -1632,7 +1749,7 @@ def evaluate_primary(hid: str, series: Mapping[str, Sequence[float]], margins: M
     """Evaluate one primary hypothesis at the Bonferroni level (m=4). Refuses anything outside {H1,H2,H3}."""
     hid = _plain_word(hid)      # the probe decides WHICH component table is built; see `_plain_word`
     if hid not in PRIMARY:
-        raise ValueError(f"{hid!r} is not a primary hypothesis; non-primary metrics are exploratory and "
+        raise ValueError(f"{_shown(hid)} is not a primary hypothesis; non-primary metrics are exploratory and "
                          f"cannot produce a verdict (use exploratory_interval)")
     level = bonferroni_level(cfg.alpha, N_PRIMARY)
 
@@ -1657,7 +1774,7 @@ def exploratory_interval(name: str, values: Sequence[float], cfg: BenchmarkConfi
     """Interval at the unadjusted level 1-alpha, labelled EXPLORATORY. Never yields a verdict."""
     name = _plain_word(name)    # see `_plain_word`; the refusal below must read the stored characters
     if name in PRIMARY:
-        raise ValueError(f"{name!r} is a primary hypothesis id; use evaluate_primary")
+        raise ValueError(f"{_shown(name)} is a primary hypothesis id; use evaluate_primary")
     return ExploratoryResult(name, summarize("explore:" + name, values, 1.0 - cfg.alpha, cfg.n_boot, base_seed,
                                              cfg.min_seeds, cfg.tail_ratio_max))
 
@@ -1804,7 +1921,7 @@ def _arm_fit(seed: int, arm: str, cfg: BenchmarkConfig) -> ArmFit:
     that answers 'C0' would be served the C0 entry. See `PROBE_LANE_CONSTANT_LOOKUPS`."""
     arm = _plain_word(arm)
     if arm not in ARM_NAMES:
-        raise ValueError(f"unknown arm {arm!r}; allowed {ARM_NAMES}")
+        raise ValueError(f"unknown arm {_shown(arm)}; allowed {ARM_NAMES}")
     fx = build_fixture(seed, cfg)
     mask, teacher, eta, steps = fx.train_mask, fx.teacher, cfg.eta_star, cfg.steps
     if arm == "C0":
@@ -1945,7 +2062,7 @@ def _all_unmeasured(why: str) -> ArmScores:
 def score_predictor(fx: SeedFixture, pred: Predictor, c0: Predictor, g_min: float = 0.0) -> ArmScores:
     """Protocol section 3 on one seed. Non-finite values or G <= max(g_min, 0) => unmeasured with reason."""
     if not fx.G > max(g_min, 0.0):
-        return _all_unmeasured(f"G_s={fx.G!r} not above eligibility floor")
+        return _all_unmeasured(f"G_s={_shown(fx.G)} not above eligibility floor")
     try:
         oT, oU = fx.teacher.outputs(fx.T), fx.teacher.outputs(fx.U)
         eT_c = _mse(pred(fx.T), oT.conditioned) - _mse(c0(fx.T), oT.conditioned)
@@ -1953,7 +2070,7 @@ def score_predictor(fx: SeedFixture, pred: Predictor, c0: Predictor, g_min: floa
         eU_c = _mse(pred(fx.U), oU.conditioned) - _mse(c0(fx.U), oU.conditioned)
         raw_T, raw_U = _mse(pred(fx.T), oT.conditioned), _mse(pred(fx.U), oU.unconditioned)
     except (ValueError, OverflowError, ArithmeticError) as e:
-        return _all_unmeasured(f"prediction failed: {e}")
+        return _all_unmeasured(f"prediction failed: {_shown(e, how=str)}")
     vals = {"S": eT_c / fx.G, "L": eU_u / fx.G, "S_U": eU_c / fx.G}
     if not all(math.isfinite(v) for v in vals.values()) or not (math.isfinite(raw_T) and math.isfinite(raw_U)):
         return _all_unmeasured("non-finite metric (numerical failure)")
@@ -1991,7 +2108,7 @@ class SeedScores:
         # both gate comparisons run on the plain int, which is also the value `seed_list_digest` hashes
         # and `RunProvenance` records, so the card and its own digest cannot disagree.
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
-            raise ValueError(f"seed must be an int, got {type(self.seed).__name__}")
+            raise ValueError(f"seed must be an int, got {_type_name(self.seed)}")
         object.__setattr__(self, "seed", int.__int__(self.seed))
         # NORMALISE THE KEYS, THEN CHECK THE KEY SET -- the ordering rule of `_plain_number`, one lane out.
         # The exact-key-set test below is `__hash__`/`__eq__` on the caller's key objects, and it closes
@@ -2059,7 +2176,7 @@ def _converged(fx: SeedFixture, treatment: PredictorFactory, cfg: BenchmarkConfi
         arms = ["C0", "C_shuf"] + ([trained_arm] if trained_arm else [])
         ratios = [_arm_fit(fx.seed, arm, cc).grad_ratio for arm in arms]
     except ValueError as e:
-        u = MetricValue.unmeasured(f"converged-budget run failed: {e}")
+        u = MetricValue.unmeasured(f"converged-budget run failed: {_shown(e, how=str)}")
         return u, u, u
     d, bd = _metric_read(a.delta), _metric_read(b.delta)
     ds = (d - bd) if d is not None and bd is not None else None
@@ -2081,7 +2198,7 @@ def score_seed(seed: int, treatment: PredictorFactory, cfg: BenchmarkConfig) -> 
     except IneligibleSeed:
         raise
     except ValueError as e:
-        return SeedScores.failed(seed, f"fixture build failed: {e}")
+        return SeedScores.failed(seed, f"fixture build failed: {_shown(e, how=str)}")
     hashes = fixture_hashes(fx)
     try:
         c0 = ARM_FACTORIES["C0"](fx, cfg)
@@ -2091,7 +2208,8 @@ def score_seed(seed: int, treatment: PredictorFactory, cfg: BenchmarkConfig) -> 
         A, F = _control_adequacy(fx, cfg, c0)
         lr_ = _arm_fit(seed, trained_arm, cfg).loss_ratio if trained_arm else None
     except ValueError as e:   # train() divergence etc.: counted, never hidden
-        return SeedScores.failed(seed, f"numerical failure: {e}", fx.disjoint, fx.mask_ok, hashes)
+        return SeedScores.failed(seed, f"numerical failure: {_shown(e, how=str)}",
+                                 fx.disjoint, fx.mask_ok, hashes)
     _ad, _bd = _metric_read(a.delta), _metric_read(b.delta)
     dms = (MetricValue.measured(_ad - _bd) if _ad is not None and _bd is not None
            else MetricValue.unmeasured("treatment or C_shuf contrast unmeasured"))
@@ -2133,9 +2251,9 @@ class GateResult:
         if self.exempt and self.name != "control_adequacy":
             raise ValueError("only control_adequacy can carry an exemption")
         if self.name not in GATE_SCOPES:
-            raise ValueError(f"unknown gate {self.name!r}")
+            raise ValueError(f"unknown gate {_shown(self.name)}")
         if self.passed is not True and self.passed is not False:   # no truthy strings / ints / None
-            raise ValueError(f"GateResult.passed must be exactly True or False, got {self.passed!r}")
+            raise ValueError(f"GateResult.passed must be exactly True or False, got {_shown(self.passed)}")
         if not isinstance(self.reason, str):
             raise ValueError("GateResult.reason must be a string")
 
@@ -2189,7 +2307,7 @@ def evaluate_gates(scores: Sequence[SeedScores], frozen: FrozenSeedList, registe
     # also what `HypothesisResult.__post_init__` does for a component. See `ELEMENT_LANE_ATTRIBUTE_READS`.
     wrong = [i for i, s in enumerate(scores) if not isinstance(s, SeedScores)]
     if wrong:
-        raise ValueError(f"scores[{wrong[0]}] is a {type(scores[wrong[0]]).__name__}, not a SeedScores: "
+        raise ValueError(f"scores[{wrong[0]}] is a {_type_name(scores[wrong[0]])}, not a SeedScores: "
                          f"per-seed scores must be SeedScores objects, because the seed and the metric "
                          f"keys are normalised at that class and nowhere else")
     gates = []
@@ -2312,7 +2430,7 @@ class JointResult:
             # invariants read a genuine member and neither of them carry the tamper case.
             if _enum_member(Verdict, h.verdict) is None:
                 raise ValueError(f"JointResult slot {hid} holds a verdict that is not a Verdict member: "
-                                 f"{h.verdict!r} (verdicts are derived, never supplied)")
+                                 f"{_shown(h.verdict)} (verdicts are derived, never supplied)")
         if self.subject_kind not in SUBJECT_KINDS:
             raise ValueError(f"subject_kind must be one of {SUBJECT_KINDS}")
         if (self.subject_kind == "fixture") != (isinstance(self.fixture_name, str) and bool(self.fixture_name.strip())):
@@ -2350,7 +2468,7 @@ class JointResult:
                 continue
             n = _plain_word(g.name)
             if not isinstance(n, str) or n not in GATE_SCOPES:
-                raise ValueError(f"the gate list reports a failed gate under the unknown name {g.name!r}")
+                raise ValueError(f"the gate list reports a failed gate under the unknown name {_shown(g.name)}")
             failed[n] = g
         if any(GATE_SCOPES[n] == "all" for n in failed):
             bad = [h.hid for h in (self.h1, self.h2, self.h3)
@@ -2388,8 +2506,10 @@ def analyze_scores(scores: Sequence[SeedScores], *, frozen: FrozenSeedList, regi
     scores = tuple(scores)
     gates = evaluate_gates(scores, frozen, registered_digest, cfg, subject_kind, margins)
     by = {g.name: g for g in gates}
-    glob = [f"{g.name} ({g.reason})" for g in gates if g.scope == "all" and not g.passed]
-    g12 = [f"convergence ({by['convergence'].reason})"] if not by["convergence"].passed else []
+    glob = [f"{_shown(g.name, how=str)} ({_shown(g.reason, how=str)})"
+            for g in gates if g.scope == "all" and not g.passed]
+    g12 = ([f"convergence ({_shown(by['convergence'].reason, how=str)})"]
+           if not by["convergence"].passed else [])
     names = _PRIMARY_SERIES + ("delta_conv", "delta_minus_shuf_conv")
     series = {k: [v for v in (_metric_read(s.metrics[k]) for s in scores if s.ok) if v is not None]
               for k in names}
@@ -2481,7 +2601,8 @@ def to_experiment_records(res: JointResult, *, study_id: str, base_seed: int, ti
     ts = timestamp_utc or _now()
     is_fixture = res.subject_kind == "fixture"
     if scorer_validation is not None and bool(scorer_validation) != is_fixture:
-        raise ValueError(f"scorer_validation={scorer_validation!r} contradicts subject_kind={res.subject_kind!r}")
+        raise ValueError(f"scorer_validation={_shown(scorer_validation)} contradicts "
+                         f"subject_kind={_shown(res.subject_kind)}")
     kind = ("SCORER-VALIDATION FIXTURE (a test of the scorer, not a result about any method)"
             if is_fixture else "toy fixture")
     hashes = {"seed_list": res.seed_list_digest, "config": res.config_hash}
@@ -2533,7 +2654,7 @@ def to_experiment_records(res: JointResult, *, study_id: str, base_seed: int, ti
         if not isinstance(g, GateResult):
             continue      # invisible to the completeness check (documented), and invisible here too
         if g.name in real:
-            raise ValueError(f"gates contain two GateResult objects named {g.name!r}; refusing to "
+            raise ValueError(f"gates contain two GateResult objects named {_shown(g.name)}; refusing to "
                              f"serialise an ambiguous gate state")
         real[g.name] = g
     absent = [n for n in GATE_SCOPES if n not in real]
@@ -2591,16 +2712,17 @@ def _pair_from_record(rec: ExperimentRecord, min_n: Optional[int] = None) -> Int
             "ci_boot_lo", "ci_boot_hi", "ci_t_lo", "ci_t_hi")
     absent = [k for k in need if k not in m]
     if absent:
-        raise ValueError(f"{rec.name}: record is missing the metrics {absent}; cannot rebuild an interval")
-    n = _metric_count(m["n_seeds"], f"{rec.name}: n_seeds")
+        raise ValueError(f"{_shown(rec.name, how=str)}: record is missing the metrics {absent}; "
+                         "cannot rebuild an interval")
+    n = _metric_count(m["n_seeds"], f"{_shown(rec.name, how=str)}: n_seeds")
     flags = []
     if min_n is not None and n < min_n:
         flags.append("n below protocol minimum")
     if n < 20:
         flags.append("percentile bootstrap unreliable (n < 20)")
     return IntervalPair(rec.name, n,
-                        _metric_required(m["ci_level"], f"{rec.name}: ci_level"),
-                        _metric_count(m["n_boot"], f"{rec.name}: n_boot"),
+                        _metric_required(m["ci_level"], f"{_shown(rec.name, how=str)}: ci_level"),
+                        _metric_count(m["n_boot"], f"{_shown(rec.name, how=str)}: n_boot"),
                         m["mean"], m["sd"], m["iqr"], m["min"], m["max"], m["max_over_median_abs"],
                         m["ci_boot_lo"], m["ci_boot_hi"], m["ci_t_lo"], m["ci_t_hi"], tuple(flags))
 
@@ -2693,7 +2815,7 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: Optional[Benc
         raise ValueError(f"records missing for {missing}")
     for r in by.values():
         if _enum_member(EvidenceClass, r.evidence_class) is not EvidenceClass.TOY_RESULT:
-            raise ValueError(f"{r.name}: only TOY_RESULT records can carry a recomputed verdict")
+            raise ValueError(f"{_shown(r.name, how=str)}: only TOY_RESULT records can carry a recomputed verdict")
 
     # ---- subject-kind decode and exemption-forgery checks: no `cfg` is consulted, so they run first and a
     # ---- config mismatch can never mask a forgery.
@@ -2708,7 +2830,7 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: Optional[Benc
     # `not in (0.0, 1.0)` branch) and must keep raising, while an honest `unmeasured` must keep being accepted.
     exv = _metric_strict(gm.get("loss_check_exempt"), "loss_check_exempt")
     if exv is not None and exv not in (0.0, 1.0):
-        raise ValueError(f"loss_check_exempt must be 0.0 or 1.0, got {exv!r}")
+        raise ValueError(f"loss_check_exempt must be 0.0 or 1.0, got {_shown(exv)}")
     if exv == 1.0 and kind != "fixture":
         raise ValueError("records claim the gate-11(c) exemption but subject_kind_code is not 'fixture' "
                          "(forged or deleted code)")
@@ -2771,7 +2893,8 @@ def verdict_from_records(records: Sequence[ExperimentRecord], cfg: Optional[Benc
         mg = _metric_required(rm["margin"], f"{tag}: margin")
         lv = _metric_required(rm["ci_level"], f"{tag}: ci_level")
         if abs(lv - want_level) > 1e-12:
-            raise ValueError(f"{tag}: ci_level {lv!r} is not the adjusted level {want_level!r} (m={N_PRIMARY})")
+            raise ValueError(f"{tag}: ci_level {_shown(lv)} is not the adjusted level "
+                             f"{want_level!r} (m={N_PRIMARY})")
         # `_pair_from_record(r)`, NOT `(r, cfg.min_seeds)`: the recomputed `flags` would be
         # UNOBSERVABLE here. `flags` is consumed by nothing in this module's verdict logic (its only
         # other use is `to_experiment_records` writing it into `notes`, which is not evidence), and

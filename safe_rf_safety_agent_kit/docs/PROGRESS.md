@@ -11415,3 +11415,312 @@ claim was an artefact; N1 closed per-file; N2, N3). **All three are documentatio
 two declared-open items — the escape at `benchmark.py:2094` where `f"numerical failure: {e}"` lets an
 in-family exception with a raising `__str__` propagate out of public `robustness.benchmark_outcome`,
 and `test_benchmark` red under `-OO` (f=2, e=19, reproduced on a pristine archive tree).
+
+## Round 24 — SR-10 built: the diagnostic channel closed at 17 sites, not 1, and the `-OO` row made the strongest one instead of the weakest
+
+**Date:** 2026-11-12. HEAD at start `a04efa4`, tree clean. Owner: `src/toy/benchmark.py`,
+`tests/toy_tests/test_benchmark.py`, the cross-owner declaration block in
+`tests/toy_tests/test_robustness.py`, this entry. **Builder, not attester — the blueprint is NOT
+marked and SR-10 stays `[ ]`.** No other owner was working; all runs were serial.
+
+SR-10's two declared-open items, both closed.
+
+### Item 1 — the escape was declared at ONE site and measured OPEN at SEVENTEEN
+
+**Reproduced first, at a pristine `git archive a04efa4` copy, before anything was changed.** A
+`factory` raising a `ValueError` **subclass** — inside `score_seed`'s declared `except ValueError`
+family — whose own description refuses propagated a `RuntimeError` out of the public
+`robustness.benchmark_outcome`, out of `score_seed` and out of `run_study`. Deepest kit frame
+`benchmark.py:2094`, identical on 3.12.4 and 3.13.5, exactly as declared.
+
+**Two corrections to the declaration's mechanism, both measured.**
+
+1. The declaration says "whose own `__str__` raises". The traceback shows **`__format__`**. A bare
+   `{e}` compiles to `format(e, "")`, and `object.__format__` delegates to `str` only when the
+   subclass has not overridden `__format__`. Measured, four variants of the hostile exception at the
+   same site: **`__str__` alone escapes, `__format__` alone escapes (with an honest `__str__`),
+   `__repr__` alone does not reach it.** So a fix that wraps `str(e)` and leaves `f"{e}"` is still
+   open through `__format__`. `_shown(e, how=str)` calls `str` *inside* the try and hands the outer
+   f-string a plain `str`, which closes both.
+2. **`f"{x:.0%}"` runs `__format__` with an EMPTY conversion field**, so a format SPEC is a protocol
+   call that no sweep over `!r` / `!s` / `!a` / bare `{x}` sees. Two public sites were open only
+   through it.
+
+**The derived set.** `test_benchmark._derive_diagnostic_sites` re-derives every
+description-protocol site from `benchmark.py`'s AST — module body, class bodies, functions **and
+lambdas** — over **seven** spellings: a `repr`/`str`/`format`/`ascii` call; the four f-string
+conversions `{x}`, `{x!r}`, `{x!s}`, `{x!a}`; a format SPEC; `type(x).__name__`;
+`getattr(x, "__name__")`; `"%s" % x`; `"...".format(x)`. **123 sites in 153 occurrences**, each
+decided in writing in `_DIAGNOSTIC_SITES` and checked by set equality in both directions, so a new
+site fails the suite closed. Census, derived and asserted:
+
+| decision | sites | what it means |
+|---|---|---|
+| `_D_ROUTED` | 39 | through `benchmark._shown` / `benchmark._type_name` |
+| `_D_OWN` | 47 | this module's own constant, `len()`/`sorted()`/`range()`, loop variable over its own literals, or a literal label a call site passed |
+| `_D_PLAIN` | 18 | plain by an admission that already ran (`_plain_number`, `BenchmarkConfig.__post_init__`, `IntervalPair`/`ComponentResult.__post_init__`, or a `str` slice) |
+| `_D_LABEL` | 9 | the record-label channel, **declared OPEN with its measurement** |
+| `_D_GATED` | 4 | behind a membership refusal against a module constant |
+| `_D_HELPER` | 4 | the two helpers themselves |
+| `_D_STORED` | 1 | `repr(r)` is the sha256 INPUT for fixture rows, not a description |
+| `_D_WRITE` | 1 | `factory.__name__ = f"arm_{arm}"` is a write |
+
+**Measured OPEN before the fix: 17 distinct `benchmark.py` lines** — 813, 840, 878, 1043, 1305,
+1309, 1427, 1585, 1635, 1807, 1956, 1994, 2084, 2094, 2136, 2138, 2192 — **the same seventeen on
+3.12.4 and on 3.13.5**, every one through a public entry point and none needing
+`object.__setattr__`. **The declaration named one of the seventeen.** Eleven of the other sixteen
+are reached through the public `sample_sd`, `Margins`, `intervals_disagree`, `summarize`,
+`GateResult`, `HypothesisResult`, `evaluate_primary`, `evaluate_gates` and `SeedScores.from_values`.
+**After the fix: 0**, both interpreters, same harness.
+
+**Three sites were NOT reached open by this round's fixtures and are recorded as such, not as
+closed:** `_converged`'s handler (`score_seed`'s own handler catches the re-run first on this
+fixture), `score_predictor`'s `G_s={fx.G!r}` (an ineligible `G` comes from this module's own
+arithmetic), and `exploratory_interval`'s `{name!r}` (refused by a `TypeError` from string
+concatenation one line earlier). All three are routed anyway — **not reached is not closed** — and
+the escape sweep marks them so the next reader does not count three unreached sites as three
+measurements.
+
+**What this does NOT close, declared with its measurement rather than left to be found: the
+RECORD-LABEL channel.** `to_experiment_records`, `seed_records` and `planned_slot_records` build an
+`ExperimentRecord.name`, a `RunProvenance.run_id` and a `notes` string out of caller-supplied
+identifiers. A `str` subclass whose `__format__` raises, passed as `study_id`, as
+`JointResult.subject`, as an `arm` or as a seed, takes **all three public functions** out with a
+`RuntimeError` — benchmark.py:2504, 2506, 2831, 2853, 2854 at `a04efa4`, on both interpreters,
+before and after this round. It is deliberately **not** routed: a record's `name` is the identifier
+a recompute looks records up BY, so degrading it to `<undescribable str: ...>` would file a real
+study under a placeholder and `verdict_from_records` would answer `records missing for [...]` — the
+same asymmetry `robustness._name_attr` records for a card's label. Closing it needs an admission on
+the label fields, which changes what three public functions ACCEPT, and that is a different task.
+Pinned by `TheRecordLabelChannelIsStatedAndLeftOpen`, which **fails when it closes**.
+
+### The declaration in `test_robustness.py` is REMOVED, as its own text required
+
+`_CROSS_OWNER_ESCAPES` held exactly one entry, written to rot loudly:
+`test_the_one_cross_owner_escape_is_declared_and_still_reachable` asserted the escape **still
+happened**, so closing the site makes that test fail. It did. **The entry is gone and the table is
+now empty**, which also means `_declared_cross_owner` excuses nothing and any new cross-owner escape
+is an unconditional complaint rather than a silent carve-out. The test slot was **inverted into a
+regression pin** — `test_no_cross_owner_escape_is_declared_and_the_one_that_was_is_closed` asserts
+the table is empty AND that the same hostile input through the same public adapter now refuses in
+family out of `robustness.py`, by the same traceback attribution that found it. This is not
+"disabling a test to claim completion": the subject of the old assertion no longer exists, and what
+replaces it fails if the escape returns.
+
+### Item 2 — `test_benchmark` under `-OO`: reproduced, and the cause breakdown is three proximate causes with one root
+
+**Reproduced at a pristine `a04efa4` copy: Ran 338, failures=2, errors=19 — the brief's figure is
+correct**, and identical on 3.12.4 and 3.13.5. Not one cause:
+
+* **18 errors** `AttributeError: 'NoneType' object has no attribute 'split'` — the
+  `" ".join(X.__doc__.split())` normalising idiom every doc pin used;
+* **1 error** `TypeError: argument of type 'NoneType' is not iterable` — the same cause reached
+  through `assertIn(key, bm.__doc__)` rather than through `.split()`;
+* **2 FAILURES, and these are the interesting ones.** `@dataclass` **SUBSTITUTES** a synthesised
+  signature for a class whose docstring was stripped, so under `-OO` `bm.Margins.__doc__` is **not**
+  None — it is `"Margins(delta_S: 'float' = 0.1, ...)"`, present and WRONG, and the two pins on it
+  compared their needle against a signature string. **The brief described the visible failure as "an
+  assertion reading a docstring that `-OO` strips"; it is the SUBSTITUTION, which is why it is a
+  failure and not a nineteenth error.** A `doc is not None` check cannot see this.
+
+**Not closed the way `test_stability`, `test_dashboard` and `test_robustness` closed it, and the
+reason is their own measured cost.** Those three use `_doc()` returning None plus `if doc is not
+None:` at each pin. SR-06's attestation recorded what that bought in `test_stability`: **18
+assertions behind 13 guards go dark under `-OO` at an unchanged green count, and three
+relative-indent doc mutants are killed normally and UNKILLED under `-OO`.** A guard makes the `-OO`
+row weaker evidence. `test_stability` already contains the better half of its own repertoire —
+*"pinned here from `inspect.getsource`, which also makes the pin hold under `-OO`"* — and that is the
+half used here, carried one step further: `_doc` reads the docstring **out of the module's source
+text** with `ast.get_docstring(..., clean=False)`, which returns the exact literal `__doc__` would
+hold. Every pin runs in both modes at unchanged strength. **All 31 `__doc__` reads (17 distinct
+`__doc__` occurrences were reads of 15 `toy` objects plus 2 test methods) were rewritten; zero
+assertions are doc-gated.**
+
+**Why not `inspect.getsource(obj)` directly**, which was the obvious restructuring: it is **weaker**
+than the docstring. This file's own note records a false sentence that "had to go was in a COMMENT —
+so `__doc__` cannot see it", and a needle matched against raw source is satisfied by a comment or by
+code. `ast.get_docstring` sees exactly what `__doc__` sees, and
+`test_doc_reads_exactly_what_dunder_doc_holds` asserts that equality object by object in a normal
+run.
+
+**The `-OO` figure, asked for by SR-06's attestation and DERIVED, not stated — and BOTH halves of
+it, because "zero goes dark" alone would be an overstatement by omission:**
+
+* **`DOC-GATED: 0 assertions behind 0 guards`** — read out of this file's AST over both guard
+  spellings and compared with the figure written in the comment, exactly as `test_stability` does,
+  and additionally asserted to be `(0, 0)`. **No pin of anything `benchmark.py` documents is
+  doc-gated.**
+* **`MODE-GATED: 8 assertions behind 2 guards`** — assertions that run in only one mode, also
+  derived and asserted. **Every one of them has the `__doc__` ATTRIBUTE ITSELF as its subject**, and
+  that is asserted per assertion from the AST rather than claimed: the check that `_doc` returns
+  what `__doc__` holds cannot run where `__doc__` does not exist, and the `@dataclass` substitution
+  can only be demonstrated where the docstring *is* stripped. That is Note E's **other** case — the
+  subject does not exist in the other mode, like `skipIf(np is None)` — not its hazard, which is a
+  pin whose subject still exists going dark. **The figure was first written 9 behind 3 from reading
+  the file and DERIVED as 8 behind 2; the test corrected it.** And the per-assertion `__doc__` check
+  immediately caught a line of my own that was mode-gated via a local variable rather than visibly
+  about `__doc__`; it is inlined now.
+
+The structural claim that keeps DOC-GATED at zero is derived too: **`__doc__` is read in exactly ONE
+place in this file, inside `_doc`**, so a raw `__doc__` read cannot be added and leave the suite
+green under `-OO`. **No pin that dies in a normal run is unkilled under `-OO`**, and that is shown
+rather than promised: a doc-only mutant is applied to the text `_doc` reads, so the same pin sees it
+in both modes — M14 below is killed in all four environments.
+
+### A new interpreter finding, not in the brief: CPython 3.13 de-indents docstrings at compile time
+
+The first source-reading `_doc` compared the **raw literal** against `__doc__`. That held on 3.12.4
+and failed on 3.13.5 **for all fifteen pinned objects: 15 failures on 3.13.5 normal, 0 on 3.12.4,
+and — the shape that named the cause — 0 under `-OO` on BOTH**, because the comparison only runs
+where docstrings exist. Measured directly with a four-line probe on both interpreters:
+
+| | `__doc__ == raw literal` | `cleandoc(__doc__) == cleandoc(raw)` |
+|---|---|---|
+| 3.12.4 | **True** | True |
+| 3.13.5 | **False** | True |
+
+CPython 3.13 **strips a docstring's common indentation at compile time** (gh-81283), so `__doc__` is
+already de-indented there. **A raw-literal docstring reader is therefore not interpreter-portable.**
+`_doc` now returns `inspect.cleandoc` of the literal, which is exactly what `test_stability._doc`,
+`test_robustness._doc` and `test_dashboard._doc` already return — so this helper's contract is now
+**identical** to the three it is modelled on and differs only in *where* it reads. The mechanism is
+pinned as a measurement (`config_hash.__doc__`'s second line carries its source indentation on 3.12
+and not on 3.13), so a future interpreter change says so on one line instead of as fifteen diffs.
+**Cross-owner note: the three sibling modules are unaffected**, because they read
+`inspect.cleandoc(__doc__)` and never the literal.
+
+### Derivations that failed before they were right — eight, and two of them were the fix itself
+
+1. **The derivation was `test_robustness._derive_diagnostic_sites` copied as-is.** That one knows
+   four protocols and does **not** see a format SPEC, `"%s" % x` or `"...".format(x)`. Carried over
+   unexamined it would have reported a complete table over a blind sweep. **This is also a finding
+   about `test_robustness`: its own derived table is blind to those three spellings** —
+   `benchmark.py` happens to contain none of `%` or `.format`, but its format-spec blindness cost
+   two open sites here.
+2. **The first patch routed 36 sites and left one of them** — `intervals_disagree`'s
+   `f"widths differ by more than {width_tol:.0%}"`, still OPEN through the public
+   `intervals_disagree` (benchmark.py:1309 before, 1406 after the first pass). The derivation saw
+   it; the patch did not read its own derivation.
+3. **The second patch then left exactly one more** — `summarize`'s `f"... > {tail_ratio_max}"`, a
+   bare `{}` on a public parameter, benchmark.py:1427. **Two passes in a row each left one site.**
+   This is the project's "a fix at one site leaves a sibling" defect happening *inside* the fix for
+   it, twice, and it is why the asserted figure is derived from the AST and not counted by hand.
+4. **The first reachability harness probed the `{x!r}` sites with a `str` SUBCLASS** and read four
+   in-family refusals as "closed". They were closed by **`_plain_word`**, which collapses a `str`
+   subclass — so the harness measured an existing admission, not the site. With a non-`str` object in
+   the same positions, `_arm_fit`, `GateResult.__post_init__` and `HypothesisResult.__post_init__`
+   were all OPEN. **A probe that cannot distinguish "the site is protected" from "my fixture was
+   absorbed one layer up" prints a false SURVIVE.**
+5. **`_doc` version one did `ast.parse(textwrap.dedent(inspect.getsource(obj)))`** on the object
+   alone. `textwrap.dedent` removes the block's **common** leading whitespace, so for a **method**
+   every continuation line of the docstring lost four spaces while `__doc__` keeps them:
+   `bm.BenchmarkConfig.config_hash` and `bm.IntervalPair._bound` came back 56 and 68 characters
+   short. Caught by `test_doc_reads_exactly_what_dunder_doc_holds`, which exists for exactly that.
+   A reader that silently reindents would also silently defeat any pin that depends on relative
+   indentation — and `test_stability` has three.
+6. **The attribution assertions were written with `assertRaises`, which CLEARS the traceback.**
+   `unittest._AssertRaisesContext.__exit__` stores `exc_value.with_traceback(None)` and calls
+   `traceback.clear_frames`, so `cm.exception.__traceback__` is None and `_escape_module` answers
+   None for every case. **Thirteen subTests reported `None != 'benchmark.py'` for that reason
+   alone**, and read as thirteen attribution failures until the cause was found.
+   `test_robustness` uses a bare `try/except` at its one attribution site for the same reason;
+   factored out here as `_raised`.
+
+Two smaller ones: the figure for `_doc` pins was first written `>= 20` from the **31 `__doc__`
+occurrences**, which counted *reads* and not *objects* (15 resolvable + 2 test methods + the
+helper's own parameter) — *a count of a construct is not a measurement of its extent*; and
+`assertNotIn("dedent", inspect.getsource(...))` **failed on the reader's own docstring**, the
+paragraph explaining why dedent is wrong. Both now derived from the AST.
+
+### A consequence the existing apparatus caught, and the declared table that had to change
+
+Routing `_metric_required` and `_metric_strict` through `_shown` moved their `__repr__` touch on a
+stored `MetricValue`, and
+`TheCheckedReaderIsTheOnlyWayToReadAStoredMetric.test_the_reads_are_observed_at_runtime...` reported
+it immediately: *observed but not declared* `("benchmark", "_shown", "__repr__")`, *declared but not
+observed* the two old rows. **Two declared rows collapsed into one**, which is the point of the
+section — one place to decide, one place to degrade. `_DECLARED_METRIC_TOUCHES` is 7 rows, and the
+non-vacuity floor is now derived from `len(_DECLARED_METRIC_TOUCHES)` rather than written as a
+separate `8`. `__format__` stays in `_FORBIDDEN_TOUCHES`: `_shown` reaches a stored metric by `repr`
+or by `str`, never by `format`.
+
+### Measurements
+
+Serial, one suite at a time, `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` cleared before every run,
+plain `-B`, **never `-I`**. Full suite NOT run (orchestrator's). Blueprint NOT marked.
+
+| run | environments | result |
+|---|---|---|
+| `test_benchmark` | 3.12.4 and 3.13.5 × {normal, `-OO`} | **348 OK** (4/4) |
+| `test_robustness` | both × {normal, `-OO`} | **197 OK** (4/4) |
+| `test_dashboard` | both × {normal, `-OO`} | **260 OK** (4/4) |
+| escape harness (`a04efa4` vs candidate) | both | **17 open -> 0** diagnostic; label 5 -> 5 |
+| `scripts/lint.sh` | 3.12.4 | see below |
+
+`test_dashboard` is run because it imports `toy.benchmark`. **`test_claim_ledger` does NOT import it**
+(checked, not assumed: its imports are `toy.claim_ledger`, `toy.schema`, `toy.teacher_student`), so
+it is not run. `test_scripts` is not in the permitted set, but it runs `scripts/lint.sh` against the
+REAL tree, so **`lint.sh` itself was run directly** instead of the suite.
+
+### Mutants — 18, each on a FRESH copy of the candidate tree, 44 (mutant, environment) cells
+
+**All 18 killed in every environment listed; harness exit 0.** The harness **fails the run** both on
+a patch that does not apply and on a mutant that is not killed — the defect that printed a false
+SURVIVE last round. There is no restore path to skip because nothing is mutated in place: each
+mutant gets its own copy, so a SIGTERM leaves a scratch directory and nothing else. **No SURVIVE is
+claimed anywhere; the word used is "killed by \<class\> on \<interpreters\>".**
+
+| mutant | killed by | environments |
+|---|---|---|
+| M1 the DECLARED site 2094 back to a bare `{e}` | `ADiagnosticIsBuiltInOnePlace` | 3.12.4, 3.13.5 |
+| M2 `score_seed`'s OTHER handler (fixture build) | same | both |
+| M3 `score_predictor`'s handler | same | both |
+| M4 the FORMAT SPEC site (pass 1 left this one) | same | both |
+| M5 `summarize`'s `{tail_ratio_max}` (pass 2 left this one) | same | both |
+| M6 `_as_list`'s type name | same | both |
+| M7 `_shown` re-raises instead of degrading | same | both |
+| M8 `_shown` ignores `how`/`spec` (text not preserved) | same | both |
+| M9 `_UNCONVERTED = ()` | same | both |
+| M10 `_type_name` re-raises instead of degrading | same | both |
+| M11 a NEW undecided `{x!r}` site in `benchmark.py` | same | both |
+| M12 the module comment's quoted figure drifts | same | both |
+| M13 the record-label declaration paragraph deleted | `TheRecordLabelChannelIsStatedAndLeftOpen` | both |
+| M14 **doc-only** mutant on a pinned docstring | `MarginsAreNotInTheConfigHash` | both × {normal, `-OO`} |
+| M15 a raw `__doc__` read added outside `_doc` | `TheDocPinsAreReadFromSource...` | both × {normal, `-OO`} |
+| M16 the DOC-GATED figure drifts | same | both × {normal, `-OO`} |
+| M17 `_doc` dedents again | same | both × {normal, `-OO`} |
+| M18 the cross-owner declaration re-added | `ADeclaredReasonIsExercisedOnEveryParameterItCovers` | both |
+
+**M14 is the one that answers item 2's real question:** a doc-only mutant is **killed under `-OO` as
+well as normally**, which is what a source-read pin buys and what a guarded pin loses.
+
+**M9 WAS UNKILLED ON THE FIRST RUN, on both interpreters, and the harness failed the run because of
+it.** The cause is this project's own vacuity defect inside this round's own test: the sweep was
+`for exc in bm._UNCONVERTED:`, so emptying the tuple made the loop body run **zero times** and the
+sweep reported OK. The tuple is now pinned by value *before* it is swept, and the sweep asserts its
+own iteration count. **This is the clearest evidence that a harness which does not fail the RUN is
+worthless: nothing else in 44 cells would have told me.**
+
+### Test counts and the baseline
+
+`test_benchmark` **338 -> 348** (+10 tests in 3 new classes). `test_robustness` **197 -> 197** (one
+test replaced in place). `test_dashboard` unchanged at 260.
+**`scripts/test_baseline.txt` needs updating:** `toy_tests.test_benchmark 338 0` ->
+`toy_tests.test_benchmark 348 0`. Not edited here, as the rules require it be said rather than done
+silently.
+
+### Remaining uncertainty, recorded rather than closed
+
+1. **The RECORD-LABEL channel is OPEN** at benchmark.py (5 measured occurrences through 3 public
+   functions), declared with its measurement and pinned to fail when it closes. Closing it changes
+   what those functions accept and is not SR-10's task.
+2. **The raising-`__class__` channel stays open kit-wide** and is untouched here.
+3. **A raising ATTRIBUTE LOOKUP on a caller's object** remains out of reach of any check in this
+   module too: every field this module reads off a caller's carrier runs the caller's code.
+4. **`_shown` degrades; it does not refuse.** That is deliberate and is the same policy as
+   `stability._shown` and `robustness._shown`, but it means a reason string can be a placeholder.
+   The exception TYPE is unchanged, which is what every caller branches on, and
+   `test_a_hostile_description_cannot_change_which_exception_a_caller_sees` asserts that as a
+   property rather than site by site.
+5. **Three of the 20 escape-sweep cases were not reached open by this round's fixtures** (above).
+   Routed anyway; recorded as unreached, not as closed.

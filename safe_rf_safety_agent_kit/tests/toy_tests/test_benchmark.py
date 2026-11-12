@@ -20,6 +20,11 @@ import os
 import pickle
 import random
 import sys
+import textwrap
+import types
+import collections
+import re
+import traceback
 import unittest
 from enum import Enum
 from pathlib import Path
@@ -38,6 +43,118 @@ SMALL = bm.BenchmarkConfig(n_boot=2000)          # smaller B only to keep the su
 FZ = bm.freeze_seed_list(7, 30)
 TS_PROBE = "2000-01-01T00:00:00Z"
 _ORACLE = {}
+
+
+# --------------------------------------------------------------------------- THE `-OO` ROW
+# `python -OO` STRIPS DOCSTRINGS, and at a04efa4 this file was RED under it: Ran 338, failures=2,
+# errors=19, IDENTICALLY on 3.12.4 and 3.13.5 (so not the asymmetric class, and `-OO` is not a mode
+# this project runs -- but an error is the wrong report for "the pins cannot run"). THREE proximate
+# causes, ONE root cause:
+#   * 18 errors `AttributeError: 'NoneType' object has no attribute 'split'` -- `" ".join(X.__doc__
+#     .split())`, the normalising idiom every doc pin here used;
+#   *  1 error `TypeError: argument of type 'NoneType' is not iterable` -- `assertIn(key, bm.__doc__)`,
+#     the same cause reached through `in` rather than through `.split()`;
+#   *  2 FAILURES, not errors, and they are the interesting ones: `@dataclass` SUBSTITUTES a synthesised
+#     signature for a class whose docstring was stripped, so under `-OO` `bm.Margins.__doc__` is NOT
+#     None -- it is `"Margins(delta_S: 'float' = 0.1, ...)"`, present and WRONG, and the two pins on it
+#     compared their needle against a signature string. A None check cannot see that. (The brief for
+#     this round described the visible failure as "an assertion reading a docstring that `-OO` strips";
+#     it is the SUBSTITUTION, which is why it is a failure and not a nineteenth error.)
+# HOW IT IS CLOSED, and why NOT the way `test_stability` closed it. That module's shape is `_doc()`
+# returning None plus a plain `if doc is not None:` at each pin, and the attestation of SR-06 recorded
+# the cost: 18 assertions behind 13 guards GO DARK under `-OO` while the run still reports OK, and three
+# doc pins became UNKILLED under `-OO` although they are killed in a normal run. A guard makes the `-OO`
+# row WEAKER evidence, not stronger. `test_stability` also already contains the better half of its own
+# repertoire -- "pinned here from `inspect.getsource`, which also makes the pin hold under `-OO`" -- and
+# that is the half used here, carried one step further: `_doc` reads the docstring OUT OF THE SOURCE
+# TEXT with `ast.get_docstring(..., clean=False)`, which returns the exact string literal `__doc__`
+# would hold. So the pin is UNCHANGED in strength, runs in BOTH modes, and the `-OO` figure is:
+#   DOC-GATED: 0 assertions behind 0 guards.
+# AND THE OTHER HALF OF THE SAME HONESTY, because "zero goes dark" would otherwise be an
+# overstatement by omission. A handful of assertions in this file DO run in only one mode, and
+# every one of them has the `__doc__` ATTRIBUTE ITSELF as its subject: the check that `_doc`
+# returns what `__doc__` holds cannot run where `__doc__` does not exist, and the demonstration
+# that `@dataclass` substitutes a signature for a stripped class docstring can only run where it
+# IS stripped. That is Note E's OTHER case -- the subject does not exist in the other mode, like
+# `skipIf(np is None)` -- and not its hazard, which is a pin whose subject still exists going
+# dark. It is counted so the distinction is checkable rather than asserted in prose:
+#   MODE-GATED: 8 assertions behind 2 guards, every one of them about `__doc__` itself.
+# (First written as 9 behind 3 from reading the file; DERIVED as 8 behind 2, and the test is what
+#  corrected it. A figure nobody derives is a figure that is wrong by one.)
+# which `TheDocPinsAreReadFromSourceSoNothingGoesDarkUnderMinusOO` DERIVES from this file's AST rather
+# than asking a reader to trust it, together with the structural claim that makes it hold -- `__doc__`
+# is read in exactly ONE place in this file, inside `_doc` -- so a future raw `__doc__` read cannot be
+# added and leave the suite green under `-OO`.
+# WHY NOT `inspect.getsource(obj)` DIRECTLY, which would have been the obvious restructuring: it is
+# WEAKER than the docstring. This file's own note at `test_the_three_falsified_statements...` records a
+# sentence that "had to go was in a COMMENT -- so `__doc__` cannot see it", and a needle matched against
+# raw source would be satisfied by a comment or by code. `ast.get_docstring` sees exactly what `__doc__`
+# sees, and `test_doc_reads_exactly_what_dunder_doc_holds` asserts that equality object by object.
+_DOC_CACHE: dict = {}
+
+
+def _module_docstrings(mod):
+    """{qualname (or "" for the module): its docstring EXACTLY as `__doc__` would hold it} for `mod`,
+    parsed from the file once.
+
+    EXACTLY AS `__doc__` WOULD HOLD IT MEANS `inspect.cleandoc` OF THE LITERAL, and getting there cost
+    two measured failures, both kept because they are the lesson.
+      1. Version one did `ast.parse(textwrap.dedent(inspect.getsource(obj)))` on the object alone,
+         which is the obvious way -- and `textwrap.dedent` removes the COMMON leading whitespace of
+         THE BLOCK, so for a METHOD every continuation line of its docstring lost four spaces.
+         MEASURED on 3.12.4: `bm.BenchmarkConfig.config_hash` and `bm.IntervalPair._bound` came back
+         56 and 68 characters short. The module is parsed as a file now, so the literal is read
+         exactly as written, and `test_nothing_in_this_file_is_doc_gated...` pins the ABSENCE of a
+         `textwrap.dedent` call here from the AST rather than from the text -- a text search for the
+         word matched this very paragraph.
+      2. Then the raw literal compared equal to `__doc__` on 3.12.4 and UNEQUAL ON 3.13.5, for ALL
+         FIFTEEN pinned objects: 15 failures on 3.13.5 normal, 0 on 3.12.4, and -- the shape that
+         names the cause -- 0 under `-OO` on BOTH, because the comparison only runs where docstrings
+         exist. CPython 3.13 STRIPS A DOCSTRING'S COMMON INDENTATION AT COMPILE TIME (gh-81283), so
+         `__doc__` is already de-indented there and the source literal is not. A raw-literal reader is
+         therefore not interpreter-portable. `inspect.cleandoc` normalises both sides to the same
+         thing on both interpreters, PRESERVES relative indentation (it removes only the common
+         prefix), and is exactly what `test_stability._doc`, `test_robustness._doc` and
+         `test_dashboard._doc` already return -- so this helper's contract is now identical to the
+         three it is modelled on, and differs from them only in WHERE it reads."""
+    key = mod.__name__
+    if key not in _DOC_CACHE:
+        tree = ast.parse(inspect.getsource(mod))
+        out = {"": ast.get_docstring(tree)}        # clean=True: `inspect.cleandoc`, as above
+
+        def walk(node, prefix):
+            for child in node.body:
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    name = prefix + child.name
+                    out[name] = ast.get_docstring(child)
+                    walk(child, name + ".")
+        walk(tree, "")
+        _DOC_CACHE[key] = out
+    return _DOC_CACHE[key]
+
+
+def _doc(obj):
+    """`obj`'s docstring, read out of its module's SOURCE TEXT rather than off `obj.__doc__`.
+
+    `python -OO` strips `__doc__` and `@dataclass` then SUBSTITUTES a synthesised signature for a
+    stripped class docstring, so `__doc__` is the wrong place to read a pin from in that mode -- once
+    None, once present and wrong. The source file is not rewritten by `-OO`, so the literal is still
+    there, and `ast.get_docstring` returns `inspect.cleandoc` of it -- which is what `__doc__` holds
+    after `cleandoc` on every interpreter this project runs, 3.13's compile-time de-indentation
+    included (see `_module_docstrings`). Asserted equal to `inspect.cleandoc(obj.__doc__)` for every
+    object this file pins, in a normal run, by
+    `TheDocPinsAreReadFromSourceSoNothingGoesDarkUnderMinusOO`."""
+    if isinstance(obj, types.ModuleType):
+        return _module_docstrings(obj)[""]
+    mod = sys.modules[obj.__module__]
+    qual = getattr(obj, "__qualname__", None) or getattr(obj, "__name__", None)
+    if qual is None:
+        raise AssertionError("_doc cannot name this object, so it cannot read it")
+    table = _module_docstrings(mod)
+    if qual not in table:
+        raise AssertionError(f"{mod.__name__}.{qual} is not a module-level definition in the source, "
+                             f"so `_doc` cannot read its docstring from there")
+    return table[qual]
 
 
 def study(factory, name, base=7, cfg=SMALL, digest="auto", n=30):
@@ -935,8 +1052,8 @@ class InScopeGateInvariant(unittest.TestCase):
         self.assertEqual(len(bm.DEFERRED_GATES), 6)
         self.assertEqual(set(oracle().deferred_gates), want)
         for key in ("shift sensitivity", "ERROR_REGISTER", "V-set", "n_cap", "exchangeability", "amendment log"):
-            self.assertIn(key, bm.__doc__)           # the module docstring names each unimplemented check
-        self.assertIn("interval_verdict", bm.__doc__)
+            self.assertIn(key, _doc(bm))           # the module docstring names each unimplemented check
+        self.assertIn("interval_verdict", _doc(bm))
 
 
 class ConstantSampleExactness(unittest.TestCase):
@@ -1647,7 +1764,7 @@ class OracleAcrossBaseSeeds(unittest.TestCase):
         self.assertEqual([f"{v:.3g}" for v in failing], ["0.00108", "0.00178"])
         self.assertEqual(max(self.GRAD_RATIO.values()), self.GRAD_RATIO[23])
         self.assertLess(max(self.GRAD_RATIO.values()), 3.4e-3)        # the retracted figure, unattained
-        doc = " ".join(bm.__doc__.split())
+        doc = " ".join(_doc(bm).split())
         # The retracted figure may appear ONLY as an attributed correction, never as the docstring's own
         # measurement -- the convention `test_robustness` uses for a falsified claim.
         self.assertNotIn("gradient ratio 1.1e-3..3.4e-3 vs tau_conv", doc)
@@ -1732,7 +1849,7 @@ class SdScaleBands(unittest.TestCase):
         # (3) fails closed with a false ValueError (x - m overflows)
         with self.assertRaises(ValueError):
             bm.sample_sd([1.7e308, -1.7e308, -1.7e308, -1.7e308])
-        doc = " ".join(bm.sample_sd.__doc__.split())
+        doc = " ".join(_doc(bm.sample_sd).split())
         for needle in ("FLOAT FLOOR", "PYTHON INTS", "FALSE ValueError",
                        "Consumers (SR-11 robustness probes) must NOT read zero-SD as 'constant' for samples within a "
                        "few subnormal steps of each other",
@@ -1800,7 +1917,7 @@ class SdScaleBands(unittest.TestCase):
         # stops holding, the companion test's annotated snippets no longer model the target.
         self.assertIn("values: Sequence[float]", src)
         self.assertTrue(self.has_live_float_reference(src))
-        self.assertNotIn("robustness.py:", " ".join(bm.sample_sd.__doc__.split()))   # no line-number citation
+        self.assertNotIn("robustness.py:", " ".join(_doc(bm.sample_sd).split()))   # no line-number citation
 
     def test_the_tripwire_itself_behaves_as_documented(self):
         """Every case carries the SAME annotation as the one real target, because the previous version of this
@@ -1859,7 +1976,7 @@ class RelabelRouteBoundaryIsExactlyAsDocumented(unittest.TestCase):
                 self.assertEqual(rv.joint, J.JOINT_SUPPORTED, (kind, name))      # the documented hole
 
     def test_the_docstring_states_that_the_flag_alone_suffices(self):
-        doc = " ".join(bm.__doc__.split())
+        doc = " ".join(_doc(bm).split())
         self.assertIn("THAT CROSS-CHECK IS DEFEATED BY THE FLAG ALONE", doc)
         self.assertNotIn("forged consistently", doc)
 
@@ -1948,7 +2065,7 @@ class RecomputeIsBoundToTheStoredConfiguration(unittest.TestCase):
             bm.to_experiment_records(oracle(), study_id="f", base_seed=7, timestamp_utc=self.TS), SMALL).reasons, ())
 
     def test_the_docstring_no_longer_claims_only_stored_metrics(self):
-        doc = " ".join(bm.verdict_from_records.__doc__.split())
+        doc = " ".join(_doc(bm.verdict_from_records).split())
         # the false claim may appear ONLY as an attributed correction, never as the docstring's own promise
         self.assertNotIn("Rebuild the verdict ONLY from stored metrics", doc)
         self.assertIn('used to claim "ONLY from stored metrics", which was false', doc)
@@ -1956,7 +2073,7 @@ class RecomputeIsBoundToTheStoredConfiguration(unittest.TestCase):
                        "`cfg.min_seeds`, `cfg.width_tol` and `cfg.alpha` are not stored as metrics",
                        "FAIL CLOSED", "never fall back to module defaults"):
             self.assertIn(needle, doc)
-        mod = " ".join(bm.__doc__.split())
+        mod = " ".join(_doc(bm).split())
         self.assertIn("fails CLOSED", mod)
         # the open-routes list no longer claims every remaining hole is tampering
         self.assertIn("THAT FRAMING ONCE OVERSTATED THE CASE", mod)
@@ -1992,13 +2109,13 @@ class MarginsAreNotInTheConfigHash(unittest.TestCase):
         self.assertEqual(rv.reasons, ())                  # the config still matched: margins are not in it
 
     def test_the_gap_and_the_int_float_asymmetry_are_documented(self):
-        mg = " ".join(bm.Margins.__doc__.split())
+        mg = " ".join(_doc(bm.Margins).split())
         for needle in ("NOT COVERED BY `BenchmarkConfig.config_hash()`",
                        "TWO STUDIES DIFFERING ONLY IN MARGINS PRODUCE BYTE-IDENTICAL `config_hash`",
                        "reads the margin OUT OF THE RECORD",
                        "`config_hash` alone is not a complete provenance key"):
             self.assertIn(needle, mg)
-        ch = " ".join(bm.BenchmarkConfig.config_hash.__doc__.split())
+        ch = " ".join(_doc(bm.BenchmarkConfig.config_hash).split())
         self.assertIn("`Margins` is NOT a field", ch)
         self.assertIn("compare `==` yet hash DIFFERENTLY", ch)
         # the safe-direction asymmetry itself
@@ -2227,11 +2344,11 @@ class ProtocolParameterDefaultsAreNotSharedObjects(unittest.TestCase):
         self.assertGreater(after.hits, before.hits)
 
     def test_the_reason_is_written_down_where_the_next_reader_will_look(self):
-        mod = " ".join(bm.__doc__.split())
+        mod = " ".join(_doc(bm).split())
         self.assertIn("LITERAL default objects", mod)
         self.assertIn("one instance shared by every no-argument call", mod)
-        self.assertIn("CONSTRUCTED PER CALL", " ".join(bm.analyze_scores.__doc__.split()))
-        self.assertIn("constructed per call", " ".join(bm.run_study.__doc__.split()))
+        self.assertIn("CONSTRUCTED PER CALL", " ".join(_doc(bm.analyze_scores).split()))
+        self.assertIn("constructed per call", " ".join(_doc(bm.run_study).split()))
 
 
 class SdOverflowFallback(unittest.TestCase):
@@ -2325,7 +2442,7 @@ class RelabelRouteFullGrid(unittest.TestCase):
         self.assertEqual((accepted, rejected), (44, 40))        # 22 / 20 per base result, two base results
 
     def test_docstring_states_the_exact_rule(self):
-        doc = " ".join(bm.__doc__.split())
+        doc = " ".join(_doc(bm).split())
         for needle in ("22 accepted, 20 rejected",
                        "a record is accepted iff the flag is deleted, unmeasured or 0.0 (any code), or the flag is "
                        "1.0 and the decoded code is 'fixture' (2.0)",
@@ -2335,7 +2452,7 @@ class RelabelRouteFullGrid(unittest.TestCase):
         self.assertNotIn("Only a relabel that leaves the flag at 1.0 is caught", doc)
 
     def test_docstring_claims_are_text_pinned(self):
-        doc = " ".join(bm.__doc__.split())
+        doc = " ".join(_doc(bm).split())
         for needle in ("(as is deleting both fields)", "flag 0.0 with an out-of-range code",
                        "forging the code to 'fixture' (2.0) with the flag at 1.0 or deleted",
                        "code deleted with flag 0.0", "producer-asserted, not authenticated"):
@@ -2381,14 +2498,14 @@ class IntervalPairBoundsMustBeFiniteFloats(unittest.TestCase):
         self.assertEqual(p2.boot()[0], 0.0)
 
     def test_the_reason_is_recorded_where_the_next_reader_looks(self):
-        doc = " ".join(bm.IntervalPair._bound.__doc__.split())
+        doc = " ".join(_doc(bm.IntervalPair._bound).split())
         self.assertIn("is only `value is not None`", doc)
         self.assertIn("decisive **SUPPORTED** with no figures behind it", doc)
 
 
 class TIntervalAndBootstrapContracts(unittest.TestCase):
     def test_sum_vs_fsum_claim_is_stated_precisely(self):
-        doc = " ".join(bm._sum_sq.__doc__.split())
+        doc = " ".join(_doc(bm._sum_sq).split())
         for needle in ("overflow-equivalent", "220k random trials on Python 3.12.4 ONLY", "not proven value-equivalent",
                        "below Python 3.12 the built-in sum is uncompensated"):
             self.assertIn(needle, doc)
@@ -2575,8 +2692,13 @@ _DECLARED_METRIC_TOUCHES = {
     ("benchmark", "_metric_read", "value"),                  # THE checked reader
     ("benchmark", "_metric_declared_unmeasured", "value"),   # honest-absence seam
     ("benchmark", "_metric_declared_unmeasured", "reason"),
-    ("benchmark", "_metric_required", "__repr__"),           # names the offending metric in its ValueError
-    ("benchmark", "_metric_strict", "__repr__"),             # ditto
+    ("benchmark", "_shown", "__repr__"),                     # SR-10 item 1: the ONE place a
+    #   caller-supplied object is described for a message. It used to be TWO rows here,
+    #   `_metric_required` and `_metric_strict`, each spelling `{x!r}` for itself; routing both
+    #   through `benchmark._shown` collapsed them into this one, which is the whole point of the
+    #   section -- one place to decide, one place to degrade. `__format__` stays in
+    #   `_FORBIDDEN_TOUCHES`: `_shown` reaches a stored metric by `repr` or by `str`, never by
+    #   `format`, so a `__format__` touch on a MetricValue would still be a new consumer.
     ("robustness", "arm_difference", "reason"),              # quotes an absent arm's stated reason
     ("robustness", "benchmark_outcome.<locals>.outcome", "reason"),       # ditto, for a probe outcome
     ("robustness", "Scorecard.to_dict", "to_dict"),          # delegates serialisation to the carrier
@@ -2861,7 +2983,12 @@ reach is a site the probe does not check).""")
             probe_run()
         seen = rec.seen
         self.assertIn(("benchmark", "_metric_read", "value"), seen)          # it really did observe
-        self.assertGreaterEqual(len(seen), 8)
+        # 7, not 8, SINCE SR-10 ITEM 1: `_metric_required` and `_metric_strict` each used to
+        # perform their own `__repr__` touch and now both go through `benchmark._shown`, so two
+        # observed rows became one. The floor is derived from the declared table rather than
+        # written twice, so it cannot drift away from it.
+        self.assertGreaterEqual(len(seen), len(_DECLARED_METRIC_TOUCHES))
+        self.assertEqual(len(_DECLARED_METRIC_TOUCHES), 7)
         for attr in _FORBIDDEN_TOUCHES:
             offenders = sorted(t for t in seen if t[2] == attr)
             self.assertEqual(offenders, [], f"a stored metric was reached through {attr!r}: {offenders}")
@@ -3148,7 +3275,7 @@ class TheStaticSpellingRuleIsATripwireNotAGuarantee(unittest.TestCase):
                        "as a cheap tripwire -- not as a guarantee",
                        "it sees\n# only what the run it performs exercises"):
             self.assertIn(needle, bsrc, needle)
-        rdoc = " ".join(rb._enum_value.__doc__.split())
+        rdoc = " ".join(_doc(rb._enum_value).split())
         self.assertIn("it is a tripwire, not a guarantee, and this docstring used to describe it as one",
                       rdoc)
         self.assertIn("MEASURED 11 of 19 spellings", rdoc)
@@ -3453,7 +3580,7 @@ class TheCrossChecksFailClosedAndTheFlagsSurviveAsFarAsTheyCan(unittest.TestCase
             self.assertTrue(set(back.flags) <= set(pair.flags), (pair.flags, back.flags))
             self.assertNotIn("degenerate: all values tied", back.flags)
             self.assertFalse(any(f.startswith("heavy tail") for f in back.flags), back.flags)
-        doc = " ".join(bm._pair_from_record.__doc__.split())
+        doc = " ".join(_doc(bm._pair_from_record).split())
         for needle in ("it cannot be RESTORED", "Reconstructing prose is not carrying evidence",
                        "a SUBSET of the producer's, never a superset"):
             self.assertIn(needle, doc, needle)
@@ -3753,12 +3880,12 @@ class TheMinimumSeedsFloorHoldsForEveryValueTheFieldsCanHold(unittest.TestCase):
                     self.assertEqual(got, want, f"{name}: answered differently for the same number")
 
     def test_the_module_docstring_no_longer_claims_more_than_it_can(self):
-        doc = " ".join(bm.__doc__.split())
+        doc = " ".join(_doc(bm).split())
         self.assertIn("THIS BULLET USED TO END \"no component verdict exists below the minimum\", "
                       "FULL STOP, AND THAT WAS FALSE", doc)
         self.assertIn("`IntervalPair` had no `__post_init__` at all", doc)
         self.assertIn("normalised at construction now", doc)
-        reader = " ".join(bm._metric_read.__doc__.split())
+        reader = " ".join(_doc(bm._metric_read).split())
         self.assertIn("IT RETURNS A PLAIN `float`, NEVER THE STORED OBJECT", reader)
         src = Path(bm.__file__).read_text()
         self.assertIn("THIS COMMENT USED TO CONTINUE \"so a `MetricValue` built by the public API is "
@@ -4499,7 +4626,7 @@ class AMarginIsBoundedWhereverOneEnters(unittest.TestCase):
         self.assertIs(safe.verdict, J.JOINT_UNSUPPORTED)
 
     def test_the_three_falsified_statements_are_corrected_where_a_reader_looks(self):
-        mg = " ".join(bm.Margins.__doc__.split())
+        mg = " ".join(_doc(bm.Margins).split())
         self.assertNotIn("So the margin a recompute uses is always the margin that produced the record", mg)
         for needle in ('USED TO CLAIM "so the margin a recompute uses is always the margin that produced '
                        'the record", which was FALSE',
@@ -4507,7 +4634,7 @@ class AMarginIsBoundedWhereverOneEnters(unittest.TestCase):
                        "`Margins(-1e6, +1e6, -1e6)`",
                        "margins remain PRODUCER-ASSERTED"):
             self.assertIn(needle, mg)
-        vd = " ".join(bm.verdict_from_records.__doc__.split())
+        vd = " ".join(_doc(bm.verdict_from_records).split())
         self.assertNotIn("so no margin a recompute uses can come from the caller at all. ", vd + " ")
         for needle in ("A PROVENANCE ARGUMENT OFFERED AS A VALIDITY ARGUMENT",
                        'IT WAS ALSO CLAIMED TO "GRANT NOTHING OVER FORGING THE `gate_*` METRICS DIRECTLY", '
@@ -4515,10 +4642,10 @@ class AMarginIsBoundedWhereverOneEnters(unittest.TestCase):
                        "it cannot make a component SUPPORTED",
                        "The two are not equivalent"):
             self.assertIn(needle, vd)
-        cm = " ".join(bm._check_margin.__doc__.split())
+        cm = " ".join(_doc(bm._check_margin).split())
         self.assertIn("It does NOT close, and cannot close, the legal-`Margins` route", cm)
         self.assertIn("FOR ANY FINITE CAP", cm)
-        rd = " ".join(bm._metric_read.__doc__.split())
+        rd = " ".join(_doc(bm._metric_read).split())
         self.assertIn("`True` is an `int`", rd)
 
 
@@ -4553,7 +4680,7 @@ class ConfigHashIsCanonicalNotMerelyCalledCanonical(unittest.TestCase):
         self.assertIn("sort_keys=True", inspect.getsource(bm.BenchmarkConfig.config_hash))
 
     def test_the_repeatability_requirement_is_stated_where_the_reader_looks(self):
-        ch = " ".join(bm.BenchmarkConfig.config_hash.__doc__.split())
+        ch = " ".join(_doc(bm.BenchmarkConfig.config_hash).split())
         for needle in ("CANONICAL MEANS `sort_keys=True`, and that is load-bearing",
                        "9eaf4bfefc57 to 08d7772419c5", '"Repeatability" is the literal acceptance criterion'):
             self.assertIn(needle, ch)
@@ -4777,7 +4904,7 @@ class TheConfigBindingReadsTheWordTheKeyStores(unittest.TestCase):
         sweep: the `verdict_from_records` docstring is the one place a reader goes to learn how strong the
         config binding is, and until this round it described the VALUE lane only and said nothing about
         the NAME. A doc-only mutant that deletes the paragraph fails here."""
-        doc = " ".join(bm.verdict_from_records.__doc__.split())
+        doc = " ".join(_doc(bm.verdict_from_records).split())
         for needle in ("THE KEY LANE, added in round 12 because the sentence above was true of the VALUE "
                        "and said nothing about the NAME",
                        "carrying the hash THIS CALL will ask for",
@@ -4946,7 +5073,7 @@ class EveryWordLookedUpInAStoredMappingIsSwept(unittest.TestCase):
         self.assertEqual(ESCALATIONS + DENIALS + LATERAL + BOTH_RAISE, COMPLAINTS)
         self.assertEqual(CASES - COMPLAINTS, AGREED)
         self.assertEqual(CASES, len(list(self._cases())), "the figures are about THIS payload")
-        doc = " ".join(self.test_every_key_of_every_stored_mapping_reads_as_the_word_it_stores.__doc__
+        doc = " ".join(_doc(self.test_every_key_of_every_stored_mapping_reads_as_the_word_it_stores)
                        .split())
         for needle in ("all 129 cases classified", "13 ESCALATIONS", "21 DENIALS", "9 LATERAL",
                        "73 both-raise", "13 + 21 + 9 + 73 = 116", "Post-fix: 129 agree, 0 complaints"):
@@ -6248,7 +6375,7 @@ class TheEnumTableRowThatWasFalseIsCorrected(unittest.TestCase):
     def test_the_table_says_two_and_is_keyed_by_function_not_by_stale_line_numbers(self):
         """The corrected prose, pinned per CLAUDE.md's per-sentence rule: a doc-only mutant that restores
         "three", or that reinstates the line numbers, fails here."""
-        doc = " ".join(bm._enum_member.__doc__.split())
+        doc = " ".join(_doc(bm._enum_member).split())
         self.assertIn("would have opened TWO sites to close one", doc)
         self.assertNotIn("would have opened three sites to close one", doc)
         self.assertIn("THE TABLE IS KEYED BY FUNCTION, NOT BY LINE NUMBER", doc)
@@ -6755,7 +6882,7 @@ class PlainWordItselfIsPinnedAndNotOnlyItsCallers(unittest.TestCase):
             "treatment_kind: ARM_NAMES[_plain_word(getattr(treatment, 'arm_name', None))]"].split())
         self.assertIn("`None` must keep reading as 'not an arm name'", entry)
         self.assertIn("returns a non-`str` unchanged instead of stringifying it", entry)
-        doc = " ".join(bm._plain_word.__doc__.split())
+        doc = " ".join(_doc(bm._plain_word).split())
         self.assertIn("Anything that is not a `str` is returned UNCHANGED", doc)
         self.assertIn("rather than as the characters of `'None'`", doc)
 
@@ -6793,3 +6920,1002 @@ class PlainWordItselfIsPinnedAndNotOnlyItsCallers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ===================================================================== SR-10 item 1
+# EVERY DIAGNOSTIC `benchmark.py` BUILDS OUT OF A VALUE, DERIVED FROM ITS AST AND DECIDED IN WRITING.
+# Why a table and not the lines: round 12 DECLARED one escape (`benchmark.py:2094`, `score_seed`'s
+# `f"numerical failure: {e}"`), and that one line is one of 153 occurrences of seven protocols, of which
+# TWENTY-ONE were measured ending outside the family this module declares. A fix at the declared line
+# alone would have left twenty. So `repr` / `str` / `format` of a caller's object are spelled once, inside
+# `benchmark._shown`, `type(x).__name__` once inside `benchmark._type_name`, and this table decides every
+# remaining site by the PROVENANCE of its operand.
+_D_ROUTED = ("ROUTED through `_shown` / `_type_name`, which degrade instead of losing the refusal.")
+_D_HELPER = ("THE HELPER ITSELF: the one place each protocol is spelled, inside its own try/except.")
+_D_OWN = ("THIS MODULE'S OWN DATA -- a module constant, a `len()`/`sorted()`/`range()` of its own, a loop "
+          "variable over its own literals, a label a call site passed as a literal, or a number it "
+          "computed itself. There is no caller protocol to run.")
+_D_PLAIN = ("A PLAIN `int` / `float` / `str` BY AN ADMISSION THAT ALREADY RAN: `_plain_number` (which is "
+            "what `_check_margin` returns and what `_metric_read` hands on), `BenchmarkConfig."
+            "__post_init__` (which collapses every int/float field to its exact base type), "
+            "`IntervalPair.__post_init__` / `ComponentResult.__post_init__` (`n`, `min_n`), or a `str` "
+            "SLICE, which returns a base `str` even from a subclass. MEASURED: with a `float` subclass "
+            "whose `__repr__`/`__str__`/`__format__` raise handed to `BenchmarkConfig`, to a stored "
+            "`A` metric and to `summarize`'s values, none of these sites raised.")
+_D_GATED = ("Reached only AFTER a membership refusal against one of this module's own constants, so the "
+            "operand is one of this module's own words by the time it is described.")
+_D_STORED = ("LOAD-BEARING, NOT A DESCRIPTION: `repr(r)` is the INPUT to a sha256 over fixture rows, and "
+             "the rows are built by this module's own `build_fixture` from `make_rng`. Degrading it would "
+             "forge a fixture hash, which is the opposite of what `_shown` is for.")
+_D_WRITE = ("A WRITE, not a read: `factory.__name__ = f\"arm_{arm}\"` sets the name this module labels its "
+            "own arm factories with. `arm` comes from `ARM_NAMES`.")
+_D_LABEL = ("THE RECORD-LABEL CHANNEL, DECLARED OPEN WITH ITS MEASUREMENT -- see "
+            "`TheRecordLabelChannelIsStatedAndLeftOpen`. A `str` subclass whose `__format__` raises, "
+            "passed as `study_id` / `JointResult.subject` / an `arm` / a seed, takes the PUBLIC "
+            "`to_experiment_records`, `seed_records` and `planned_slot_records` out with a `RuntimeError` "
+            "(MEASURED at a04efa4 and still, on 3.12.4 and 3.13.5). It is NOT routed: a record's `name` "
+            "is the identifier a recompute looks records up BY, not a description, so degrading it to a "
+            "placeholder would file a real study under `<undescribable str: ...>` and "
+            "`verdict_from_records` would then answer `records missing for [...]`. Closing it needs an "
+            "admission on the label fields, which changes what three public functions ACCEPT; that is a "
+            "different task, and this row exists so it cannot be forgotten.")
+_D_NAMES = {id(v): k for k, v in list(globals().items()) if k.startswith("_D_")}
+
+
+def _derive_diagnostic_sites(src=None):
+    """{(subject, protocol, operand): [line numbers]} for every description-protocol site in
+    `benchmark.py`, read from its SOURCE and never from a list.
+
+    SEVEN PROTOCOL SPELLINGS, because seven is what a module can apply to an object it was handed:
+      1. `repr` / `str` / `format` / `ascii` as a CALL;
+      2. an f-string CONVERSION -- `{x!r}`, `{x!s}`, `{x!a}` and the bare `{x}`, which are FOUR
+         DIFFERENT protocol calls and not one (SR-06's lesson, and a sweep for `!r` alone sees one);
+      3. an f-string FORMAT SPEC, `f"{x:.0%}"`, which runs `__format__` with an EMPTY conversion field;
+      4. `type(x).__name__`;
+      5. `getattr(x, "__name__")`;
+      6. `"%s" % x`;
+      7. `"...".format(x)`.
+    EVERY SCOPE IS A SUBJECT -- the module body, every class body, every function AND EVERY LAMBDA.
+    THIS DERIVATION FAILED FOUR TIMES BEFORE IT WAS RIGHT, and each failure is recorded because the
+    failures are the evidence that the table is not decorative:
+      1. the first version was `test_robustness._derive_diagnostic_sites` copied as-is. That one knows
+         FOUR protocols and does NOT see 3, 6 or 7 -- the format spec, `%` and `.format`. Carried over
+         unexamined it would have reported a complete table over a blind sweep;
+      2. having ADDED the format spec, the first patch of this round then ROUTED THIRTY-SIX SITES AND
+         LEFT ONE OF THEM: `intervals_disagree`'s `f"widths differ by more than {width_tol:.0%}"`, still
+         OPEN through the PUBLIC `intervals_disagree` for a `float` subclass whose `__format__` raises
+         (MEASURED at benchmark.py:1309 before the fix and 1406 after the first pass). The derivation
+         saw it; the patch did not read its own derivation. That is this project's "a fix at one site
+         leaves a sibling" defect happening INSIDE the fix for it;
+      3. and then a SECOND surviving sibling, found the same way: `summarize`'s
+         `f"... > {tail_ratio_max} (flag only)"`, a bare `{}` on a PUBLIC parameter, MEASURED OPEN at
+         benchmark.py:1427 after the second pass. Two patches in a row each left exactly one site, which
+         is why the figure this table asserts is DERIVED and not counted by hand;
+      4. the first REACHABILITY harness probed the `{x!r}` sites with a `str` SUBCLASS and read four
+         in-family refusals as "closed". They were closed BY `_plain_word`, which collapses a `str`
+         subclass -- so the harness measured an existing admission and not the site. With a non-`str`
+         object in the same positions, `_arm_fit`, `GateResult.__post_init__` and
+         `HypothesisResult.__post_init__` were all OPEN. A probe that cannot distinguish "the site is
+         protected" from "my fixture was absorbed one layer up" reports a false SURVIVE.
+    `test_the_derivation_sees_each_of_the_shapes_it_missed` re-injects each shape into the SOURCE TEXT
+    and asserts it is seen; nothing on disk is touched."""
+    src = inspect.getsource(bm) if src is None else src
+    tree = ast.parse(src)
+    subjects = [("<module>", tree.body)]
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            subjects.append((n.name, n.body))
+        elif isinstance(n, ast.Lambda):
+            subjects.append(("<lambda>", [n.body]))
+        elif isinstance(n, ast.ClassDef):
+            subjects.append((n.name, n.body))
+    out: dict = {}
+
+    def add(name, proto, operand, lineno):
+        out.setdefault((name, proto, operand), []).append(lineno)
+
+    for name, body in subjects:
+        stack = list(body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                continue                                  # its own subject, above
+            kids = list(ast.iter_child_nodes(node))
+            if isinstance(node, ast.FormattedValue):
+                tag = "!" + chr(node.conversion) if node.conversion != -1 else "{}"
+                add(name, tag, ast.unparse(node.value), node.lineno)
+                if node.format_spec is not None:
+                    add(name, "formatspec", ast.unparse(node.value), node.lineno)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                    and node.func.id in ("repr", "str", "format", "ascii"):
+                add(name, node.func.id,
+                    ast.unparse(node.args[0]) if node.args else "", node.lineno)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                    and node.func.id == "getattr" and len(node.args) >= 2 \
+                    and isinstance(node.args[1], ast.Constant) and node.args[1].value == "__name__":
+                add(name, "getattr __name__", ast.unparse(node.args[0]), node.lineno)
+            if isinstance(node, ast.Attribute) and node.attr == "__name__":
+                add(name, "__name__", ast.unparse(node.value), node.lineno)
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod) \
+                    and isinstance(node.left, ast.Constant) and isinstance(node.left.value, str):
+                add(name, "%", ast.unparse(node.right), node.lineno)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                    and node.func.attr == "format":
+                add(name, ".format", ast.unparse(node), node.lineno)
+            stack.extend(kids)
+    return out
+
+
+def _undescribable(base=object, exc=RuntimeError, **extra):
+    """A class whose `__repr__`, `__str__` and `__format__` all raise `exc` -- OUTSIDE every family this
+    module declares, which is what makes an ESCAPE visible rather than indistinguishable from a refusal.
+    It lies about nothing else."""
+    def refuse(self, *a):
+        raise exc("describing this object refuses")
+    d = {"__repr__": refuse, "__str__": refuse, "__format__": refuse}
+    d.update(extra)
+    return type(f"Undescribable{base.__name__.title()}", (base,), d)
+
+
+def _unnameable_type_instance(exc=RuntimeError):
+    """An instance whose TYPE refuses `__name__`: the `type(x).__name__` channel, which is a different
+    protocol from `repr`/`str`/`format` and is reached through a METACLASS property."""
+    class Meta(type):
+        @property
+        def __name__(cls):
+            raise exc("naming this type refuses")
+    return Meta("Unnameable", (object,), {})()
+
+
+def _raised(call):
+    """The exception `call` raised, WITH ITS TRACEBACK, or None.
+
+    `assertRaises` cannot be used where the attribution matters: `unittest`'s
+    `_AssertRaisesContext.__exit__` stores `exc_value.with_traceback(None)` and calls
+    `traceback.clear_frames`, to avoid a reference cycle -- so `cm.exception.__traceback__` is None
+    and `_escape_module` answers None for every case. MEASURED: thirteen subTests of this round's
+    escape sweep reported `None != 'benchmark.py'` for that reason alone, and read as thirteen
+    attribution failures until the cause was found. `test_robustness` uses a bare `try/except` at
+    its one attribution site for the same reason; this is that, factored out."""
+    try:
+        call()
+    except BaseException as e:            # noqa: BLE001 -- the subject under test
+        return e
+    return None
+
+
+def _escape_module(e):
+    """The basename of the DEEPEST `src/toy/...` frame in `e`'s traceback.
+
+    The frame that RAISED is the test's own hostile protocol; the frame that was BUILDING THE MESSAGE is
+    the one an escape belongs to, and it is the last kit frame on the way down. Same rule, deliberately,
+    as `test_robustness._escape_owner`: that is how round 12 attributed this finding to this module in
+    the first place, so closing it is measured by the same instrument."""
+    out = None
+    for frame, _lineno in traceback.walk_tb(e.__traceback__):
+        name = frame.f_code.co_filename
+        if os.path.join("src", "toy") in name or "/src/toy/" in name:
+            out = os.path.basename(name)
+    return out
+
+
+_DIAGNOSTIC_SITES = {
+    ('__post_init__', '{}', 'SEED_METRICS'):
+        _D_OWN,
+    ('__post_init__', '{}', 'SUBJECT_KINDS'):
+        _D_OWN,
+    ('__post_init__', '{}', '_shown(c.metric, how=str)'):
+        _D_ROUTED,
+    ('__post_init__', '{}', '_shown(c.reason, how=str)'):
+        _D_ROUTED,
+    ('__post_init__', '{}', '_shown(g, how=str)'):
+        _D_ROUTED,
+    ('__post_init__', '{}', '_shown(g.name)'):
+        _D_ROUTED,
+    ('__post_init__', '{}', '_shown(h.verdict)'):
+        _D_ROUTED,
+    ('__post_init__', '{}', '_shown(self.hid)'):
+        _D_ROUTED,
+    ('__post_init__', '{}', '_shown(self.name)'):
+        _D_ROUTED,
+    ('__post_init__', '{}', '_shown(self.passed)'):
+        _D_ROUTED,
+    ('__post_init__', '{}', '_type_name(self.seed)'):
+        _D_ROUTED,
+    ('__post_init__', '{}', 'bad'):
+        _D_OWN,
+    ('__post_init__', '{}', 'hid'):
+        _D_OWN,
+    ('__post_init__', '{}', 'k'):
+        _D_OWN,
+    ('__post_init__', '{}', "sorted((n for n in failed if GATE_SCOPES[n] == 'all'))"):
+        _D_OWN,
+    ('__post_init__', '{}', 'sorted(GATE_SCOPES)'):
+        _D_OWN,
+    ('_arm_fit', '{}', 'ARM_NAMES'):
+        _D_OWN,
+    ('_arm_fit', '{}', '_shown(arm)'):
+        _D_ROUTED,
+    ('_as_list', '{}', '_type_name(v)'):
+        _D_ROUTED,
+    ('_as_list', '{}', 'what'):
+        _D_OWN,
+    ('_check_finite', '{}', 'what'):
+        _D_OWN,
+    ('_check_margin', '!r', 'MARGIN_MAX'):
+        _D_OWN,
+    ('_check_margin', '!r', 'f'):
+        _D_PLAIN,
+    ('_check_margin', '{}', '_shown(v)'):
+        _D_ROUTED,
+    ('_check_margin', '{}', 'what'):
+        _D_OWN,
+    ('_converged', '{}', '_shown(e, how=str)'):
+        _D_ROUTED,
+    ('_metric_count', '{}', '_shown(v)'):
+        _D_ROUTED,
+    ('_metric_count', '{}', 'what'):
+        _D_OWN,
+    ('_metric_required', '{}', '_shown(x)'):
+        _D_ROUTED,
+    ('_metric_required', '{}', 'what'):
+        _D_OWN,
+    ('_metric_strict', '{}', '_shown(x)'):
+        _D_ROUTED,
+    ('_metric_strict', '{}', 'what'):
+        _D_OWN,
+    ('_pair_from_record', '{}', '_shown(rec.name, how=str)'):
+        _D_ROUTED,
+    ('_pair_from_record', '{}', 'absent'):
+        _D_OWN,
+    ('_row_hashes', 'repr', 'r'):
+        _D_STORED,
+    ('_shown', 'format', 'v'):
+        _D_HELPER,
+    ('_shown', '{}', '_type_name(e)'):
+        _D_HELPER,
+    ('_shown', '{}', '_type_name(v)'):
+        _D_HELPER,
+    ('_student_factory', '__name__', 'factory'):
+        _D_WRITE,
+    ('_student_factory', '{}', 'arm'):
+        _D_OWN,
+    ('_type_name', '__name__', 'type(v)'):
+        _D_HELPER,
+    ('_verdict_from_bounds', '{}', 'min_n'):
+        _D_PLAIN,
+    ('_verdict_from_bounds', '{}', 'n'):
+        _D_PLAIN,
+    ('analyze_scores', '{}', "_shown(by['convergence'].reason, how=str)"):
+        _D_ROUTED,
+    ('analyze_scores', '{}', '_shown(g.name, how=str)'):
+        _D_ROUTED,
+    ('analyze_scores', '{}', '_shown(g.reason, how=str)'):
+        _D_ROUTED,
+    ('build', '{}', 'hid'):
+        _D_GATED,
+    ('build', '{}', 'metric'):
+        _D_GATED,
+    ('comp', '!r', 'want_level'):
+        _D_OWN,
+    ('comp', '{}', 'N_PRIMARY'):
+        _D_OWN,
+    ('comp', '{}', '_shown(lv)'):
+        _D_ROUTED,
+    ('comp', '{}', 'joint_n'):
+        _D_PLAIN,
+    ('comp', '{}', 'k'):
+        _D_OWN,
+    ('comp', '{}', 'pair.n'):
+        _D_PLAIN,
+    ('comp', '{}', 'tag'):
+        _D_OWN,
+    ('evaluate_gates', '!r', 'hi'):
+        _D_PLAIN,
+    ('evaluate_gates', '!r', 'lo'):
+        _D_PLAIN,
+    ('evaluate_gates', '!r', 'max(grs)'):
+        _D_PLAIN,
+    ('evaluate_gates', '!r', 'max(rs)'):
+        _D_PLAIN,
+    ('evaluate_gates', 'formatspec', 'cfg.max_failure_rate'):
+        _D_PLAIN,
+    ('evaluate_gates', 'formatspec', 'rate'):
+        _D_OWN,
+    ('evaluate_gates', '{}', 'SUBJECT_KINDS'):
+        _D_OWN,
+    ('evaluate_gates', '{}', '_type_name(scores[wrong[0]])'):
+        _D_ROUTED,
+    ('evaluate_gates', '{}', 'cfg.delta_A'):
+        _D_PLAIN,
+    ('evaluate_gates', '{}', 'cfg.eps_fit'):
+        _D_PLAIN,
+    ('evaluate_gates', '{}', 'cfg.loss_factor'):
+        _D_PLAIN,
+    ('evaluate_gates', '{}', 'cfg.max_failure_rate'):
+        _D_PLAIN,
+    ('evaluate_gates', '{}', 'cfg.min_seeds'):
+        _D_PLAIN,
+    ('evaluate_gates', '{}', 'cfg.tau_conv'):
+        _D_PLAIN,
+    ('evaluate_gates', '{}', 'key'):
+        _D_OWN,
+    ('evaluate_gates', '{}', 'n_att'):
+        _D_OWN,
+    ('evaluate_gates', '{}', 'n_fail'):
+        _D_OWN,
+    ('evaluate_gates', '{}', 'n_ok'):
+        _D_OWN,
+    ('evaluate_gates', '{}', 'rate'):
+        _D_OWN,
+    ('evaluate_gates', '{}', 'wrong[0]'):
+        _D_OWN,
+    ('evaluate_primary', '{}', '_shown(hid)'):
+        _D_ROUTED,
+    ('exploratory_interval', '{}', '_shown(name)'):
+        _D_ROUTED,
+    ('freeze_seed_list', '{}', 'k'):
+        _D_OWN,
+    ('intervals_disagree', '{}', '_shown(b)'):
+        _D_ROUTED,
+    ('intervals_disagree', '{}', '_shown(margin)'):
+        _D_ROUTED,
+    ('intervals_disagree', '{}', '_shown(t)'):
+        _D_ROUTED,
+    ('intervals_disagree', '{}', '_shown(wb)'):
+        _D_ROUTED,
+    ('intervals_disagree', '{}', "_shown(width_tol, spec='.0%')"):
+        _D_ROUTED,
+    ('intervals_disagree', '{}', '_shown(wt)'):
+        _D_ROUTED,
+    ('intervals_disagree', '{}', 'nm'):
+        _D_OWN,
+    ('opt', '{}', 'nm'):
+        _D_OWN,
+    ('planned_slot_records', '{}', 'TOY_LABEL'):
+        _D_OWN,
+    ('planned_slot_records', '{}', 'arm'):
+        _D_LABEL,
+    ('planned_slot_records', '{}', 's'):
+        _D_LABEL,
+    ('planned_slot_records', '{}', 'study_id'):
+        _D_LABEL,
+    ('score_predictor', '{}', '_shown(e, how=str)'):
+        _D_ROUTED,
+    ('score_predictor', '{}', '_shown(fx.G)'):
+        _D_ROUTED,
+    ('score_seed', '{}', '_shown(e, how=str)'):
+        _D_ROUTED,
+    ('seed_records', '{}', 'TOY_LABEL'):
+        _D_OWN,
+    ('seed_records', '{}', 'res.subject'):
+        _D_LABEL,
+    ('seed_records', '{}', 's.seed'):
+        _D_OWN,
+    ('seed_records', '{}', 'study_id'):
+        _D_LABEL,
+    ('summarize', 'formatspec', 'ratio'):
+        _D_OWN,
+    ('summarize', '{}', '_shown(tail_ratio_max, how=str)'):
+        _D_ROUTED,
+    ('summarize', '{}', 'ratio'):
+        _D_OWN,
+    ('to_experiment_records', '{}', 'TOY_LABEL'):
+        _D_OWN,
+    ('to_experiment_records', '{}', '_shown(g.name)'):
+        _D_ROUTED,
+    ('to_experiment_records', '{}', '_shown(res.subject_kind)'):
+        _D_ROUTED,
+    ('to_experiment_records', '{}', '_shown(scorer_validation)'):
+        _D_ROUTED,
+    ('to_experiment_records', '{}', 'absent'):
+        _D_OWN,
+    ('to_experiment_records', '{}', 'c.metric'):
+        _D_LABEL,
+    ('to_experiment_records', '{}', 'h.hid'):
+        _D_GATED,
+    ('to_experiment_records', '{}', 'kind'):
+        _D_OWN,
+    ('to_experiment_records', '{}', 'list(c.pair.flags)'):
+        _D_OWN,
+    ('to_experiment_records', '{}', 'list(res.deferred_gates)'):
+        _D_OWN,
+    ('to_experiment_records', '{}', 'n'):
+        _D_OWN,
+    ('to_experiment_records', '{}', 'res.fixture_name'):
+        _D_LABEL,
+    ('to_experiment_records', '{}', 'res.subject'):
+        _D_LABEL,
+    ('to_experiment_records', '{}', 'res.subject_kind'):
+        _D_GATED,
+    ('to_experiment_records', '{}', 'study_id'):
+        _D_LABEL,
+    ('to_experiment_records', '{}', 'tag'):
+        _D_OWN,
+    ('verdict_from_records', '{}', '_shown(exv)'):
+        _D_ROUTED,
+    ('verdict_from_records', '{}', '_shown(r.name, how=str)'):
+        _D_ROUTED,
+    ('verdict_from_records', '{}', 'bound[:12]'):
+        _D_PLAIN,
+    ('verdict_from_records', '{}', 'missing'):
+        _D_OWN,
+    ('verdict_from_records', '{}', 'n'):
+        _D_OWN,
+    ('verdict_from_records', '{}', 'sorted((h[:12] for h in stored))'):
+        _D_OWN,
+    ('verdict_from_records', '{}', 'want_hash[:12]'):
+        _D_PLAIN,
+}
+
+
+class ADiagnosticIsBuiltInOnePlace(unittest.TestCase):
+    """SR-10 item 1, closed as a CLASS rather than as a line.
+
+    An ERROR-MESSAGE CHANNEL IS A PROTOCOL CALL ON HOSTILE INPUT INSIDE THE RAISE PATH. Round 12 declared
+    ONE such site here, `score_seed`'s `f"numerical failure: {e}"` (benchmark.py:2094 at 4f06749/a04efa4),
+    and the fix for it is not that line: it is that `repr`/`str`/`format` of a caller's object happen in
+    exactly one place, `benchmark._shown`, `type(x).__name__` in exactly one, `benchmark._type_name`, and
+    every other site is decided here by the provenance of its operand.
+    WHAT THIS CLASS DOES NOT CLAIM: that no caller protocol can take this module out. The RECORD-LABEL
+    channel still can (declared, measured, and pinned next door), and so can a raising ATTRIBUTE LOOKUP or
+    a raising `__class__` -- both held open kit-wide, because an `isinstance` call is itself the lookup."""
+
+    def test_the_enumeration_is_derived_from_the_module_not_written(self):
+        derived = _derive_diagnostic_sites()
+        self.assertEqual(set(derived), set(_DIAGNOSTIC_SITES),
+                         "a description protocol is applied at a site this table does not decide: give it "
+                         "a row with the reason its operand cannot refuse, or route it through "
+                         "benchmark._shown / benchmark._type_name")
+        for key, why in _DIAGNOSTIC_SITES.items():
+            with self.subTest(site=key):
+                self.assertTrue(str(why).strip(), f"{key} has no decision written")
+        # THE FIGURES, DERIVED. Each is also quoted in `benchmark.py`'s own comment block, and a quoted
+        # figure nobody asserts is a figure that drifts -- so the block is checked against these.
+        self.assertEqual(len(derived), 123)
+        self.assertEqual(sum(len(v) for v in derived.values()), 153)
+        by_proto = collections.Counter(k[1] for k in derived)
+        self.assertEqual(dict(by_proto),
+                         {"{}": 109, "!r": 7, "formatspec": 3, "__name__": 2, "repr": 1, "format": 1})
+        self.assertEqual([k for k in derived if k[1] in ("!s", "!a", "str", "ascii", "%", ".format",
+                                                         "getattr __name__")], [],
+                         "a protocol spelling appeared that no site used before: `{x!s}`, `{x!a}`, "
+                         "`str(x)`, `ascii(x)`, `\"%s\" % x`, `\"{}\".format(x)` and "
+                         "`getattr(x, '__name__')` all run a caller's code and all belong in _shown / "
+                         "_type_name / a decided row")
+        by_decision = collections.Counter(_D_NAMES[id(w)] for w in _DIAGNOSTIC_SITES.values())
+        self.assertEqual(dict(by_decision),
+                         {"_D_ROUTED": 39, "_D_OWN": 47, "_D_PLAIN": 18, "_D_LABEL": 9, "_D_GATED": 4,
+                          "_D_HELPER": 4, "_D_STORED": 1, "_D_WRITE": 1})
+        self.assertEqual(sum(by_decision.values()), len(derived))
+        # THE STRUCTURAL CLAIMS, stated exactly rather than as "everything goes through the helper"
+        self.assertEqual(sorted(k for k in derived if _DIAGNOSTIC_SITES[k] is _D_HELPER),
+                         [("_shown", "format", "v"), ("_shown", "{}", "_type_name(e)"),
+                          ("_shown", "{}", "_type_name(v)"), ("_type_name", "__name__", "type(v)")])
+        self.assertEqual([k for k in derived if k[1] == "repr"], [("_row_hashes", "repr", "r")])
+        self.assertEqual([k for k in derived if k[1] == "__name__"
+                          and _DIAGNOSTIC_SITES[k] is not _D_HELPER],
+                         [("_student_factory", "__name__", "factory")])
+        for subject, proto, operand in (k for k, w in _DIAGNOSTIC_SITES.items() if w is _D_ROUTED):
+            self.assertTrue(operand.startswith(("_shown(", "_type_name(")), (subject, proto, operand))
+        # and the module's own comment block quotes these figures
+        block = inspect.getsource(bm).split("diagnostic construction")[1].split("def _shown")[0]
+        for quoted in ("123 sites in 153 occurrences", "of which 39 are ROUTED",
+                       "AND SIXTEEN MORE OCCURRENCES THE DECLARATION DID NOT NAME",
+                       "SEVENTEEN DISTINCT OCCURRENCES escaped"):
+            self.assertIn(quoted, block,
+                          "benchmark.py's comment block quotes a figure this derivation does not produce")
+
+    def test_the_derivation_sees_each_of_the_shapes_it_missed(self):
+        """WATCHING THE DERIVATION FAIL, which is the only evidence the table is not decorative. Six
+        shapes, each injected back into the SOURCE TEXT; nothing on disk is touched. The first three are
+        the protocols `test_robustness`'s derivation -- the one this was copied from -- does NOT see."""
+        src = inspect.getsource(bm)
+        base = set(_derive_diagnostic_sites(src))
+        anchor = "\nMatrix = tuple\n"
+        cases = {
+            # 1. a FORMAT SPEC: `__format__` runs with an EMPTY conversion field, so one injected
+            #    `f"{x:.0%}"` is TWO rows -- the bare `{}` reading AND the spec reading -- and both
+            #    must appear. This is the shape the first pass of this round's own fix left open at
+            #    two public sites.
+            (("<module>", "formatspec", "MARGIN_MAX"), ("<module>", "{}", "MARGIN_MAX")):
+                (f'_INJECTED = f"{{MARGIN_MAX:.0%}}"', "formatspec"),
+            # 2. `"%s" % x` -- an ast.BinOp, not a Call and not a FormattedValue
+            (("<module>", "%", "MARGIN_MAX"),):
+                ('_INJECTED = "%s" % MARGIN_MAX', "%"),
+            # 3. `"...".format(x)` -- an Attribute call, not the BUILTIN `format`
+            (("<module>", ".format", "'{}'.format(MARGIN_MAX)"),):
+                ('_INJECTED = "{}".format(MARGIN_MAX)', ".format"),
+            # 4. `{x!s}` and `{x!a}`, which are not `{x!r}` and not the bare `{x}`
+            (("<module>", "!s", "MARGIN_MAX"),):
+                (f'_INJECTED = f"{{MARGIN_MAX!s}}"', "!s"),
+            (("<module>", "!a", "MARGIN_MAX"),):
+                (f'_INJECTED = f"{{MARGIN_MAX!a}}"', "!a"),
+            # 5. `getattr(x, "__name__")`, which is none of the spellings above -- the protocol that left
+            #    four public positions open in `toy/robustness.py` behind a passing set-equality check
+            (("<module>", "getattr __name__", "MARGIN_MAX"),):
+                ('_INJECTED = getattr(MARGIN_MAX, "__name__", "x")', "getattr"),
+        }
+        self.assertEqual(src.count(anchor), 1, "the injection anchor moved")
+        for expected, (inject, _label) in cases.items():
+            with self.subTest(shape=expected):
+                got = set(_derive_diagnostic_sites(src.replace(anchor, anchor + inject + "\n")))
+                self.assertEqual(got - base, set(expected),
+                                 "the derivation does not see this shape, so a site of it could be added "
+                                 "to benchmark.py while the set-equality check above passed")
+                for row in expected:
+                    self.assertNotIn(row, _DIAGNOSTIC_SITES)
+        # 6. and the SCOPES: a site in the module body, a class body and a LAMBDA are each their own
+        #    subject. A derivation over `ast.FunctionDef` alone sees none of the three.
+        scope_cases = {
+            ("Margins", "!r", "MARGIN_MAX"):
+                ("class Margins:", 'class Margins:\n    _INJECTED = f"{MARGIN_MAX!r}"'),
+            ("<lambda>", "!r", "MARGIN_MAX"):
+                ("return lambda rows: fx.teacher.outputs",
+                 'return lambda rows: f"{MARGIN_MAX!r}" and fx.teacher.outputs'),
+        }
+        for expected, (old, new) in scope_cases.items():
+            with self.subTest(scope=expected):
+                self.assertEqual(src.count(old), 1, old)
+                got = set(_derive_diagnostic_sites(src.replace(old, new)))
+                self.assertEqual(got - base, {expected})
+
+    def test_shown_is_text_preserving_for_an_honest_value(self):
+        """`_shown` must not have changed a single message this module already produced. For a value whose
+        protocol answers it IS that protocol, in all three spellings."""
+        for v in (0.25, 10, "words", -1.5e308, None, True, (1, 2), bm.Verdict.SUPPORTED,
+                  MetricValue.measured(1.0), bm.Margins()):
+            with self.subTest(v=type(v).__name__):
+                self.assertEqual(bm._shown(v), repr(v))
+                self.assertEqual(bm._shown(v, how=str), str(v))
+        self.assertEqual(bm._shown(0.25, spec=".0%"), format(0.25, ".0%"))
+        self.assertEqual(bm._shown(0.25, spec=".0%"), "25%")
+        # and the real message is unchanged, which is what `test_a_wide_interval...` pins elsewhere
+        self.assertIn("widths differ by more than 25%",
+                      bm.intervals_disagree((1.0, 3.0), (1.0, 1.0), 0.0, 0.25)[1])
+        # DEGRADED, not lost, and the placeholder names both types so the reason is still diagnostic
+        u = _undescribable()()
+        self.assertEqual(bm._shown(u),
+                         "<undescribable UndescribableObject: RuntimeError raised while describing it>")
+        self.assertEqual(bm._shown(u, how=str), bm._shown(u))
+        self.assertEqual(bm._shown(u, spec=".0%"), bm._shown(u))
+        self.assertEqual(bm._type_name(_unnameable_type_instance()), "<unnamed type>")
+        # the exits that must still propagate: a diagnostic helper is not a blanket swallow.
+        # THE TUPLE IS PINNED BEFORE IT IS SWEPT, and that is a MEASURED correction rather than
+        # belt-and-braces: with only the sweep, the mutant `_UNCONVERTED = ()` was UNKILLED on
+        # both interpreters, because an empty tuple makes the loop body run zero times and a
+        # vacuous sweep reports OK. The harness caught it only because it fails the RUN on an
+        # unkilled mutant. This is the project's own vacuity defect inside this round's own test.
+        self.assertEqual(bm._UNCONVERTED, (MemoryError, RecursionError, SystemError),
+                         "the unconverted-exit tuple is a KIT-WIDE policy, spelled identically in "
+                         "`toy.stability` and `toy.robustness`: these three are resource/interpreter "
+                         "failures, not descriptions that refused, and a diagnostic helper that "
+                         "swallowed them would convert a MemoryError into a placeholder string")
+        swept = 0
+        for exc in bm._UNCONVERTED:
+            with self.subTest(exc=exc.__name__):
+                with self.assertRaises(exc):
+                    bm._shown(_undescribable(exc=exc)())
+                with self.assertRaises(exc):
+                    bm._type_name(_unnameable_type_instance(exc))
+                swept += 1
+        self.assertEqual(swept, len(bm._UNCONVERTED))      # the sweep was not vacuous
+        self.assertEqual(swept, 3)
+        # and a BaseException that is NOT in the tuple propagates anyway, because the helper
+        # catches `Exception` and not `BaseException`
+        with self.assertRaises(KeyboardInterrupt):
+            bm._shown(_undescribable(exc=KeyboardInterrupt)())
+
+    def test_the_declared_cross_owner_escape_is_closed(self):
+        """ITEM 1 ITSELF, measured exactly as round 12 measured it, through the PUBLIC
+        `robustness.benchmark_outcome` adapter that the declaration named.
+
+        BEFORE (a04efa4, 3.12.4 and 3.13.5): a `factory` raising a `ValueError` SUBCLASS -- inside
+        `score_seed`'s declared `except ValueError` family -- whose own description refuses turned the
+        fail-closed record into a propagating `RuntimeError` whose deepest kit frame was
+        `benchmark.py:2094`. `score_seed` and `run_study` propagated it too.
+        AFTER: the seed is COUNTED AS FAILED with its reason degraded to the placeholder, which is what a
+        fail-closed record is for; `benchmark_outcome` then raises its own declared `ValueError` out of
+        `robustness.py`, because the metric is genuinely unmeasured."""
+        E = _undescribable(ValueError)
+        factory = lambda *a, **k: (_ for _ in ()).throw(E("refused"))
+        exc = _raised(lambda: rb.benchmark_outcome(factory, "S", None)(1))
+        self.assertIsInstance(exc, ValueError)          # in family, not RuntimeError
+        self.assertNotIsInstance(exc, E)
+        self.assertNotIsInstance(exc, RuntimeError)
+        self.assertEqual(_escape_module(exc), "robustness.py",
+                         "the message construction that propagated is no longer in benchmark.py")
+        self.assertIn("S unmeasured", str(exc))
+        self.assertIn("undescribable", str(exc))
+        # and the module's own entry points now RECORD the failure instead of propagating
+        sc = bm.score_seed(1, factory, SMALL)
+        self.assertFalse(sc.ok)
+        self.assertEqual(sc.metrics["S"].reason,
+                         "numerical failure: <undescribable UndescribableValueerror: RuntimeError "
+                         "raised while describing it>")
+        tiny = bm.BenchmarkConfig(steps=20, steps_conv=25, n_boot=50, n_train=16, n_eval=16)
+        res = bm.run_study(bm.freeze_seed_list(7, 4), factory, subject="hostile",
+                           registered_digest=None, cfg=tiny)
+        self.assertEqual(res.n_failed, 4)
+        self.assertEqual(res.verdict, J.JOINT_INCONCLUSIVE)
+
+    def test_every_escape_measured_at_a04efa4_is_closed_and_each_is_still_reached(self):
+        """THE WHOLE DIAGNOSTIC CHANNEL, re-run case by case through the route that measured it.
+
+        THE DERIVED FIGURES, from one harness run against `git archive a04efa4` and against this tree,
+        identical on 3.12.4 and on 3.13.5: 23 cases; SEVENTEEN DISTINCT benchmark.py LINES escaped before
+        (813, 840, 878, 1043, 1305, 1309, 1427, 1585, 1635, 1807, 1956, 1994, 2084, 2094, 2136, 2138,
+        2192 -- three of the 23 cases share 2094, which is why 20 escaping cases are 17 occurrences);
+        ZERO after. The declaration named ONE of the seventeen.
+        TWO OF THE 23 ARE NOT A MEASUREMENT OF THIS CHANNEL AND ARE MARKED, not quietly counted:
+        `_converged`'s handler and `score_predictor`'s `G_s={fx.G!r}` were NOT reached open by this
+        round's fixtures (the first because `score_seed`'s own handler catches the re-run first on this
+        fixture, the second because an ineligible `G` is produced by this module's own arithmetic), and
+        `exploratory_interval`'s `{name!r}` refused with a `TypeError` from string concatenation one line
+        earlier. ROUTED ANYWAY, because NOT REACHED IS NOT CLOSED -- and recorded here so the next reader
+        does not read three unreached sites as three measurements.
+        Two assertions per reached case, because either alone passes for the wrong reason: the exception
+        is INSIDE the declared family AND the hostile object was really DESCRIBED (the message carries
+        the placeholder), so a fixture absorbed one layer up cannot read as a closed site. That exact
+        flaw is why this round's first reachability harness reported four false closures."""
+        EV, OBJ = _undescribable(ValueError), _undescribable()
+        throw = lambda E: (lambda *a, **k: (_ for _ in ()).throw(E("refused")))
+
+        class BadPred:
+            def __call__(self, m):
+                raise EV("refused")
+
+        def fixture_build_raises():
+            with mock.patch.object(bm, "build_fixture", throw(EV)):
+                return bm.score_seed(1, bm.fixture_oracle_gated, SMALL)
+
+        def converged_raises():
+            calls = []
+
+            def factory(fx, cfg):
+                calls.append(1)
+                if len(calls) > 2:                            # the converged-budget re-run
+                    raise EV("refused")
+                return bm.fixture_oracle_gated(fx, cfg)
+            return bm.score_seed(1, factory, SMALL)
+
+        # (line measured OPEN at a04efa4 or None for "not reached by this round's fixtures",
+        #  callable, expected outcome)
+        REACHED_RECORDS = [
+            (2094, lambda: bm.score_seed(1, throw(EV), SMALL).metrics["S"].reason),
+            (2084, lambda: fixture_build_raises().metrics["S"].reason),
+            (1956, lambda: bm.score_seed(1, lambda fx, cfg: BadPred(), SMALL).metrics["S"].reason),
+            (1427, lambda: " ".join(bm.summarize("nm", [1.0] * 24 + [1e9], 0.9875, 10, 7, 2,
+                                                 _undescribable(float)(10.0)).flags)),
+            (1309, lambda: bm.intervals_disagree((1.0, 3.0), (1.0, 1.0), 0.0,
+                                                 _undescribable(float)(0.25))[1]),
+            (1305, lambda: bm.intervals_disagree((_undescribable(float)(-1.0),
+                                                  _undescribable(float)(1.0)), (1.0, 2.0), 0.0)[1]),
+        ]
+        REACHED_RAISES = [
+            (1807, lambda: bm._arm_fit(1, OBJ(), SMALL)),
+            (2136, lambda: bm.GateResult(OBJ(), True, "r")),
+            (2138, lambda: bm.GateResult("min_seeds", OBJ(), "r")),
+            (1585, lambda: bm.HypothesisResult(OBJ(), (), bm.Verdict.INCONCLUSIVE)),
+            (1635, lambda: bm.evaluate_primary(OBJ(), {}, bm.Margins(), SMALL, 7)),
+            (1994, lambda: bm.SeedScores.from_values(_unnameable_type_instance(), 1.0, 1.0, 1.0, 1.0)),
+            (1043, lambda: bm.sample_sd(_unnameable_type_instance())),
+            (2192, lambda: bm.evaluate_gates([_unnameable_type_instance()], FZ, FZ.digest, SMALL,
+                                             "trained")),
+            (878, lambda: bm.Margins(delta_S=OBJ())),
+            (813, lambda: bm._metric_required(OBJ(), "w")),
+            (840, lambda: bm._metric_strict(OBJ(), "w")),
+            (813, lambda: bm._metric_count(_undescribable(float)(1.5), "w")),
+        ]
+        NOT_REACHED = [
+            ("_converged converged-budget run failed {e}",
+             lambda: converged_raises().metrics["delta_conv"].reason),
+            ("score_predictor G_s={fx.G!r}",
+             lambda: bm.score_predictor(bm.build_fixture(1, SMALL), lambda m: m,
+                                        lambda m: m, g_min=float("inf")).S.reason),
+            ("exploratory_interval {name!r} (refused by TypeError one line earlier)",
+             lambda: bm.exploratory_interval(OBJ(), [1.0, 2.0, 3.0], SMALL, 7)),
+        ]
+        # THE FIGURES, derived from these lists rather than written in the docstring alone
+        self.assertEqual(len(REACHED_RECORDS) + len(REACHED_RAISES) + len(NOT_REACHED) + 2, 23,
+                         "the 23 harness cases are these plus the two whole-API routes below")
+        measured_lines = {ln for ln, _ in REACHED_RECORDS} | {ln for ln, _ in REACHED_RAISES}
+        self.assertEqual(sorted(measured_lines),
+                         [813, 840, 878, 1043, 1305, 1309, 1427, 1585, 1635, 1807, 1956, 1994, 2084,
+                          2094, 2136, 2138, 2192])
+        self.assertEqual(len(measured_lines), 17)
+        for line, call in REACHED_RECORDS:
+            with self.subTest(a04efa4_line=line):
+                text = call()
+                self.assertIn("undescribable", text,
+                              "the hostile object no longer reaches this site, so this case measures "
+                              "nothing: fix the fixture rather than deleting the case")
+        for line, call in REACHED_RAISES:
+            with self.subTest(a04efa4_line=line):
+                exc = _raised(call)
+                self.assertIsInstance(exc, ValueError)      # IN the declared family
+                self.assertNotIsInstance(exc, RuntimeError)
+                msg = str(exc)
+                self.assertTrue("undescribable" in msg or "unnamed type" in msg, msg)
+                self.assertEqual(_escape_module(exc), "benchmark.py",
+                                 "the refusal no longer comes from this module, so this case no "
+                                 "longer measures this site")
+        for label, call in NOT_REACHED:
+            with self.subTest(not_reached=label):
+                exc = _raised(call)
+                self.assertNotIsInstance(exc, RuntimeError,
+                                         "a site this round declared UNREACHED by its fixtures is "
+                                         "now reachable: promote it to REACHED with its line")
+                if exc is not None:
+                    self.assertIsInstance(exc, (ValueError, TypeError))
+        # and the two whole-API routes, which are the shape the declaration was written about
+        with self.assertRaises(ValueError):
+            rb.benchmark_outcome(throw(EV), "S", None)(1)
+        tiny = bm.BenchmarkConfig(steps=20, steps_conv=25, n_boot=50, n_train=16, n_eval=16)
+        self.assertEqual(bm.run_study(bm.freeze_seed_list(7, 4), throw(EV), subject="h",
+                                      registered_digest=None, cfg=tiny).n_failed, 4)
+
+    def test_a_hostile_description_cannot_change_which_exception_a_caller_sees(self):
+        """THE PROPERTY THE WHOLE SECTION IS FOR, asserted as a property and not site by site: the
+        exception TYPE a caller branches on is the same whether the object describes itself or refuses.
+        Measured by running the same route twice -- once with an honest object, once with the hostile
+        twin -- and comparing the exception classes."""
+        honest_hostile = [
+            (lambda o: bm.GateResult(o, True, "r"), "zzz", _undescribable(str)("zzz")),
+            (lambda o: bm.Margins(delta_S=o), float("nan"), _undescribable(float)(float("nan"))),
+            (lambda o: bm._metric_required(o, "w"), object(), _undescribable()()),
+            (lambda o: bm._arm_fit(1, o, SMALL), object(), _undescribable()()),
+        ]
+        for call, honest, hostile in honest_hostile:
+            with self.subTest(call=call):
+                try:
+                    call(honest)
+                except Exception as e:                                        # noqa: BLE001
+                    honest_type = type(e)
+                else:
+                    self.fail("the honest half of this pair no longer refuses")
+                with self.assertRaises(honest_type):
+                    call(hostile)
+
+
+class TheRecordLabelChannelIsStatedAndLeftOpen(unittest.TestCase):
+    """THE ADJACENT CHANNEL THIS ROUND DID NOT CLOSE, declared with its measurement rather than omitted.
+
+    `to_experiment_records`, `seed_records` and `planned_slot_records` build an `ExperimentRecord.name`, a
+    `RunProvenance.run_id` and a `notes` string out of caller-supplied identifiers. A `str` subclass whose
+    `__format__` raises, passed as `study_id`, as `JointResult.subject`, as an `arm` or as a seed, takes
+    all three PUBLIC functions out with a `RuntimeError` -- MEASURED on 3.12.4 and 3.13.5, at a04efa4 and
+    still at this HEAD. It is NOT routed through `_shown`, and the reason is at `_D_LABEL`: a record's name
+    is the identifier a recompute looks records up BY. The same asymmetry `robustness._name_attr` records.
+    THIS TEST FAILS WHEN THE CHANNEL CLOSES, which is the point: it is here to rot loudly, exactly as
+    `test_robustness._CROSS_OWNER_ESCAPES` was, and the fix is to delete it and the `_D_LABEL` rows with
+    it -- not to soften it into a carve-out for something that no longer happens."""
+
+    def _hostile(self):
+        return _undescribable(str, exc=RuntimeError)
+
+    def test_the_five_label_sites_are_declared_and_still_reachable(self):
+        label_rows = sorted(k for k, w in _DIAGNOSTIC_SITES.items() if w is _D_LABEL)
+        self.assertEqual(len(label_rows), 9)
+        self.assertEqual({k[0] for k in label_rows},
+                         {"to_experiment_records", "seed_records", "planned_slot_records"})
+        self.assertEqual({k[2] for k in label_rows},
+                         {"study_id", "res.subject", "res.fixture_name", "arm", "s", "c.metric"})
+        H = self._hostile()
+        res = oracle()
+        ts = TS_PROBE
+        cases = {
+            "to_experiment_records study_id":
+                lambda: bm.to_experiment_records(res, study_id=H("sid"), base_seed=7, timestamp_utc=ts),
+            "seed_records study_id":
+                lambda: bm.seed_records(res, study_id=H("sid"), timestamp_utc=ts),
+            "planned_slot_records arm":
+                lambda: bm.planned_slot_records(study_id="sid", arms=[H("E")], seeds=[1],
+                                                timestamp_utc=ts),
+            "planned_slot_records seed":
+                lambda: bm.planned_slot_records(study_id="sid", arms=["E"],
+                                                seeds=[_undescribable(int)(1)], timestamp_utc=ts),
+            "to_experiment_records res.subject":
+                lambda: bm.to_experiment_records(dataclasses.replace(res, subject=H("oracle")),
+                                                 study_id="sid", base_seed=7, timestamp_utc=ts),
+            "seed_records res.subject":
+                lambda: bm.seed_records(dataclasses.replace(res, subject=H("oracle")),
+                                        study_id="sid", timestamp_utc=ts),
+        }
+        for label, call in cases.items():
+            with self.subTest(case=label):
+                exc = _raised(call)
+                self.assertIsInstance(exc, RuntimeError,
+                                      "the record-label channel no longer escapes: delete this test, "
+                                      "the _D_LABEL rows and the paragraph in benchmark.py")
+                self.assertEqual(_escape_module(exc), "benchmark.py",
+                                 "the record-label channel no longer escapes from benchmark.py: delete "
+                                 "this test, the _D_LABEL rows and the paragraph in benchmark.py")
+        # and the declaration is written where a reader of the module will find it
+        block = inspect.getsource(bm).split("diagnostic construction")[1].split("def _shown")[0]
+        self.assertIn("AND WHAT THIS DOES NOT CLOSE", block)
+        self.assertIn("RECORD-LABEL channel", block)
+        self.assertIn("TheRecordLabelChannelIsStatedAndLeftOpen", block)
+
+
+class TheDocPinsAreReadFromSourceSoNothingGoesDarkUnderMinusOO(unittest.TestCase):
+    """SR-10 item 2. `python -OO` strips docstrings; at a04efa4 this module was 338 ran, failures=2,
+    errors=19 under it, identically on 3.12.4 and 3.13.5.
+
+    The fix reads every pinned docstring OUT OF THE SOURCE with `ast.get_docstring(..., clean=False)`
+    rather than off `__doc__`, so the figure the SR-06 attestation asked for is ZERO: no assertion in this
+    file is behind a docstring-existence guard, and no pin that dies in a normal run is unkilled under
+    `-OO`. Both halves are DERIVED below, not asserted in prose."""
+
+    def _this_file_ast(self):
+        return ast.parse(inspect.getsource(sys.modules[__name__]))
+
+    def test_doc_reads_exactly_what_dunder_doc_holds(self):
+        """`_doc` is only a legitimate substitute if it returns the SAME STRING. Asserted object by
+        object, over the objects this file actually pins -- derived from its own AST, so a new pin is
+        covered without anyone remembering to add it."""
+        tree = self._this_file_ast()
+        exprs = sorted({ast.unparse(n.args[0]) for n in ast.walk(tree)
+                        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                        and n.func.id == "_doc" and n.args})
+        # 17 DISTINCT PINNED OBJECTS in 31 reads, DERIVED: the figure was first written as ">= 20"
+        # from the 31 `__doc__` occurrences this file had before the rewrite, which counted READS
+        # and not OBJECTS -- a count of a construct is not a measurement of its extent.
+        resolvable = [e for e in exprs if e.startswith(("bm", "rb", "schema_mod"))]
+        self.assertEqual(len(resolvable), 15, resolvable)
+        self.assertEqual(len(exprs), 18, exprs)   # + two `test_...` methods and `_doc`'s own `obj`
+        checked = 0
+        for expr in exprs:
+            if not expr.startswith(("bm", "rb", "schema_mod")):
+                continue        # `self.test_...` (a bound method) and `_doc`'s own parameter `obj`
+            with self.subTest(pinned=expr):
+                obj = eval(expr, {"bm": bm, "rb": rb, "schema_mod": schema_mod})   # noqa: S307
+                self.assertIsNotNone(_doc(obj), f"{expr} has no docstring in the source")
+                if sys.flags.optimize < 2:
+                    # `inspect.cleandoc` ON BOTH SIDES, not raw equality. Raw equality held on
+                    # 3.12.4 and failed on 3.13.5 for all fifteen of these objects, because CPython
+                    # 3.13 strips a docstring's common indentation at compile time (gh-81283). The
+                    # asymmetry showed as 15 failures on 3.13.5 normal, 0 on 3.12.4 and 0 under
+                    # `-OO` on both -- the `-OO` zero being the clue, since this branch only runs
+                    # where docstrings exist.
+                    self.assertEqual(_doc(obj), inspect.cleandoc(obj.__doc__),
+                                     "_doc read something other than the docstring itself")
+                    # and the stronger property that DOES hold on both: the whitespace-collapsed
+                    # text, which is the normalisation every pin in this file applies.
+                    self.assertEqual(" ".join(_doc(obj).split()),
+                                     " ".join(obj.__doc__.split()))
+                checked += 1
+        self.assertEqual(checked, len(resolvable))
+        # the test method whose OWN docstring is pinned: resolved off a real instance
+        own = self.__class__(self._testMethodName)
+        self.assertIsNotNone(_doc(own.test_doc_reads_exactly_what_dunder_doc_holds))
+        # the two ways `__doc__` is wrong under `-OO`, both demonstrated rather than described
+        self.assertIs(bm.__doc__ is None, sys.flags.optimize >= 2)
+        self.assertTrue(dataclasses.is_dataclass(bm.Margins))
+        if sys.flags.optimize >= 2:
+            # (1) stripped to None ...
+            self.assertIsNone(bm.sample_sd.__doc__)
+            # (2) ... and SUBSTITUTED for a dataclass: present and WRONG. This is why two of the
+            # nineteen -OO problems were FAILURES and not errors.
+            self.assertIsNotNone(bm.Margins.__doc__)
+            self.assertEqual(bm.Margins.__doc__,
+                             bm.Margins.__name__ + str(inspect.signature(bm.Margins)).replace(
+                                 " -> None", ""))
+            self.assertNotIn("NOT COVERED BY", bm.Margins.__doc__)
+        else:
+            self.assertIn("NOT COVERED BY", bm.Margins.__doc__)
+            # THE 3.13 DIFFERENCE, pinned as a measurement rather than left as a remark: on 3.13
+            # the attribute is already de-indented, on 3.12 it is not, and `cleandoc` of either is
+            # the same text. If a future interpreter changes this again, this line says so.
+            # The `__doc__` read is INLINE, not via a local: the mode-gated census in
+            # `test_nothing_in_this_file_is_doc_gated...` requires every one-mode assertion to be
+            # visibly ABOUT `__doc__`, and with a local named `second` it was not -- that census
+            # caught this very line on its first run, which is the only reason to trust it.
+            self.assertIs(bm.BenchmarkConfig.config_hash.__doc__.splitlines()[1]
+                          .startswith("        "), sys.version_info < (3, 13),
+                          "CPython 3.13 strips a docstring's common indentation at compile time "
+                          "(gh-81283). That is why `_doc` normalises with `inspect.cleandoc` "
+                          "instead of comparing the raw literal: raw equality held on 3.12.4 and "
+                          "failed on 3.13.5 for all fifteen pinned objects.")
+        self.assertIn("NOT COVERED BY", _doc(bm.Margins))     # in BOTH modes, which is the whole point
+
+    def test_nothing_in_this_file_is_doc_gated_and_dunder_doc_is_read_in_one_place(self):
+        """THE `-OO` FIGURE, DERIVED, so that it stops being a journal entry nothing can check.
+
+        `test_stability` closed the same class with `if _doc(x) is not None:` guards and paid 18
+        assertions behind 13 guards that GO DARK under `-OO` at an unchanged green count. The figure
+        here is written in the comment at THE `-OO` ROW and must be zero on both counts; and the reason
+        it stays zero is structural -- `__doc__` is read in exactly ONE place in this file, inside
+        `_doc` -- so a future raw `__doc__` read cannot be added and leave the suite green under `-OO`."""
+        src = inspect.getsource(sys.modules[__name__])
+        tree = ast.parse(src)
+        doc_guards = [n for n in ast.walk(tree) if isinstance(n, ast.If)
+                      and re.fullmatch(r"(doc|_doc\(.+\)|.+\.__doc__) is not None",
+                                       ast.unparse(n.test))]
+        doc_gated = sum(1 for g in doc_guards
+                        for c in ast.walk(ast.Module(body=g.body, type_ignores=[]))
+                        if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                        and c.func.attr.startswith("assert"))
+        written = re.search(r"DOC-GATED: (\d+) assertions behind (\d+) guards", src)
+        self.assertIsNotNone(written, "the `-OO` row no longer writes down its figure")
+        self.assertEqual((doc_gated, len(doc_guards)),
+                         (int(written.group(1)), int(written.group(2))),
+                         "the `-OO` figure in the comment is not this file's figure")
+        self.assertEqual((doc_gated, len(doc_guards)), (0, 0),
+                         "an assertion in this file is now behind a docstring-existence guard, so it "
+                         "goes dark under `-OO` while the run still reports OK. Read the docstring from "
+                         "the source with `_doc` instead of guarding the assertion away")
+        # THE OTHER HALF: assertions that run in only ONE MODE, which is a different thing from a
+        # doc-gated pin and is counted separately rather than folded into a single flattering
+        # figure. Each one must be ABOUT `__doc__` itself -- i.e. its subject genuinely does not
+        # exist in the other mode -- and that is asserted, not assumed, so this count cannot
+        # become a place to hide a real pin.
+        mode_guards = [n for n in ast.walk(tree) if isinstance(n, ast.If)
+                       and "sys.flags.optimize" in ast.unparse(n.test)]
+        mode_asserts = [c for g in mode_guards for b in (g.body, g.orelse) if b
+                        for c in ast.walk(ast.Module(body=list(b), type_ignores=[]))
+                        if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                        and c.func.attr.startswith("assert")]
+        written_mode = re.search(r"MODE-GATED: (\d+) assertions behind (\d+) guards", src)
+        self.assertIsNotNone(written_mode, "the `-OO` row no longer writes down this figure")
+        self.assertEqual((len(mode_asserts), len(mode_guards)),
+                         (int(written_mode.group(1)), int(written_mode.group(2))),
+                         "the MODE-GATED figure in the comment is not this file's figure")
+        for c in mode_asserts:
+            with self.subTest(mode_gated=ast.unparse(c)[:60]):
+                self.assertIn("__doc__", ast.unparse(c),
+                              "an assertion that runs in only one mode is not about `__doc__`, so "
+                              "its subject exists in both modes and it should not be mode-gated: "
+                              "that is Note E's hazard, a pin going dark at an unchanged green "
+                              "count")
+        # THE STRUCTURAL CLAIM: `__doc__` is READ in exactly one place, and that place is `_doc`.
+        reads = [(getattr(n, "lineno", None), ast.unparse(n)) for n in ast.walk(tree)
+                 if isinstance(n, ast.Attribute) and n.attr == "__doc__"
+                 and not isinstance(n.ctx, ast.Store)]
+        in_doc = {getattr(n, "lineno", None) for fn in ast.walk(tree)
+                  if isinstance(fn, ast.FunctionDef) and fn.name == "_doc"
+                  for n in ast.walk(fn)}
+        outside = [r for r in reads if r[0] not in in_doc]
+        in_this_test = {getattr(n, "lineno", None) for fn in ast.walk(tree)
+                        if isinstance(fn, ast.FunctionDef)
+                        and fn.name in ("test_doc_reads_exactly_what_dunder_doc_holds",
+                                        "test_nothing_in_this_file_is_doc_gated_and_dunder_doc_"
+                                        "is_read_in_one_place")
+                        for n in ast.walk(fn)}
+        self.assertEqual([r for r in outside if r[0] not in in_this_test], [],
+                         "a raw `__doc__` read was added outside `_doc`: under `-OO` it reads None (or, "
+                         "for a dataclass, a synthesised signature) and the pin errors or passes for the "
+                         "wrong reason")
+        # and `_doc` itself does not depend on `__doc__` surviving: it parses the file
+        reader = ast.parse(textwrap.dedent(inspect.getsource(_module_docstrings)))
+        calls = {ast.unparse(n.func) for n in ast.walk(reader) if isinstance(n, ast.Call)}
+        self.assertIn("ast.get_docstring", calls)
+        # DERIVED, not a text search: the first version of this assertion was
+        # `assertNotIn("dedent", inspect.getsource(...))`, which FAILED on the reader's own
+        # DOCSTRING -- the paragraph that explains why dedent is wrong contains the word. A
+        # lexical sweep over source matches prose; an AST over calls cannot.
+        self.assertNotIn("textwrap.dedent", calls,
+                         "the docstring reader dedents again: that removes the block's common "
+                         "indent from the docstring literal too, so a method's continuation "
+                         "lines come back four spaces short of what `__doc__` holds")
+
+    def test_a_doc_only_mutant_still_dies_under_minus_oo(self):
+        """THE QUESTION SR-06's ATTESTATION ASKED, answered as a measurement rather than a promise: is
+        any pin that dies in a normal run UNKILLED under `-OO`? For a source-read pin the answer cannot
+        be yes, and this shows why -- the mutant is applied to the SOURCE TEXT that `_doc` reads, so the
+        same pin sees it in both modes. The three `test_stability` doc pins that went unkilled under
+        `-OO` did so because the GUARD, not the pin, was what `-OO` changed."""
+        needles = {bm.Margins: "NOT COVERED BY `BenchmarkConfig.config_hash()`",
+                   bm.sample_sd: "robustness",
+                   bm.BenchmarkConfig.config_hash: "CANONICAL MEANS"}
+        for obj, needle in needles.items():
+            with self.subTest(obj=getattr(obj, "__name__", obj)):
+                real = _doc(obj)
+                self.assertIn(needle, real)
+                mutated = real.replace(needle, "")
+                mod = sys.modules[obj.__module__]
+                table = dict(_module_docstrings(mod))
+                table[obj.__qualname__] = mutated
+                with mock.patch.dict(_DOC_CACHE, {mod.__name__: table}):
+                    self.assertNotIn(needle, _doc(obj))       # the pin WOULD fail on the mutant
+                self.assertIn(needle, _doc(obj))              # and the cache is restored

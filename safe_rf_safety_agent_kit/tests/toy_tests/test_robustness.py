@@ -4401,26 +4401,24 @@ def _undescribable_carrier(v, exc):
 
 # -------------------------------------------- WHOSE module an escape came out of
 # A generator that drives public callables of `toy.robustness` reaches three other modules on the way
-# (`toy.schema`, `toy.benchmark`, `toy.stability`), and round 12's RAISE member found one escape that is
+# (`toy.schema`, `toy.benchmark`, `toy.stability`), and round 12's RAISE member found one escape that was
 # NOT this file's to close. An escape is attributed by TRACEBACK -- the deepest `src/toy/...` frame is
 # the module whose message construction propagated -- so the attribution is measured and not asserted,
 # and a cross-owner escape is DECLARED here with that measurement instead of being caught inside this
 # module's adapter and called closed.
-_CROSS_OWNER_ESCAPES = {
-    ("benchmark_outcome", "factory", "benchmark.py"):
-        "MEASURED round 12, identically on 3.12.4 and 3.13.5, and REPORTED rather than patched over: "
-        "`toy/benchmark.py`'s `score_seed` builds its own fail-closed record as "
-        "`SeedScores.failed(seed, f\"numerical failure: {e}\", ...)` (benchmark.py:2094 at HEAD "
-        "4f06749), so a `factory` raising an exception INSIDE the declared family whose own `__str__` "
-        "raises turns that failed-seed record into a propagating RuntimeError, which then leaves the "
-        "public `robustness.benchmark_outcome` adapter. The site belongs to SR-10 and the fix there is "
-        "one admission of the same shape as `robustness._shown`. Closing it from here would mean "
-        "catching another owner's escape inside this module's adapter and reporting the channel closed, "
-        "which is the opposite of reporting it. Pinned by "
-        "`ADeclaredReasonIsExercisedOnEveryParameterItCovers.test_the_one_cross_owner_escape_is_"
-        "declared_and_still_reachable`, which FAILS once the declaration is unreachable -- so when "
-        "SR-10 closes it, this entry has to go.",
-}
+# THE TABLE IS EMPTY AT THIS HEAD, AND THAT IS THE POINT OF HAVING HAD AN ENTRY IN IT.
+# It held exactly one, `("benchmark_outcome", "factory", "benchmark.py")`: `toy/benchmark.py`'s
+# `score_seed` built its fail-closed record as `SeedScores.failed(seed, f"numerical failure: {e}", ...)`
+# (benchmark.py:2094 at 4f06749 and at a04efa4), so a `factory` raising an exception INSIDE the declared
+# family whose own description refuses turned a counted failed seed into a propagating `RuntimeError` out
+# of the public `robustness.benchmark_outcome`. The entry was written to ROT LOUDLY -- the test below
+# FAILED once the declaration became unreachable -- and SR-10 closed the site (`benchmark._shown` /
+# `benchmark._type_name`, and sixteen sibling occurrences the declaration had not named). So the entry is
+# GONE, as its own text required, and the test below has been inverted into a REGRESSION PIN: the table
+# must stay empty and that escape must stay closed. An empty table also means
+# `_declared_cross_owner` now excuses nothing, so any NEW cross-owner escape is an unconditional
+# complaint instead of a silent carve-out.
+_CROSS_OWNER_ESCAPES: dict = {}
 
 
 def _escape_owner(e):
@@ -4967,34 +4965,38 @@ class ADeclaredReasonIsExercisedOnEveryParameterItCovers(unittest.TestCase):
                 rb.probe_missing_inputs(_raising_measure(ValueError), SEEDS, CFG)
         self.assertEqual(_reason_coverage_complaints(), [])                 # and the real module is clean
 
-    def test_the_one_cross_owner_escape_is_declared_and_still_reachable(self):
-        """THE ONE ESCAPE THE RAISE MEMBERS FOUND THAT IS NOT THIS FILE'S TO CLOSE, declared with its
-        measurement in `_CROSS_OWNER_ESCAPES` and attributed BY TRACEBACK rather than by assertion.
+    def test_no_cross_owner_escape_is_declared_and_the_one_that_was_is_closed(self):
+        """THE SLOT THAT HELD THE ONE ESCAPE THAT WAS NOT THIS FILE'S TO CLOSE, now a REGRESSION PIN.
 
-        It is reported, not patched over: catching another owner's escape inside this module's adapter
-        would let the channel be called closed. The declaration is held to being REACHABLE -- remove it
-        and exactly one complaint appears -- so when SR-10 closes the site, this test fails and the
-        entry has to go rather than quietly becoming a carve-out for something that no longer happens."""
-        self.assertEqual(len(_CROSS_OWNER_ESCAPES), 1)
-        key, why = next(iter(_CROSS_OWNER_ESCAPES.items()))
-        self.assertEqual(key, ("benchmark_outcome", "factory", "benchmark.py"))
-        self.assertIn("benchmark.py:2094", why)
-        self.assertIn("SR-10", why)
-        with mock.patch.dict(_CROSS_OWNER_ESCAPES, clear=True):
-            complaints = _reason_coverage_complaints()
-        self.assertEqual(len(complaints), 1, complaints)
-        self.assertTrue(complaints[0].startswith("benchmark_outcome.factory: a callable raising an "
-                                                 "in-family exception whose own __str__ raises"),
-                        complaints[0])
-        self.assertIn("OUTSIDE the declared family", complaints[0])
-        # and the attribution is measured: the frame that built the message is in the other module
-        E = _exception_str_raises(RuntimeError)
+        This test used to assert that `_CROSS_OWNER_ESCAPES` held exactly one entry and that the escape
+        it declared STILL HAPPENED -- deliberately, so that closing the site would make this test fail
+        and force the declaration out rather than letting it become a carve-out for something that no
+        longer occurs. SR-10 closed the site, this test failed, and the entry is gone. What replaces it
+        asserts the two things that must now stay true: the table declares NOTHING (so
+        `_declared_cross_owner` excuses nothing and a new cross-owner escape is a complaint), and the
+        escape that was declared is CLOSED -- measured by the same instrument that found it, the
+        traceback attribution, through the same public adapter and the same hostile input."""
+        self.assertEqual(_CROSS_OWNER_ESCAPES, {},
+                         "a cross-owner escape is declared again. That is allowed -- it is how this file "
+                         "reports an escape it must not patch over -- but the entry must carry its "
+                         "measurement and the owning task, and a test must hold it REACHABLE so it rots "
+                         "loudly, as the SR-10 entry did.")
+        E = _exception_str_raises(_RAISE_EXC)
         try:
             rb.benchmark_outcome(lambda *a, **k: (_ for _ in ()).throw(E("refused")), "S", None)(1)
+        except _DECLARED_FAMILY as e:
+            # IN FAMILY: `benchmark.score_seed` now records the failed seed with a degraded reason and
+            # the adapter raises its own ValueError for a genuinely unmeasured metric.
+            self.assertEqual(_escape_owner(e), "robustness.py",
+                             "the refusal now comes from this module's own adapter, as it should")
+            self.assertIn("undescribable", str(e))
         except Exception as e:                                           # noqa: BLE001
-            self.assertEqual(_escape_owner(e), "benchmark.py")
+            self.fail(f"the SR-10 escape is back: {type(e).__name__} out of {_escape_owner(e)}. "
+                      f"Re-declare it in `_CROSS_OWNER_ESCAPES` with its measurement rather than "
+                      f"catching it here.")
         else:
-            self.fail("the declared cross-owner escape no longer happens; delete the declaration")
+            self.fail("benchmark_outcome no longer refuses an unmeasured metric at all")
+        self.assertEqual(_reason_coverage_complaints(), [])   # and the real module is clean with no table
 
     def test_the_reason_each_exerciser_tests_is_the_one_the_module_states(self):
         """An exerciser is only honest if it tests the mechanism the reason NAMES, so each reason's
