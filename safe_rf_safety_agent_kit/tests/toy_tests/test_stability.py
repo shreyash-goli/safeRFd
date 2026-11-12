@@ -1,12 +1,14 @@
 """SR-06 tests: adversarial numeric cases for toy.stability. Abstract numbers only;
 no biological content and no claim about any real system."""
 import copy
+import dataclasses
 import functools
 import inspect
 import math
 import sys
 import types
 import unittest
+from fractions import Fraction
 from numbers import Rational, Real
 from pathlib import Path
 
@@ -61,13 +63,50 @@ class Truthy:
 # `scripts/run_tests.sh` fails a bare run that reports fewer. An UNCOUNTED skip is the hazard;
 # this one is the project's only skip here and
 # `test_the_only_skip_in_this_file_is_the_counted_numpy_one` asserts it stays the only one.
-# Every other numpy-dependent assertion in this file is behind a plain `if np is not None`.
+# Every other numpy-dependent assertion in this file is behind a plain `if np is not None`, and
+# that sentence is now true AS TO SPELLING as well as in substance: one of those guards used to be
+# spelled `if _np is not None:` behind a function-local `import numpy as _np`, so the assertion
+# that counted the guards could not see it, while the assertion that counted them was itself a
+# `src.count("if np is not None:")` -- a self-count, of whose two hits ONE WAS THE ASSERTION'S OWN
+# STRING LITERAL. The local import is gone (the module-level `np` was already there), and the count
+# is derived from this file's AST over `ast.If` tests, which cannot include a string literal and
+# cannot miss a respelling: `test_the_only_skip_in_this_file_is_the_counted_numpy_one` fails on any
+# `if <word>np is not None:` it does not expect.
 
 
 def _doc(obj):
-    """`inspect.cleandoc(obj.__doc__)`, or None when docstrings are stripped (`python -OO`)."""
+    """`inspect.cleandoc(obj.__doc__)`, or None when the docstring is stripped or SUBSTITUTED.
+
+    Two ways a docstring can be absent, and the second one is not None. `python -OO` strips them, so
+    `inspect.cleandoc(None)` used to raise and the pins came out as ERRORS -- that is NOTE E above.
+    The other way is this module's single `@dataclass`: `dataclasses` SUBSTITUTES a synthesised
+    signature string for a class with no docstring of its own, so under `-OO`
+    `GradientCheckReport.__doc__` is not None, it is
+    `"GradientCheckReport(analytic: 'tuple[float, ...]', ...)"`. Measured on both interpreters;
+    `GradientCheckReport` is this module's ONLY dataclass and the ONLY one of its 14 classes whose
+    `__doc__` survives `-OO`. A None check cannot see that: the docstring is present and wrong, and
+    the first pin anyone writes on this class would compare its needle against a signature string.
+
+    No pin reads it today, so there is NO consequence at this commit -- this is the latent half,
+    adopted from `test_robustness`, which grew the detector for three live sites. The substitution is
+    detected by RECONSTRUCTING it with the expression `dataclasses` itself evaluates, not by
+    pattern-matching the text: if a real docstring ever equals its own synthesised signature there is
+    nothing to pin anyway, and if `dataclasses` changes that expression this helper STOPS
+    suppressing and the pin fails LOUDLY rather than passing for the wrong reason.
+    `test_e_the_docstring_guard_is_inert_in_a_normal_run` asserts both halves in both modes.
+    """
     d = getattr(obj, "__doc__", None)
-    return None if d is None else inspect.cleandoc(d)
+    if d is None:
+        return None
+    if isinstance(obj, type) and dataclasses.is_dataclass(obj) and d == _dataclass_signature_doc(obj):
+        return None
+    return inspect.cleandoc(d)
+
+
+def _dataclass_signature_doc(cls):
+    """The docstring `@dataclass` synthesises for a class that has none: the class name plus its own
+    signature with the `-> None` stripped, which is the expression `dataclasses.py` itself evaluates."""
+    return cls.__name__ + str(inspect.signature(cls)).replace(" -> None", "")
 
 
 # --------------------------------------------------------------------------- FINDING C
@@ -644,6 +683,35 @@ class QAHardening(unittest.TestCase):
         with self.assertRaisesRegex(st.StabilityError, "too small"):
             st.check_gradient(lambda p: p[0] ** 2, lambda p: [2e8], [1e8], step=1e-12)
 
+    def test_the_validators_return_plain_floats_and_not_a_callers_subclass(self):
+        """The return TYPE, asserted directly for the first time.
+
+        `check_finite_scalar` is documented to return `float(value)`, and `toy.robustness.mse_fsum`
+        relies on getting a plain `float` when it feeds this module's output to `math.fsum`. The
+        contract WAS protected -- measured, a `_as_float` that returns the caller's subclass
+        unchanged is killed by 4 failures here and 7 in test_robustness -- but only INCIDENTALLY,
+        through the compensated-summation figure, with no assertion anywhere on the type itself.
+        It is cheap, it is a contract another module depends on, so it is asserted.
+        """
+        sub = type("SubFloat", (float,), {"__hash__": float.__hash__})(2.5)
+        self.assertIs(type(st.check_finite_scalar(sub)), float)
+        self.assertIs(type(st.check_finite_scalar(2)), float, "an int is returned as a float")
+        for v in st.check_finite_sequence([sub, 2]):
+            self.assertIs(type(v), float)
+        for row in st.check_finite_matrix([[sub, 2]]):
+            for v in row:
+                self.assertIs(type(v), float)
+        for v in st.require_parameter_gradient([sub, 2]):
+            self.assertIs(type(v), float)
+        self.assertIs(type(st.masked_mean_checked([sub], [True], 1)), float)
+        self.assertIs(type(st.masked_squared_error_mean([sub], [0.0], [True], 1)), float)
+        self.assertIs(type(st.check_params_changed([sub], [3.5])), float)
+        r = st.check_gradient(_F_QUAD, _G_QUAD, [1.0, 2.0])
+        for f in (r.max_abs_error, r.max_rel_error, r.step, r.rtol, r.atol):
+            self.assertIs(type(f), float)
+        for v in r.analytic + r.numeric:
+            self.assertIs(type(v), float)
+
     def test_fn_exceptions_propagate_unwrapped_and_generators_materialised_once(self):
         with self.assertRaises(ZeroDivisionError):
             st.check_gradient(lambda p: 1 / 0, lambda p: [1.0], [1.0])
@@ -750,14 +818,107 @@ _NOT_A_LYING_NUMBER = {
     ("masked_mean_checked", "name"): "a str label in a message, not a number",
     ("masked_mean_checked", "strict_masked_out"): "a bool policy flag; bool cannot be subclassed",
     ("masked_squared_error_mean", "strict_masked_out"): "a bool policy flag; bool cannot be subclassed",
-    ("check_gradient", "fn"): "a caller-supplied callable: its RETURN value is normalised where it is "
-                              "consumed (check_finite_scalar), and the callable itself is documented as "
-                              "outside any boundary here",
-    ("check_gradient", "grad_fn"): "a caller-supplied callable: same reason as fn",
+    ("check_gradient", "fn"): "a caller-supplied callable, which opens THREE routes, and this row "
+                              "excuses exactly TWO of them: its RETURN value is normalised where it "
+                              "is consumed (check_finite_scalar), and the CALL itself is the "
+                              "documented unwrapped-propagation carve-out. Its SIDE EFFECT on the "
+                              "list this module hands it is NOT excused here -- it is swept by "
+                              "TheFifthAxisIsACallablePlacedOperand (test_h1/test_h2/test_h3), "
+                              "because the reason this row used to give named the return value and "
+                              "the callable and READ as though it covered all three, which is how "
+                              "1785 derived refusals never reached the one operand `_same` inspects",
+    ("check_gradient", "grad_fn"): "the same three routes as fn and the same two excused: the CALL "
+                                   "and the RETURN value, whose lazy half is additionally covered by "
+                                   "TheCarveOutWhereItsHalvesMeet. Its SIDE EFFECT on the list this "
+                                   "module hands it is NOT excused here and is swept by test_h1",
     ("require_parameter_gradient", "name"): "a str label in a message, not a number",
     ("require_parameter_gradient", "input_grad"): "accepted only to phrase a message and documented as "
                                                   "never evidence; it decides nothing",
     ("check_params_changed", "name"): "a str label in a message, not a number",
+}
+
+
+# --------------------------------------------------------------------------- FINDING H
+# THE FIFTH AXIS: an operand a caller's CALLABLE PLACED, as against one a caller PASSED.
+#
+# Four axes were closed in earlier rounds, all of them about a value the caller hands over as an
+# ARGUMENT: its comparison and arithmetic dunders (`_plain_real` at every guard, swept by `_liar`),
+# the iterator protocol (`_materialised`), the conversion protocols (`_as_float`, `_shown`,
+# `_type_name`, `_distinct_values`' fallback), and the carve-out where a callable's RETURN VALUE is
+# itself a data argument. The fifth is none of those. `check_gradient` hands its callables a LIST
+# THIS MODULE BUILT, and `_same` then compares each slot of that list against this module's
+# snapshot -- so the left operand of that bare `==` is whatever `fn` or `grad_fn` WROTE THERE.
+#
+# WHY NO DERIVED SWEEP REACHED IT -- the finding, not a footnote. `_NOT_A_LYING_NUMBER` excuses
+# ("check_gradient", "fn") and ("check_gradient", "grad_fn"), and `test_c1`,
+# `test_a_liar_that_converts_honestly_cannot_change_an_outcome` and
+# `test_the_same_sweep_through_a_one_shot_iterable` all `continue` on that table. The reason the
+# table gave covered the callable's RETURN VALUE and the CALL ITSELF: two of the three routes a
+# callable parameter opens. The third is its SIDE EFFECT on the argument, which is the one thing
+# `_same` inspects. A REASON THAT COVERS TWO ROUTES OF THREE READS LIKE A REASON THAT COVERS THE
+# POSITION, and that is what kept 1785 swept refusals away from this operand while all three
+# suites stayed green on both interpreters. The reason text is as much of the fix as `_same` is,
+# which is why it is narrowed in the table above and names the sweep below.
+#
+# Third time in SR-06 that an avoidance-with-a-reason hid a real defect (`_liar`'s `__float__` note
+# was the second), and CLAUDE.md's rule-9 smell in its documented form: the reason held for the
+# shapes the fixture used and the range was unswept.
+_CMP_BASES = ((object, "plain object"), (Real, "numbers.Real subclass"), (Fraction, "Fraction subclass"),
+              (float, "float subclass"), (int, "int subclass"))
+_CMP_SHAPES = ("raises from __eq__", "raises from __ne__", "lies: __eq__ -> True")
+
+
+def _cmp_hostile(base, shape):
+    """A `base` instance storing 99 whose EQUALITY protocol is hostile in one of three ways.
+
+    The BASE is the whole point. `_plain_real` normalises `bool`/`int`/`float` and is the IDENTITY on
+    everything else -- measured, `_plain_real(o) is o` for a plain object, a `numbers.Real` subclass
+    and a `Fraction` subclass -- so only the last two rows of `_CMP_BASES` are the shapes the older
+    fixture (`type("EqBoom", (float,), ...)`) could express, and those two were the 15 in-family
+    cells of the 30.
+    """
+    boom = lambda s, o: (_ for _ in ()).throw(RuntimeError("comparison boom"))
+    ns = {"__hash__": lambda s: 0}
+    if shape == "raises from __eq__":
+        ns["__eq__"] = boom
+    elif shape == "raises from __ne__":
+        ns["__eq__"] = lambda s, o: False
+        ns["__ne__"] = boom
+    else:
+        ns["__eq__"] = lambda s, o: True
+    if base is Real:
+        return type("RealCmpHostile", (Real,),
+                    dict(_REAL_STUBS, __float__=lambda s: 99.0, **ns))()
+    if base is object:
+        return type("ObjectCmpHostile", (), ns)()
+    if base is Fraction:
+        return type("FractionCmpHostile", (Fraction,), dict(ns, __hash__=Fraction.__hash__))(99)
+    return type(base.__name__.capitalize() + "CmpHostile", (base,),
+                dict(ns, __hash__=base.__hash__))(99)
+
+
+def _writer(position, obj):
+    """`(fn, grad_fn)` for `check_gradient` in which `position` WRITES `obj` into the list it is
+    handed. Both callables are otherwise honest: `_F_QUAD`/`_G_QUAD` at [1.0, 2.0] agree, so a PASS
+    report is what the module produces if the write goes unnoticed."""
+    def write(p):
+        p[0] = obj
+    if position == "grad_fn":
+        return _F_QUAD, (lambda p: (write(p), [2.0, 3.0])[1])
+    return (lambda p: (write(p), 1.0)[1]), _G_QUAD
+
+
+# The positions a caller's CALLABLE occupies, DERIVED from `_CASES` below (any bound argument that is
+# callable), with the three routes each one opens written out. A new callable parameter on a public
+# function fails `test_h3` until it has a row here.
+_CALLABLE_PLACED = {
+    ("check_gradient", "fn"): "called with a fresh `list(q)`; routes are (1) the call, carved out and "
+                              "propagated unwrapped, (2) the returned scalar, normalised by "
+                              "check_finite_scalar, (3) the SIDE EFFECT on that list, decided by _same",
+    ("check_gradient", "grad_fn"): "called with a fresh `list(p0)`; the same three routes -- the "
+                                   "call, the returned sequence, and the SIDE EFFECT on that list "
+                                   "decided by _same -- with route (2) additionally covered lazily "
+                                   "by TheCarveOutWhereItsHalvesMeet",
 }
 
 
@@ -1024,14 +1185,12 @@ class ReAttestationRegressions(unittest.TestCase):
         # the property the obvious float() fix loses, kept: an exact tiny Fraction is still refused
         with self.assertRaises(st.UnderflowError):
             st.masked_squared_error_mean([Fraction(1, 10 ** 400)], [0.0], [True], 1)
-        # a Real with no exact rational reading stays INSIDE the error family (no escaping TypeError)
-        try:
-            import numpy as _np
-        except Exception:
-            _np = None
-        if _np is not None:
-            self.assertAlmostEqual(st.masked_squared_error_mean([_np.float32(1e-40)], [_np.float32(0.0)],
-                                                                [True], 1), 1e-80, delta=1e-81)
+        # a Real with no exact rational reading stays INSIDE the error family (no escaping TypeError).
+        # This used to re-import numpy locally as `_np`, which made its guard invisible to the
+        # assertion that counts the numpy guards in this file; the module-level `np` was already here.
+        if np is not None:
+            self.assertAlmostEqual(st.masked_squared_error_mean([np.float32(1e-40)], [np.float32(0.0)],
+                                                               [True], 1), 1e-80, delta=1e-81)
         self.assertEqual(st.masked_squared_error_mean([1e-200], [1e-200], [True], 1), 0.0)   # equal: fine
         # FINDING B (round-13 re-attestation): `Fraction(x)` for a float instance reads
         # `x.as_integer_ratio()`, so that is a THIRD channel into this guard -- neither a comparison
@@ -1190,6 +1349,203 @@ class ReAttestationRegressions(unittest.TestCase):
         self.assertEqual(len(calls), 1, "one float() per masked-in element")
         with self.assertRaises(st.NonFiniteError):          # the backstop itself is untouched
             st.masked_mean_checked([1e308, 1e308], [True, True], 2)
+
+
+class TheFifthAxisIsACallablePlacedOperand(unittest.TestCase):
+    """FINDING H, closed as a CLASS: the operand of a bare guard that a caller's CALLABLE placed.
+
+    `check_gradient.call()` hands `fn`/`grad_fn` a list THIS MODULE built and then asks `_same(a, b)`
+    whether each slot still holds the snapshot value. `a` is therefore the one left operand in this
+    module that a caller's own callable fills, and `_plain_real` -- which normalises `bool`, `int` and
+    `float` and is the IDENTITY on everything else, as its own docstring says three lines away -- was
+    not on its own enough there.
+
+    MEASURED AT THE COMMIT BEFORE THIS ONE, byte-identically on 3.12.4 and 3.13.5, over 5 operand
+    bases x 3 comparison shapes x 2 callable positions = 30 cells:
+    {OUT-OF-FAMILY 12, PASS-report-with-mutation-undetected 3, IN-FAMILY 15}. The 12 were a raising
+    `__eq__`/`__ne__` on a plain object, a `numbers.Real` subclass or a `Fraction` subclass, at the
+    `fn` AND the `grad_fn` position, coming out as a bare RuntimeError. The 3 were a LYING
+    `__eq__ -> True` on those same bases via `grad_fn`: a GradientCheckReport, with the in-place
+    mutation guard silent. The 15 in family were the `float` and `int` subclass bases -- which are
+    exactly the shapes the suite's own fixture used, in `test_g2e`'s last block and in
+    `test_a_callable_cannot_hide_its_mutation_behind_a_lying_eq`. The fixture's base was the whole
+    difference between a pinned claim and a false one.
+
+    FULLY PUBLIC TIER: no `object.__setattr__`, no metaclass. `grad_fn` is a positional public
+    parameter and in-place mutation is a documented, tested shape.
+    """
+
+    def test_h1_every_callable_placed_operand_is_refused_in_family(self):
+        """The 30 cells, all of them, with the two ways out counted at zero.
+
+        The property is uniform now: whatever the base, whatever the comparison protocol, whichever
+        callable did the writing, the answer is "<label> mutated its input in place" -- because
+        `_same` decides on the plain number normalisation produced, or reports a write and does not
+        ask the object anything. `escaped` and `returned` are pinned at zero because those are the
+        only two ways out, and the 30 is pinned as a product so a shrunken factor fails here.
+        """
+        outcomes = {"in_family": 0, "escaped": 0, "returned": 0}
+        for base, bname in _CMP_BASES:
+            for shape in _CMP_SHAPES:
+                for position in ("fn", "grad_fn"):
+                    f, g = _writer(position, _cmp_hostile(base, shape))
+                    with self.subTest(base=bname, shape=shape, position=position):
+                        try:
+                            out = st.check_gradient(f, g, [1.0, 2.0])
+                        except st.StabilityError as e:
+                            outcomes["in_family"] += 1
+                            self.assertIn(f"{position} mutated its input in place", str(e))
+                            continue
+                        except BaseException as e:            # noqa: BLE001 - the escape is the subject
+                            outcomes["escaped"] += 1
+                            self.fail(f"{type(e).__name__} escaped the declared family from "
+                                      f"check_gradient when {position} wrote a {bname} whose "
+                                      f"comparison {shape}: {e}")
+                            continue
+                        outcomes["returned"] += 1
+                        self.fail(f"check_gradient RETURNED {out!r} when {position} wrote a {bname} "
+                                  f"that {shape}: an in-place mutation went undetected")
+        self.assertEqual(outcomes, {"in_family": 30, "escaped": 0, "returned": 0})
+        self.assertEqual(len(_CMP_BASES) * len(_CMP_SHAPES) * 2, 30, "5 bases x 3 shapes x 2 positions")
+        self.assertEqual(len(_CMP_BASES), 5)
+        self.assertEqual(len(_CMP_SHAPES), 3)
+        # the identity half of the finding: `_plain_real` cannot normalise three of the five bases
+        identity = {bname: st._plain_real(_cmp_hostile(base, "lies: __eq__ -> True"))
+                    for base, bname in _CMP_BASES}
+        self.assertEqual({k for k, v in identity.items() if type(v) in (float, int)},
+                         {"float subclass", "int subclass"},
+                         "_plain_real normalises only int/float: that is why the base decides")
+        # and the figures this module quotes about those 30 cells are these 30 cells
+        msrc = inspect.getsource(st)
+        self.assertIn("5 operand bases x 3 comparison shapes x 2 callable positions = 30 cells", msrc)
+        self.assertIn("12 bare RuntimeErrors escaped `check_gradient` and 3 were PASS", msrc)
+
+    def test_h2_the_rule_is_a_plain_number_or_a_write_and_the_narrowing_is_stated(self):
+        """What `_same` now does with each shape of write, INCLUDING the one behaviour change.
+
+        The rule is statable in one line: anything `_plain_real` cannot reduce to exactly `int` or
+        `float` is reported as a write, not asked. `type(...) is` and not `isinstance`, because
+        `bool` is an `int` subclass that `_plain_real` deliberately does not collapse and
+        `isinstance` would let `True` pass for the `1.0` it replaced -- measured before this fix: it
+        did, and so did `Fraction(1, 1)`, at the `grad_fn` position, with a PASS report.
+
+        THE NARROWING, stated rather than discovered later: a callable that swaps a coordinate for a
+        value-EQUAL object of another type now gets "mutated its input in place" where it used to
+        pass. That is right -- the snapshot is a plain `float` this module put there, so the slot HAS
+        been written to -- and it is the price of not consulting the caller's `__eq__`. A plain `int`
+        and a `float` subclass storing the same value still pass, because both normalise to a plain
+        number and the comparison is then between two plain numbers. `numpy` splits along exactly
+        that line and is asserted below: `float64` IS a `float` subclass and normalises; `float32`
+        is not and is a write.
+        """
+        eq_float = type("EqFloatSame", (float,), {"__eq__": lambda s, o: True,
+                                                  "__ne__": lambda s, o: False,
+                                                  "__hash__": float.__hash__})
+        rows = (("the same plain float", 1.0, False),
+                ("a plain int of the same value", 1, False),
+                ("a float subclass storing the same value", type("PlainSubFloat", (float,), {})(1.0), False),
+                ("a float subclass with a lying __eq__, same value", eq_float(1.0), False),
+                ("an int subclass with a lying __int__, same value",
+                 type("IntLieSame", (int,), {"__int__": lambda s: 7})(1), False),
+                ("a different plain float", 99.0, True),
+                ("True for 1.0", True, True),
+                ("Fraction(1, 1) for 1.0", Fraction(1, 1), True))
+        for label, obj, is_write in rows:
+            f, g = _writer("grad_fn", obj)
+            with self.subTest(wrote=label):
+                if is_write:
+                    with self.assertRaisesRegex(st.StabilityError, "grad_fn mutated its input in place"):
+                        st.check_gradient(f, g, [1.0, 2.0])
+                else:
+                    self.assertEqual(st.check_gradient(f, g, [1.0, 2.0]).analytic, (2.0, 3.0))
+        if np is not None:                              # a plain `if`, never a skip
+            f32, g32 = _writer("grad_fn", np.float32(1.0))
+            with self.assertRaisesRegex(st.StabilityError, "grad_fn mutated its input in place"):
+                st.check_gradient(f32, g32, [1.0, 2.0])
+            self.assertTrue(isinstance(np.float64(1.0), float), "float64 is a float subclass")
+            f64, g64 = _writer("grad_fn", np.float64(1.0))
+            self.assertEqual(st.check_gradient(f64, g64, [1.0, 2.0]).analytic, (2.0, 3.0))
+        # the unit, directly: the gate, and the reason it is `type(...) is` and not `isinstance`
+        self.assertIs(st._same(1.0, 1.0), True)
+        self.assertIs(st._same(1, 1.0), True)
+        self.assertIs(st._same(eq_float(1.0), 1.0), True)
+        for not_a_number in (True, Fraction(1, 1), _cmp_hostile(object, "lies: __eq__ -> True")):
+            self.assertIs(st._same(not_a_number, 1.0), False)
+        self.assertIs(st._same(2.0, 1.0), False)
+        # the narrowing is written where a caller reads it
+        doc = _doc(st._same)
+        if doc is not None:
+            self.assertIn("THE ONE BEHAVIOUR CHANGE", doc)
+
+    def test_h3_the_class_is_derived_and_the_derivation_states_its_own_reach(self):
+        """The fail-closed half, and -- the lesson `test_c4` paid for -- its REACH, stated exactly.
+
+        WHAT THE DERIVED HALF DERIVES: the callable POSITIONS, from `_CASES` (every bound argument
+        that is callable), so a new callable parameter on any public function fails here until it has
+        a row in `_CALLABLE_PLACED` and a narrowed reason in `_NOT_A_LYING_NUMBER`.
+
+        WHAT THE AST HALF MATCHES, exactly: inside `call()` -- the function that invokes a caller's
+        callable -- every `ast.Compare` whose operands mention the handed-over list `arg` or the
+        snapshot `snap` must have `len(...)` on BOTH sides. An element-level comparison spelled
+        there directly is an offender; the only permitted element comparison is the `_same(a, b)`
+        call. WHAT IT DOES NOT MATCH, and nothing here pretends otherwise: a comparison moved into a
+        new helper that `call()` merely invokes, a `sorted()`/`set()`/`in` test on `arg`, a hash of
+        its elements, or a callable position in some future function that does not pass its list
+        through `call()`. Watched to FAIL, which is the only evidence that a derivation derives:
+        `arg[0] != snap[0]` added beside the existing check is killed here, and a `_same` reverted to
+        a bare `==` is killed by `test_h1`/`test_h2` (12 escapes and 3 PASS reports) and by this
+        test's structural assertion, three ways.
+
+        WHAT ACTUALLY PROTECTS THE PROPERTY IS BEHAVIOURAL, AND IT IS `test_h1`. The AST half's job
+        is the narrower one of stopping the comparison from being RESPELLED by hand next to the one
+        that is already there -- which is precisely how the row intake site came to be half-fixed,
+        and how this operand came to be excused by a reason that fitted two routes of three.
+        """
+        import ast
+        derived = set()
+        for name in sorted(_CASES):
+            sig = inspect.signature(getattr(st, name))
+            for args, kwargs, _why in _CASES[name]:
+                for pname, given in sig.bind(*args, **kwargs).arguments.items():
+                    if callable(given) and not isinstance(given, type):
+                        derived.add((name, pname))
+        self.assertEqual(derived, set(_CALLABLE_PLACED),
+                         "a public function takes a callable this class does not sweep: give it a "
+                         "row in _CALLABLE_PLACED and narrow its _NOT_A_LYING_NUMBER reason, or the "
+                         "side-effect route is unswept exactly as fn/grad_fn's was")
+        for key, why in sorted(_CALLABLE_PLACED.items()):
+            with self.subTest(position=key):
+                self.assertIn("SIDE EFFECT", why.upper(), f"{key} does not name the third route")
+                self.assertIn(key, _NOT_A_LYING_NUMBER)
+                reason = _NOT_A_LYING_NUMBER[key]
+                self.assertIn("side effect", reason.lower(),
+                              "the exclusion reason must say what it does NOT cover: a reason that "
+                              "covers two routes of three is how this survived")
+                self.assertIn("test_h1", reason, "the reason must name the sweep that does cover it")
+        # the AST half
+        tree = ast.parse(inspect.getsource(st))
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "call"]
+        self.assertEqual(len(calls), 1, "call() is the function that invokes a caller's callable")
+        offenders = []
+        for node in ast.walk(calls[0]):
+            if not isinstance(node, ast.Compare):
+                continue
+            operands = [node.left] + list(node.comparators)
+            if not any(isinstance(x, ast.Name) and x.id in ("arg", "snap")
+                       for o in operands for x in ast.walk(o)):
+                continue
+            if not all(isinstance(o, ast.Call) and isinstance(o.func, ast.Name)
+                       and o.func.id == "len" for o in operands):
+                offenders.append(ast.unparse(node))
+        self.assertEqual(offenders, [],
+                         "a value a caller's callable placed is compared bare inside call(): route "
+                         "it through _same, which decides on the normalised value")
+        self.assertIn("_same(a, b) for a, b in zip(arg, snap)", inspect.getsource(st.check_gradient))
+        same_src = inspect.getsource(st._same)
+        self.assertIn("type(a) is not float and type(a) is not int", same_src)
+        self.assertNotIn("isinstance(a,", same_src,
+                         "isinstance would admit bool, which _plain_real deliberately does not "
+                         "collapse: True would pass for the 1.0 it replaced")
 
 
 def _with_broken(obj, make):
@@ -1432,8 +1788,13 @@ class IntakeIsDerivedNotEnumerated(unittest.TestCase):
 
 # FINDING G2. The conversion-protocol sites of `toy.stability`, DERIVED from its AST the way the
 # intake sites were, with one row per (function, protocol, operand) and the decision in writing.
-# The test below re-derives the set and compares; a new `float()`, `repr()`, `len()`, `bool()`,
-# `int()` or `Fraction()` anywhere in the module fails here until it is decided.
+# The test below re-derives the set and compares; a new `float()`, `repr()`, `len()`, `bool()` or
+# `Fraction()` fails here until it is decided -- in ANY SCOPE: a function body, the module body, a
+# class body or a lambda body. That reach is the Finding I correction and is now true rather than
+# written: the walker was `ast.FunctionDef`-only and skipped lambda bodies, so three of those four
+# scopes were unvisited and a coercion in any of them was unkilled by all three suites on both
+# interpreters. `int()` is in the candidate set the walker looks for and has no site, which is why
+# it is DISCHARGED in the module's table rather than absent from it.
 _CONVERSION_SITES = {
     ("_as_float", "float", "v"):
         "THE one float() in the module. The three conversion sites all call this helper, which "
@@ -1464,6 +1825,35 @@ _CONVERSION_SITES = {
     ("call", "len", "arg"): "`arg = list(p)`, built here; the caller's callable may MUTATE it, "
                             "which is the point of the comparison, but it is still a list",
     ("call", "len", "snap"): "`snap = tuple(arg)`, built here",
+}
+
+
+# The OTHER SIDE of the conversion check, and the half that was missing. `_CONVERSION_SITES` above
+# and the module's prose table are both HAND-WRITTEN, and the only walker was `test_g2d`'s: so
+# membership WITHIN a protocol was cross-checked, while PROTOCOL coverage and SCOPE coverage were
+# not. A protocol the walker never looks for, or a scope it never walks, is absent from both sides
+# and the set EQUALITY passes -- which is how FINDING I (three unwalked scopes) and the missing
+# `__format__` row both arose, and it is `toy.robustness`' four-public-positions-behind-a-green-check
+# failure in another module. So coverage is two-sided now too: every BUILTIN this module calls must
+# be either in the coercion candidate set that `test_g2d` walks for, or excused here in writing.
+_NOT_A_COERCION = {
+    "abs": "arithmetic on a float this module already validated, not a coercion of caller data",
+    "all": "truth-tests a generator of this module's own bools (`_is_row_like`, `_same`, `x == 0.0`)",
+    "any": "truth-tests the mask tuple AFTER the strict-bool gate, so no caller __bool__ is reached",
+    "enumerate": "indexes a tuple this module built; reads no protocol on the elements",
+    "hasattr": "the INTAKE probe, not a conversion: it has its own enumeration and _materialised",
+    "isinstance": "a TYPE test, not a coercion; it is the open `__class__` channel, declared above "
+                  "and scoped by test_the_open_class_channel_sentence_is_its_measured_scope",
+    "iter": "the INTAKE protocol, enumerated and wrapped by _materialised",
+    "list": "copies a tuple this module built (`list(p)`, `list(p0)`), never a caller object",
+    "max": "arithmetic over floats `check_finite_*` already returned",
+    "range": "over `n = len(p0)`, an int this module computed",
+    "sum": "adds floats this module validated; the compensated-summation figure is pinned separately",
+    "tuple": "inside _materialised it consumes an ITERATOR (the intake protocol); everywhere else it "
+             "copies this module's own list",
+    "type": "`type(x)` ignores a `__class__` property and is safe; the `__name__` lookup on its "
+            "result IS a protocol and is the _type_name row of the table",
+    "zip": "pairs tuples this module built",
 }
 
 
@@ -1611,29 +2001,85 @@ class ConversionIsDerivedNotEnumerated(unittest.TestCase):
         is about LYING and says nothing about RAISING. So the exclusion is replaced by a derived
         enumeration with the same fail-closed property the intake set has: a new coercion applied
         anywhere in the module fails HERE until someone decides it in writing.
+
+        FINDING I: "anywhere in the module" WAS FALSE IN THREE SCOPES, and so was the identical
+        phrase in the comment above `_CONVERSION_SITES`. The walker was
+        `[n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]` and `own_nodes` skipped
+        `ast.Lambda` bodies, so the MODULE body, every CLASS body and every LAMBDA body were
+        unvisited. Measured, one added raw `len()` coercion per scope: in a function body, FAILED
+        (192 failures, 39 errors); in the module body, in `GradientCheckReport`'s class body, and in
+        a lambda body, UNKILLED by test_stability, test_robustness and test_checkpoint on both
+        interpreters. HEAD has zero coercion sites in those three scopes, so there was no
+        behavioural consequence -- the finding is against the derivation's stated fail-closed
+        property, which IS the claim this test makes.
+
+        `test_c4` is the model for what to do, and round 16 did it there: either state the reach
+        exactly or widen the matcher. Widening was clean here, so the walker is widened -- all four
+        scope kinds, with decorators, default values, annotations and base classes attributed to the
+        ENCLOSING scope, which is where they are evaluated. (`ShiftSpec`-style module-level lambdas
+        are what bit `toy.robustness`; this module has none at HEAD, which is exactly why nothing
+        noticed.) And the widening is itself checked from BOTH sides, below: every `ast.Call` and
+        `ast.FormattedValue` in the tree must be attributed to exactly one scope, so a scope kind
+        the walker does not know about fails instead of being silently empty.
         """
-        import ast, re
+        import ast, builtins, re
         src = inspect.getsource(st)
         tree = ast.parse(src)
+        SCOPED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 
-        def own_nodes(fn):
-            stack = list(fn.body)
+        def scopes(tree):
+            """EVERY scope, not only `ast.FunctionDef`: the module body, each class body and each
+            lambda body as well. This is the Finding I widening."""
+            yield "<module>", list(tree.body)
+            for n in ast.walk(tree):
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    yield n.name, list(n.body)
+                elif isinstance(n, ast.Lambda):
+                    yield "<lambda>", [n.body]
+
+        def own_nodes(body):
+            """`body`'s own nodes. A nested scope is its own subject, but the expressions evaluated
+            in THIS scope on its behalf are not: a decorator, a default value, an annotation and a
+            base-class expression all run here, so they stay attributed here. Without that, one
+            `dataclass(frozen=True)` call was reachable by no scope at all."""
+            stack = list(body)
             while stack:
                 n = stack.pop()
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                    continue                      # a nested function is its own subject
+                if isinstance(n, SCOPED):
+                    if not isinstance(n, ast.Lambda):
+                        stack.extend(n.decorator_list)
+                    if isinstance(n, ast.ClassDef):
+                        stack.extend(n.bases)
+                        stack.extend(k.value for k in n.keywords)
+                    else:
+                        a = n.args
+                        stack.extend(x for x in a.defaults if x is not None)
+                        stack.extend(x for x in a.kw_defaults if x is not None)
+                        if not isinstance(n, ast.Lambda):
+                            if n.returns is not None:
+                                stack.append(n.returns)
+                            for arg in a.posonlyargs + a.args + a.kwonlyargs:
+                                if arg.annotation is not None:
+                                    stack.append(arg.annotation)
+                            for arg in (a.vararg, a.kwarg):
+                                if arg is not None and arg.annotation is not None:
+                                    stack.append(arg.annotation)
+                    continue
                 yield n
                 stack.extend(ast.iter_child_nodes(n))
 
         coercions = ("float", "int", "bool", "len", "repr", "Fraction")
         derived, by_proto, shown, typed = set(), {}, 0, 0
         as_float_calls, as_float_lines = 0, set()
-        for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
-            for node in own_nodes(fn):
+        attributed, bare_fmt, label_fmt = [], 0, 0
+        for scope, body in scopes(tree):
+            for node in own_nodes(body):
+                if isinstance(node, (ast.Call, ast.FormattedValue)):
+                    attributed.append(id(node))
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                     if node.func.id in coercions:
                         arg = ast.unparse(node.args[0]) if node.args else ""
-                        derived.add((fn.name, node.func.id, arg))
+                        derived.add((scope, node.func.id, arg))
                         by_proto[node.func.id] = by_proto.get(node.func.id, 0) + 1
                     elif node.func.id == "_shown":
                         shown += 1
@@ -1642,8 +2088,36 @@ class ConversionIsDerivedNotEnumerated(unittest.TestCase):
                     elif node.func.id == "_as_float":
                         as_float_calls += 1
                         as_float_lines.add(node.lineno)
-                if isinstance(node, ast.FormattedValue) and node.conversion == ord("r"):
-                    derived.add((fn.name, "!r", ast.unparse(node.value)))
+                if isinstance(node, ast.FormattedValue):
+                    if node.conversion == ord("r"):
+                        derived.add((scope, "!r", ast.unparse(node.value)))
+                    elif node.conversion == -1:
+                        bare_fmt += 1
+                        label_fmt += ast.unparse(node.value) in ("name", "what", "where")
+        # SIDE ONE of the coverage check: the walker's scopes partition the tree. A scope kind it
+        # does not know is not silently empty, it is a mismatch here.
+        everything = [n for n in ast.walk(tree) if isinstance(n, (ast.Call, ast.FormattedValue))]
+        self.assertEqual(len(attributed), len(everything),
+                         "the scope walker does not reach every call/interpolation in the module: "
+                         "a scope kind it ignores is absent from the derived set AND from "
+                         "_CONVERSION_SITES, so the set equality below would pass vacuously")
+        self.assertEqual(len(set(attributed)), len(attributed), "a node attributed to two scopes")
+        self.assertIn("<module>", {s for s, _ in scopes(tree)})
+        self.assertIn("GradientCheckReport", {s for s, _ in scopes(tree)})
+        # SIDE TWO: protocol coverage. Every builtin this module CALLS is either a coercion the
+        # walker looks for, or excused in writing. A protocol in neither is the Finding I defect one
+        # axis over: invisible to the walker and to the table at once.
+        called = {n.func.id for n in everything
+                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        builtin_called = {n for n in called if hasattr(builtins, n)}
+        self.assertEqual(builtin_called - set(coercions), set(_NOT_A_COERCION),
+                         "a builtin this module calls is neither in the coercion candidate set this "
+                         "test walks for nor excused in _NOT_A_COERCION: decide it in writing")
+        for n, why in _NOT_A_COERCION.items():
+            with self.subTest(builtin=n):
+                self.assertIn(n, builtin_called,
+                              f"_NOT_A_COERCION excuses {n}(), which this module no longer calls")
+                self.assertTrue(why.strip())
         self.assertEqual(derived, set(_CONVERSION_SITES),
                          "a coercion protocol is applied at a site this enumeration does not "
                          "decide: give it a row in _CONVERSION_SITES with the reason it is safe, "
@@ -1680,6 +2154,31 @@ class ConversionIsDerivedNotEnumerated(unittest.TestCase):
         self.assertEqual(int(m["lens"].group(1)), by_proto.get("len", 0))
         for helper in ("_as_float", "_shown", "_type_name"):
             self.assertTrue(callable(getattr(st, helper, None)), f"{helper} is gone")
+        # the EIGHTH protocol, which had no row: `__format__` through a bare `{x}`. It is DECLARED
+        # rather than converted, so it has no `_CONVERSION_SITES` rows -- 111 of them would say
+        # nothing -- but its three figures are derived from this same AST and read out of the row.
+        fmt = re.search(r"__format__ as `\{x\}` -- (\d+) interpolations, (\d+) of them "
+                        r"module-produced, (\d+) on the label chain", block)
+        self.assertIsNotNone(fmt, "the conversion enumeration no longer gives __format__ a row")
+        self.assertEqual((int(fmt.group(1)), int(fmt.group(2)), int(fmt.group(3))),
+                         (bare_fmt, bare_fmt - label_fmt, label_fmt),
+                         "the __format__ row's figures are not this AST's figures")
+        self.assertEqual(len([k for k in derived if k[1] == "!r"]), 0,
+                         "every repr goes through _shown, so no `{x!r}` interpolation is left")
+        # and the correction that row makes to its own reason: the label is formatted EAGERLY, on
+        # the SUCCESS path. Asserted by OBSERVING the format rather than by letting one raise -- an
+        # assertion that the raise escapes would pin a defect in a channel that is declared, not
+        # closed, and would fail on the eventual fix.
+        seen = []
+
+        class CountingLabel(str):
+            def __format__(self, spec):
+                seen.append(spec)
+                return str(self)
+
+        self.assertEqual(st.check_finite_sequence([1.0, 2.0], CountingLabel("values")), (1.0, 2.0))
+        self.assertTrue(seen, "the `where` label is interpolated only while phrasing a refusal, so "
+                              "the row's 'built EAGERLY, on the SUCCESS path' is wrong")
 
     def test_g2f_a_type_whose_name_raises_cannot_replace_the_refusal_either(self):
         """`type(x).__name__` is the other protocol every message here invokes on caller data.
@@ -1763,16 +2262,18 @@ class ConversionIsDerivedNotEnumerated(unittest.TestCase):
         self.assertEqual(st.check_mask(lying_len((True, False)), 2), (True, False))
         with self.assertRaises(st.NormalizationMismatchError):   # and `len` still decides on the copy
             st.masked_mean_checked(lying_len((1.0, 2.0)), [True, True], 1)
-        # `_same`'s bare `==` is the one comparison whose operand a caller's CALLABLE places, and
-        # `_plain_real` closes it there: the mutation is still detected, in family.
-        def swap(p):
-            p[0] = type("EqBoom", (float,), {
-                "__eq__": lambda s, o: (_ for _ in ()).throw(RuntimeError("eq")),
-                "__ne__": lambda s, o: (_ for _ in ()).throw(RuntimeError("ne")),
-                "__hash__": float.__hash__})(99.0)
-            return 1.0
-        with self.assertRaisesRegex(st.StabilityError, "mutated its input"):
-            st.check_gradient(swap, _G_QUAD, [1.0, 2.0])
+        # `_same`'s bare `==` is the one comparison whose operand a caller's CALLABLE places. This
+        # block used to assert it with ONE base -- `type("EqBoom", (float,), ...)` -- and the base
+        # was the whole difference: `_plain_real` normalises only int/float, so the same shape on a
+        # plain object, a `numbers.Real` subclass or a `Fraction` subclass left this module as a
+        # bare RuntimeError, 12 of 30 cells, with 3 more returning a PASS report. FINDING H. The
+        # base is swept over here, and the full 5 x 3 x 2 matrix is
+        # `TheFifthAxisIsACallablePlacedOperand`.
+        for base, bname in _CMP_BASES:
+            with self.subTest(base=bname):
+                f, g = _writer("fn", _cmp_hostile(base, "raises from __eq__"))
+                with self.assertRaisesRegex(st.StabilityError, "mutated its input"):
+                    st.check_gradient(f, g, [1.0, 2.0])
 
 
 class TheCarveOutWhereItsHalvesMeet(unittest.TestCase):
@@ -1886,10 +2387,142 @@ class TheCarveOutWhereItsHalvesMeet(unittest.TestCase):
         self.assertTrue(absorbed, "the documented cost is that this IS absorbed as a ValueError")
 
 
+# --------------------------------------------------------------------------- FINDING J
+# The `__class__` channel's MEASURED SCOPE, position by position. The module's sentence about it is
+# what the NEXT OWNER reads about an open finding, which is what makes it load-bearing -- and the
+# test that pinned it asserted only the SIX in-family positions it happened to name, so it could not
+# notice an OMISSION FROM THE ESCAPE LIST. `require_parameter_gradient(input_grad=...)` was exactly
+# that omission: an OUTER argument position of a public function that escapes, while the sentence
+# said outer positions come out in family. It is in neither of the sentence's two lists, it is
+# absent from `_CASES` (no row passes `param_grad=None`) and it is excluded by
+# `_NOT_A_LYING_NUMBER`, so no derived sweep reached it either.
+#
+# The asymmetry is fixed by ACCOUNTING FOR EVERY POSITION rather than by asserting one half: the
+# (function, parameter) set is DERIVED from the signatures of the nine public functions, every pair
+# must appear in this table or be excused below, and each row says which half of the sentence it
+# belongs to. Behaviour is asserted for the IN-FAMILY rows only. The escaping rows are asserted
+# about NOTHING: the `__class__` channel reaches every `isinstance` in three files and the fix is
+# those owners' joint decision, so a test that pinned an escape would pin a defect and fail on the
+# eventual fix.
+#
+# REACH, stated exactly rather than implied: the PARAMETER set is derived and fails closed; the
+# POSITION KINDS (outer / row / element / scalar / a callable's return value) are enumerated here by
+# hand, one row per kind that was driven. A position kind nobody drives is not in this table.
+def _class_boom():
+    """A caller object whose `__class__` is a property that raises: iterable, so it reaches past the
+    sequence probe wherever one exists."""
+    class C:
+        @property
+        def __class__(self):
+            raise RuntimeError("class boom")
+
+        def __iter__(self):
+            return iter([1.0, 2.0])
+    return C()
+
+
+_IN_FAMILY, _ESCAPES = "in family", "escapes"
+_CLASS_CHANNEL_POSITIONS = (
+    ("check_finite_scalar", "value", "scalar", _ESCAPES,
+     lambda h: st.check_finite_scalar(h)),
+    ("check_finite_sequence", "values", "outer", _IN_FAMILY,
+     lambda h: st.check_finite_sequence(h)),
+    ("check_finite_sequence", "values", "element", _ESCAPES,
+     lambda h: st.check_finite_sequence([h])),
+    ("check_finite_matrix", "m", "outer", _IN_FAMILY,
+     lambda h: st.check_finite_matrix(h)),
+    ("check_finite_matrix", "m", "row", _IN_FAMILY,
+     lambda h: st.check_finite_matrix([h])),
+    ("check_finite_matrix", "m", "element", _ESCAPES,
+     lambda h: st.check_finite_matrix([[h]])),
+    ("check_mask", "mask", "outer", _IN_FAMILY, lambda h: st.check_mask(h, 2)),
+    ("check_mask", "mask", "element", _ESCAPES, lambda h: st.check_mask([h], 1)),
+    ("check_mask", "expected_len", "scalar", _ESCAPES, lambda h: st.check_mask([True], h)),
+    ("masked_mean_checked", "values", "outer", _IN_FAMILY,
+     lambda h: st.masked_mean_checked(h, [True, True], 2)),
+    ("masked_mean_checked", "values", "row", _ESCAPES,
+     lambda h: st.masked_mean_checked([h], [True], 2)),
+    ("masked_mean_checked", "values", "element", _ESCAPES,
+     lambda h: st.masked_mean_checked([h], [True], 1)),
+    ("masked_mean_checked", "mask", "outer", _IN_FAMILY,
+     lambda h: st.masked_mean_checked([1.0], h, 1)),
+    ("masked_mean_checked", "mask", "element", _ESCAPES,
+     lambda h: st.masked_mean_checked([1.0], [h], 1)),
+    ("masked_mean_checked", "denominator", "scalar", _ESCAPES,
+     lambda h: st.masked_mean_checked([1.0], [True], h)),
+    ("masked_squared_error_mean", "prediction", "outer", _IN_FAMILY,
+     lambda h: st.masked_squared_error_mean(h, [1.0, 2.0], [True, True], 2)),
+    ("masked_squared_error_mean", "prediction", "element", _ESCAPES,
+     lambda h: st.masked_squared_error_mean([h], [1.0], [True], 1)),
+    ("masked_squared_error_mean", "target", "outer", _IN_FAMILY,
+     lambda h: st.masked_squared_error_mean([1.0, 2.0], h, [True, True], 2)),
+    ("masked_squared_error_mean", "target", "element", _ESCAPES,
+     lambda h: st.masked_squared_error_mean([1.0], [h], [True], 1)),
+    ("masked_squared_error_mean", "mask", "outer", _IN_FAMILY,
+     lambda h: st.masked_squared_error_mean([1.0], [2.0], h, 1)),
+    ("masked_squared_error_mean", "denominator", "scalar", _ESCAPES,
+     lambda h: st.masked_squared_error_mean([1.0], [2.0], [True], h)),
+    ("check_gradient", "point", "outer", _IN_FAMILY,
+     lambda h: st.check_gradient(_F_FLAT, lambda p: [1.0, 1.0], h)),
+    ("check_gradient", "point", "element", _ESCAPES,
+     lambda h: st.check_gradient(_F_FLAT, lambda p: [1.0, 1.0], [h, 1.0])),
+    ("check_gradient", "step", "scalar", _ESCAPES,
+     lambda h: st.check_gradient(_F_QUAD, _G_QUAD, [1.0, 2.0], step=h)),
+    ("check_gradient", "rtol", "scalar", _ESCAPES,
+     lambda h: st.check_gradient(_F_QUAD, _G_QUAD, [1.0, 2.0], rtol=h)),
+    ("check_gradient", "atol", "scalar", _ESCAPES,
+     lambda h: st.check_gradient(_F_QUAD, _G_QUAD, [1.0, 2.0], atol=h)),
+    ("check_gradient", "zero_tol", "scalar", _ESCAPES,
+     lambda h: st.check_gradient(_F_QUAD, _G_QUAD, [1.0, 2.0], zero_tol=h)),
+    ("check_gradient", "fn", "return value", _ESCAPES,
+     lambda h: st.check_gradient(lambda p: h, lambda p: [2.0], [1.0])),
+    ("check_gradient", "grad_fn", "return element", _ESCAPES,
+     lambda h: st.check_gradient(lambda p: p[0] ** 2, lambda p: [h], [1.0])),
+    ("require_parameter_gradient", "param_grad", "outer", _IN_FAMILY,
+     lambda h: st.require_parameter_gradient(h)),
+    ("require_parameter_gradient", "param_grad", "element", _ESCAPES,
+     lambda h: st.require_parameter_gradient([h])),
+    # THE OMISSION. An OUTER argument position of a public function that ESCAPES, which the old
+    # sentence's "the OUTER positions come out IN FAMILY" contradicts, and which its escape list did
+    # not name. Its other four hostile shapes all come out as MissingGradientError.
+    ("require_parameter_gradient", "input_grad", "outer", _ESCAPES,
+     lambda h: st.require_parameter_gradient(None, input_grad=h)),
+    ("require_parameter_gradient", "input_grad", "element", _ESCAPES,
+     lambda h: st.require_parameter_gradient(None, input_grad=[h])),
+    ("check_params_changed", "before", "outer", _IN_FAMILY,
+     lambda h: st.check_params_changed(h, [1.0, 2.0])),
+    ("check_params_changed", "before", "element", _ESCAPES,
+     lambda h: st.check_params_changed([h], [1.0])),
+    ("check_params_changed", "after", "outer", _IN_FAMILY,
+     lambda h: st.check_params_changed([1.0, 2.0], h)),
+    ("check_params_changed", "after", "element", _ESCAPES,
+     lambda h: st.check_params_changed([1.0], [h])),
+    ("check_params_changed", "min_abs_change", "scalar", _ESCAPES,
+     lambda h: st.check_params_changed([1.0], [2.0], min_abs_change=h)),
+)
+
+# Parameters of the nine public functions that the `__class__` channel cannot reach, each with the
+# reason. A parameter in neither this table nor `_CLASS_CHANNEL_POSITIONS` fails the test below.
+_NOT_A_CLASS_CHANNEL_POSITION = {
+    ("check_finite_scalar", "name"): "a str label: no isinstance is applied to it",
+    ("check_finite_sequence", "name"): "a str label: no isinstance is applied to it",
+    ("check_finite_matrix", "name"): "a str label: no isinstance is applied to it",
+    ("check_mask", "name"): "a str label: no isinstance is applied to it",
+    ("masked_mean_checked", "name"): "a str label: no isinstance is applied to it",
+    ("require_parameter_gradient", "name"): "a str label: no isinstance is applied to it",
+    ("check_params_changed", "name"): "a str label: no isinstance is applied to it",
+    ("masked_mean_checked", "strict_masked_out"): "a bool policy flag, truth-tested and never "
+                                                  "isinstance-tested",
+    ("masked_squared_error_mean", "strict_masked_out"): "a bool policy flag, truth-tested and never "
+                                                        "isinstance-tested",
+}
+
+
 class FiguresAndDocPinInventory(unittest.TestCase):
     """The figures that were merely WRITTEN, asserted; and the doc-pin counts, derived."""
 
-    _WORD = {0: "No", 1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six", 7: "Seven"}
+    _WORD = {0: "No", 1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six", 7: "Seven",
+             8: "Eight"}
 
     def test_the_compensated_summation_figure_is_this_interpreters_behaviour(self):
         """`sum([1e16, 1.0, -1e16])` is 1.0, not 0.0 -- `stability.py`'s `check_gradient`
@@ -1947,13 +2580,14 @@ class FiguresAndDocPinInventory(unittest.TestCase):
         from the class and compared against the word written in its docstring.
 
         It fired as intended when FINDING G1 and G2 added D5, D6 and D7: the figure moved from
-        four to seven and this test failed until the docstring said so.
+        four to seven and this test failed until the docstring said so. It fired again when FINDING
+        K promoted the one keyword pin to D8.
         """
         passages = {k: v for k, v in vars(LoadBearingSentences).items()
                     if k.startswith("D") and isinstance(v, str)}
         withdrawn = {k for k in passages if k.endswith("_WITHDRAWN")}
         positive = {k for k in passages if k not in withdrawn}
-        self.assertEqual(len(positive), 7, f"positive passages: {sorted(positive)}")
+        self.assertEqual(len(positive), 8, f"positive passages: {sorted(positive)}")
         self.assertEqual(len(withdrawn), 1, f"withdrawn passages: {sorted(withdrawn)}")
         src = inspect.getsource(LoadBearingSentences)
         self.assertEqual(src.count("assertIn("), 8, "cleandoc'd assertIn doc pins")
@@ -1988,50 +2622,110 @@ class FiguresAndDocPinInventory(unittest.TestCase):
                       intake, "the discharge figure disagrees with the list below it")
         conv = src.split("caller-input conversion protocols")[1].split("def _shown")[0]
         converted, discharged = conv.count("[converted]"), conv.count("DISCHARGED")
-        self.assertEqual((converted, discharged), (4, 3), "the conversion enumeration's rows")
-        self.assertIn(f"{self._WORD[converted + discharged].upper()} protocols", conv)
-        self.assertIn(f"{self._WORD[converted].upper()} have reachable sites", conv)
+        declared = conv.count("[declared]")
+        self.assertEqual((converted, discharged, declared), (4, 3, 1),
+                         "the conversion enumeration's rows: the third figure is `__format__`, "
+                         "which had no row at all until this round although it has 111 reachable "
+                         "sites -- a protocol with no row is invisible to the walker and to the "
+                         "table at the same time")
+        self.assertIn(f"{self._WORD[converted + discharged + declared].upper()} protocols", conv)
+        self.assertIn(f"{self._WORD[converted + declared].upper()} have reachable sites", conv)
+        self.assertIn(f"{self._WORD[converted].upper()} of them converted here", conv)
+        self.assertIn(f"{self._WORD[declared].upper()} declared", conv)
 
     def test_the_open_class_channel_sentence_is_its_measured_scope(self):
         """The sentence the NEXT OWNER reads about an open finding, which makes it load-bearing.
 
-        It used to say `_is_row_like` "happens to absorb it at the nestedness probe; nothing else
-        does" -- false since the intake fix moved `isinstance(obj, _NOT_A_SEQUENCE)` inside
-        `_materialised`'s `try`. Measured at this commit on both interpreters with a `@property
-        __class__` raising RuntimeError: the OUTER positions and the ROW position come out IN
-        FAMILY; the ELEMENT positions, `denominator` and `expected_len` still escape as a bare
-        RuntimeError.
+        FINDING J, and it is an asymmetry in this very test as much as in the sentence. The sentence
+        listed the in-family positions as "(`values`, `mask`, `point`, `before`/`after`,
+        `param_grad`)" and the escaping ones as "the ELEMENT positions, `denominator` and
+        `expected_len`", and this test asserted the six in-family ones -- so it COULD NOT NOTICE AN
+        OMISSION FROM THE ESCAPE LIST. Three omissions were there:
 
-        ONLY the in-family half is asserted. The escaping half is a known open finding recorded in
-        `docs/PROGRESS.md`, reaching ~85 `isinstance` sites across three files and needing a
-        kit-wide decision by those files' owners: a test asserting that it escapes would PIN A
-        DEFECT and make the eventual fix fail here.
+          * `require_parameter_gradient(input_grad=...)` escapes at `isinstance(input_grad, Real)`,
+            at BOTH its positions. It is an OUTER argument of a public function, which the sentence's
+            own "the OUTER positions come out IN FAMILY" contradicts, and it appeared in neither
+            list. Its other four hostile shapes (`__iter__`, `__getattr__`, `__float__`, `__repr__`
+            raising) are all MissingGradientError, so this channel is the only one that escapes
+            there -- and it is absent from `_CASES` and excused by `_NOT_A_LYING_NUMBER`, so no
+            derived sweep reached it either.
+          * EVERY SCALAR position escapes, not only the two named: `value`, `step`, `rtol`, `atol`,
+            `zero_tol` and `min_abs_change` as well as `denominator` and `expected_len`.
+          * "the ROW position" is in family for `check_finite_matrix` and NOT for
+            `masked_mean_checked`, where the nestedness probe absorbs the hostile `__class__`,
+            answers "not a row", and hands the object to the ELEMENT check.
+
+        So the sentence is rewritten from a POSITION-BY-POSITION sweep: 38 driven positions, 13 in
+        family and 25 escaping, identical on 3.12.4 and 3.13.5. The fix to the asymmetry is to
+        ACCOUNT for all 38 instead of asserting 6 -- the (function, parameter) set is derived from
+        the signatures and every pair must be in the table or excused -- while still asserting
+        BEHAVIOUR for the in-family rows only. The escaping rows are asserted about nothing: the
+        channel reaches every `isinstance` in this module (19, derived below) and more in its two
+        importers, the fix is those owners' joint decision, and a test that pinned an escape would
+        pin a defect and fail on that fix. The figure this docstring used to quote -- "~85
+        `isinstance` sites across three files" -- is not reproducible: it reconciles only with a
+        robustness figure that round 18 retired, so it is replaced by this module's own count,
+        derived, with the other two modules' counts left to their owners rather than inherited.
         """
+        import ast
         src = inspect.getsource(st)
         self.assertIn("MEASURED SCOPE at this commit", src)
-        self.assertIn("still escape as a bare RuntimeError", src)
+        self.assertIn("escaping as a bare RuntimeError", src)
         self.assertNotIn("happens to absorb it at", src)     # the withdrawn, false claim
         self.assertIn("it is NOT closed", src)
-
-        def hostile():
-            class C:
-                @property
-                def __class__(self):
-                    raise RuntimeError("class boom")
-
-                def __iter__(self):
-                    return iter([1.0, 2.0])
-            return C()
-        for label, call in (("outer values", lambda: st.check_finite_sequence(hostile())),
-                            ("mask", lambda: st.check_mask(hostile(), 2)),
-                            ("row", lambda: st.check_finite_matrix([hostile()])),
-                            ("point", lambda: st.check_gradient(lambda p: 1.0,
-                                                                lambda p: [1.0], hostile())),
-                            ("before", lambda: st.check_params_changed(hostile(), [1.0, 2.0])),
-                            ("param_grad", lambda: st.require_parameter_gradient(hostile()))):
-            with self.subTest(in_family_at=label):
+        # this module's own isinstance count, derived over EVERY scope and quoted in the sentence
+        sites = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name) and n.func.id == "isinstance"]
+        self.assertEqual(len(sites), 19, "the isinstance sites in this module")
+        self.assertIn(f"({len(sites)} of them, derived from this file's AST over", src,
+                      "the sentence must quote this module's own derived count, not a sum that "
+                      "silently inherits another module's retired figure")
+        # EVERY parameter of the nine public functions is accounted for, in one table or the other
+        params = {(n, p) for n in _CASES for p in inspect.signature(getattr(st, n)).parameters}
+        covered = {(f, p) for f, p, _k, _v, _c in _CLASS_CHANNEL_POSITIONS}
+        self.assertEqual(params - covered, set(_NOT_A_CLASS_CHANNEL_POSITION),
+                         "a public parameter is in neither _CLASS_CHANNEL_POSITIONS nor "
+                         "_NOT_A_CLASS_CHANNEL_POSITION: that is how input_grad came to be missing "
+                         "from BOTH halves of the sentence while this test stayed green")
+        for key in _NOT_A_CLASS_CHANNEL_POSITION:
+            self.assertIn(key, params, f"{key} is excused but no longer exists")
+        self.assertEqual(len(_CLASS_CHANNEL_POSITIONS), 38, "the driven positions")
+        verdicts = [v for _f, _p, _k, v, _c in _CLASS_CHANNEL_POSITIONS]
+        self.assertEqual((verdicts.count(_IN_FAMILY), verdicts.count(_ESCAPES)), (13, 25),
+                         "the measured split the sentence is written from")
+        self.assertIn("13 IN FAMILY and 25 escaping", src)
+        self.assertIn("38 driven positions", src)
+        # and the sentence names each half's members
+        in_family_half = src.split("IN FAMILY (13)")[1].split("ESCAPING (25)")[0]
+        escaping_half = src.split("ESCAPING (25)")[1].split("_NOT_A_SEQUENCE = (")[0]
+        # The two kinds the sentence enumerates BY PARAMETER NAME are the outer and the scalar ones;
+        # the row, element and return-value kinds it describes as classes, in prose, and they are
+        # checked by the split figures above rather than by name. `input_grad` is the row this makes
+        # fail if it is dropped from the escape list again.
+        for f, p, kind, verdict, _call in _CLASS_CHANNEL_POSITIONS:
+            if kind not in ("outer", "scalar"):
+                continue
+            half = in_family_half if verdict == _IN_FAMILY else escaping_half
+            with self.subTest(sentence_names=(f, p, kind)):
+                self.assertIn(f"`{p}`", half,
+                              f"{f}({p}=...) at its {kind} position is measured {verdict!r} and "
+                              f"the sentence's {verdict!r} list does not name it")
+        # BEHAVIOUR: asserted for the 13 in family, and for nothing else.
+        for f, p, kind, verdict, call in _CLASS_CHANNEL_POSITIONS:
+            if verdict != _IN_FAMILY:
+                continue
+            with self.subTest(in_family_at=(f, p, kind)):
                 with self.assertRaises(st.StabilityError):
-                    call()
+                    call(_class_boom())
+        # input_grad's other four shapes DO come out in family, which is the contrast that makes the
+        # `__class__` channel the only escape there. This half is a behaviour claim, so it is pinned.
+        for label, make in (_BROKEN_ITER_OTHER[:1] + _BROKEN_GETATTR[:1] + _BROKEN_FLOAT[:1]
+                            + (("__repr__ raises RuntimeError", _repr_raises(RuntimeError)),)):
+            for where, call in (("outer", lambda o: st.require_parameter_gradient(None, input_grad=o)),
+                                ("element", lambda o: st.require_parameter_gradient(None, input_grad=[o]))):
+                with self.subTest(input_grad=label, at=where):
+                    with self.assertRaises(st.MissingGradientError):
+                        call(make())
 
     def test_the_only_skip_in_this_file_is_the_counted_numpy_one(self):
         """NOTE E's principle versus the one real `@unittest.skipIf` in this file, reconciled.
@@ -2059,8 +2753,25 @@ class FiguresAndDocPinInventory(unittest.TestCase):
         inline = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                   and isinstance(n.func, ast.Attribute) and n.func.attr in ("skipTest", "skip")]
         self.assertEqual(inline, [], "a test that skips itself is an uncounted skip")
-        # every OTHER numpy-dependent assertion is behind a plain `if`, which cannot skip
-        self.assertEqual(src.count("if np is not None:"), 2)
+        # Every OTHER numpy-dependent assertion is behind a plain `if`, which cannot skip. DERIVED
+        # from the AST, not counted in the text: this was
+        # `assertEqual(src.count("if np is not None:"), 2)` -- a SELF-COUNT, of whose two hits ONE
+        # WAS THIS ASSERTION'S OWN STRING LITERAL, so it described one real guard as two. It also
+        # could not see a THIRD numpy guard that existed, spelled `if _np is not None:` behind a
+        # function-local `import numpy as _np`, which made the comment at NOTE E inaccurate AS TO
+        # SPELLING. An `ast.If` test cannot be a string literal and cannot be respelled past this.
+        import re as _re
+        np_guards = [ast.unparse(n.test) for n in ast.walk(tree)
+                     if isinstance(n, ast.If) and _re.search(r"\b[A-Za-z_]*np\b", ast.unparse(n.test))]
+        self.assertEqual(np_guards, ["np is not None"] * 3,
+                         "a numpy-dependent guard in this file is spelled some other way, so it is "
+                         "counted by nothing: use the module-level `np`")
+        # DERIVED, not counted in the text: `src.count("import numpy as ")` would be a self-count
+        # again -- it matches this file's own prose about the defect it describes.
+        np_imports = [ast.unparse(n) for n in ast.walk(tree)
+                      if isinstance(n, (ast.Import, ast.ImportFrom)) and "numpy" in ast.unparse(n)]
+        self.assertEqual(np_imports, ["import numpy as np"],
+                         "numpy is imported once, at module level, so every guard reads the same name")
 
     def test_e_the_docstring_guard_is_inert_in_a_normal_run(self):
         """NOTE E. `python -OO` strips docstrings, so `inspect.cleandoc(None)` raised
@@ -2079,12 +2790,35 @@ class FiguresAndDocPinInventory(unittest.TestCase):
         """
         self.assertEqual(st.__doc__ is not None, sys.flags.optimize < 2)
         for obj in (st, st.check_gradient, st.check_finite_scalar, st.masked_mean_checked,
-                    st.check_mask, st.check_finite_sequence, LoadBearingSentences):
+                    st.check_mask, st.check_finite_sequence, st._same, st._plain_real,
+                    st.GradientCheckReport, LoadBearingSentences):
             with self.subTest(obj=getattr(obj, "__name__", obj)):
                 self.assertIs(_doc(obj) is None, sys.flags.optimize >= 2)
         if sys.flags.optimize < 2:
             self.assertIn("Exception design", _doc(st))
             self.assertIn("Rejected before comparing", _doc(st.check_gradient))
+        # THE SECOND WAY A DOCSTRING CAN BE ABSENT, which a None check cannot see: `@dataclass`
+        # SUBSTITUTES its synthesised signature for a stripped class docstring, so under `-OO`
+        # `GradientCheckReport.__doc__` is PRESENT AND WRONG. `GradientCheckReport` was absent from
+        # the object list above, which is the only reason the `assertIs(... is None, optimize >= 2)`
+        # line was green; it is in the list now, and `_doc` reconstructs the substitution with the
+        # expression `dataclasses` itself evaluates so that a change THERE fails loudly here
+        # instead of silently suppressing a real docstring.
+        report = st.GradientCheckReport
+        klasses = [o for o in vars(st).values()
+                   if isinstance(o, type) and getattr(o, "__module__", None) == st.__name__]
+        self.assertEqual(len(klasses), 14, "14 classes at HEAD")
+        self.assertEqual([c.__name__ for c in klasses if dataclasses.is_dataclass(c)],
+                         ["GradientCheckReport"], "the module's only dataclass")
+        self.assertIsNotNone(report.__doc__, "__doc__ is never None here: stripped, it is substituted")
+        self.assertIs(report.__doc__ == _dataclass_signature_doc(report), sys.flags.optimize >= 2)
+        if sys.flags.optimize >= 2:
+            self.assertEqual([c.__name__ for c in klasses if c.__doc__ is not None],
+                             ["GradientCheckReport"],
+                             "the only class whose __doc__ survives -OO, by substitution")
+            self.assertIn("analytic:", report.__doc__)       # the signature, not the docstring
+        else:
+            self.assertIn("Returned only when the check PASSES", _doc(report))
 
     def test_the_figures_the_docstrings_quote_are_this_interpreters_figures(self):
         """Four figures `stability.py` quotes as measurements, asserted where each is claimed.
@@ -2131,15 +2865,29 @@ class FiguresAndDocPinInventory(unittest.TestCase):
                 self.assertIs(st._plain_real(obj), obj)
 
     def test_the_test_count_is_deliberately_not_asserted_here(self):
-        """The suite's own test count (72 before this round) appears in neither source file; it
-        lives in `scripts/test_baseline.txt`, which the orchestrator owns and regenerates.
+        """The suite's own test count appears in neither source file; it lives in
+        `scripts/test_baseline.txt`, which the orchestrator owns and regenerates.
 
         Left that way DELIBERATELY, stated rather than overlooked: asserting the count inside the
         file whose contents determine it creates a second source of truth that drifts on every
         legitimate addition, and the baseline file already fails a run that loses tests. What this
         test does assert is the property the count was standing in for -- that no test class here
         is empty and every one is collected -- which is what a dropped case would actually break.
+
+        AND THIS DOCSTRING NOW QUOTES NO FIGURE AT ALL, by construction and by the assertion below.
+        It used to carry a parenthetical count "before this round" that was STALE BY TWO ROUNDS --
+        derived over history, the suite went from fifty-seven to seventy-two, stayed, rose to
+        eighty-four, then to its present size, so the parenthetical named a figure two rounds old --
+        and it did so in the test whose entire subject is that count, which makes it the latest
+        instance of this project's recurring figure-in-prose defect. The deliberate NON-assertion
+        of the count is settled and correct; it was the history written beside it that rotted. So
+        the parenthetical is gone, and no digit may appear here.
         """
+        doc = _doc(self.test_the_test_count_is_deliberately_not_asserted_here)
+        if doc is not None:
+            self.assertEqual([c for c in doc if c.isdigit()], [],
+                             "this docstring quotes a figure about the suite's own size, which is "
+                             "the one thing it exists to say nobody should write down")
         classes = [o for o in globals().values()
                    if isinstance(o, type) and issubclass(o, unittest.TestCase)]
         self.assertGreaterEqual(len(classes), 10)
@@ -2150,7 +2898,7 @@ class FiguresAndDocPinInventory(unittest.TestCase):
 
 
 class LoadBearingSentences(unittest.TestCase):
-    """Seven passages that were wider than their mechanism, each pinned to its own passage, plus
+    """Eight passages that were wider than their mechanism, each pinned to its own passage, plus
     one withdrawn sentence pinned ABSENT.
 
     Both figures are ASSERTED, not merely written: `FiguresAndDocPinInventory` re-derives them
@@ -2161,14 +2909,43 @@ class LoadBearingSentences(unittest.TestCase):
     Each test asserts the exact narrowed passage AND the behaviour it claims, so a doc-only edit to
     that passage fails this test (verified by mutating each passage and watching it fail), and so does
     a code-only regression. The passages are quoted in full rather than by keyword: a keyword pin in
-    this project was itself found evadable by rewording around it."""
+    this project was itself found evadable by rewording around it.
 
+    FINDING K, which was a violation of that last sentence by this class itself. Re-running the
+    settled pins against the file, all seven `D` passages DIED on a relative-indent mutant on both
+    interpreters -- and the EIGHTH `assertIn`, `"Rejected before comparing (none counts as evidence
+    of a working gradient)"`, was UNKILLED by all three suites on both interpreters, because it was
+    a single-line needle with no leading whitespace: `cleandoc` re-renders the line with four extra
+    spaces and `assertIn` still finds it. It was the one keyword pin here and it was the weak one.
+    It is D8 now, the whole "Rejected before comparing" block, and it dies on the same mutant its
+    siblings die on.
+
+    D8 is spelled with a LEADING NEWLINE inside `cleandoc` rather than flush like D1 and D7,
+    because its bullet list has to keep its relative indentation: `cleandoc` strips the common
+    margin of every line after the first, so a flush first line would make the bullets -- the
+    least-indented of the remaining lines -- come out at column zero and never match the module's
+    two-space rendering. D6 is spelled the same way, for the same reason."""
+
+    # FINDING H: the headline was falsified by the one operand a caller's CALLABLE fills, and the
+    # three PASS reports measured there were an overridden `__eq__` talking a guard out of raising --
+    # the exact thing this sentence says cannot happen. The passage now states the second rule that
+    # makes it true at that operand, and quotes the 30-cell measurement.
     D1 = inspect.cleandoc("""Nothing in
 this module warns or returns a sentinel, and no guard here is decided by the
 caller's object: every one of them compares, and divides by, the NORMALISED
 value (`_plain_real`, or the float a `check_finite_*` validator already
 returned), so an overridden `__eq__`, `__ne__`, `__ge__` or `__rmul__` cannot
-talk a guard out of raising.""")
+talk a guard out of raising. THAT HOLDS FOR A VALUE A CALLER'S CALLABLE PLACED
+AS WELL AS FOR ONE IT PASSED, and holding it there took a SECOND rule, because
+`_plain_real` normalises only `bool`/`int`/`float` and is the IDENTITY on
+everything else: where the left operand of a bare `==` is whatever `fn` or
+`grad_fn` wrote into the list this module handed it, the guard decides on the
+plain `int`/`float` normalisation produced and REPORTS ANY OTHER OBJECT AS A
+WRITE instead of asking that object whether it is equal (`_same`). Measured
+over 5 operand bases x 3 comparison shapes x 2 callable positions = 30 cells,
+identically on both interpreters: without that rule 12 of the 30 left this
+module as a bare RuntimeError and 3 were PASS REPORTS WITH THE MUTATION
+UNDETECTED; with it, 30 of 30 are refused in family.""")
     D1_WITHDRAWN = "warns, returns a sentinel, or returns a number computed from bad"
     D2 = inspect.cleandoc("""The mismatch check and the division both use
     `_plain_real(denominator)`, the int the object STORES, so an `int` subclass
@@ -2176,6 +2953,17 @@ talk a guard out of raising.""")
     this check""")
     D3 = inspect.cleandoc("""`step`, `rtol`, `atol` and `zero_tol` are normalised to plain floats ONCE, immediately after
     validation, and every use below is of those floats""")
+    # FINDING K: promoted from the one keyword `assertIn` in this class, which was also the only
+    # one of the eight that a relative-indent mutant did not kill.
+    D8 = inspect.cleandoc("""
+    Rejected before comparing (none counts as evidence of a working gradient):
+      * analytic gradient with any NaN/inf (NonFiniteError),
+      * analytic gradient with max |g_i| <= zero_tol, default exactly zero
+        (DegenerateGradientError): a zero gradient matches a flat function and
+        also a severed gradient path, so agreement proves nothing. Choose a
+        point where the true gradient is nonzero. A genuinely tiny gradient is
+        not "zero" unless you raise zero_tol above it.
+      * non-finite fn values during differencing (NonFiniteError).""")
     D4 = inspect.cleandoc("""`sum()` is used for accumulation elsewhere in this module and relies on
     CPython 3.12+ compensated float summation (sum([1e16, 1.0, -1e16]) is
     1.0 there, not 0.0); masked means can differ in the last bits on
@@ -2236,8 +3024,7 @@ it is a failed READ of a data argument and is converted to this module's family
         doc = _doc(st.check_gradient)
         if doc is not None:
             self.assertIn(self.D3, doc)
-            self.assertIn("Rejected before comparing (none counts as evidence of a working gradient)",
-                          doc)
+            self.assertIn(self.D8, doc)       # FINDING K: was a single-line keyword needle
         with self.assertRaises(st.DegenerateGradientError):
             st.check_gradient(_F_FLAT, _G_ZERO, [1.0, 2.0], zero_tol=_liar(0.0))
         r = st.check_gradient(_F_QUAD, _G_QUAD, [1.0, 2.0], step=_liar(1e-6), rtol=_liar(1e-4),

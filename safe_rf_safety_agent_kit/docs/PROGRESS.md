@@ -10370,3 +10370,192 @@ Still the three owners' joint decision.
 
 **SR-11 stays `[ ]`** — the fixer is not the attester, and SR-11 depends on SR-10 → SR-06. **Verified
 stays 9 of 17.**
+
+## Round 19 — SR-06's fifth axis: a pin, a claim and a fixture that all shared one base
+
+**Date:** 2026-11-12. HEAD at attestation `4aa6800`.
+
+### Five attestations, five axes — and the axis count is now the finding
+
+**provenance → interpreter portability → the intake family → the conversion protocol → the comparison
+protocol.** Four of the five named subjects PASSED, and the attester recorded that before stating the
+failure: *"I did not manufacture this finding and I am not failing SR-06 because the chain is
+blocked — a clean PASS was available on four of the five subjects and I have recorded it."* The
+numerics have been sound for five rounds. What keeps failing is the boundary, and **a boundary has as
+many faces as the language has protocols.**
+
+### FINDING H — the sharpest instance of this project's defining failure
+
+`check_gradient`'s in-place-mutation guard compares a value the caller's **callable** wrote into `arg`,
+via `_same`'s bare `==`. **`_plain_real` normalises only `bool`/`int`/`float` — and says so in its own
+docstring three lines away.** So on a plain object, a `numbers.Real` subclass or a `Fraction` subclass
+it is the identity.
+
+5 operand bases × 3 comparison shapes × 2 callable positions = 30, byte-identical on both
+interpreters:
+
+```
+BEFORE: {OUT-OF-FAMILY 12, PASS-report-with-mutation-undetected 3, IN-FAMILY 15}
+AFTER : {OUT-OF-FAMILY  0, PASS-report-with-mutation-undetected 0, IN-FAMILY 30}
+```
+
+**The 15 in-family cells were the `float` and `int` subclass bases — the only bases the suite's fixture
+used.** Fully public: no `object.__setattr__`, no metaclass, and in-place mutation is a documented,
+tested shape.
+
+**Two pinned sentences were falsified, and the pin, the claim and the fixture all shared one base.**
+D1 said *"no guard here is decided by the caller's object … an overridden `__eq__` … cannot talk a
+guard out of raising"* — three overridden `__eq__`s talked it out of raising. `:299-301` said
+`_plain_real` *"closes it there too (measured: …)"* — and that measurement used a `float` subclass.
+`test_g2e`'s block asserting it used `type("EqBoom", (float,), …)`. **Each confirmed the others, so
+there was nothing in the file capable of disagreeing.** That is a sharper failure mode than an
+unpinned sentence: a *pinned* sentence whose pin is drawn from the same unrepresentative sample as the
+claim.
+
+**What let it through was a reason, not a missing check.** `_NOT_A_LYING_NUMBER` excludes
+`check_gradient`'s callables because *"its RETURN value is normalised where it is consumed, and the
+callable itself is documented as outside any boundary here."* **A callable opens three routes — the
+call, the return value, and the side effect on the handed-over list. The reason covers two.** And
+because `test_c1`, `test_a_liar_…` and `test_the_same_sweep_…` all reuse that table, the 61-position /
+1785-refusal sweep never reached the third. **Third time in SR-06 that an avoidance-with-a-reason hid a
+real defect**, and `CLAUDE.md`'s rule-9 smell in its documented form.
+
+The fix narrows the reason as deliberately as it changes the code: both rows now name three routes,
+say which two are excused, state that the side effect is **not**, and name the sweep that covers it —
+with `test_h3` asserting that text, so the reason cannot silently widen again.
+
+### A sixth escape shape nobody had listed, and it decides the spelling
+
+At HEAD a callable could swap `1.0` for **`True`** — or plain `int 1`, or `Fraction(1,1)` — and get a
+PASS report, because `_plain_real` returns `bool` unchanged and `True == 1.0`. **This makes the obvious
+spelling wrong:** `isinstance(a, (float, int))` would *keep* the hole, since `bool` is an `int`
+subclass. The gate is `type(a) is not float and type(a) is not int`, and the `SAME_ISINSTANCE` mutant
+is killed on both interpreters. **The idiomatic check would have reproduced the defect it was written
+to close** — which is worth remembering the next time `isinstance` looks like the safe default.
+
+One behaviour change, stated in the module and pinned both ways: a callable replacing a coordinate with
+a value-equal object of another type now gets "mutated its input in place", while a plain `int`, a
+`float` subclass storing the same value, and `np.float64` (which *is* a `float` subclass) still pass.
+No cross-module reach — **neither importer calls `check_gradient`**, grepped and both suites green.
+
+### FINDING I — the walker, and coverage that was one-sided
+
+`test_g2d` walked only `ast.FunctionDef` and skipped `ast.Lambda` bodies, so a coercion in the module
+body, a lambda or a class body was **unkilled by all three suites on both interpreters** — while its
+docstring claimed *"anywhere in the module."* Zero such sites exist at HEAD, so there was no
+behavioural consequence; the finding is against the stated fail-closed property, which is the claim.
+
+Widened to all four scope kinds, with decorators, defaults, annotations and base-class expressions
+attributed to the **enclosing** scope where they are evaluated — without which the one
+`dataclass(frozen=True)` call belonged to no scope (240 of 241 attributed; now 241/241). All three
+previously-unkilled mutants now fail.
+
+**And the structural point was acted on, which matters more than the walker.** The module's prose table
+and the test's dict are *both hand-written* and the only walker was the test's — so **membership within
+a protocol was cross-checked while protocol and scope coverage were not.** A scope the walker ignored
+was absent from both sides and set equality passed. Now: a **partition** assertion (every `ast.Call`
+and `ast.FormattedValue` attributed to exactly one scope, so an ignored scope kind is a *mismatch*
+rather than an empty bucket), and a `_NOT_A_COERCION` table excusing in writing every builtin the
+module calls that is not a coercion candidate, asserted **in both directions** so a stale excuse fails
+too. Reverting the walker now fails its own check. **This is the same gap that left four public
+positions open in `robustness.py` behind a green set-equality check**, and the shape transfers.
+
+### FINDING J — understated three ways, not one
+
+Re-measured position by position rather than by shape: **38 driven positions over nine public
+functions, 13 in family, 25 escaping**, identical on both interpreters. `input_grad` was the omission
+briefed — but also **every scalar position** escapes, not just `denominator`/`expected_len`; and
+*"the ROW position comes out in family"* is true only for `check_finite_matrix`, because
+`masked_mean_checked`'s row **escapes** when `_is_nested`'s probe absorbs the hostile `__class__`,
+answers "not a row", and hands the object to the element check.
+
+**The asymmetry is fixed by accounting rather than by asserting one half:** the test derives all 33
+`(function, parameter)` pairs from the signatures and requires each to be in the covered set or the
+excused set, **in both directions** — which is precisely how `input_grad` survived being in neither.
+The 25 escapes are asserted about **nothing** behaviourally, so the eventual joint fix will not fail
+here.
+
+### FINDING K — the one keyword pin was the weak one
+
+Seven `D` passages survived a +781-line change and die on relative-indent mutants. The 8th `assertIn`
+was a **single-line needle with no leading whitespace**, so `assertIn` still found it after `cleandoc`
+re-rendered the line — **unkilled by all three suites on both interpreters.** `LoadBearingSentences`'
+own docstring states the method it violated: *"The passages are quoted in full rather than by keyword:
+a keyword pin in this project was itself found evadable by rewording around it."* Promoted to `D8`, a
+full eight-line passage; the mutant that was unkilled under HEAD tests now fails.
+
+A detail worth keeping: `D8` needs a leading newline inside `cleandoc`, because a flush first line
+makes the bullets — the least-indented remaining lines — land at column zero and never match the
+module's two-space rendering. Recorded in the class docstring rather than left to look arbitrary.
+
+### Four figures corrected, and one refused
+
+1. **"(72 before this round)" was stale by two rounds** — 57 → 72 → 72 → **84** → 100 → 100, so before
+   this round it was 84. **Seventh instance of figures-in-prose, in the test whose entire subject is
+   that count.** Replaced with a word-only account and pinned by **no digit may appear in that
+   docstring** — the only pin that cannot itself rot.
+2. **"~85 `isinstance` sites across three files"** reconciles only with a figure round 18 retired. Real
+   total **78** (`stability.py` **19** by AST — `grep -c` says 16 because it counts *lines*,
+   `robustness.py` 49, `checkpoint.py` 10). Replaced with this module's own derived count and the other
+   two referred to as *"its two importers … whose counts belong to their owners"*, **so the sentence
+   cannot silently inherit a retired figure again.**
+3. **`assertEqual(src.count("if np is not None:"), 2)` counted its own string literal** as one of the
+   two, while a third guard spelled `_np is not None` was counted by nothing. Now AST-derived (cannot
+   match a literal, cannot miss a respelling) — **and the spelling was fixed rather than the comment**,
+   deleting the function-local `import numpy as _np`. The fixer's *first* attempt at the import count
+   self-counted too, caught by its own run.
+4. `test_c1`'s performed-not-asserted figures left exactly as they are, correctly labelled.
+
+**And it refused one of my figures.** I passed along "14 out-of-family outcomes over 7 positions, 12 on
+valid input"; its own enumeration gave **13 over 7, 6 on valid input**. Rather than pick, it reasoned
+that the number depends entirely on which cases one drives and so is not reproducible from the
+artefacts — and wrote the three **AST-derivable** figures (111 bare interpolations / 80 module-produced
+/ 31 on the label chain) and pinned all three instead. **That is "if you quote a figure, put it where a
+test can read it" applied against a figure the orchestrator supplied**, and it flagged the divergence
+rather than quietly dropping it. The right answer, and the right way to disagree.
+
+### Also taken: the contract another module depends on
+
+`robustness.mse_fsum` relies on `check_finite_*` returning a plain `float`. That contract **was**
+protected — but only **incidentally**, through the compensated-summation figure, with no direct
+return-type assertion anywhere. Now `assertIs(type(...), float)` across seven validators and every
+float field of `GradientCheckReport`, plus a sentence naming who relies on it. `RETURN_FLOAT_SUBCLASS`
+→ 30 failures, the new test among the killers.
+
+**`_doc`'s dataclass blind spot closed**, adopting `test_robustness`' detector: `_doc` returns `None`
+when the docstring equals the reconstruction of `dataclasses`' own substituted signature, **so a change
+in `dataclasses` makes the pin fail loudly instead of silently suppressing a real docstring.**
+`GradientCheckReport` is the module's only dataclass and the only one of its 14 classes whose `__doc__`
+survives `-OO` — and its **absence** from `test_e`'s object list was what kept that test green.
+
+### Measurements
+
+| run | interpreter / environment | result |
+|---|---|---|
+| `test_stability` | 3.12.4 (user-site numpy 2.4.6, torch 2.7.1) | **104 OK** (was 100) |
+| `test_stability` | 3.13.5 miniconda (numpy 2.4.4, no torch) | **104 OK** |
+| `test_stability` | both, **`-OO`** | **104 OK** |
+| `test_stability` | numpy absent (meta-path blocker), both | **104 OK, skipped=1** |
+| `test_robustness` / `test_checkpoint` | both | 197 OK / 48 OK |
+| **full suite** | **3.12.4** | **1464 ran, 2 skipped, 0 failed**, rc=0 |
+| **full suite** | **3.13.5**, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` | **1464 ran, 84 skipped, 0 failed**, rc=0 |
+
+1460 + 4 = 1464. Pre-fix verification: HEAD module + new tests = **`FAILED (failures=27, errors=3)`,
+identical counts on both interpreters.** 26 mutants run, 23 killed, **3 controls behaving as designed**
+and reported as unkilled-with-diffs rather than as survivors.
+
+Two figures in my brief were wrong and are corrected: round 16's diffstat is `stability.py`
+**+216/−39** and `test_stability.py` **+781/−30** (I relayed the fixer's own +255/−39 and +811 without
+checking), and `stability.py` was **867** lines, not ~997. *"218 raw coercion sites"* and *"75 sites in
+79 occurrences"* appear **nowhere in the artefacts** — the first only in a commit message, the second
+nowhere at all. **A figure that lives only in a commit message is a figure no test can read.**
+
+### Cross-owner
+
+The **`__class__` channel** is now measured at **38 positions, 13 in family, 25 escaping**, with
+`stability.py` at 19 `isinstance` sites, `robustness.py` 49, `checkpoint.py` 10 — **78, not ~85.** None
+of the 25 escapes is asserted, so the joint fix will not fail in this file. `test_benchmark` red under
+`-OO` and the declared escape at `benchmark.py:2094` remain **SR-10's**.
+
+**SR-06 stays `[ ]`** — the fixer is not the attester and this fix has had no independent pass.
+**Verified stays 9 of 17.**

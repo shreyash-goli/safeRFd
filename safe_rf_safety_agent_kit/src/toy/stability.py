@@ -10,7 +10,18 @@ this module warns or returns a sentinel, and no guard here is decided by the
 caller's object: every one of them compares, and divides by, the NORMALISED
 value (`_plain_real`, or the float a `check_finite_*` validator already
 returned), so an overridden `__eq__`, `__ne__`, `__ge__` or `__rmul__` cannot
-talk a guard out of raising. What that does NOT cover, stated rather than left
+talk a guard out of raising. THAT HOLDS FOR A VALUE A CALLER'S CALLABLE PLACED
+AS WELL AS FOR ONE IT PASSED, and holding it there took a SECOND rule, because
+`_plain_real` normalises only `bool`/`int`/`float` and is the IDENTITY on
+everything else: where the left operand of a bare `==` is whatever `fn` or
+`grad_fn` wrote into the list this module handed it, the guard decides on the
+plain `int`/`float` normalisation produced and REPORTS ANY OTHER OBJECT AS A
+WRITE instead of asking that object whether it is equal (`_same`). Measured
+over 5 operand bases x 3 comparison shapes x 2 callable positions = 30 cells,
+identically on both interpreters: without that rule 12 of the 30 left this
+module as a bare RuntimeError and 3 were PASS REPORTS WITH THE MUTATION
+UNDETECTED; with it, 30 of 30 are refused in family.
+What that does NOT cover, stated rather than left
 to be discovered: a number a caller's own `__float__`/`__int__` or a
 caller-supplied CALLABLE returns is taken as the value, by protocol -- this
 module cannot see behind it, and `check_finite_scalar` is documented to return
@@ -154,6 +165,11 @@ def _plain_real(v):
 def check_finite_scalar(value, name: str = "value") -> float:
     """Return `float(value)` if it is a finite real number, else raise.
 
+    The returned object's type is exactly `float`, never a `float` subclass: a caller's subclass
+    does not survive this validator, and `toy.robustness.mse_fsum` relies on that when it feeds the
+    result to `math.fsum`. The contract was protected only INCIDENTALLY -- through the compensated-
+    summation figure -- until a test asserted the type directly.
+
     bool is rejected (True is not a measurement). -0.0 is finite and is
     returned unchanged (sign preserved, not normalised to +0.0) by the
     `check_finite_*` validators. Arithmetic results are NOT covered by that
@@ -234,15 +250,33 @@ def _finite_at(v, where: str) -> float:
 #     nothing about RAISING. Measured while that line stood: a raising `__float__` produced 45
 #     out-of-family outcomes and a raising `__repr__` nine more.
 #   * `isinstance()` against a lying or RAISING `__class__` -- a different class of channel: it
-#     reaches every `isinstance` in this module (and its siblings), not the intake points, so it
-#     is not closed here and must not be assumed closed. MEASURED SCOPE at this commit, because
-#     this sentence is what the next owner reads about an open finding: with a `@property
-#     __class__` that raises RuntimeError, the OUTER positions (`values`, `mask`, `point`,
-#     `before`/`after`, `param_grad`) and the ROW position come out IN FAMILY -- the outer ones
-#     because `_materialised` keeps `isinstance(obj, _NOT_A_SEQUENCE)` inside its `try`, the row
-#     one because `_is_row_like` absorbs it -- while the ELEMENT positions, `denominator` and
-#     `expected_len` still escape as a bare RuntimeError. So it is NOT absorbed "at the nestedness
-#     probe" alone, which is what this comment claimed, and it is NOT closed.
+#     reaches every `isinstance` in this module (19 of them, derived from this file's AST over
+#     every scope), not the intake points, so it is not closed here and must not be assumed
+#     closed. MEASURED SCOPE at this commit, because this sentence is what the next owner reads
+#     about an open finding, and it is written from a POSITION-BY-POSITION sweep rather than from
+#     a shape: with a `@property __class__` that raises RuntimeError, 38 driven positions over the
+#     nine public functions give 13 IN FAMILY and 25 escaping as a bare RuntimeError, identically
+#     on 3.12.4 and 3.13.5.
+#     IN FAMILY (13), and only these: every OUTER SEQUENCE position -- `values` (of
+#     `check_finite_sequence` and of `masked_mean_checked`), `m`, `mask` (of all three functions
+#     that take one), `prediction`, `target`, `point`, `param_grad`, `before`, `after` -- because
+#     `_materialised` keeps `isinstance(obj, _NOT_A_SEQUENCE)` inside its `try`; plus
+#     `check_finite_matrix`'s ROW position, because that row goes through `_materialised` too.
+#     ESCAPING (25), which the previous wording of this sentence understated three ways: every
+#     ELEMENT position; every SCALAR position, which is `value`, `expected_len`, `denominator`,
+#     `step`, `rtol`, `atol`, `zero_tol` and `min_abs_change` and NOT just the two this sentence
+#     used to name; `input_grad` at BOTH its positions, an OUTER argument of a public function
+#     that escapes while the old sentence said outer positions come out in family (its other four
+#     hostile shapes -- `__iter__`, `__getattr__`, `__float__`, `__repr__` raising -- are all
+#     refused as MissingGradientError, so the `__class__` channel is the only one that escapes
+#     there); `masked_mean_checked`'s ROW position, which is NOT in family although
+#     `check_finite_matrix`'s is, because `_is_nested`'s probe absorbs the hostile `__class__`,
+#     answers "not a row" and so hands the object to the ELEMENT check; and the RETURN values of
+#     `fn` and `grad_fn`. So it is NOT absorbed "at the nestedness probe" alone, it is NOT closed,
+#     and the fix is the three owners' joint decision rather than this module's -- which is why
+#     the test that pins this sentence asserts the 13 in family, accounts for all 38 positions so
+#     a new one cannot be missing from BOTH halves, and asserts NOTHING about the 25, because a
+#     test that pinned the escape would pin a defect and fail on the eventual fix.
 _NOT_A_SEQUENCE = (str, bytes, Mapping, set, frozenset)
 
 # Exceptions from a caller's object that are NOT converted into this module's family: they report
@@ -262,8 +296,11 @@ _UNCONVERTED = (MemoryError, RecursionError, SystemError)
 # `float`/`int`/`bool`/`len`/`repr` (the `{...!r}` conversion included), `type(x).__name__` and
 # `Fraction`, then deciding each by the PROVENANCE of its operand.
 # `tests/toy_tests/test_stability.py::test_g2d_...` re-derives the set from the AST and fails
-# closed when a new site appears. SEVEN protocols; FOUR have reachable sites, and all four are
-# closed here:
+# closed when a new site appears -- over EVERY SCOPE (module body, class bodies and lambda bodies
+# included: it used to walk `ast.FunctionDef` only, so a coercion in any of those three was
+# invisible to it and to this table alike) and against a decided list of every builtin this module
+# calls, so a protocol missing from BOTH this table and the walker fails too. EIGHT protocols;
+# FIVE have reachable sites, FOUR of them converted here and ONE declared:
 #
 #   float()            -- 4 calls in 3 statements: check_finite_scalar,
 #                         _validated_masked_values, _sq (both operands). Every one of them goes
@@ -297,14 +334,40 @@ _UNCONVERTED = (MemoryError, RecursionError, SystemError)
 #                         `__len__`/`__length_hint__`. Accepting it is right: such an object IS
 #                         usable as a sequence, its elements are read verbatim, and every `len()`
 #                         that decides anything is taken on this module's copy. DISCHARGED
+#   __format__ as `{x}` -- 111 interpolations, 80 of them module-produced, 31 on the label chain.
+#                         The 80 interpolate a value this module itself produced (a float, an int,
+#                         a `_shown` or `_type_name` result) and reach no caller protocol. The 31
+#                         interpolate the `name`, `what` or `where` LABEL, whose root is the public
+#                         `name=` parameter: that parameter is annotated `str`, but an annotation is
+#                         not a boundary, and a `str` subclass with a raising `__format__` is
+#                         accepted and its exception leaves this module. NOT CONVERTED. DECLARED
+#                         instead, and declared in a ROW rather than in prose below the table,
+#                         because a protocol that has reachable caller-data sites and no row is
+#                         invisible to the walker and to this table at once -- which is how this one
+#                         went three rounds without either. The reason for leaving it: the label
+#                         reaches the MESSAGE and nothing else. It decides no guard, changes no
+#                         value and cannot alter an exception TYPE, which is what a caller branches
+#                         on. What that reason UNDERSTATES, corrected here rather than left to be
+#                         re-measured: `where = f"{name}[{i}][{j}]"` and the `what` strings are
+#                         built EAGERLY, on the SUCCESS path, so the channel fires on fully valid
+#                         input and not only while a refusal is being phrased.         [declared]
 #
 # NOT conversion, so deliberately not re-decided here: the ARITHMETIC and COMPARISON dunders.
 # They are the module docstring's own claim, closed by `_plain_real` at every guard and swept by
 # the derived liar sweep in the tests. `_same`'s bare `==` is the one of them whose left operand
-# comes back from a caller's CALLABLE, and `_plain_real` closes it there too (measured: a callable
-# that swaps in a value whose `__eq__` raises still gets "mutated its input in place"). A `name=`
-# label's `__format__`/`__str__` is also outside: that parameter is annotated `str`, and the
-# message is the only thing it reaches.
+# comes back from a caller's CALLABLE rather than from a caller's ARGUMENT, and `_plain_real` is
+# NOT on its own enough there -- the correction this round makes, because the sentence that used to
+# stand here ("`_plain_real` closes it there too (measured: a callable that swaps in a value whose
+# `__eq__` raises still gets 'mutated its input in place')") was TRUE ONLY FOR THE `float` SUBCLASS
+# THAT MEASUREMENT USED, which was also the only base the test fixture asserting it used.
+# `_plain_real` normalises `bool`/`int`/`float` and returns everything else UNCHANGED, so for a
+# plain object, a `numbers.Real` subclass or a `Fraction` subclass the bare `==` was still the
+# caller's. Measured over 5 operand bases x 3 comparison shapes x 2 callable positions = 30 cells,
+# byte-identically on 3.12.4 and 3.13.5: 12 bare RuntimeErrors out of `check_gradient` (a raising
+# `__eq__` or `__ne__` on any of those three bases, at the `fn` AND the `grad_fn` position), 3 PASS
+# REPORTS with the in-place mutation UNDETECTED (a lying `__eq__ -> True` on those three bases via
+# `grad_fn`), and 15 in family -- the 15 being the `float` and `int` subclass bases, the only
+# shapes the suite reached. `_same` now decides on the NORMALISED value or not at all; see there.
 #
 # WHY CONVERTED RATHER THAN EXEMPTED: see the module docstring. Taken at its word is about LYING.
 # Measured before this fix, identically on 3.12.4 and 3.13.5: a caller-defined `numbers.Real`
@@ -808,10 +871,40 @@ def check_gradient(fn: Callable[[list], float], grad_fn: Callable[[list], Sequen
 
 
 def _same(a, b) -> bool:
-    """`a` comes back from the caller's callable and `b` is this module's snapshot, so `a` is the LEFT
-    operand of a bare `==` and answers for itself: `_plain_real` first, or a callable that swaps a
-    point coordinate for a `float` subclass with a lying `__eq__` hides its own in-place mutation."""
+    """Is the post-call slot `a` still the snapshot value `b`? Decided on PLAIN NUMBERS or not at all.
+
+    `b` is always a plain `float` this module put in the list (`check_finite_sequence`'s tuple, or a
+    coordinate stepped by a validated float). `a` is whatever the caller's CALLABLE left in the slot,
+    which makes it the LEFT operand of a bare `==` -- the one operand position in this module that a
+    caller's own callable fills -- so without normalisation it answers for itself.
+
+    TWO RULES, and the second is what the round that wrote the first one missed. `_plain_real` is the
+    first: a `float`/`int` subclass with a lying `__eq__` cannot claim to be unchanged, because what
+    is compared is the `int`/`float` it STORES. But `_plain_real` normalises only `bool`/`int`/`float`
+    and its own docstring says so: a plain object, a `numbers.Real` subclass and a `Fraction` subclass
+    come back UNCHANGED (measured: `_plain_real(o) is o`), and for those three the bare `==` was still
+    theirs. Measured over 5 operand bases x 3 comparison shapes x 2 callable positions = 30 cells,
+    identically on both interpreters: 12 bare RuntimeErrors escaped `check_gradient` and 3 were PASS
+    reports with the mutation undetected; only the `float` and `int` bases -- the fixture's own shapes
+    -- were in family.
+
+    So the second rule: anything normalisation cannot reduce to exactly `int` or `float` is REPORTED AS
+    A WRITE. It is not asked. That is correct as well as closed -- `b` is a plain `float`, so a slot
+    now holding a `Fraction`, a `numpy` scalar, a `bool` or an arbitrary object HAS been written to,
+    whatever that object says about equality -- and it is what makes the module docstring's "no guard
+    here is decided by the caller's object" true at this operand. `type(...) is` and not `isinstance`,
+    deliberately: `bool` is an `int` subclass that `_plain_real` deliberately does not collapse, and
+    `isinstance` would let `True` pass for the `1.0` it replaced (measured before this: it did).
+
+    THE ONE BEHAVIOUR CHANGE, stated because it is a real narrowing: a callable that replaces a
+    coordinate with a value-EQUAL object of another type -- `True`, `Fraction(1, 1)`, a `numpy`
+    float -- now gets "mutated its input in place" where it used to pass. A plain `int` and a `float`
+    subclass storing the same value still pass, because both normalise to a plain number and the
+    comparison is then between two plain numbers.
+    """
     a = _plain_real(a)
+    if type(a) is not float and type(a) is not int:
+        return False                 # not normalisable: a different object is in the slot, full stop
     return a == b or (a != a and b != b)
 
 
