@@ -10925,3 +10925,191 @@ three owners' joint decision. The route count other owners should now quote for 
 (14 in family, 28 escaping)**, not 41/27.
 
 **SR-06 stays `[ ]`** — the fixer is not the attester, and this fix has had no independent pass.
+
+## Round 22 — SR-06: the row routes, counted as caller-facing positions, and a verdict neither round predicted
+
+**Date:** 2026-11-12. HEAD at start `4982b90` (round 21, committed). Owner: `src/toy/stability.py`,
+`tests/toy_tests/test_stability.py`, this entry. **Not committed** — left dirty for the orchestrator.
+
+Round 21 drove `masked_squared_error_mean`'s `prediction` and `target` at a **ROW** position and
+**declined** to count them, recording the declines in `_ROUTE_DRIVEN_AND_DECLINED`. The orchestrator
+reversed the decision on the principle that **this table counts caller-facing positions, not internal
+sites**: which site absorbs the object is an implementation fact, and declining a route on a judgment
+call about internal reachability is *"a reason that covers two routes of three reads like a reason that
+covers the position"* in its third incarnation. That is right, and the form round 21 used — declining
+**in writing** — was the right form for the wrong decision.
+
+### FINDING S — the measured verdict is IN FAMILY, not escaping, and it is fixture-dependent
+
+Both the orchestrator and round 21 expected these two routes to **escape**. Driven here, they do not.
+
+With the counterpart argument honestly 2D — `masked_squared_error_mean([h], [[1.0, 2.0]], [True], 2)` —
+the answer is **IN FAMILY, a `ShapeError`** from `masked_squared_error_mean` itself: `_is_row_like`'s
+probe absorbs the hostile `__class__` and answers *"not a row"*, so `prediction` reads **flat** while
+`target` reads **2D**, and the function refuses the disagreement. Identical on 3.12.4 (numpy 2.4.6) and
+3.13.5 (numpy 2.4.4), numpy present and absent.
+
+**Not a fixture artefact, and that is now derived rather than argued.** Substituting a legitimate row
+`[1.0, 2.0]` for the hostile object makes the same call **return 0.0**, so the refusal is caused by the
+object. That benign-substitution control now runs for **every** `row` row in the table — it is precisely
+the check the earlier sweep lacked when it mistook its own 2D-target fixture for the route's answer, and
+a mutant that re-introduces such a fixture is killed by it.
+
+**The verdict depends on the fixture, and that is written beside the rows rather than hidden by the one
+chosen.** Measured, all three cases:
+
+| fixture | outcome |
+|---|---|
+| hostile row in `prediction`, counterpart honestly 2D (any index, any row count) | **IN FAMILY** `ShapeError` |
+| the **same** hostile object at index **0** of **both** `prediction` and `target` | **ESCAPES** at `_sq`'s `isinstance(v, bool)` — the identical site the ELEMENT rows already drive |
+| the same object at index **1** of both | in-family `NonNumericError` about the **other** row; the hostile object is never read |
+
+The chosen fixture is the first: it is what a caller doing 2D MSE actually writes, and it is the only one
+of the three whose outcome can be attributed to **one** parameter. The second is recorded because a
+reader who takes "row" for a single outcome is wrong either way; the third is recorded because it is
+vacuous and an unrecorded vacuous fixture is how this project's figures go wrong.
+
+**A diagnostic cost, recorded, not fixed:** the in-family `ShapeError` names the **shapes** and not the
+object that caused them, so a caller who passes a hostile row gets "prediction and target must both be
+flat or both be 2D". In family is the claim; a good message is not.
+
+### The ROW pairing is DERIVED — and the predicate tried first was unsound
+
+The orchestrator asked that the row set be derived rather than hand-listed, and said a written limit
+would be an acceptable outcome. It did not come to that, but the first two attempts were wrong.
+
+**Not from the documentation.** Annotations cannot give it: `prediction`, `target` and `values` carry no
+annotation at all, and `check_finite_matrix`'s `m` is the only `Sequence[Sequence[float]]` in the module.
+Docstring prose is brittle to match and absent under `-OO`.
+
+**Not from "accepts a benign nested value" — that predicate is UNSOUND, and the flat control did not
+catch it.** It cannot tell *accepted because this parameter takes a matrix* from *accepted because this
+parameter was never read*. Measured: it reported **`require_parameter_gradient`'s `input_grad` as a fifth
+nested-accepting parameter**, because with `param_grad` present `input_grad` is **never looked at** — the
+only code path that reads it is inside the `param_grad is None` branch. The flat control passed for the
+same vacuous reason.
+
+**The derivation that holds:** a data parameter has a `row` route exactly when the module
+**materialises rows out of it**, observed by spying on `st._as_rows` while a benign nested value is
+driven through every outer data parameter. Reaching `_as_rows` cannot be faked by not reading the
+argument. Derived set, both interpreters:
+
+```
+check_finite_matrix/m   masked_mean_checked/values
+masked_squared_error_mean/prediction   masked_squared_error_mean/target
+```
+
+— exactly the four the orchestrator expected, and exactly the table's four `row` routes. Asserted both
+directions, with `_NO_ROW_ROUTE` (empty, emptiness stated) as the written home for a decline.
+
+**Three honest limits of that derivation, written rather than implied:**
+1. `prediction` and `target` **cannot be nested one at a time** — the module's own shape-agreement rule
+   refuses a 2D prediction against a flat target, so the only well-formed call nesting either nests
+   **both**. The predicate is therefore "a nested value *at* this parameter is accepted, the rest of the
+   call adjusted as the module requires", and the adjustment is **forced by the module**, not chosen.
+2. `input_grad` is **not probeable** and carries a written exemption — but the exemption's reason is
+   itself backed by two callables the test runs: `ignored()` must return (the parameter can be left
+   unread) and `read()` must raise in family (it is read only while phrasing a refusal). Any future
+   exemption of this shape must meet the same contract.
+3. The `_as_rows` **label is not the parameter name** (`check_finite_matrix` passes `name`, default
+   `"matrix"`, for parameter `m`; `masked_squared_error_mean`'s internal re-entry labels rows
+   `"squared_error"`). Attribution is therefore by **which parameter the probe nested**, never by the
+   label. A label-based derivation would have been wrong for two of the four.
+
+`_ROUTE_DRIVEN_AND_DECLINED` is **retired**, not left empty: its only two entries are now rows, and
+`_NO_ELEMENT_ROUTE` and `_NO_ROW_ROUTE` are the written homes for a decline, one per pairing rule. A
+third empty placeholder beside them would be residue — which is the call round 21 made about naming a
+placeholder for what it is, applied to itself.
+
+### Figures — re-derived, and they disagree with the brief
+
+**44 driven positions, 16 in family, 28 escaping.** The brief expected **44 / 14 / 30**. The total is
+right; the split is not, because the two new rows measure **in family**, not escaping. 28 escaping did
+not move at all.
+
+Re-derived three ways: counted from the table; watched the pristine literals fail (`44 != 42`); and by a
+sweep that **drives all 44 routes and compares each outcome against the row's verdict column**:
+
+| environment | rows | in family | escaping | mismatches |
+|---|---|---|---|---|
+| 3.12.4 numpy 2.4.6 / absent | 44 | 16 | 28 (all bare `RuntimeError`) | 0 |
+| 3.13.5 numpy 2.4.4 / absent | 44 | 16 | 28 | 0 |
+
+Route kinds: 13 outer, 13 element, **4 row**, 9 scalar, 2 return value, 1 return element, 2 written slot.
+
+### The "what closes nothing" sentence shrank by exactly what this closes
+
+`stability.py`'s reach paragraph now lists **four** derivations — signature-derived parameter set;
+`_CALLABLE_PLACED` cross-check; outer⇄element pairing; and row ⇔ `_as_rows` materialisation — and the
+limit is correspondingly smaller. What is still held by hand is now **one row and one class**: the
+ELEMENTS of the sequence `grad_fn` returns, which nothing requires but the kind enumeration
+`_ROUTE_KINDS` (delete that row and only the kind-set equality notices — verified), and a route kind this
+module has no machinery for at all. The **scalar** routes are noted as a smaller case than they look:
+the parameter accounting already requires every scalar parameter to carry *some* route, so only the
+*choice* of kind is by hand there.
+
+### Note 5's figure is now DERIVED, so it will not rot
+
+Round 21 flagged that "18 assertions behind 13 doc-gated guards" lived only in this journal. It is now
+written in a comment beside NOTE E and **compared against this file's AST**, matching both guard
+spellings (`doc is not None` and `_doc(st.<fn>) is not None`). The assertion uses `inspect.getsource`,
+so **it runs under `-OO` too** — verified: the stale-figure mutant is killed under `-OO` as well as
+normally. The `-OO` row is still weaker evidence than the others, for the reason round 21 recorded; the
+*size* of that weakness is no longer a number nobody checks.
+
+### Measurements
+
+Three permitted suites only, **serial**, `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` cleared, `-B` never
+`-I`. Full suite **not run** — the orchestrator's.
+
+| run | environments | result |
+|---|---|---|
+| `test_stability` | 3.12.4 and 3.13.5 × {normal, `-OO`} | **106 OK** (4/4) |
+| `test_stability` | both × {normal, `-OO`}, numpy absent | **106 OK, skipped=1** (4/4) |
+| `test_robustness` | both × {normal, `-OO`} | **197 OK** (4/4) |
+| `test_checkpoint` | both × {normal, `-OO`} | **48 OK** (4/4) |
+
+Test count unchanged at **106** — nothing added, disabled or deleted; baseline needs no edit.
+`ruff check --select E9,F63,F7,F82` clean. `stability.py` diff is **comment text only** (verified: no
+non-`#` line changed), so the 44-route drive is byte-identical before and after it.
+Diff: `stability.py` **+27/−9**, `test_stability.py` **+293/−54**.
+
+### Mutants — 8 new, 9 prior controls re-checked, all on `git archive` copies
+
+| mutant | pristine (`4982b90`) | after this round |
+|---|---|---|
+| `ROW_DROP_CFM` (drop `check_finite_matrix`/`m`/`row`, figures consistent) | **unkilled**, 3 suites × 2 interpreters | **KILLED** via `materialised - row_routes`, both interpreters |
+| `ROW_DROP_NEW_PREDICTION` (drop one of the new rows, figures consistent) | n/a | **KILLED**, same assertion |
+| `ROW_FIXTURE_ARTEFACT` (make the fixture's counterpart disagree on *width*, so the refusal no longer needs the hostile object) | n/a | **KILLED** by the benign-substitution control |
+| `NO_ROW_ROUTE_BLANK_REASON` (drop the row, excuse it with `"   "`) | n/a | **KILLED** via `why.strip()` |
+| `NOTE_E_FIGURE_STALE` (`18` → `17` in the comment) | n/a | **KILLED** normally **and under `-OO`** |
+| `TBL_DROP_A_DATA_ROUTE_v2`, `TBL_DROP_AN_OUTER_ROUTE`, `TBL_DROP_A_WRITTEN_SLOT_control`, `TBL_BOGUS_NO_ELEMENT_EXCUSE`, `XREF_DESTINATION_REWORDED`, `XREF_DELETED_control`, `XREF_SIBLING_TAIL_REWORDED`, `FSTRING_S_SAFE_OPERAND`, `FSTRING_A_SAFE_OPERAND` | round 21's record | **all still KILLED**, each by its intended assertion |
+
+Every kill was confirmed to fire on the **intended** assertion by reading the first `self.assert…` /
+`self.fail` line of the traceback.
+
+### Derivations that failed before they were right
+
+1. **"Accepts a benign nested value" as the row predicate — unsound**, and the flat control could not
+   catch it, because a parameter that is never read passes both halves. Replaced by `_as_rows`
+   reachability. Recorded beside `_NESTED_PROBES`, because this is the exact shape of the defect the
+   whole table exists to prevent.
+2. **`check_params_changed`'s `after` probe nested BOTH arguments**, so the module refused on `before`
+   and the answer attributed to `after` was about a different parameter. Caught by reading the refusal
+   message, not by the pass/fail of the probe.
+3. **`input_grad`'s first flat control passed `param_grad=None`**, so it raised `MissingGradientError`
+   before nesting was reached. Caught by the flat control immediately.
+4. **The first row fixture choice was nearly the vacuous one.** Three fixtures give three different
+   answers; only one can be attributed to a single parameter. Had the index-1-in-both fixture been
+   picked, the table would have recorded an in-family verdict for a route whose hostile object is never
+   read — a green row meaning nothing.
+5. **An `-OO`-gated-assertion count that looked for one spelling** (round 21's 16/11) understated the
+   real 18/13. Now derived from both spellings.
+
+### Cross-owner
+
+Behaviour unchanged; the module diff is comment text only. The `__class__` channel remains **declared
+and unpinned on purpose** — the 28 escaping rows assert nothing. **The figures other owners should quote
+for this module are 44 / 16 / 28**, not 42/14/28 and not 44/14/30.
+
+**SR-06 stays `[ ]`** — the fixer is not the attester, and this fix has had no independent pass.

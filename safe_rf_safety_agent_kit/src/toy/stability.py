@@ -254,19 +254,25 @@ def _finite_at(v, where: str) -> float:
 #     every scope), not the intake points, so it is not closed here and must not be assumed
 #     closed. MEASURED SCOPE at this commit, because this sentence is what the next owner reads
 #     about an open finding, and it is written from a POSITION-BY-POSITION sweep rather than from
-#     a shape: with a `@property __class__` that raises RuntimeError, 42 driven positions over the
-#     nine public functions give 14 IN FAMILY and 28 escaping as a bare RuntimeError, identically
+#     a shape: with a `@property __class__` that raises RuntimeError, 44 driven positions over the
+#     nine public functions give 16 IN FAMILY and 28 escaping as a bare RuntimeError, identically
 #     on 3.12.4 and 3.13.5 and with numpy present and absent.
 #     A POSITION HERE IS A ROUTE, not a parameter, and that distinction is this round's correction.
 #     The sweep used to read 38 positions, 13 and 25, and the three it was missing were all ROUTES
 #     OF PARAMETERS IT ALREADY NAMED -- `fn` and `grad_fn`, listed for their return values alone.
 #     An accounting that keys on the PARAMETER cannot see such a route: it needs no row and gets no
 #     excuse. So the test that pins this sentence keys on (function, parameter, ROUTE).
-#     IN FAMILY (14), and only these: every OUTER SEQUENCE position -- `values` (of
+#     IN FAMILY (16), and only these: every OUTER SEQUENCE position -- `values` (of
 #     `check_finite_sequence` and of `masked_mean_checked`), `m`, `mask` (of all three functions
 #     that take one), `prediction`, `target`, `point`, `param_grad`, `before`, `after` -- because
 #     `_materialised` keeps `isinstance(obj, _NOT_A_SEQUENCE)` inside its `try`; plus
 #     `check_finite_matrix`'s ROW position, because that row goes through `_materialised` too; plus
+#     `masked_squared_error_mean`'s TWO ROW positions, `prediction`'s and `target`'s, for a reason
+#     worth stating separately because it is not the row machinery at all: `_is_row_like`'s probe
+#     ABSORBS the hostile `__class__` and answers "not a row", so one side of the comparison reads
+#     FLAT and the other reads 2D, and the function refuses the disagreement. The refusal is in
+#     family, and its message names the shapes rather than the object that caused them -- a
+#     DIAGNOSTIC cost recorded here rather than a different verdict; plus
 #     the SEQUENCE OBJECT `grad_fn` RETURNS, which `_as_flat_items` materialises exactly like a
 #     sequence argument and which therefore comes out as ShapeError.
 #     ESCAPING (28), which the wording before this sentence understated three ways: every
@@ -281,7 +287,11 @@ def _finite_at(v, where: str) -> float:
 #     refused as MissingGradientError, so the `__class__` channel is the only one that escapes
 #     there); `masked_mean_checked`'s ROW position, which is NOT in family although
 #     `check_finite_matrix`'s is, because `_is_nested`'s probe absorbs the hostile `__class__`,
-#     answers "not a row" and so hands the object to the ELEMENT check; `fn`'s RETURN VALUE, and
+#     answers "not a row" and so hands the object to the ELEMENT check -- and although
+#     `masked_squared_error_mean`'s two ROW positions are not either, which is the sharper
+#     contrast: the SAME absorbed probe runs there, but there is a SECOND argument for the
+#     answer to disagree with, so the object is refused on shape before it is ever read as a
+#     number. `masked_mean_checked` has nothing to disagree with and reads it; `fn`'s RETURN VALUE, and
 #     the ELEMENTS of the sequence `grad_fn` returns but NOT that sequence itself -- which is what
 #     the previous wording ("the RETURN values of `fn` and `grad_fn`") got wrong, in the one
 #     direction a test asserting only the in-family rows could not catch; and the SLOT A CALLABLE
@@ -296,7 +306,7 @@ def _finite_at(v, where: str) -> float:
 #     are all refused in family, so there too the `__class__` channel is the only escape.
 #     So it is NOT absorbed "at the nestedness probe" alone, it is NOT closed,
 #     and the fix is the three owners' joint decision rather than this module's -- which is why
-#     the test that pins this sentence asserts the 14 in family, accounts for all 42 positions AT
+#     the test that pins this sentence asserts the 16 in family, accounts for all 44 positions AT
 #     ROUTE GRANULARITY, and asserts NOTHING about the 28, because a test that pinned the escape
 #     would pin a defect and fail on the eventual fix. WHAT THAT ACCOUNTING CLOSES, exactly, and
 #     by which derivation, because the sentence that used to stand here claimed more than its
@@ -304,12 +314,20 @@ def _finite_at(v, where: str) -> float:
 #     neither the table nor its excuse table fails; (ii) a CALLABLE-PLACED position's three
 #     routes -- call, return value, written slot -- are cross-checked against the tests'
 #     `_CALLABLE_PLACED`; (iii) a DATA parameter's OUTER route must have an ELEMENT sibling and
-#     vice versa, or be declined in writing in an excuse table. Nothing else is closed by a
-#     derivation: a route KIND nobody has driven -- a third level of nesting, say -- is held
-#     only by the hand-written enumeration of kinds in the test. That is not a quibble. The
+#     vice versa, or be declined in writing in an excuse table; (iv) and since FINDING S a DATA
+#     parameter has a ROW route exactly when THIS MODULE MATERIALISES ROWS out of it, which the
+#     test derives by spying on `_as_rows` while a benign nested value is driven through each
+#     outer data parameter -- so `row` is not a kind the test answers by hand any more either.
+#     WHAT IS STILL HELD BY HAND, shrunk by exactly what (iv) closes, and it is one ROW and one
+#     CLASS: the ELEMENTS of the sequence `grad_fn` returns, which nothing requires but the kind
+#     enumeration `_ROUTE_KINDS` -- delete that row and only the kind-set equality notices; and
+#     a route kind this module has no machinery for at all, which is in no table because nothing
+#     drives it. The SCALAR routes are a smaller case than they look: the parameter accounting
+#     already requires every scalar parameter to carry SOME route, so only the CHOICE of kind is
+#     by hand there. That is not a quibble. The
 #     claim this paragraph used to make, that the accounting covers every position at route
 #     granularity "so a new one cannot be missing from BOTH halves", was FALSE FOR DATA
-#     PARAMETERS for exactly that reason -- (ii) existed and (iii) did not -- and
+#     PARAMETERS for exactly that reason -- (ii) existed and (iii) and (iv) did not -- and
 #     `masked_squared_error_mean`'s `mask` ELEMENT route, a real escape, had no row, no excuse
 #     and no measurement behind the figure for as long as that claim stood.
 _NOT_A_SEQUENCE = (str, bytes, Mapping, set, frozenset)

@@ -2697,9 +2697,12 @@ class TheCarveOutWhereItsHalvesMeet(unittest.TestCase):
 # and ELEMENT routes must come in pairs, or be declined in writing in `_NO_ELEMENT_ROUTE` -- that is
 # Finding P, and it is Finding L's own defect one parameter KIND over, because (ii) closed route
 # granularity for callable-placed positions ONLY while the comment in `stability.py` claimed route
-# granularity for all of them. The remaining ROUTE KINDS are enumerated by hand in `_ROUTE_KINDS`
-# below, one row per kind that was driven: a kind nobody drives is held by that enumeration and by
-# no derivation, which is the limit of (i)-(iii) and is now written in `stability.py` as such.
+# granularity for all of them; (iv) a DATA parameter has a ROW route exactly when this module
+# MATERIALISES ROWS out of it, derived by spying on `_as_rows` while a benign nested value is driven
+# through every outer data parameter -- that is FINDING S, and it replaces a pair of hand-written
+# DECLINES with a measurement. The ROUTE KINDS left to the hand-written `_ROUTE_KINDS` below are
+# now just `return element` and whatever nobody drives: that is the limit of (i)-(iv), it is
+# smaller than it was, and `stability.py` says so in the same words.
 _ROUTE_KINDS = {
     "outer": "the argument object itself",
     "row": "an element of the outer sequence of a 2D argument",
@@ -2766,10 +2769,40 @@ _CLASS_CHANNEL_POSITIONS = (
      lambda h: st.masked_mean_checked([1.0], [True], h)),
     ("masked_squared_error_mean", "prediction", "outer", _IN_FAMILY,
      lambda h: st.masked_squared_error_mean(h, [1.0, 2.0], [True, True], 2)),
+    # FINDING S, THE ROW ROUTES OF THE TWO 2D-CAPABLE PARAMETERS THIS TABLE HAD NOT DRIVEN -- and
+    # the round before this one DECLINED them, on the ground that `_is_row_like` answers False for
+    # the hostile object so the row is "unreachable". That reasoning counted INTERNAL SITES. This
+    # table counts CALLER-FACING POSITIONS: which site absorbs the object is an implementation
+    # fact, and it does not make the position a caller can put an object in stop existing.
+    #
+    # MEASURED, and the verdict is NOT what either round expected -- IN FAMILY, a ShapeError, from
+    # `masked_squared_error_mean` itself: `_is_row_like`'s probe absorbs the hostile `__class__`,
+    # answers "not a row", so `prediction` reads FLAT while `target` reads 2D, and the function
+    # refuses the disagreement. 3.12.4 (numpy 2.4.6) and 3.13.5 (numpy 2.4.4) alike.
+    #
+    # NOT A FIXTURE ARTEFACT, and that is asserted rather than asserted-by-me: substituting a
+    # legitimate row `[1.0, 2.0]` for the hostile object makes this exact call RETURN 0.0, so the
+    # refusal is caused by the object and not by the shapes of the fixture. That control runs for
+    # every `row` row in this table -- it is the check the earlier sweep lacked when it mistook its
+    # own 2D-target fixture for the route's answer.
+    #
+    # THE VERDICT IS FIXTURE-DEPENDENT AND THAT IS WRITTEN DOWN, because a reader who takes "row"
+    # for a single outcome will be wrong either way. With the counterpart argument honestly 2D (the
+    # fixture below, at any index and any row count) the answer is this in-family ShapeError. With
+    # the SAME hostile object at index 0 of BOTH `prediction` and `target`, both read flat and the
+    # object reaches `_sq`'s `isinstance(v, bool)` and ESCAPES -- the identical site the ELEMENT
+    # rows already drive, and a fixture that cannot attribute its outcome to one parameter. At
+    # index 1 of both, `_sq` refuses the OTHER row first and the hostile object is never read at
+    # all. The fixture chosen is the one a caller doing 2D MSE actually writes.
+    ("masked_squared_error_mean", "prediction", "row", _IN_FAMILY,
+     lambda h: st.masked_squared_error_mean([h], [[1.0, 2.0]], [True], 2)),
     ("masked_squared_error_mean", "prediction", "element", _ESCAPES,
      lambda h: st.masked_squared_error_mean([h], [1.0], [True], 1)),
     ("masked_squared_error_mean", "target", "outer", _IN_FAMILY,
      lambda h: st.masked_squared_error_mean([1.0, 2.0], h, [True, True], 2)),
+    # the same route on the other side of the same comparison, measured the same way.
+    ("masked_squared_error_mean", "target", "row", _IN_FAMILY,
+     lambda h: st.masked_squared_error_mean([[1.0, 2.0]], [h], [True], 2)),
     ("masked_squared_error_mean", "target", "element", _ESCAPES,
      lambda h: st.masked_squared_error_mean([1.0], [h], [True], 1)),
     ("masked_squared_error_mean", "mask", "outer", _IN_FAMILY,
@@ -2878,35 +2911,111 @@ _NOT_A_CLASS_CHANNEL_POSITION = {
 # exists so that the thirteen can become twelve in writing instead of by deletion.
 _NO_ELEMENT_ROUTE = {}
 
-# Routes the sweep DROVE and DECLINED TO COUNT, keyed (function, parameter, route), each with the
-# reason it is not a row above. Same principle as `_NO_ELEMENT_ROUTE` and the same reason for
-# existing: a declined route recorded by absence reads exactly like a route nobody drove.
+# FINDING S. The ROW pairing, derived, and `_ROUTE_DRIVEN_AND_DECLINED` RETIRED with it. That table
+# held exactly two entries -- `masked_squared_error_mean`'s `prediction` and `target` at a ROW
+# position, declined because `_is_row_like` answers False for the hostile object so no INTERNAL site
+# treats it as a row. The decision is reversed: this table counts CALLER-FACING POSITIONS. Which
+# internal site absorbs the object is an implementation fact and does not make the position a caller
+# can put an object in stop existing; and declining a route on a judgment call about internal
+# reachability is "a reason that covers two routes of three reads like a reason that covers the
+# position" in its third incarnation. Both routes now have rows, measured IN FAMILY. The table is
+# gone rather than left empty: `_NO_ELEMENT_ROUTE` and `_NO_ROW_ROUTE` are the written homes for a
+# declined route now, one per pairing rule, and a third empty placeholder beside them would be
+# residue.
 #
-# `masked_squared_error_mean`'s `prediction` and `target` were driven at a ROW position and declined
-# because THERE IS NO ROW ROUTE THERE TO DRIVE: `_is_row_like` catches the hostile `__class__` in
-# its own `try` and answers False (asserted from the object, not from this comment, in
-# `test_the_open_class_channel_sentence_is_its_measured_scope`), so `_is_nested` says "flat" and the
-# object goes to the ELEMENT check -- the row the table already holds, at the identical escape site,
-# `_sq`'s `isinstance(v, bool)`. What the first sweep saw there was an IN-FAMILY ShapeError, and
-# that was its own fixture talking: a 2D target against a flat-looking prediction makes
-# `masked_squared_error_mean` complain that the two disagree about shape before the hostile object
-# is read at all. Driven with a flat target, the route escapes at `_sq` exactly as the element row
-# does.
+# THE RULE: a data parameter has a ROW route exactly when the module MATERIALISES ROWS out of it.
+# That is not read off a hand list and not read off the documentation either -- see
+# `_NESTED_PROBES` below for how it is derived, and for the predicate that was tried first and was
+# unsound.
+_NO_ROW_ROUTE = {}
+
+# The probe behind the ROW pairing rule: for each (function, parameter) with an OUTER data route, a
+# FLAT control and a NESTED probe. The derivation is that a parameter has a row position exactly
+# when driving a benign NESTED value through it reaches `_as_rows`, the module's own row
+# materialiser -- observed by spying on `st._as_rows`, not by matching prose.
 #
-# RECORDED, NOT TIDIED: `("masked_mean_checked", "values", "row")` IS a row in the table and is
-# unreachable in precisely the same way -- measured at the same site as its own element row. It
-# stays because the module's MEASURED SCOPE sentence names it by hand, as the contrast with
-# `check_finite_matrix`'s row, which is a real row route through `_materialised`. Deleting it would
-# delete a row the prose names; declining `msem`'s two here while keeping it is an asymmetry, and an
-# asymmetry written down is worth more than a tidy table nobody can audit.
-_ROUTE_DRIVEN_AND_DECLINED = {
-    ("masked_squared_error_mean", "prediction", "row"):
-        "unreachable: _is_row_like answers False for the hostile object, so _is_nested says flat "
-        "and the ELEMENT row below drives the identical site (_sq's isinstance(v, bool)). The "
-        "in-family ShapeError first seen here came from a 2D-target fixture, not from this route",
-    ("masked_squared_error_mean", "target", "row"):
-        "unreachable for the same reason as `prediction`'s row, and measured at the same site: the "
-        "nestedness probe absorbs the hostile __class__ and the element check gets the object",
+# WHY NOT THE DOCUMENTATION, which is what "documented as accepting a nested sequence" would
+# suggest: the type annotations cannot give it (`prediction`, `target` and `values` carry no
+# annotation at all, while `check_finite_matrix`'s `m` is the only `Sequence[Sequence[float]]`), and
+# docstring prose is both brittle to match and absent under `-OO`. The behavioural reading is also
+# STRICTLY STRONGER than the documentary one: a docstring can claim 2D support the code does not
+# have, and acceptance cannot.
+#
+# WHY NOT "ACCEPTS A BENIGN NESTED VALUE", which was tried first and is UNSOUND: it cannot tell
+# "accepted because this parameter takes a matrix" from "accepted because this parameter was never
+# READ". Measured -- it reported `require_parameter_gradient`'s `input_grad` as a fifth
+# nested-accepting parameter, because with `param_grad` present `input_grad` is never looked at.
+# The FLAT control did not catch that: the control passes vacuously for the same reason. Reaching
+# `_as_rows` cannot be faked by not reading the argument, which is why the predicate moved.
+#
+# THE FLAT CONTROL is load-bearing all the same, for the other artefact: it is what proves a probe's
+# answer is about NESTING and not about some other way the fixture is malformed. Two of the twelve
+# below were malformed when first written and it caught both -- `check_params_changed`'s `after`
+# probe nested BOTH arguments, so the module refused on `before` and the answer attributed to
+# `after` was about a different parameter; and `input_grad`'s first flat control passed `param_grad
+# =None`, so it raised MissingGradientError before nesting was reached. Same species as the sweep
+# that mistook its own 2D-target fixture for a route's verdict.
+_F2 = lambda q: q[0] ** 2 + q[1] ** 2
+_G2 = lambda q: [2 * q[0], 2 * q[1]]
+_ROW = [1.0, 2.0]          # a legitimate ROW, and the benign substitute every `row` fixture takes
+_NESTED_PROBES = {
+    ("check_finite_sequence", "values"):
+        (lambda: st.check_finite_sequence([1.0, 2.0]),
+         lambda: st.check_finite_sequence([_ROW, _ROW])),
+    ("check_finite_matrix", "m"):
+        (lambda: st.check_finite_matrix([[1.0]]),
+         lambda: st.check_finite_matrix([_ROW, _ROW])),
+    ("check_mask", "mask"):
+        (lambda: st.check_mask([True, False], 2),
+         lambda: st.check_mask([[True], [False]], 2)),
+    ("masked_mean_checked", "values"):
+        (lambda: st.masked_mean_checked([1.0, 2.0], [True, True], 2),
+         lambda: st.masked_mean_checked([_ROW, _ROW], [True, True], 4)),
+    ("masked_mean_checked", "mask"):
+        (lambda: st.masked_mean_checked([1.0], [True], 1),
+         lambda: st.masked_mean_checked([1.0], [[True]], 1)),
+    # `prediction` and `target` cannot be nested one at a time: the module's own shape-agreement
+    # rule refuses a 2D prediction against a flat target, so the only well-formed call in which
+    # either carries a nested value nests BOTH. The predicate is therefore "a nested value AT this
+    # parameter is accepted, the rest of the call adjusted as the module requires" -- and the
+    # adjustment is forced by `masked_squared_error_mean`, not chosen for convenience.
+    ("masked_squared_error_mean", "prediction"):
+        (lambda: st.masked_squared_error_mean([1.0, 2.0], [1.0, 2.0], [True, True], 2),
+         lambda: st.masked_squared_error_mean([_ROW, _ROW], [_ROW, _ROW], [True, True], 4)),
+    ("masked_squared_error_mean", "target"):
+        (lambda: st.masked_squared_error_mean([1.0, 2.0], [1.0, 2.0], [True, True], 2),
+         lambda: st.masked_squared_error_mean([_ROW, _ROW], [_ROW, _ROW], [True, True], 4)),
+    ("masked_squared_error_mean", "mask"):
+        (lambda: st.masked_squared_error_mean([1.0], [2.0], [True], 1),
+         lambda: st.masked_squared_error_mean([1.0], [2.0], [[True]], 1)),
+    ("check_gradient", "point"):
+        (lambda: st.check_gradient(_F2, _G2, [1.0, 2.0]),
+         lambda: st.check_gradient(_F2, _G2, [_ROW, _ROW])),
+    ("require_parameter_gradient", "param_grad"):
+        (lambda: st.require_parameter_gradient([1.0, 2.0]),
+         lambda: st.require_parameter_gradient([_ROW, _ROW])),
+    ("check_params_changed", "before"):
+        (lambda: st.check_params_changed([1.0, 2.0], [3.0, 4.0]),
+         lambda: st.check_params_changed([_ROW, _ROW], [3.0, 4.0])),
+    ("check_params_changed", "after"):
+        (lambda: st.check_params_changed([1.0, 2.0], [3.0, 4.0]),
+         lambda: st.check_params_changed([3.0, 4.0], [_ROW, _ROW])),
+}
+
+# The one OUTER data parameter the probe above cannot reach, with the reason and with the two facts
+# the reason rests on, as callables rather than as prose: `ignored()` must RETURN (the parameter can
+# be left unread entirely) and `read()` must RAISE in family (it is read only while a refusal is
+# being phrased). Any future exemption of this shape must meet the same contract.
+_NOT_PROBEABLE_FOR_ROWS = {
+    ("require_parameter_gradient", "input_grad"): (
+        "the one data parameter with NO SUCCESS PATH: it is read only inside the `param_grad is "
+        "None` branch, while phrasing that refusal, and is IGNORED entirely when `param_grad` is "
+        "present -- so no flat control can both READ it and RETURN, and `accepts a nested value` "
+        "reports it as 2D-capable for a reason that is really `never looked at`. A parameter the "
+        "module never materialises cannot have a row position, and it has no row row.",
+        lambda: st.require_parameter_gradient([1.0, 2.0], input_grad=[[1.0, 2.0]]),
+        lambda: st.require_parameter_gradient(None, input_grad=[[1.0, 2.0]]),
+    ),
 }
 
 
@@ -3048,9 +3157,9 @@ class FiguresAndDocPinInventory(unittest.TestCase):
             `masked_mean_checked`, where the nestedness probe absorbs the hostile `__class__`,
             answers "not a row", and hands the object to the ELEMENT check.
 
-        So the sentence is rewritten from a POSITION-BY-POSITION sweep: 42 driven positions, 14 in
+        So the sentence is rewritten from a POSITION-BY-POSITION sweep: 44 driven positions, 16 in
         family and 28 escaping, identical on 3.12.4 and 3.13.5 and with numpy absent. The fix to the
-        asymmetry is to ACCOUNT for all 42 instead of asserting 6 -- the (function, parameter) set
+        asymmetry is to ACCOUNT for all 44 instead of asserting 6 -- the (function, parameter) set
         is derived from the signatures and every pair must be in the table or excused -- while
         still asserting BEHAVIOUR for the in-family rows only.
 
@@ -3087,11 +3196,32 @@ class FiguresAndDocPinInventory(unittest.TestCase):
         for this round rather than relayed: a bare RuntimeError out of `check_mask`'s own
         `isinstance(v, bool)`, on 3.12.4 (numpy 2.4.6) and 3.13.5 (numpy 2.4.4) alike. The
         derivation that closes it is that OUTER and ELEMENT routes come in pairs, both ways, with
-        `_NO_ELEMENT_ROUTE` to decline a genuinely element-less sequence parameter in writing. Two
-        routes were also DRIVEN AND DECLINED this round -- `prediction` and `target` at a ROW
-        position, which `_is_row_like` makes unreachable -- and they are recorded in
-        `_ROUTE_DRIVEN_AND_DECLINED` rather than left absent, because the absence of a declined
-        route and the absence of a route nobody thought of read the same.
+        `_NO_ELEMENT_ROUTE` to decline a genuinely element-less sequence parameter in writing.
+
+        FINDING S, which REVERSES a decision Finding P's round made and closes the last data-route
+        kind that was answered by hand. That round drove `masked_squared_error_mean`'s `prediction`
+        and `target` at a ROW position and DECLINED to count them, on the ground that
+        `_is_row_like` answers False for the hostile object so no internal site treats it as a row;
+        it recorded the declines in writing, which was the right form for the wrong decision. The
+        decision counted INTERNAL SITES. This table counts CALLER-FACING POSITIONS: which site
+        absorbs the object is an implementation fact, and declining a route on a judgment call
+        about internal reachability is "a reason that covers two routes of three reads like a
+        reason that covers the position" for the third time.
+
+        Both routes are now driven, and the measured verdict is what NEITHER round predicted: IN
+        FAMILY, a ShapeError out of `masked_squared_error_mean` itself. The absorbed probe answers
+        "not a row", so one side of the comparison reads FLAT and the other 2D and the function
+        refuses the disagreement -- which also makes it the only `row` position whose answer
+        depends on the OTHER argument, and that dependence is written beside the rows rather than
+        hidden by the fixture that happened to be chosen. The figure moved 42 -> 44 and 14 -> 16;
+        28 escaping did not move.
+
+        The pairing rule for ROWS is DERIVED, not hand-listed: a data parameter has a row route
+        exactly when this module MATERIALISES ROWS out of it, observed by spying on `_as_rows`
+        while a benign nested value is driven through every outer data parameter. The predicate
+        tried first -- "accepts a benign nested value" -- is UNSOUND and is recorded as such: it
+        reported `input_grad` as 2D-capable because with `param_grad` present `input_grad` is never
+        read at all, and the flat control passed for that same vacuous reason.
         """
         import ast
         src = inspect.getsource(st)
@@ -3161,33 +3291,115 @@ class FiguresAndDocPinInventory(unittest.TestCase):
                 self.assertIn((*key, "outer"), routes,
                               f"{key} is excused as element-less but has no outer route either")
                 self.assertTrue(why.strip(), f"{key} is declined with no reason written")
-        for (f, p, kind), why in _ROUTE_DRIVEN_AND_DECLINED.items():
-            with self.subTest(driven_and_declined=(f, p, kind)):
-                self.assertNotIn((f, p, kind), routes,
-                                 "this route is declined in writing AND present in the table")
-                self.assertIn((f, p), {(a, b) for a, b, _k in routes},
-                              "a route is declined for a position the table no longer holds")
-                self.assertIn(kind, _ROUTE_KINDS, "a declined route of an undefined kind")
-                self.assertTrue(why.strip(), "a route declined with no reason written")
-        # and the MEASUREMENT the declined `row` routes rest on, asserted from the object rather
-        # than written in their reasons: the hostile `__class__` is absorbed inside `_is_row_like`'s
-        # own `try`, so there is no row route at `prediction`/`target` to drive. If this ever
-        # answers True those two are reachable after all and need ROWS instead of REASONS.
+        # FINDING S: THE ROW PAIRING, DERIVED THE SAME WAY -- and the third and last data-route
+        # kind to stop being a hand-written answer. A parameter has a ROW route exactly when the
+        # module MATERIALISES ROWS out of it, observed by spying on `_as_rows` while a benign
+        # nested value is driven through each outer data parameter. Both directions, with
+        # `_NO_ROW_ROUTE` as the written home for a decline.
+        row_routes = {(f, p) for f, p, k in routes if k == "row"}
+        self.assertEqual(set(_NESTED_PROBES) | set(_NOT_PROBEABLE_FOR_ROWS), outer_routes,
+                         "every OUTER data parameter needs a nested probe or a written exemption: "
+                         "a parameter with neither is a parameter whose row route is decided by "
+                         "nobody, which is how two real row positions came to be declined")
+        self.assertEqual(set(_NESTED_PROBES) & set(_NOT_PROBEABLE_FOR_ROWS), set(),
+                         "a parameter is both probed and exempted from probing")
+        real_as_rows, materialised = st._as_rows, set()
+        try:
+            for key, (flat, nested) in _NESTED_PROBES.items():
+                with self.subTest(nested_probe=key):
+                    try:
+                        flat()
+                    except BaseException as e:          # noqa: BLE001 - reported, not swallowed
+                        self.fail(f"the FLAT control for {key} does not pass ({e!r}), so this "
+                                  "probe's answer is not about nesting. Two of these fixtures were "
+                                  "malformed when written and this control is what caught them")
+                    seen = []
+
+                    def spy(m, name, _seen=seen, _real=real_as_rows):
+                        _seen.append(name)
+                        return _real(m, name)
+
+                    st._as_rows = spy
+                    try:
+                        nested()
+                        refused = False
+                    except st.StabilityError:
+                        refused = True
+                    finally:
+                        st._as_rows = real_as_rows
+                    if seen:
+                        materialised.add(key)
+                    else:
+                        self.assertTrue(refused,
+                                        f"the nested probe for {key} neither reached `_as_rows` "
+                                        "nor was refused, so the fixture never READ the parameter "
+                                        "and proves nothing about it. This is exactly how "
+                                        "`accepts a benign nested value` reported `input_grad` as "
+                                        "2D-capable when it is simply not looked at")
+        finally:
+            st._as_rows = real_as_rows
+        self.assertTrue(materialised,
+                        "no probe reached `_as_rows`: the spy is not on the name the module calls "
+                        "and this whole derivation is vacuous")
+        self.assertLess(len(materialised), len(_NESTED_PROBES),
+                        "every probe reached `_as_rows`, so the derivation does not discriminate")
+        self.assertEqual(materialised - row_routes, set(_NO_ROW_ROUTE),
+                         "the module materialises ROWS out of this parameter and the table drives "
+                         "no `row` route for it: add the row, or decline it in writing in "
+                         "_NO_ROW_ROUTE")
+        self.assertEqual(row_routes - materialised, set(),
+                         "a `row` route is driven for a parameter the module never materialises "
+                         "rows out of: the row kind is defined by `_as_rows`, so either the route "
+                         "is not a row or the probe for it is wrong")
+        for key, why in _NO_ROW_ROUTE.items():
+            with self.subTest(no_row_route=key):
+                self.assertIn(key, materialised,
+                              f"{key} is declined as row-less but the module materialises no rows "
+                              "out of it anyway, so there is nothing to decline")
+                self.assertTrue(why.strip(), f"{key} is declined with no reason written")
+        for key, (why, ignored, read) in _NOT_PROBEABLE_FOR_ROWS.items():
+            with self.subTest(not_probeable=key):
+                self.assertIn(key, outer_routes, f"{key} is exempted but is not an outer route")
+                self.assertNotIn((*key, "row"), routes,
+                                 f"{key} is exempted from the row derivation AND has a row row")
+                self.assertTrue(why.strip(), f"{key} is exempted with no reason written")
+                # the contract the reason rests on, measured here rather than asserted in prose
+                ignored()                               # can be left unread entirely: returns
+                with self.assertRaises(st.StabilityError):
+                    read()                              # read only while refusing
+        # and the measurement that explains WHY the two new `row` rows come out IN FAMILY rather
+        # than escaping: the hostile `__class__` is absorbed inside `_is_row_like`'s own `try`, so
+        # the probe answers "not a row", the two sides of the comparison disagree about shape, and
+        # `masked_squared_error_mean` refuses in family before the object is read as a number.
         self.assertFalse(st._is_row_like(_class_boom()),
-                         "_is_row_like answers True for the hostile object, so the `row` routes "
-                         "declined in _ROUTE_DRIVEN_AND_DECLINED are reachable and must be driven")
+                         "_is_row_like no longer absorbs the hostile __class__, so the in-family "
+                         "ShapeError verdict on the two `row` rows has lost its mechanism")
+        # NOT A FIXTURE ARTEFACT, derived for every `row` route rather than argued once: substitute
+        # a legitimate row for the hostile object and the same call must succeed. Without this, a
+        # fixture whose OTHER argument is the real cause of the refusal reads exactly like a driven
+        # route -- which is the mistake that declined these two routes in the first place.
+        for f, p, kind, _verdict, call in _CLASS_CHANNEL_POSITIONS:
+            if kind != "row":
+                continue
+            with self.subTest(benign_row_control=(f, p)):
+                try:
+                    call(_ROW)
+                except BaseException as e:              # noqa: BLE001 - reported, not swallowed
+                    self.fail(f"the `row` fixture for {f}({p}=...) refuses a LEGITIMATE row "
+                              f"({e!r}), so its verdict is its own fixture's answer and not this "
+                              "route's. That is the mistake that declined two real row positions")
         self.assertEqual(sorted({k for _f, _p, k in routes}), sorted(_ROUTE_KINDS),
                          "a route kind is driven that _ROUTE_KINDS does not define, or defined "
                          "there and driven nowhere: the enumeration of kinds IS the reach claim")
         for kind, why in _ROUTE_KINDS.items():
             with self.subTest(route_kind=kind):
                 self.assertTrue(why.strip(), f"{kind} has no definition written")
-        self.assertEqual(len(_CLASS_CHANNEL_POSITIONS), 42, "the driven positions")
+        self.assertEqual(len(_CLASS_CHANNEL_POSITIONS), 44, "the driven positions")
         verdicts = [v for _f, _p, _k, v, _c in _CLASS_CHANNEL_POSITIONS]
-        self.assertEqual((verdicts.count(_IN_FAMILY), verdicts.count(_ESCAPES)), (14, 28),
+        self.assertEqual((verdicts.count(_IN_FAMILY), verdicts.count(_ESCAPES)), (16, 28),
                          "the measured split the sentence is written from")
         # and the PROSE quotes THE TABLE'S counts, derived here rather than typed a second time:
-        # the three needles below used to carry 41, 14 and 27 as literals, so prose and table could
+        # the three needles below used to carry the figures as literals, so prose and table could
         # only ever be compared through a figure a human kept in step in two files.
         fam, esc = verdicts.count(_IN_FAMILY), verdicts.count(_ESCAPES)
         self.assertEqual(fam + esc, len(_CLASS_CHANNEL_POSITIONS),
@@ -3283,6 +3495,33 @@ class FiguresAndDocPinInventory(unittest.TestCase):
         self.assertEqual(np_guards, ["np is not None"] * 3,
                          "a numpy-dependent guard in this file is spelled some other way, so it is "
                          "counted by nothing: use the module-level `np`")
+        # NOTE E's `-OO` LIMIT, DERIVED, so that the figure stops being a journal entry nothing can
+        # check. Under `-OO` every docstring is None, so every assertion behind a
+        # docstring-existence guard goes dark WHILE THE RUN STILL REPORTS OK -- which is exactly
+        # why the `-OO` row is weaker evidence than the other environment rows, and why the
+        # relative-indent mutants on the D1, D8 and D9 passages are killed in a normal run and
+        # UNKILLED under `-OO`. The figure was first recorded as "16 assertions behind 11 guards",
+        # which was the NARROW SPELLING's figure: `doc is not None` has eleven guards, and two more
+        # are spelled `_doc(st.<fn>) is not None`, which a count looking for the first spelling
+        # cannot see -- the same hazard this file already records three lines up for
+        # `if _np is not None:`. Both spellings are matched here, and the total is written in the
+        # next line so a test reads it rather than a reader trusting it.
+        # DOC-GATED: 18 assertions behind 13 guards.
+        doc_guards = [n for n in ast.walk(tree) if isinstance(n, ast.If)
+                      and _re.fullmatch(r"(doc|_doc\(.+\)) is not None", ast.unparse(n.test))]
+        doc_gated = sum(1 for g in doc_guards
+                        for c in ast.walk(ast.Module(body=g.body, type_ignores=[]))
+                        if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                        and c.func.attr.startswith("assert"))
+        written = _re.search(r"DOC-GATED: (\d+) assertions behind (\d+) guards", src)
+        self.assertIsNotNone(written, "the `-OO` limit no longer writes down its figure")
+        self.assertEqual((doc_gated, len(doc_guards)),
+                         (int(written.group(1)), int(written.group(2))),
+                         "the `-OO` limit's figure is not this file's figure. It is the size of the "
+                         "apparatus that goes dark under `-OO` at an unchanged green count, so a "
+                         "stale value here understates how much weaker that row is")
+        self.assertGreater(doc_gated, 0, "no assertion is doc-gated, so the `-OO` limit as written "
+                                         "no longer describes this file")
         # DERIVED, not counted in the text: `src.count("import numpy as ")` would be a self-count
         # again -- it matches this file's own prose about the defect it describes.
         np_imports = [ast.unparse(n) for n in ast.walk(tree)
