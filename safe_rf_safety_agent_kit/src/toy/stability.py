@@ -957,8 +957,9 @@ def _same(a, b) -> bool:
 
     So the second rule: anything normalisation cannot reduce to exactly `int` or `float` is REPORTED AS
     A WRITE. IT IS NOT ASKED WHETHER IT IS EQUAL. That is correct as well as closed -- `b` is a plain
-    `float`, so a slot now holding a `Fraction`, a `numpy` scalar, a `bool` or an arbitrary object HAS
-    been written to, whatever that object says about equality -- and it is what makes the module
+    `float`, so a slot now holding a `Fraction`, a `bool`, an arbitrary object or a `numpy` scalar
+    THAT IS NOT A `float` SUBCLASS HAS been written to, whatever that object says about
+    equality -- and it is what makes the module
     docstring's "no guard here is decided by the caller's object" true at this operand. `type(...) is`
     and not `isinstance`, deliberately: `bool` is an `int` subclass that `_plain_real` deliberately
     does not collapse, and `isinstance` would let `True` pass for the `1.0` it replaced (measured
@@ -969,18 +970,31 @@ def _same(a, b) -> bool:
     asked whether it is EQUAL -- which is the claim that matters, and is the claim the module
     docstring makes -- but ONE question is still put to it, and it is the `__class__` channel this
     module declares OPEN. `_plain_real`'s own first statement is `isinstance(v, bool)`, and
-    `isinstance` consults `__class__`: measured, three `__class__` reads per `_same` call, and a slot
-    holding an object whose `__class__` RAISES takes that exception out of `check_gradient`
-    unconverted, byte-identically on 3.12.4 and 3.13.5 with numpy present and absent. That is the
-    route this round added to the MEASURED SCOPE sentence above, where it is one of the 27 escapes;
+    `isinstance` consults `__class__`: measured, three `__class__` reads per `_same` call when the
+    reads SUCCEED, and exactly ONE when the first of them raises -- the distinction matters because
+    a read count is how a test tells a driven route from a fixture that refused before reaching the
+    object. A slot holding an object whose `__class__` RAISES takes that exception out of
+    `check_gradient` unconverted, byte-identically on 3.12.4 and 3.13.5 with numpy present and
+    absent. That is the
+    route this round added to the MEASURED SCOPE sentence above, where it is one of the 28 escapes;
     it is NOT closed here, because closing it is the three owners' joint fix, and every other hostile
     shape at this operand -- sixteen of them, at both callable positions -- is refused in family.
+    That figure was TYPED and unpinned until now; it is eight dunder-raising shapes at two callable
+    positions, derived and swept cell by cell in `test_h1`, which also checks that the list of eight
+    named in the MEASURED SCOPE comment above is the list it sweeps.
 
     THE ONE BEHAVIOUR CHANGE, stated because it is a real narrowing: a callable that replaces a
     coordinate with a value-EQUAL object of another type -- `True`, `Fraction(1, 1)`, a `numpy`
-    float -- now gets "mutated its input in place" where it used to pass. A plain `int` and a `float`
-    subclass storing the same value still pass, because both normalise to a plain number and the
-    comparison is then between two plain numbers.
+    `float32` -- now gets "mutated its input in place" where it used to pass. A plain `int` and a
+    `float` subclass storing the same value still pass, because both normalise to a plain number and
+    the comparison is then between two plain numbers.
+
+    WHICH NUMPY SCALARS, because "a `numpy` float" was WRONG here and contradicted the sentence
+    after it in this same paragraph: `np.float64` IS a Python `float` subclass, so it normalises and
+    a value-equal `float64` write-back still PASSES -- measured, `_same(np.float64(1.0), 1.0)` is
+    True. `float32`, `float16` and `int64` are not `float` subclasses and those ARE writes.
+    `check_gradient`'s own docstring says this correctly, naming `float64`, and the suite pins the
+    split; it was only this private docstring's unqualified phrase that was false.
     """
     a = _plain_real(a)
     if type(a) is not float and type(a) is not int:

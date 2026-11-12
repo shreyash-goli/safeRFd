@@ -11113,3 +11113,200 @@ and unpinned on purpose** — the 28 escaping rows assert nothing. **The figures
 for this module are 44 / 16 / 28**, not 42/14/28 and not 44/14/30.
 
 **SR-06 stays `[ ]`** — the fixer is not the attester, and this fix has had no independent pass.
+
+## Round 23 — SR-06's last apparatus round: four notes closed, and a vacuity claim that does not reproduce
+
+**Date:** 2026-11-12. HEAD at start `ab46e0e`. Owner: `src/toy/stability.py`,
+`tests/toy_tests/test_stability.py`, this entry. **Not committed.** Declared the last apparatus round
+for SR-06; no new axes opened.
+
+### The headline: the two row rows are NOT vacuous, and the brief's measurement used a different hostile
+
+Attestation #9 reported, and the orchestrator reproduced, `__class__` reads of **0** at
+`masked_squared_error_mean`'s two ROW positions, and asked for a fourth ledger state — "not
+exercisable" — with figures **44 / 14 / 28 / 2**.
+
+**Re-measured here with this table's own fixtures and this table's own hostile, on both interpreters:**
+
+| route | reads | outcome |
+|---|---|---|
+| `check_finite_matrix`/`m`/row | **1** | in family `ShapeError` (names the object) |
+| `masked_mean_checked`/`values`/row | **3** | `RuntimeError` — escapes |
+| `masked_squared_error_mean`/`prediction`/row | **1** | in family `ShapeError` |
+| `masked_squared_error_mean`/`target`/row | **1** | in family `ShapeError` |
+
+**All 44 rows read the hostile at least once. Not one row has reads == 0.**
+
+The brief's four numbers reproduce **exactly** — and only — with a **non-iterable** `__class__`-raiser:
+
+```
+non-iterable raiser:  msem/prediction/row reads=0   msem/target/row reads=0
+                      cfm/m/row reads=1             mmc/values/row reads=1
+```
+
+`_class_boom()` **has** `__iter__` (`test_stability.py:2724-2725`), so `hasattr(v, "__iter__")` is True,
+`_is_row_like` reaches the absorbing `isinstance(v, (str, bytes))`, and the read happens. The brief's
+stated mechanism — *"`_class_boom()` has no `__iter__`, so the `and` short-circuits"* — is true of the
+**non-iterable** raiser and false of the fixture in use. That object is the zero-read case; it is not
+the one the table drives.
+
+**So the fourth state is not introduced.** Reclassifying two routes on a read count they do not have
+would encode a false measurement into a declared ledger while set-equality reported success — which is
+this project's named signature defect. **Figures stay 44 / 16 / 28**, re-derived from the table and
+re-confirmed by driving all 44 routes in four environments with 0 verdict mismatches.
+
+**The disagreement is now settled by machine rather than by argument** — see the next section. If a
+future attester measures zero again, the suite says which hostile they used.
+
+### The control the brief asked for, built in full — and it does catch a real 0-read fixture
+
+A **hostile-is-read control** now runs for **every** row in `_CLASS_CHANNEL_POSITIONS`, not only the
+`row` kind: the hostile counts its own `__class__` reads, and any row whose declared state is
+`in family` or `escapes` with **reads == 0** fails. The orchestrator's reasoning for this is exactly
+right and generalises past the two routes that prompted it: the benign-substitution control added last
+round catches *"my fixture refuses everything"* and **cannot** catch *"my fixture refuses before
+reaching the hostile."*
+
+Only the **read count** is asserted, never the outcome — asserting an escaping row's verdict would pin
+the open `__class__` defect. Equivalence of the counting hostile to `_class_boom` is established on the
+objects instead.
+
+It fires on nothing at HEAD, so it was proved against a constructed defect:
+`masked_mean_checked`/`values`/`element` driven with a mask whose length disagrees with the data
+(`[h], [True, True], 1`). `check_mask` runs before the values are read, so the call is refused on its
+own shape — **0 reads, in-family `MaskLengthError`, verdict column still saying `escapes`**. Nothing
+asserted an escaping verdict and the `row`-only benign control does not reach an element route, so
+there was nothing to notice it: **unkilled by all three suites on both interpreters** at `ab46e0e`,
+**killed** now.
+
+### An explaining assertion that passed for the wrong reason
+
+`assertFalse(st._is_row_like(_class_boom()))` carried its mechanism in its **message** and asserted only
+the answer — and `False` is reached by **two** routes, the absorbing one and the short-circuit. The
+orchestrator was right that the stated mechanism was not asserted, and wrong about which route this
+fixture takes. Both sides of the boundary are now asserted by read count: the **iterable** raiser is
+`False` with **exactly one** read (absorb path entered — the stated mechanism), the **non-iterable** one
+is `False` with **zero** (short-circuit, nothing absorbed). A mutant that strips `__iter__` from the
+counting hostile — i.e. substitutes the attester's object — is now killed.
+
+### N1 — the derived-figure mechanism was built per sentence, not per file
+
+Confirmed, all four, at `ab46e0e`, with all three suites green on both interpreters:
+
+| site | said | derived |
+|---|---|---|
+| `src/toy/stability.py` (MEASURED SCOPE cross-ref) | 27 escapes | **28** — and it contradicted its own sentence nineteen lines up |
+| `test_stability.py` (Finding L narrative) | 27 escaping rows | **28** |
+| `test_stability.py` (written-slot row comment) | 27 escapes | **28** |
+| `test_stability.py` (behaviour-loop comment) | 14 in family | **16** |
+
+**A fifth copy, correct at 28, sat thirty lines from a stale one in the same file.** `_same`'s docstring
+warns, two paragraphs above its own stale copy, that a figure in three places leaves two free to drift —
+so this is the file's own recorded lesson recurring **inside the fix written for it**. The round-21
+f-string needles assert that the right figure is **present**; nothing asserted that a wrong one is
+**absent**.
+
+Closed with a `_LEDGER_FIGURE_PHRASES` table: every phrase that quotes a current ledger figure, in
+**either** file, must match the derived count, and **every template must match at least once** so a
+template that goes blind fails too. Reach stated: it covers phrases quoting a *current* figure, not
+sentences recording *history* ("the sweep used to read 38 positions, 13 and 25"), which must stay stale.
+One prose sentence of mine that quoted live counts the templates could not read was reworded to carry no
+figure at all. Two mutants: a reverted stale copy, and a re-phrasing that blinds a template — both
+killed.
+
+### N2 — the measured self-contradiction, confirmed and now pinned
+
+`_same.__doc__` named "a `numpy` float" among the value-equal write-backs that now get *"mutated its
+input in place"*, while the sentence **immediately after it** says a `float` subclass storing the same
+value still passes. Measured (3.12.4, numpy 2.4.6):
+
+```
+float64  float-subclass=True   _same(v, 1.0) = True    -> PASS, not a write
+float32  float-subclass=False  _same(v, 1.0) = False   -> write
+float16  float-subclass=False  False                   -> write
+int64    float-subclass=False  False                   -> write
+```
+
+Exactly as the orchestrator described: `check_gradient.__doc__` says the correct thing naming `float64`,
+the suite pins the split, and only the private docstring's unqualified phrase was false. Both phrases
+now name `float32` and say "a `numpy` scalar THAT IS NOT A `float` SUBCLASS". **Pinned on the source** —
+so it holds under `-OO` — with the false spelling pinned **absent** as well as the true one present,
+because a correction nobody asserts is a correction that can be reverted. No new numpy guard was
+introduced: the behaviour was already pinned a few lines below, and adding a fourth `if np is not None:`
+would have moved a counted figure for nothing.
+
+**One more measured imprecision in the same paragraph, not in the brief:** it said "three `__class__`
+reads per `_same` call" directly before describing the RAISING case. Measured: **three** when the reads
+succeed, **one** when the first of them raises. Corrected, and the distinction is now load-bearing —
+a read count is exactly how the new control tells a driven route from a fixture that refused early.
+
+### N3 — derived and pinned, and the figure was right
+
+"sixteen of them, at both callable positions" was typed and unpinned, and the attester did not measure
+it. **Measured here: eight dunder-raising shapes × two callable positions = 16 cells, all in family
+("mutated its input in place"), 0 escaped, 0 returned, both interpreters.** The figure is correct, so it
+is derived and pinned rather than annotated as unpinned: `test_h1` now sweeps the eight shapes at both
+positions, compares the cell count against the word the module spells, **and asserts that the list of
+eight the MEASURED SCOPE comment names IS the list it sweeps**, so prose and sweep cannot drift apart.
+`__class__` is excluded by construction — it is the one shape at that operand that escapes, and it has
+its own `written slot` rows. Two mutants: dropping a shape from the sweep, and renaming one in the prose
+list — both killed.
+
+### Measurements
+
+Three permitted suites only, serial, `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` cleared, `-B` never
+`-I`. Full suite not run; blueprint not marked.
+
+| run | environments | result |
+|---|---|---|
+| `test_stability` | 3.12.4 and 3.13.5 × {normal, `-OO`} | **106 OK** (4/4) |
+| `test_stability` | both × {normal, `-OO`}, numpy absent | **106 OK, skipped=1** (4/4) |
+| `test_robustness` | both × {normal, `-OO`} | **197 OK** (4/4) |
+| `test_checkpoint` | both × {normal, `-OO`} | **48 OK** (4/4) |
+
+Test count unchanged at **106** — nothing added, disabled or deleted; baseline needs no edit.
+`ruff check --select E9,F63,F7,F82` clean. Diff: `stability.py` **+23/−9**, `test_stability.py`
+**+236/−12**, this entry **+197/−0**. The module change is **documentation only, proved at AST level**: with docstrings and
+comments stripped, `stability.py`'s AST is byte-identical to `ab46e0e`.
+
+### Mutants — 8, all on `git archive` copies, both interpreters
+
+| mutant | pristine `ab46e0e` | after this round |
+|---|---|---|
+| `READS_ZERO_FIXTURE` (mask length disagrees, so the call is refused before the hostile is read) | **unkilled**, 3 suites × 2 interpreters | **KILLED** by the hostile-is-read control |
+| `HOSTILE_NOT_ITERABLE` (strip `__iter__` — the attester's object) | n/a | **KILLED** by the one-read assertion |
+| `N1_STALE_COPY` (28 → 27 in `stability.py`) | the four stale copies **were** there, suite green | **KILLED** |
+| `N1_TEMPLATE_BLIND` (re-phrase past a template) | n/a | **KILLED** by the match-at-least-once guard |
+| `N2_PHRASE_REVERTED` (back to "a `numpy` float") | the false phrase **was** there, suite green | **KILLED** |
+| `N3_SHAPE_DROPPED` (drop one of the eight) | n/a | **KILLED** |
+| `N3_PROSE_LIST_DRIFT` (rename one shape in the prose list) | n/a | **KILLED** |
+| `NOTE_E_FIGURE_STALE` (round 22's, re-checked) | n/a | **KILLED**, normally and under `-OO` |
+
+Every kill confirmed to fire on the intended assertion by reading the first `self.assert…`/`self.fail`
+line of the traceback.
+
+### Derivations that failed before they were right
+
+1. **My first `READS_ZERO_FIXTURE` was not a zero-read fixture.** I assumed `check_mask`'s empty-mask
+   guard preceded the denominator; it does not — `expected_len` is processed before `any(items)`, so
+   reads was **1** and the mutant survived *correctly*. I read the survival as a hole in the control and
+   it was a hole in my mutant. Replaced after measuring four candidate fixtures.
+2. **A mutant that failed to apply reported a false SURVIVE.** `N2_PHRASE_REVERTED` searched for the
+   unwrapped phrase while the file wraps it across lines; the harness asserted and died, the copy stayed
+   pristine, and the run printed OK. A mutation harness must fail the *run*, not just the *patch* —
+   caught only because the traceback was in the same output.
+3. **An edit script I wrote and never executed.** The N2 pin's "OK" was the unchanged file. Caught by
+   grepping for the text I had supposedly added.
+4. **The N2 pin nearly introduced a fourth `if np is not None:` guard**, which would have broken the
+   numpy-guard count for no benefit — the behaviour was already pinned. Dropped the redundant half.
+
+### Cross-owner
+
+Behaviour unchanged, proved at AST level. The `__class__` channel remains **declared and unpinned on
+purpose**. **The figures for this module are 44 / 16 / 28** — not 44/14/28/2. Of six figures relayed to
+me across these rounds, four were exact, one was the narrow spelling's count (16/11 vs 18/13), and this
+round's reads == 0 is the first that does not reproduce at all; its cause is a fixture substitution, the
+same artefact class as every other finding in this thread.
+
+**SR-06 marking is the orchestrator's call on attestation #9's behavioural evidence.** Nothing in this
+round is behavioural, and the apparatus notes it closes are not evidence for or against the module.

@@ -908,6 +908,18 @@ def _writer(position, obj):
     return (lambda p: (write(p), 1.0)[1]), _G_QUAD
 
 
+# N3. The "sixteen other hostile shapes at that same slot" figure, which `_same`'s docstring and the
+# MEASURED SCOPE comment both quote and NOTHING asserted -- a typed figure in the one module whose
+# subject is typed figures. It is eight dunder-raising shapes at the two callable positions. The
+# eight are swept cell by cell in `test_h1`, and the list the MEASURED SCOPE comment names is
+# asserted to BE this list, so the prose and the sweep cannot drift apart. `__class__` is NOT here:
+# it is the one shape at this operand that ESCAPES, and it has its own row in
+# `_CLASS_CHANNEL_POSITIONS` as a `written slot` route.
+_WRITTEN_SLOT_OTHER_SHAPES = ("__getattr__", "__float__", "__repr__", "__iter__",
+                              "__eq__", "__bool__", "__len__", "__index__")
+_SIXTEEN = {16: "sixteen"}          # the only spelling the module currently needs
+
+
 # The positions a caller's CALLABLE occupies, DERIVED from `_CASES` below (any bound argument that is
 # callable), with the three routes each one opens written out. A new callable parameter on a public
 # function fails `test_h3` until it has a row here.
@@ -1441,6 +1453,39 @@ class TheFifthAxisIsACallablePlacedOperand(unittest.TestCase):
                         self.fail(f"check_gradient RETURNED {out!r} when {position} wrote a {bname} "
                                   f"that {shape}: an in-place mutation went undetected")
         self.assertEqual(outcomes, {"in_family": 30, "escaped": 0, "returned": 0})
+        # N3: and the OTHER figure about this same operand, derived instead of typed. `_same`'s
+        # docstring and the MEASURED SCOPE comment both say "sixteen other hostile shapes at that
+        # same slot ... is refused in family"; the attester could not reconstruct it from any table
+        # and did not measure it, so it was a bare assertion in a module whose subject is bare
+        # assertions. Swept here: eight dunder-raising shapes x two callable positions.
+        cells = 0
+        for dunder in _WRITTEN_SLOT_OTHER_SHAPES:
+            hostile = type(f"Boom{dunder.strip('_')}", (), {
+                dunder: lambda self, *a, _d=dunder, **k: (_ for _ in ()).throw(RuntimeError(_d))})
+            for position in ("fn", "grad_fn"):
+                f, g = _writer(position, hostile())
+                with self.subTest(other_shape=dunder, position=position):
+                    with self.assertRaisesRegex(st.StabilityError, "mutated its input in place"):
+                        st.check_gradient(f, g, [1.0, 2.0])
+                cells += 1
+        self.assertEqual(cells, len(_WRITTEN_SLOT_OTHER_SHAPES) * 2,
+                         "8 dunder-raising shapes x 2 callable positions")
+        flat_msrc = _unwrapped(inspect.getsource(st))
+        word = _SIXTEEN.get(cells)
+        self.assertIsNotNone(word, f"{cells} cells are swept and this test has no word for that "
+                                   "figure: the module spells it out, so add the spelling here "
+                                   "deliberately rather than letting the prose drift")
+        self.assertIn(f"{word} of them, at both callable positions", flat_msrc,
+                      "the module's spelled figure for the other hostile shapes at this operand "
+                      "is not the number this sweep drives")
+        # and the list the MEASURED SCOPE comment names IS the list swept, so neither can drift
+        import re
+        named = re.findall(r"`(__\w+__)`", flat_msrc.split(
+            f"{word} other hostile shapes at that same slot (")[1].split(")")[0])
+        self.assertEqual(sorted(named), sorted(_WRITTEN_SLOT_OTHER_SHAPES),
+                         "the shapes the MEASURED SCOPE comment names at this operand are not the "
+                         "shapes swept here: a prose list and a sweep that disagree are how the "
+                         "figure between them stops meaning anything")
         self.assertEqual(len(_CMP_BASES) * len(_CMP_SHAPES) * 2, 30, "5 bases x 3 shapes x 2 positions")
         self.assertEqual(len(_CMP_BASES), 5)
         self.assertEqual(len(_CMP_SHAPES), 3)
@@ -1550,6 +1595,27 @@ class TheFifthAxisIsACallablePlacedOperand(unittest.TestCase):
         doc = _doc(st._same)
         if doc is not None:
             self.assertIn("THE ONE BEHAVIOUR CHANGE", doc)
+        # N2. WHICH numpy scalars, pinned, because the unqualified phrase that used to stand here
+        # was MEASURABLY FALSE and contradicted the sentence immediately after it in its own
+        # paragraph: it named "a `numpy` float" among the value-equal write-backs that now get
+        # "mutated its input in place", while `np.float64` IS a Python `float` subclass, normalises,
+        # and still PASSES. `check_gradient`'s docstring said the right thing naming `float64` and
+        # the behaviour was already pinned three lines up -- only the private docstring's phrase was
+        # wrong, which is exactly the shape a behavioural pin cannot catch. Pinned on the SOURCE so
+        # it holds under `-OO` too, with the false spelling pinned ABSENT as well as the true one
+        # present: a correction nobody asserts is a correction that can be reverted.
+        msrc_flat = _unwrapped(inspect.getsource(st))
+        self.assertIn("`Fraction(1, 1)`, a `numpy` `float32` -- now gets", msrc_flat,
+                      "`_same`'s narrowing sentence must name the numpy type that IS a write")
+        self.assertNotIn("`Fraction(1, 1)`, a `numpy` float -- now gets", msrc_flat,
+                         "the unqualified `a numpy float` is back: it is false for float64, which "
+                         "normalises and passes")
+        self.assertIn("THAT IS NOT A `float` SUBCLASS HAS been written to", msrc_flat,
+                      "the write rule must say WHICH numpy scalars are writes")
+        # The BEHAVIOUR behind the phrase is already pinned, under the numpy guard a few lines
+        # below -- `float32` written back is a mutation report, `float64` is not -- so nothing is
+        # re-driven here and no fourth numpy guard is introduced to be counted. What was missing
+        # was only the pin on the WORDS, which is the half a behavioural pin cannot reach.
 
     def test_h4_the_one_question_still_put_to_the_slot_is_the_declared_class_channel(self):
         """FINDING L, the prose half. `_same`'s docstring said the object in the slot "is not
@@ -1565,7 +1631,7 @@ class TheFifthAxisIsACallablePlacedOperand(unittest.TestCase):
         WHAT IS NOT PINNED, deliberately: THE ESCAPE. An object whose `__class__` raises, written
         into the slot by `fn` or `grad_fn`, takes a bare RuntimeError out of `check_gradient` on
         both interpreters with numpy present and absent. That is the kit-wide open `__class__`
-        finding, it is one of the 27 escaping rows of `_CLASS_CHANNEL_POSITIONS`, it reproduces
+        finding, it is one of the 28 escaping rows of `_CLASS_CHANNEL_POSITIONS`, it reproduces
         identically against HEAD~1 so it is not this round's regression, and a test asserting it
         would pin a defect and fail on the three owners' joint fix.
 
@@ -2726,6 +2792,47 @@ def _class_boom():
     return C()
 
 
+def _class_boom_counting():
+    """`(hostile, reads)` -- `_class_boom`'s object, counting its own `__class__` reads.
+
+    FINDING T. The control this exists for: a fixture can refuse BEFORE the hostile object is ever
+    consulted, and a verdict recorded from such a fixture is vacuous. The benign-substitution
+    control added for the `row` rows catches "my fixture refuses everything"; it cannot catch "my
+    fixture refuses before reaching the hostile", because substituting a benign value changes the
+    outcome either way. Only counting the reads can tell those apart.
+    """
+    reads = []
+
+    class C:
+        @property
+        def __class__(self):
+            reads.append(1)
+            raise RuntimeError("class boom")
+
+        def __iter__(self):
+            return iter([1.0, 2.0])
+    return C(), reads
+
+
+def _class_boom_counting_not_iterable():
+    """The same raiser WITHOUT `__iter__`, which is a DIFFERENT object and reaches a different site.
+
+    It is here because the difference is load-bearing and was mistaken for a property of the routes:
+    `_is_row_like` opens with `hasattr(v, "__iter__") and not isinstance(v, (str, bytes))`, so a
+    NON-iterable raiser short-circuits at the `hasattr` and is never asked for its `__class__` at
+    all -- zero reads, nothing absorbed -- while the ITERABLE one reaches the `isinstance` and is
+    absorbed there, one read. The table drives the iterable one.
+    """
+    reads = []
+
+    class C:
+        @property
+        def __class__(self):
+            reads.append(1)
+            raise RuntimeError("class boom")
+    return C(), reads
+
+
 # FINDING O. The spellings a figure can take in the one docstring in this file whose whole subject
 # is that figures about the suite's own size rot. The pin written beside that docstring forbade
 # DIGITS -- and the round that wrote it had, in the same breath, replaced a stale digit figure with
@@ -2737,6 +2844,35 @@ _NUMBER_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven", 
                  "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
                  "seventeen", "eighteen", "nineteen", "twenty", "thirty", "forty", "fifty",
                  "sixty", "seventy", "eighty", "ninety", "hundred", "thousand", "dozen", "score")
+
+# N1. The ledger's figures are quoted in PROSE in both files, and the f-string needles added when
+# the figures were last corrected assert the PRESENCE of the right count and nothing asserts the
+# ABSENCE of a contradicting one. Measured at `ab46e0e`: FOUR copies had drifted -- three saying 27
+# escapes where the derived figure is 28 (one of them in `stability.py` itself, contradicting its
+# own MEASURED SCOPE sentence nineteen lines up) and one saying 14 in family where the table says
+# 16. A fifth copy, correct, sat thirty lines from a stale one in the same file.
+#
+# `_same`'s docstring warns, two paragraphs above its own stale copy, that restating a figure in
+# three places leaves two of them free to drift. So this is the file's own recorded lesson recurring
+# INSIDE the fix written for it, which is this project's signature defect: the mechanism was built
+# one granularity too narrow -- per sentence, not per file.
+#
+# Each row is a phrase that REFERS TO THIS LEDGER, with the figure(s) its capture groups must equal.
+# Every match in EITHER file is checked, so a contradicting copy anywhere fails, and every template
+# must match at least once, so a template that goes blind fails too.
+#
+# REACH, stated rather than implied: this covers phrases that quote a CURRENT ledger figure. It does
+# NOT cover a sentence recording HISTORY ("the sweep used to read 38 positions, 13 and 25", "was 41
+# and not 42") -- those are deliberately stale and must stay that way. A new phrasing that quotes a
+# live figure is not covered until it is added here, which is the limit of this and is why the
+# templates are written to match the phrasings that exist rather than to guess at prose.
+_LEDGER_FIGURE_PHRASES = (
+    (r"one of the (\d+) escap\w*", ("escaping",)),
+    (r"assert(?:s|ed for) the (\d+) in family", ("in family",)),
+    (r"(\d+) driven positions", ("driven",)),
+    (r"give (\d+) IN FAMILY and (\d+) escaping", ("in family", "escaping")),
+    (r"driven positions, (\d+) in family and (\d+) escaping", ("in family", "escaping")),
+)
 
 _IN_FAMILY, _ESCAPES = "in family", "escapes"
 _CLASS_CHANNEL_POSITIONS = (
@@ -2846,7 +2982,7 @@ _CLASS_CHANNEL_POSITIONS = (
     # covers the position", one table over and in the same commit. `_same`'s first act is
     # `_plain_real(a)`, whose first statement is `isinstance(v, bool)`, so the hostile `__class__`
     # is consulted there and the RuntimeError leaves the module. NOT PINNED AS A BEHAVIOUR: it is
-    # one of the 27 escapes of the declared open channel, like every other escaping row here.
+    # one of the 28 escapes of the declared open channel, like every other escaping row here.
     ("check_gradient", "fn", "written slot", _ESCAPES,
      lambda h: st.check_gradient(*_writer("fn", h), [1.0, 2.0])),
     ("check_gradient", "grad_fn", "written slot", _ESCAPES,
@@ -3213,8 +3349,8 @@ class FiguresAndDocPinInventory(unittest.TestCase):
         "not a row", so one side of the comparison reads FLAT and the other 2D and the function
         refuses the disagreement -- which also makes it the only `row` position whose answer
         depends on the OTHER argument, and that dependence is written beside the rows rather than
-        hidden by the fixture that happened to be chosen. The figure moved 42 -> 44 and 14 -> 16;
-        28 escaping did not move.
+        hidden by the fixture that happened to be chosen. The total and the in-family half each moved
+        by two; the escaping half did not move.
 
         The pairing rule for ROWS is DERIVED, not hand-listed: a data parameter has a row route
         exactly when this module MATERIALISES ROWS out of it, observed by spying on `_as_rows`
@@ -3367,13 +3503,75 @@ class FiguresAndDocPinInventory(unittest.TestCase):
                 ignored()                               # can be left unread entirely: returns
                 with self.assertRaises(st.StabilityError):
                     read()                              # read only while refusing
-        # and the measurement that explains WHY the two new `row` rows come out IN FAMILY rather
-        # than escaping: the hostile `__class__` is absorbed inside `_is_row_like`'s own `try`, so
-        # the probe answers "not a row", the two sides of the comparison disagree about shape, and
-        # `masked_squared_error_mean` refuses in family before the object is read as a number.
-        self.assertFalse(st._is_row_like(_class_boom()),
-                         "_is_row_like no longer absorbs the hostile __class__, so the in-family "
-                         "ShapeError verdict on the two `row` rows has lost its mechanism")
+        # ITEM 3 / FINDING T. The measurement that explains WHY the two msem `row` rows come out
+        # IN FAMILY: the hostile `__class__` IS consulted inside `_is_row_like`'s own `try` and
+        # absorbed there, so the probe answers "not a row", the two sides of the comparison
+        # disagree about shape, and `masked_squared_error_mean` refuses in family before the object
+        # is read as a number.
+        #
+        # This used to be `assertFalse(st._is_row_like(_class_boom()))` with that mechanism written
+        # in its MESSAGE and nothing asserting it -- and the answer `False` is reached by TWO
+        # different routes, only one of which is the stated one. So the mechanism is asserted now,
+        # on BOTH sides of its boundary, by counting the reads:
+        #   * the ITERABLE raiser -- which is what this table drives -- passes the
+        #     `hasattr(v, "__iter__")` and is absorbed at the `isinstance(v, (str, bytes))`: False,
+        #     with ONE read. The absorb path was entered. This is the mechanism.
+        #   * a NON-iterable raiser short-circuits at the `hasattr` and is never asked: False, with
+        #     ZERO reads. Nothing is absorbed, and the same `False` means something else entirely.
+        # Attestation #9 reported zero reads at these positions and proposed a fourth ledger state
+        # for them. Re-measured here on both interpreters: with THIS table's fixtures and THIS
+        # table's hostile the count is ONE, and zero is what the non-iterable raiser gives. The
+        # attester's hostile was not this one, so the fourth state is not introduced -- and the
+        # question is settled by re-running this suite rather than by re-litigating.
+        iterable_raiser, iterable_reads = _class_boom_counting()
+        self.assertFalse(st._is_row_like(iterable_raiser),
+                         "_is_row_like no longer answers `not a row` for the hostile object, so "
+                         "the in-family ShapeError verdict on the msem `row` rows has lost its "
+                         "mechanism")
+        self.assertEqual(len(iterable_reads), 1,
+                         "_is_row_like did not CONSULT the hostile `__class__` exactly once. Its "
+                         "`False` is then reached by the short-circuit rather than by absorbing "
+                         "the raise, and the mechanism this comment states is not the mechanism")
+        plain_raiser, plain_reads = _class_boom_counting_not_iterable()
+        self.assertFalse(st._is_row_like(plain_raiser))
+        self.assertEqual(len(plain_reads), 0,
+                         "the NON-iterable raiser is supposed to short-circuit at the `hasattr` "
+                         "before `__class__` is consulted: that is the zero-read case, and it is a "
+                         "different object from the one this table drives")
+        # ITEM 2 / FINDING T: THE HOSTILE-IS-READ CONTROL, for EVERY row in the table and not only
+        # the `row` kind, because the defect it catches is not specific to rows: any fixture can
+        # refuse on the shape of the CALL before the hostile object is consulted, and a verdict
+        # recorded from such a fixture is vacuous whatever its kind. Measured at this commit: all
+        # of them read it at least once, so this control currently fires on nothing -- it is here
+        # because it is the assertion that makes the vacuity question unrepeatable, and a mutant
+        # that swaps one fixture for a call-shape-refusing one is killed by it.
+        #
+        # ONLY the read count is asserted, never the OUTCOME: asserting an escaping row's verdict
+        # would pin the open `__class__` defect, which this file refuses to do. Equivalence of the
+        # counting hostile to `_class_boom` is established on the OBJECTS, just below, for the
+        # same reason.
+        probe, probe_reads = _class_boom_counting()
+        plain = _class_boom()
+        self.assertEqual(list(probe), list(plain), "the counting hostile iterates differently")
+        for same_shape in (probe, plain):
+            with self.assertRaises(RuntimeError):
+                isinstance(same_shape, str)             # the raise, at the absorbing site's probe
+        self.assertGreaterEqual(len(probe_reads), 1, "the counter does not count")
+        for f, p, kind, verdict, call in _CLASS_CHANNEL_POSITIONS:
+            hostile, reads = _class_boom_counting()
+            with self.subTest(hostile_is_read=(f, p, kind)):
+                try:
+                    call(hostile)
+                except BaseException:                   # noqa: BLE001 - the outcome is not asserted
+                    pass
+                self.assertGreaterEqual(
+                    len(reads), 1,
+                    f"{f}({p}=...) at its {kind} position never CONSULTED the hostile "
+                    f"`__class__`, so its declared {verdict!r} is its fixture's answer and not "
+                    "this route's. Either the fixture refuses on the shape of the call before the "
+                    "object is reached -- fix the fixture -- or the route genuinely cannot be "
+                    "exercised at this kind, which needs a written exemption here rather than a "
+                    "verdict. No exemption exists because at this commit nothing needs one")
         # NOT A FIXTURE ARTEFACT, derived for every `row` route rather than argued once: substitute
         # a legitimate row for the hostile object and the same call must succeed. Without this, a
         # fixture whose OTHER argument is the real cause of the refusal reads exactly like a driven
@@ -3406,6 +3604,32 @@ class FiguresAndDocPinInventory(unittest.TestCase):
                          "a row carries a verdict that is neither half of the sentence")
         self.assertIn(f"{fam} IN FAMILY and {esc} escaping", src)
         self.assertIn(f"{len(_CLASS_CHANNEL_POSITIONS)} driven positions", src)
+        # N1: and NO CONTRADICTING COPY anywhere in either file. The needles above assert that the
+        # right figure is PRESENT; four stale copies lived alongside them for two rounds because
+        # nothing asserted that a wrong one is ABSENT.
+        import re
+        ledger = {"driven": len(_CLASS_CHANNEL_POSITIONS), "in family": fam, "escaping": esc}
+        sources = {"src/toy/stability.py": _unwrapped(src),
+                   "tests/toy_tests/test_stability.py":
+                       _unwrapped(inspect.getsource(sys.modules[__name__]))}
+        for pattern, keys in _LEDGER_FIGURE_PHRASES:
+            quoted = 0
+            for where, text in sources.items():
+                for m in re.finditer(pattern, text):
+                    quoted += 1
+                    for group, key in enumerate(keys, start=1):
+                        with self.subTest(ledger_copy=pattern, where=where, quotes=key):
+                            self.assertEqual(
+                                int(m.group(group)), ledger[key],
+                                f"{where} quotes {m.group(0)!r}, which contradicts the table's "
+                                f"own {key} count of {ledger[key]}. A figure restated in prose "
+                                "needs the ABSENCE of the wrong value asserted, not just the "
+                                "presence of the right one")
+            with self.subTest(ledger_copy=pattern):
+                self.assertGreater(quoted, 0,
+                                   f"the phrase {pattern!r} matches nothing in either file, so "
+                                   "this template is blind: either the prose was re-phrased past "
+                                   "it -- update the template -- or the copy it guarded is gone")
         self.assertIn("A POSITION HERE IS A ROUTE, not a parameter", src,
                       "the sentence must say what it counts, because the figure changed by three "
                       "without a single parameter being added")
@@ -3439,7 +3663,7 @@ class FiguresAndDocPinInventory(unittest.TestCase):
                 self.assertIn(f"`{p}`", half,
                               f"{f}({p}=...) at its {kind} position is measured {verdict!r} and "
                               f"the sentence's {verdict!r} list does not name it")
-        # BEHAVIOUR: asserted for the 14 in family, and for nothing else.
+        # BEHAVIOUR: asserted for the 16 in family, and for nothing else.
         for f, p, kind, verdict, call in _CLASS_CHANNEL_POSITIONS:
             if verdict != _IN_FAMILY:
                 continue
