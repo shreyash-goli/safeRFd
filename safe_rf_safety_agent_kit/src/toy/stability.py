@@ -122,7 +122,7 @@ def _plain_real(v):
     differ from the value it used. Measured: `int(L(1)) == 2` for
     `class L(int): __int__ = lambda s: 2`, while `int.__int__(L(1)) == 1`.
     (`toy.schema._plain_value` reaches the same rule for the same reason; it is
-    re-derived in four lines here rather than imported, to keep this module
+    re-derived here rather than imported, to keep this module
     standard-library-only and to avoid depending on another module's private
     helper for this one's guards.)
 
@@ -191,13 +191,91 @@ def _finite_at(v, where: str) -> float:
     return check_finite_scalar(v, where)
 
 
-def _as_flat_items(values, name: str) -> tuple:
-    if isinstance(values, (str, bytes, Mapping, set, frozenset)) or not hasattr(values, "__iter__"):
-        raise ShapeError(f"{name} must be a sequence of numbers, got {type(values).__name__}")
+# ------------------------------------------------------ caller-input intake
+# THE ENUMERATION of sites where caller-supplied input is materialised or probed. DERIVED, not
+# listed: a site exists wherever the ITERATOR PROTOCOL or an ATTRIBUTE LOOKUP is applied to an
+# object the CALLER handed over -- as opposed to a tuple this module already built. Deriving it
+# mechanically (`tests/toy_tests/test_stability.py`, the C-series tests re-derive it) found FIVE
+# candidates and discharged two:
+#
+#   _as_flat_items  -- every outer sequence: values, mask-bearing data, prediction, target,
+#                      point, param_grad, before/after, the analytic gradient     [intake]
+#   _as_rows        -- each ROW of a 2D argument                                  [intake]
+#   check_mask      -- the mask                                                   [intake]
+#   _is_nested / _split_values -- the flat-vs-2D attribute probe on an ELEMENT    [intake]
+#   check_gradient's inner `call()` -- DISCHARGED: `list(p)` is reached only as `call(grad_fn,
+#                      ..., p0)` and `call(fn, ..., q)`, where `p0` is `check_finite_sequence`'s
+#                      tuple of floats and `q` is a `list(p0)` copy. `p` is never a caller object.
+#
+# The first three used to spell the probe and the materialisation as two separate statements, and
+# only two of the three wrapped the materialisation; the third (`_as_rows`' per-ROW `tuple(r)`)
+# did not, so a bare TypeError escaped the declared family on documented input. Wrapping a third
+# call the same way would have left a fourth to be found, so BOTH operations now go through the
+# two helpers below and every site calls one of them.
+#
+# Deriving the set surfaced a FOURTH site that had not been reported: the `hasattr(x, "__iter__")`
+# that PRECEDES each materialisation is itself an attribute lookup on the caller's object, so a
+# `__getattr__` raising anything but AttributeError escaped from the OUTER position too -- the
+# position the earlier fix believed it had closed. It is inside the same `try` now.
+#
+# NOT in this enumeration, each for a stated reason:
+#   * `len()` -- every `len()` here is taken on a tuple this module built.
+#   * `float()` / `int()` -- the conversion protocol is documented above as taken at its word.
+#   * `isinstance()` against a lying or RAISING `__class__` -- a different class of channel: it
+#     reaches every `isinstance` in this module (and its siblings), not the intake points, so it
+#     is not closed here and must not be assumed closed. `_is_row_like` happens to absorb it at
+#     the nestedness probe; nothing else does.
+_NOT_A_SEQUENCE = (str, bytes, Mapping, set, frozenset)
+
+# Exceptions from a caller's object that are NOT converted into this module's family: they report
+# the state of the interpreter, not the shape of the input, and a ShapeError would misdescribe
+# them. (The BaseException-only exits -- KeyboardInterrupt, SystemExit, GeneratorExit -- are
+# already outside `except Exception`.)
+_UNCONVERTED = (MemoryError, RecursionError, SystemError)
+
+
+def _materialised(obj, exc, what: str) -> tuple:
+    """Probe `obj` for sequence-hood and materialise it, with BOTH steps inside ONE `try`.
+
+    WHY EVERY EXCEPTION AND NOT ONLY `TypeError`, decided on the carve-out's own text rather than
+    left to disagree with it: the unwrapped-propagation carve-out in `check_gradient` names `fn`
+    and `grad_fn` -- CALLABLES the caller supplies for this module to invoke. A DATA argument
+    (`values`, `mask`, `prediction`, `target`, `point`, a row) is read, not called, and the
+    exception-design paragraph above says every error here derives from `StabilityError`.
+    Measured before this: an `__iter__` raising ValueError escaped as a BARE ValueError (inside
+    ValueError, outside StabilityError) and one raising RuntimeError or KeyError escaped ValueError
+    entirely -- from the two sites that DID wrap, so widening the catch is what matches the policy
+    those wrappers were written for. The original exception is chained (`from e`) and named in the
+    message, so widening loses no diagnostic.
+    """
     try:
-        return tuple(values)
-    except TypeError:
-        raise ShapeError(f"{name} must be a sequence of numbers, got {type(values).__name__}") from None
+        if not isinstance(obj, _NOT_A_SEQUENCE) and hasattr(obj, "__iter__"):
+            return tuple(obj)
+    except _UNCONVERTED:
+        raise
+    except StabilityError:
+        raise
+    except Exception as e:
+        raise exc(f"{what}, got {type(obj).__name__} (its __iter__ or attribute lookup raised "
+                  f"{type(e).__name__}, so it is not usable as a sequence)") from e
+    raise exc(f"{what}, got {type(obj).__name__}")
+
+
+def _is_row_like(v) -> bool:
+    """Is `v` a ROW rather than a scalar element? This is an ATTRIBUTE LOOKUP on the caller's
+    object, so a hostile `__getattr__` is answered here instead of escaping the family: a `v` that
+    cannot be probed is not a row, and the element validators then refuse it in family
+    (NonNumericError, because it is not a `Real`)."""
+    try:
+        return hasattr(v, "__iter__") and not isinstance(v, (str, bytes))
+    except _UNCONVERTED:
+        raise
+    except Exception:
+        return False
+
+
+def _as_flat_items(values, name: str) -> tuple:
+    return _materialised(values, ShapeError, f"{name} must be a sequence of numbers")
 
 
 def _as_rows(m, name: str) -> tuple[tuple, ...]:
@@ -206,9 +284,10 @@ def _as_rows(m, name: str) -> tuple[tuple, ...]:
         raise ShapeError(f"{name} is empty")
     rows = []
     for i, r in enumerate(outer):
-        if isinstance(r, (str, bytes, Mapping, set, frozenset)) or not hasattr(r, "__iter__"):
-            raise ShapeError(f"{name}[{i}] is not a row (sets/mappings have no defined order) (got {type(r).__name__})")
-        row = tuple(r)
+        # The ROW site. It was the one intake point of the three whose `tuple()` was unguarded
+        # while both siblings wrapped the identical call.
+        row = _materialised(r, ShapeError,
+                            f"{name}[{i}] is not a row (sets/mappings have no defined order)")
         if not row:
             raise ShapeError(f"{name}[{i}] is an empty row")
         rows.append(row)
@@ -231,13 +310,7 @@ def check_mask(mask: Sequence[bool], expected_len: int | None = None, name: str 
       * at least one entry is True (an empty or all-False mask raises rather
         than letting a caller produce a loss)        -> EmptyMaskError
     """
-    if isinstance(mask, (str, bytes, Mapping, set, frozenset)) or not hasattr(mask, "__iter__"):
-        raise MaskTypeError(f"{name} must be a sequence of bool, got {type(mask).__name__}")
-    try:
-        items = tuple(mask)
-    except TypeError:   # a broken `__iter__`: the sibling `_as_flat_items` wraps the identical call
-        raise MaskTypeError(f"{name} must be a sequence of bool, got {type(mask).__name__} "
-                            "(its __iter__ is not usable)") from None
+    items = _materialised(mask, MaskTypeError, f"{name} must be a sequence of bool")
     for i, b in enumerate(items):
         if not isinstance(b, bool):
             raise MaskTypeError(f"{name}[{i}] must be a strict bool, got {b!r} ({type(b).__name__}); "
@@ -259,7 +332,7 @@ def check_mask(mask: Sequence[bool], expected_len: int | None = None, name: str 
 def _split_values(values, mask: tuple[bool, ...], name: str):
     """Return (rows, width). Flat sequences are treated as width-1 'rows'."""
     outer = _as_flat_items(values, name)
-    nested = bool(outer) and all(hasattr(v, "__iter__") and not isinstance(v, (str, bytes)) for v in outer)
+    nested = _is_nested(outer)
     if nested:
         rows = _as_rows(outer, name)
         return rows, len(rows[0])
@@ -299,7 +372,7 @@ def _validated_masked_values(values, mask, name: str, strict: bool):
 
 
 def _is_nested(outer) -> bool:
-    return bool(outer) and all(hasattr(v, "__iter__") and not isinstance(v, (str, bytes)) for v in outer)
+    return bool(outer) and all(_is_row_like(v) for v in outer)
 
 
 def masked_mean_checked(values, mask: Sequence[bool], denominator: int, *,
@@ -482,6 +555,11 @@ def check_gradient(fn: Callable[[list], float], grad_fn: Callable[[list], Sequen
 
     Other behaviour: an exception raised inside the caller's `fn`/`grad_fn`
     (e.g. ZeroDivisionError) propagates unwrapped; it is not a StabilityError.
+    That carve-out is about CALLABLES the caller supplies for this module to
+    INVOKE, and it covers nothing else. An exception raised while a DATA
+    argument is probed or materialised -- a broken `__iter__`, a `__getattr__`
+    that raises -- is converted to this module's family instead, whatever its
+    class, and the original is chained as `__cause__`.
     `point`, like every sequence argument in this module, is materialised once
     (generators are consumed a single time at validation).
 

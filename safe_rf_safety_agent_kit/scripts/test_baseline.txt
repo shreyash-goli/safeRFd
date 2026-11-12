@@ -10,6 +10,6 @@ toy_tests.test_failure_modes 20 2
 toy_tests.test_robustness 181 0
 toy_tests.test_schema 55 0
 toy_tests.test_scripts 156 4
-toy_tests.test_stability 72 1
+toy_tests.test_stability 84 1
 toy_tests.test_teacher_student 55 0
 toy_tests.test_tensor_ops 110 82

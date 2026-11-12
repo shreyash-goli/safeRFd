@@ -9653,3 +9653,139 @@ nothing to re-attribute** — but that is luck, not method, and it is the same h
 phantom 16-failure spike that put the rule in this file. **Disjoint file ownership is not disjoint
 resource use.** The rule needs its scope stated: two owners may edit disjoint files concurrently, but
 only one may be *running a suite* at a time, and the orchestrator is the one who has to sequence that.
+
+## Round 15 — SR-06 re-attested FAIL on a THIRD axis, then fixed; and a derivation that reproduced the original defect's own reasoning
+
+**Date:** 2026-11-11. HEAD at attestation `0187b01`.
+
+### The stated blocker passed, and the journal's estimate was wrong for the fifth round running
+
+Round 14's entry said SR-06 *"stays `[ ]` pending a re-attestation that only needs the two-interpreter run."* **It needed more.** The two-interpreter run passes — `test_stability` **72 OK**, `test_robustness` **181 OK**, `test_checkpoint` **48 OK**, on both interpreters, **zero skips in all six runs**, so the counts are genuinely run and not inflated by a torch-gated skip on the no-torch side. All five doc pins plus Finding B killed their own mutants on both, `failures=1` each. **SR-06 then failed on a third, new axis.**
+
+The brief told the attester in as many words not to believe that estimate, *because it was the orchestrator's estimate of its own fix and estimates of that kind have been wrong five rounds running.* **That instruction is the only reason the third axis was found.** The standing lesson generalises: an estimate of remaining work written by whoever did the work is not a scope, and the journal should stop writing them. Round 14's sentence should have read "pending re-attestation", full stop.
+
+### The attester reproduced the pre-fix red rather than trusting the diagnosis
+
+Reverting D2 and D3 to their non-`cleandoc` spelling, needle *and* haystack: **3.12.4 Ran 72 OK / 3.13.5 Ran 72 FAILED (failures=1)** for each, reconstructing the original `failures=2` exactly. CPython 3.13's compile-time docstring dedent confirmed by a third party, and the `cleandoc` fix shown load-bearing and correctly aimed.
+
+### The mirror-defect worry was bounded by measurement, not argued away
+
+`cleandoc` on both sides makes indentation irrelevant — including where it ought to matter. Measured:
+
+| probe | result |
+|---|---|
+| passage indented +4 **relative** to the rest of its docstring (rendered doc changes) | **pin FAILS on both** — still sensitive |
+| whole docstring re-indented +4 uniformly | pin passes; `cleandoc(mutant) == cleandoc(HEAD)` **True** |
+| common indent respelled as a **tab** | pin passes; `cleandoc(mutant) == cleandoc(HEAD)` **True** |
+| any rewording (D1/D2/D3/D3b) | **kills on both** |
+| needle present in an unrelated docstring | False — no cross-talk |
+
+**The pins tolerate exactly the edits a reader cannot see, and nothing else.** They are strictly better than the fragile ones they replaced, which was the bar. And the `assertNotIn` is **not** last round's vacuous shape — it is a plain sentence a docstring can contain, and it was watched firing.
+
+### FINDING C (blocking) — a bare `TypeError` outside `StabilityError ⊂ ValueError`
+
+`stability.py:211`, `_as_rows`: `row = tuple(r)` unguarded, while **both** siblings wrap the identical call — `_as_flat_items:198` (`except TypeError → ShapeError`) and `check_mask:237` (`→ MaskTypeError`, which *is* the N1 fix). `hasattr(r, "__iter__")` passes where `tuple(r)` raises.
+
+**The count in the brief was wrong and the fixer corrected it: 16 escapes, not 12.** The brief's 12 were the three loss-function routes (`masked_mean_checked`, and `masked_squared_error_mean` in both argument positions); `check_finite_matrix`'s own row path is four more. Four object shapes each:
+
+| row object | HEAD, both interpreters | after, both interpreters |
+|---|---|---|
+| `__iter__` on the **instance** | `TypeError: 'Plain' object is not iterable` | `ShapeError` |
+| class attr `__iter__ = 5` | `TypeError: 'int' object is not callable` | `ShapeError` |
+| `__iter__` raises `TypeError` | `TypeError: x` | `ShapeError` |
+| `__iter__` returns a non-iterator | `TypeError: iter() returned non-iterator…` | `ShapeError` |
+
+The first shape needs **no `object.__setattr__`** and no exotic metaclass — the plainest form of the rule-9 smell. `test_n1`'s own docstring states the policy the row path violated. The original is now chained as `__cause__`, so nothing diagnostic is lost.
+
+**The uncovered-ness was verified both ways before the fix:** HEAD module + HEAD tests = 72/181/48 OK; fixed module + HEAD tests = 72/181/48 OK. Behaviour changed on sixteen documented inputs and **no test in the permitted set noticed, in either direction.** That is now false: HEAD module + final tests = **`FAILED (failures=305, errors=24)`** on both interpreters.
+
+### The derivation failed twice, and its first failure reproduced the defect's own reasoning
+
+This is the most useful methodological result of the round. Asked to close the class rather than the instance, the fixer derived the intake set from the AST and **watched its own derivation fail twice**:
+
+- **v1** modelled `_as_flat_items` as producing clean data → **6 sites, missed `_as_rows:211`.** It cleans the *container*, not the *elements*. **That conflation is exactly the reasoning that left the third `tuple()` unwrapped in the first place** — the first derivation pass independently reproduced the original defect's logic.
+- **v2**, depth-aware but flow-insensitive → **10 sites, still missed `_as_rows:211`**, because `for i, r in enumerate(rows)` at `:216` rebinds `r` to clean data and overwrites the depth-0 `r` of `:208`.
+- **v3**, flow-sensitive and depth-aware with `tuple()` *adding* a depth → **5 candidates** out of **68 iterator-protocol invocations and 24 `len()` calls**.
+
+**A derivation that is watched failing is evidence; one that is only watched passing is a hypothesis.** Two wrong derivations here each produced a plausible, complete-looking site list.
+
+### The derivation found a site nobody had reported — including the attester and me
+
+**The `hasattr(x, "__iter__")` that *precedes* each materialisation is itself an attribute lookup on the caller's object, and `hasattr` swallows only `AttributeError`.** So a `__getattr__` raising anything else escaped **from the outer position too** — the position N1 believed it had closed, because **N1 wrapped the `tuple()` and not the probe guarding it.** Measured on HEAD, both interpreters: `RuntimeError`/`KeyError` escaped `ValueError` entirely and `ValueError` escaped as a bare `ValueError`, from `check_finite_sequence`, `check_mask`, the row path and `_is_nested`.
+
+**Wrapping a third `tuple()` by hand — which is what my brief asked for — would have left this standing.** The probe and the materialisation are now in one `try` in one helper, and `test_c4` fails if any function outside the two helpers spells the probe itself (watched: a hand-wrapped fifth intake point → FAILED f=1 both). The fifth candidate, `check_gradient`'s inner `call():516`, is **discharged by assertion rather than by argument**: it is reached only with `check_finite_sequence`'s tuple of floats and a `list()` copy of it, so a caller object never arrives there.
+
+### FINDING A — the enumeration is now membership-by-definition
+
+`_public()` asks what the module *defines*, not what type an object has: it sees through `functools.partial`, `__wrapped__`, `staticmethod`/`classmethod`, accepting if **any** link in the unwrap chain names the module, with non-guards excused in writing in a new `_NOT_A_GUARD` table (13 exception classes + `GradientCheckReport`). Asserted at HEAD: **23 public names, 23 − 14 = exactly the nine guard functions**, `== set(_CASES)`, both interpreters, plus a stale-exemption check on `_NOT_A_GUARD` itself.
+
+**A design trap worth recording:** resolving `__module__` through the **last** unwrap link makes `lru_cache` come out *invisible* whenever the wrapped function was defined elsewhere — the same failure in the other direction. Hence any-link, documented in `_definition_modules`.
+
+Each bypassing shape carried a live defect (honest divisor → `2.0`, `EqInt(1)` → **`4.0`** where a `NormalizationMismatchError` is required), verified on both interpreters:
+
+| shape | old tests | new tests |
+|---|---|---|
+| plain `def` / identity-decorated `def` | FAILED f=1 | FAILED f=1 |
+| **`@lru_cache(maxsize=None)`** | **Ran 72 OK** | **FAILED f=1** |
+| **`functools.partial` alias** | **Ran 72 OK** | **FAILED f=1** |
+| **public class + `@staticmethod`** | **Ran 72 OK** | **FAILED f=1** |
+| new parameter / stale `_NOT_A_LYING_NUMBER` row / stale `_NOT_A_GUARD` row | FAILED f=1 (last is new) | FAILED f=1 |
+
+Narrowing `_public()` back to `inspect.isfunction` → **FAILED f=7 on both**. The scope honesty is preserved in the docstring: this changes nothing about `stability.py`'s behaviour at HEAD, and is a finding against the mechanism rather than the numerics.
+
+### Notes D, E, F — each decided, and D by an argument I had not considered
+
+**D: the catch moved, not the carve-out.** The carve-out names `fn`/`grad_fn` — *callables the caller supplies for this module to invoke*; a data argument is read, not called. The decisive point is one I had not seen: **widening the carve-out to name `__iter__` would contradict the module's own existing wrappers, so honest widening would have required deleting the N1 fix.** `_materialised` now converts every `Exception` raised while probing or materialising a data argument, chaining with `from e` and naming the class in the message. Excluded and stated: `MemoryError`, `RecursionError`, `SystemError` (interpreter state, not input shape), with `KeyboardInterrupt`/`SystemExit`/`GeneratorExit` outside `except Exception` already, and a caller's `StabilityError` re-raised as itself. Reverting to `except TypeError` only → **FAILED failures=200, errors=11** on both.
+
+**E: guarded, and deliberately NOT with `skipUnless`.** Reproduced: HEAD under `-OO` is `Ran 72, FAILED (errors=5)` on both. A `skipUnless` would have produced five skips under `-OO` — the shape the brief warned about, where the guard is worse than the error. Instead `_doc(obj)` returns `None` when docstrings are stripped and each pin takes a plain `if`, so **the guard cannot skip anything in any mode** and every behavioural assertion still runs under `-OO`. Now **84 OK, zero skips** under `-OO` and in normal runs, both interpreters; `test_e_…` asserts the guard fires only when `sys.flags.optimize >= 2`, and forcing it live → FAILED f=1.
+
+**F: the refusal asserted instead of tolerated — and the tolerance was live.** `except st.StabilityError: continue` became a `self.fail` naming the dunder. **Proof it was absorbing a real regression:** a module mutant making `check_gradient` refuse a non-plain-`float` step is **PASSED by `test_f4` under the old tolerant `except`** (f=2, e=2, with `test_f4` absent from the failure list) and **killed by the narrowed one** (FAILED in 4 subtests), both interpreters. The branch was absorbing exactly the regression it existed to catch — which is now the second measured instance of this shape in two rounds.
+
+### Figures: pinned, with the mutant watched killing each
+
+| figure | mutant → kill, both interpreters |
+|---|---|
+| `sum([1e16,1.0,-1e16])` is 1.0 — **the two-interpreter promise sitting unpinned in the one module unmarked for a two-interpreter failure**; `1e16` appeared nowhere in the test file | doc reword → f=1; `sum()` → naive loop → f=2 |
+| "Three sentences" → **"Four passages … one withdrawn sentence"**, derived from the class (4 positive `D`s, 1 withdrawn, 5 `assertIn`, 1 `assertNotIn`) and compared against the **word** in the docstring | word → "Five" → f=1; adding a `D5` without updating the word → f=1 |
+| **twelve** error classes: 13 incl. base, 12 strict, pairwise distinctness for **all twelve** (was 3) | `MaskLengthError(MaskTypeError)` → f=2; dropping a class → f=1 |
+| "that spelling fails … **twice**" — derived as exactly 2 of 5, both `Fraction(1,10**400)` positions | `float()` spelling → f=2 on the behaviour **and** f=2 on the figure |
+| `Fraction(np.float32(1e-40))` → `TypeError` | asserted behind a plain `if np is not None`, **never a skip** |
+| `int(L(1)) == 2` vs `int.__int__(L(1)) == 1`; `_plain_real` identity on `iter`/genexp/`map` | `_plain_real` using `int()`/`float()` → f=3, e=5 |
+
+**The 72 count was deliberately left out of both files, with a test that says so and why**: asserting the count inside the file that determines it creates a second source of truth that drifts on every legitimate addition, and `scripts/test_baseline.txt` already fails a run that loses tests. It asserts instead the property the count stood in for — that no test class is empty. **That is the right resolution of "pin every figure", and it is a limit on the rule rather than an exception to it:** pin the property, not the tally, when the tally is derived from the file doing the asserting.
+
+`map()` was added to the one-shot sweep: `list`/`iter`/genexp/`map` all refuse F2 with `UnderflowError`, and `_plain_real(map(...))` is identity. No switch to a collapse-only boundary.
+
+### An environment figure I have been getting wrong in every brief
+
+The fixer measured, and I confirmed directly:
+
+```
+non-isolated 3.12: numpy 2.4.6  (~/Library/Python/3.12/lib/python/site-packages)
+isolated   3.12 -I: numpy 1.26.4  (bundled)
+3.13.5 miniconda:   numpy 2.4.4
+```
+
+**I have been writing "3.12.4, numpy 1.26.4" into briefs for several rounds. That describes the isolated interpreter, not the environment `python3 -m unittest` actually loads.** Every count recorded in this journal is from the non-isolated environment, so the *counts* are sound and only the label was wrong — but the standing rule is that a figure carries its environment, and an environment stated wrongly is worse than one omitted, because it cannot be re-derived from the record. The `Fraction(np.float32(1e-40))` figure was re-verified on **all three** (1.26.4 isolated, 2.4.6 non-isolated, 2.4.4) and holds on each. **Related and already known: `-I` implies `-E` and discards `PYTHONDONTWRITEBYTECODE`; it now also means a different numpy.**
+
+### Handed up rather than half-fixed: a raising `__class__` escapes every `isinstance` in the kit
+
+`isinstance` consults `__class__` via `ABCMeta.__instancecheck__` and the fast-path fallback, so `@property def __class__: raise RuntimeError` propagates. **This is a different channel class from Finding C** — it reaches `isinstance`, not the intake points — and the fixer closed it only where it happens to pass through the new helpers, **declining to half-fix the rest**, and declining to pin the current escaping behaviour because *that would pin a defect and break when someone fixes it.* Both calls are right.
+
+Measured identically on both interpreters: `stability.py` has 21 `isinstance` sites and still escapes at element positions as a bare `RuntimeError`, stated as not-closed in the module's enumeration comment so it cannot be assumed closed. **`robustness.py` (54 sites) and `checkpoint.py` (10): 23 of 23 public single-required-argument functions escape** as bare `RuntimeError`/`TypeError`. Needs a kit-wide decision by those files' owners and its own attestation — **recorded here as an open finding, not as a note**, because "fail safely" is SR-06's acceptance phrase and these are two modules that import it.
+
+### Measurements
+
+| run | interpreter / environment | result |
+|---|---|---|
+| `test_stability` | 3.12.4 (numpy 2.4.6, torch 2.7.1) | **84 OK**, 0 skips (was 72) |
+| `test_stability` | 3.13.5 miniconda (numpy 2.4.4, no torch) | **84 OK**, 0 skips |
+| `test_robustness` / `test_checkpoint` | both | 181 OK / 48 OK, 0 skips |
+| `test_stability` under **`-OO`** | both | **84 OK, 0 skips** (HEAD: 72, errors=5) |
+| **full suite** | **3.12.4** | **1415 ran, 2 skipped, 0 failed**, rc=0 |
+| **full suite** | **3.13.5**, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` | **1415 ran, 84 skipped, 0 failed**, rc=0 |
+| `run_tests.sh --expect none --twice` | bare 3.12.4 venv | **1415 / 90 / 0**, `run1 == run2`, identical per-module counts and skip list |
+
+1403 + 12 = 1415. `scripts/test_baseline.txt` regenerated in the bare venv: **one row**, `toy_tests.test_stability 72 1` → `84 1` — the bare-skip column stays **1**, which the fixer predicted and verified by simulating an absent numpy. Zero slack.
+
+**SR-06 stays `[ ]`.** The fixer is not the attester, and this fix has had no independent pass. **Verified stays 9 of 17.**
