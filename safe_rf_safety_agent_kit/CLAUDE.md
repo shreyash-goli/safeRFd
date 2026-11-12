@@ -36,9 +36,16 @@
   produces failures belonging to someone else's in-flight work — which was misattributed repeatedly
   in this project before the cause was found.)*
 - **Never run anything else concurrently with a suite run, including your own repro or mutation
-  scripts.** Doing so produced a phantom 16-failure spike that vanished on a serial re-run, and the
-  same hazard class as the stale-`.pyc` incident. If you see a failure set you cannot explain,
-  **re-run it serially before attributing it to anything.**
+  scripts — and this binds ACROSS owners, not only within one.** Disjoint file ownership is not
+  disjoint resource use: the blueprint's completion semantics let two owners edit non-overlapping
+  files at the same time, and that permission says nothing about *running suites* at the same time.
+  Measured 2026-11-11: two owners launched in parallel on genuinely disjoint files collided anyway,
+  one owner's `test_scripts` overlapping the other's per-module run and inflating `test_dashboard`
+  from its usual share to 105 s. Every module was OK, so nothing had to be re-attributed — luck, not
+  method. **Only one suite may be running at a time, and sequencing that is the orchestrator's job,
+  not each owner's.** Running something alongside a suite once produced a phantom 16-failure spike
+  that vanished on a serial re-run — the same hazard class as the stale-`.pyc` incident. If you see a
+  failure set you cannot explain, **re-run it serially before attributing it to anything.**
 - Clear `__pycache__` and set `PYTHONDONTWRITEBYTECODE=1` for every measurement. Stale bytecode has
   produced both a false mutation survivor and a misattributed 10-failure spike here.
 - **A quietness check built on `pgrep -f` or `ps | grep` SELF-MATCHES its own command line**, so an

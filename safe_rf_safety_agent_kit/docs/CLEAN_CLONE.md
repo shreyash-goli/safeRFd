@@ -1093,6 +1093,21 @@ This is hygiene, not a sandbox; the runtime socket guard is a second, partial la
   differing total implies a differing `ran`/`skip` line). Only the canon comparison and the `$BAD`-with-`$UT_RC`
   pair are pinned individually. This is defensible redundancy rather than a set of masked tests, but it is four
   terms, not the one the record previously named.
+- **The pytest stage runs with whatever pytest plugins the ambient environment autoloads, and that is why
+  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` appears in the commands above.** `scripts/run_tests.sh` invokes
+  `python3 -m pytest -q -p no:cacheprovider`, which disables only pytest's own cache plugin; every
+  third-party plugin installed in the environment still loads and participates. The flag was added to the
+  documented commands after a conda environment's pytest died at *collection* with
+  `OSError: Could not find/load shared object file 'libllvmlite.dylib'` from a numba/llvmlite plugin, which
+  made four of `tests/toy_tests/test_scripts.py`'s pytest-stage tests fail: measured 2026-11-11 on CPython
+  3.13.5 (miniconda), `Ran 156, FAILED (failures=4)` without the flag and `Ran 156, OK` with it. **The
+  failure is loud, not silent** — inside the script the run emitted `POLICY:PYTEST_FAILED` and
+  `POLICY:PYTEST_COLLECTED`, which is the correct report of a pytest that exited 1 having collected 0 tests,
+  and nothing was exempted by it. So this is an environment-portability limit, not a hole in the policy: the
+  affected tests are environment-fragile (they need a working pytest), not interpreter-fragile. Until this
+  bullet the flag was written in the commands without its reason, so a reader had no way to know whether it
+  was load-bearing or habit. It is load-bearing on any environment with a broken pytest plugin, and inert on
+  one without.
 - **The 1/3/4 variable-by-variable table comes from the stand-in; the Linux TOTAL does not, any more.** The
   table under "Filesystem-case skips" is from a real case-sensitive APFS disk image, which is still a stand-in:
   it shows which *variable* drives each skip. The **4** it predicts for the Linux configuration is now measured

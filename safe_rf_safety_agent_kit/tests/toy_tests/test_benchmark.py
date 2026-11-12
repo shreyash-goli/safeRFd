@@ -4909,8 +4909,53 @@ class EveryWordLookedUpInAStoredMappingIsSwept(unittest.TestCase):
         self.assertEqual(complaints, [], f"{len(complaints)} of {swept} swept (record, mapping, key) "
                                          f"forgeries are decided by a word the key does not store:\n"
                                          + "\n".join(complaints[:6]))
-        self.assertGreaterEqual(swept, 100, "the sweep collapsed; it is supposed to walk a real payload")
+        # PINNED AT 129, not floored at 100. CORRECTION 2 of this round's three: the 13/21/9/73
+        # re-ranking above lives in a DOCSTRING and no assertion pinned either 129 or 13, so the only
+        # numeric guard here was `assertGreaterEqual(swept, 100)` -- under which the sweep could lose 29
+        # of its 129 cases in silence. The probe-lane sibling pins `assertEqual(swept, 308)`; this one
+        # now does the same. MEASURED, 3.12.4 and 3.13.5: 129 cases over 7 records, decomposed and
+        # PINNED below rather than narrated here -- the first figure written into this comment had the
+        # JOINT record's 12 and the input_hashes 21 the wrong way round, which is the whole reason the
+        # round's lesson is "pin the figures" and not "state them carefully".
+        self.assertEqual(swept, 129, "the (record, mapping, key) case count is a product of the payload, "
+                                     "not a floor: a sweep that shrinks has stopped testing what it says")
         self.assertEqual(swept, len(list(self._cases())))
+        per = collections.Counter((i, field) for i, field, _, _ in self._cases())
+        agg = [i for i in range(len(self.recs)) if not self.recs[i].name.endswith("/agg/JOINT")]
+        joint = next(i for i in range(len(self.recs)) if self.recs[i].name.endswith("/agg/JOINT"))
+        self.assertEqual([per[(i, "metrics")] for i in agg], [16] * 6)         # 6 x 16 = 96
+        self.assertEqual(per[(joint, "metrics")], 12)                          #          12
+        self.assertEqual(sum(per[(i, "provenance.input_hashes")] for i in range(7)), 21)
+        self.assertEqual(96 + 12 + 21, 129)
+
+    def test_the_classification_figures_are_pinned_not_narrated(self):
+        """CORRECTION 2, the other half. The 13/21/9/73 re-ranking was measured at the pre-fix commit
+        `eb21eef^` and CANNOT be re-measured here -- post-fix all 129 cases agree and there are 0
+        complaints, which is the whole point of the fix. What can be pinned, and now is, is the
+        ARITHMETIC that makes the figures a partition of a measured total rather than four remembered
+        numbers: 13 escalations + 21 denials + 9 lateral + 73 both-raise = 116 complaints, and
+        129 swept - 116 complaints = the 13 that already agreed. Edit any one figure in that docstring
+        and this fails.
+
+        THE PREVIOUS ROUND'S OWN STATED LESSON WAS "a figure in a test is pinned; a correction in a
+        journal is not" -- and the replacement figure went into a docstring. That is why this test
+        exists, and why it also asserts the docstring still carries the four numbers it is checking: a
+        pin on arithmetic alone would pass against a docstring that had quietly dropped the derivation."""
+        ESCALATIONS, DENIALS, LATERAL, BOTH_RAISE = 13, 21, 9, 73
+        COMPLAINTS, CASES, AGREED = 116, 129, 13
+        self.assertEqual(ESCALATIONS + DENIALS + LATERAL + BOTH_RAISE, COMPLAINTS)
+        self.assertEqual(CASES - COMPLAINTS, AGREED)
+        self.assertEqual(CASES, len(list(self._cases())), "the figures are about THIS payload")
+        doc = " ".join(self.test_every_key_of_every_stored_mapping_reads_as_the_word_it_stores.__doc__
+                       .split())
+        for needle in ("all 129 cases classified", "13 ESCALATIONS", "21 DENIALS", "9 LATERAL",
+                       "73 both-raise", "13 + 21 + 9 + 73 = 116", "Post-fix: 129 agree, 0 complaints"):
+            self.assertIn(needle, doc, "the derivation these figures are pinned against is gone")
+        # WHY THE FLOOR WAS REPLACED, performed rather than asserted: on a payload that has lost 29 of
+        # its 129 cases the retired `assertGreaterEqual(swept, 100)` still passes, and the pin does not.
+        truncated = list(self._cases())[:100]
+        self.assertGreaterEqual(len(truncated), 100)            # the retired guard is satisfied ...
+        self.assertNotEqual(len(truncated), CASES)              # ... by a sweep missing 29 forgeries
 
     def test_the_sweep_is_not_vacuous_and_the_honest_study_is_decisive(self):
         """NOT VACUOUS in the two ways a sweep like this fails silently: the reference outcome has to be
@@ -5114,8 +5159,16 @@ class TheKeyLaneSweepIsDerivedFromTheModuleNotFromAList(unittest.TestCase):
     variable-key read of any OTHER mapping was covered by neither sweep. MEASURED: mutant M9c (a new
     mapping field plus a verdict-deciding variable-key read of it) was unkilled by `test_benchmark`,
     `test_dashboard` and `test_robustness` together, 729 OK. It is killed here now, by enumeration: a new
-    container appears in the collected set and is not in the declaration. The cost was four more
+    container appears in the collected set and is not in the declaration. The cost was THREE more
     declarations, two of which say "this is a `range` index, not a word".
+      THAT FIGURE SAID "four" AND IT WAS WRONG -- the first of this round's three accounting corrections,
+    and the same error on the module's side of the declaration, corrected there too. The table went
+    3 -> 6: `s.metrics`, `other.params`, `teacher.params` PLUS `self.metrics`, `o.conditioned`,
+    `o.unconditioned`. That is three more, not four. The "two of which are a `range` index" half was
+    right (`o.conditioned`, `o.unconditioned`). The lesson this correction is itself an instance of --
+    "a figure in a test is pinned; a correction in a journal is not" -- is why the LENGTH and the
+    composition of the table are now asserted in
+    `test_the_declaration_length_is_pinned_rather_than_narrated` instead of counted in this paragraph.
     (2) "THROUGH A FIELD" IS NOW A NODE-TYPE TEST, not a string test. It used to be
     `"." in container and "(" not in container` on the UNPARSED text, which is exactly the lexical-rule
     class this project has retired three times; with variable keys collected it also started reporting
@@ -5192,6 +5245,27 @@ class TheKeyLaneSweepIsDerivedFromTheModuleNotFromAList(unittest.TestCase):
         for container, why in bm.KEY_LANE_ATTRIBUTE_LOOKUPS.items():
             self.assertTrue(why.strip() and len(why) > 40, container)
 
+    def test_the_declaration_length_is_pinned_rather_than_narrated(self):
+        """CORRECTION 1 of this round's three, PINNED. The module comment and this class's docstring both
+        said collecting variable keys "costs four more declarations"; it is three (3 -> 6). The figure was
+        wrong in two places and unpinned in both, which is the exact failure mode the round's own stated
+        lesson names: a figure in a test is pinned, a correction in prose is not. So the length and the
+        two-`range`-index composition are assertions now, and a seventh entry has to come with a figure
+        change here rather than slip past a sentence."""
+        self.assertEqual(len(bm.KEY_LANE_ATTRIBUTE_LOOKUPS), 6,
+                         "3 declarations before variable keys were collected, + 3 = 6, not + 4")
+        self.assertEqual(sorted(bm.KEY_LANE_ATTRIBUTE_LOOKUPS),
+                         ["o.conditioned", "o.unconditioned", "other.params", "s.metrics",
+                          "self.metrics", "teacher.params"])
+        index_entries = [k for k, v in bm.KEY_LANE_ATTRIBUTE_LOOKUPS.items() if "SEQUENCE INDEX" in v
+                         or "integer `range` indices" in v]
+        self.assertEqual(sorted(index_entries), ["o.conditioned", "o.unconditioned"],
+                         "the 'two of which are a range index' half of the claim, pinned as well")
+        # and the corrected figure is in the module's own declaration, not only here
+        decl = " ".join(inspect.getsource(bm).split())
+        self.assertIn("costs THREE more declarations", decl)
+        self.assertNotIn("costs four more declarations", decl)
+
     def test_the_sites_the_fix_moved_are_no_longer_read_through_a_field(self):
         """The three lookups this round moved, pinned by ABSENCE, so reinstating any of them fails here
         as well as in the payload walk."""
@@ -5223,36 +5297,68 @@ class TheKeyLaneSweepIsDerivedFromTheModuleNotFromAList(unittest.TestCase):
         neither party could say what the difference was. It is this, measured and now pinned, so the
         number is a consequence of the rule rather than a remembered total:
 
-            126  every lookup in the three spellings, annotation subtrees excluded
+            134  every lookup in the three spellings, annotation subtrees excluded
            - 42  string-literal keys           (pinned above)
            -  1  f-string key  f'gate_{n}'     (pinned above)
-           - 33  integer-index or slice subscripts -- `history[-1]`, `sorted_v[i]`, `boot[0]`: positions,
+           - 35  integer-index or slice subscripts -- `history[-1]`, `sorted_v[i]`, `boot[0]`: positions,
                  not names, and never a key lookup
            -  4  typing-generic subscripts in NON-annotation position: the module-level aliases
                  `Matrix`/`Predictor`/`PredictorFactory` write `Callable[...]` and `Sequence[...]` as
                  ordinary expressions, so the annotation exclusion does not reach them
-           = 46  VARIABLE-KEY word lookups
+           = 52  VARIABLE-KEY word lookups
 
-        83 = 46 + 33 + 4, which is exactly the superset the re-implementation reported: it had the rule
-        right and was counting indices and type aliases as lookups. Both figures are now reproducible
-        from this test, which is the only place either of them should live."""
+        THE TOTALS MOVED THIS ROUND AND THE DELTA IS DERIVED, not restated. They were 126 / 33 / 46, and
+        all eight new lookups come from the two ELEMENT-LANE refusals this round added (see
+        `bm.ELEMENT_LANE_ATTRIBUTE_READS`). Measured by diffing this sweep's output against
+        `git show HEAD:src/toy/benchmark.py`, which is why the arithmetic below is a consequence:
+            + 2  index     `wrong[0]`, twice, in `evaluate_gates`' refusal message
+            + 1  variable  `scores[wrong[0]]`, the same message naming the offending element
+            + 1  variable  `GATE_SCOPES[n]` in the `in` spelling -- `JointResult.__post_init__` now
+                 refuses an unknown FAILED gate name instead of escaping as a `KeyError` from the
+                 subscript three lines down
+            + 1  variable  `failed[n]`, the dict comprehension rewritten as the loop that refusal needs
+            + 3  variable  `real[g.name]` twice and `real[n]` once, `to_experiment_records`' validated
+                 gate view -- SR-10 Finding 1
+        126 + 8 = 134, 33 + 2 = 35, 46 + 6 = 52. WHAT THIS TEST CAN AND CANNOT SEE, stated rather than
+        overclaimed: the eight additions are asserted BY NAME below, so the total cannot be reached by a
+        different eight. A net total alone could not distinguish +8 from +9/-1, and this test does not
+        carry a 126-entry snapshot to rule that out; what rules it out is that the two lanes where a
+        REMOVAL would matter are asserted by SET EQUALITY, not by a count --
+        `test_every_word_lookup_through_a_field_is_admitted_or_declared` for every lookup reached through
+        a field and `TheProbeLaneSweepIsDerivedFromTheModule` for every lookup into a module constant.
+
+        83 = 46 + 33 + 4 was exactly the superset an independent re-implementation reported against the
+        previous totals: it had the rule right and was counting indices and type aliases as lookups. All
+        of these figures are reproducible from this test, which is the only place any of them should
+        live."""
         source = _SRC_FILES["benchmark"].read_text()
         found = self._word_lookups(source)
-        self.assertEqual(len(found), 126)
+        self.assertEqual(len(found), 134)
         by_kind = collections.Counter(kind for _, _, _, kind, _ in found)
         self.assertEqual(by_kind["literal"], 42)
         self.assertEqual(by_kind["fstring"], 1)
-        self.assertEqual(by_kind["index"], 33)
+        self.assertEqual(by_kind["index"], 35)
         TYPING = {"Callable", "Sequence", "Mapping", "Optional"}
         typing_generics = [f for f in found if f[3] == "variable" and f[1] in TYPING]
         self.assertEqual(len(typing_generics), 4, typing_generics)
         variable_words = [f for f in found if f[3] == "variable" and f[1] not in TYPING]
-        self.assertEqual(len(variable_words), 46)
-        self.assertEqual(by_kind["variable"], 50, "46 variable-key words + 4 typing-generic aliases")
+        self.assertEqual(len(variable_words), 52)
+        self.assertEqual(by_kind["variable"], 56, "52 variable-key words + 4 typing-generic aliases")
         self.assertEqual(by_kind["literal"] + by_kind["fstring"] + by_kind["index"]
-                         + by_kind["variable"], 126)
+                         + by_kind["variable"], 134)
+        # THE EIGHT ADDITIONS BY NAME, with their multiplicities, so the moved total cannot be reached by
+        # a different eight lookups. This is what makes the delta above a derivation rather than a story.
+        multiset = collections.Counter((c, k, kind) for _, c, k, kind, _ in found)
+        added = {("GATE_SCOPES", "n", "variable"): 1, ("failed", "n", "variable"): 1,
+                 ("real", "g.name", "variable"): 2, ("real", "n", "variable"): 1,
+                 ("scores", "wrong[0]", "variable"): 1, ("wrong", "0", "index"): 2}
+        self.assertEqual(sum(added.values()), 8)
+        for site, n in added.items():
+            self.assertGreaterEqual(multiset[site], n, f"{site} is this round's and is not collected")
         # And the 83 the independent re-implementation reported, derived rather than quoted.
-        self.assertEqual(len(variable_words) + by_kind["index"] + len(typing_generics), 83)
+        # 91 = 52 + 35 + 4, the same superset the re-implementation reported, now against this
+        # round's totals: it was 83 = 46 + 33 + 4 before the eight lookups above were added.
+        self.assertEqual(len(variable_words) + by_kind["index"] + len(typing_generics), 91)
 
     def test_the_tripwire_fails_on_a_reinstated_unadmitted_lookup(self):
         """NOT VACUOUS: the pre-fix spelling of the defect, fed back in as source text, is reported."""
@@ -5473,10 +5579,25 @@ class TheProbeLaneSweepIsDerivedFromTheModule(unittest.TestCase):
 
     @staticmethod
     def _word_containers():
-        """The module-level constants a word can be looked up IN, read off the MODULE, never listed."""
+        """The module-level constants a word can be looked up IN, read off the MODULE, never listed.
+
+        THE ALL-CAPS FILTER IS GONE -- correction 3 of this round's three, and a hole rather than a
+        tidy-up. It used to skip any module-level name for which `name.strip("_") !=
+        name.strip("_").upper()`, so A MODULE-LEVEL WORD CONTAINER WHOSE NAME IS NOT ALL-CAPS WAS
+        INVISIBLE TO BOTH TRIPWIRES: invisible here, and -- as a bare `ast.Name` rather than an
+        `ast.Attribute` -- invisible to the key lane's `through_a_field` test as well. MEASURED: such a
+        mutant died ONLY on the incidental `assertEqual(len(found), 126)` total in
+        `TheKeyLaneSweepIsDerivedFromTheModuleNotFromAList`, so relaxing that one figure to a range --
+        which is exactly what this round did to a sibling figure elsewhere, in the other direction --
+        would have opened it. NOTHING IS LOST TODAY and that is measured too, not assumed: dropping the
+        filter changes the collected set not at all, because `Matrix`, `Predictor` and `PredictorFactory`
+        are the only non-ALL-CAPS module-level names and none of them is a container of strings
+        (`Matrix` is `tuple` itself, the other two are `typing` generic aliases). The rule is now what the
+        sentence always said -- "a module-level constant a word can be looked up in" -- and says nothing
+        about how it is spelled, which is the lexical-rule class this project has retired three times."""
         out = {}
         for name, value in vars(bm).items():
-            if name.startswith("__") or name.strip("_") != name.strip("_").upper():
+            if name.startswith("__"):
                 continue
             if isinstance(value, collections.abc.Mapping):
                 if any(isinstance(k, str) for k in value):
@@ -5544,19 +5665,61 @@ class TheProbeLaneSweepIsDerivedFromTheModule(unittest.TestCase):
             self.assertTrue(why.strip() and len(why) > 80, site)
 
     def test_the_counts_are_derived_from_the_rule_not_inherited(self):
-        """MY OWN COUNT, pinned so the sweep cannot quietly shrink and so the figure has a derivation."""
+        """MY OWN COUNT, pinned so the sweep cannot quietly shrink and so the figure has a derivation.
+
+        MOVED THIS ROUND, 24 -> 25 and 19 -> 20 probes, by exactly one new lookup:
+        `JointResult.__post_init__`'s `n not in GATE_SCOPES`, which refuses an unknown FAILED gate name
+        before the `GATE_SCOPES[n]` subscript three lines down can escape as a `KeyError`. It is the `in`
+        spelling of a subscript this file already declares, so it COLLAPSES ONTO THE EXISTING
+        DECLARATION -- the distinct (function, lookup) pair count is unchanged at 15, which is the
+        property keying the declaration by enclosing function was chosen for."""
         found = self._constant_lookups(_SRC_FILES["benchmark"].read_text())
-        self.assertEqual(len(found), 24, "module-constant lookups in all three spellings")
+        self.assertEqual(len(found), 25, "module-constant lookups in all three spellings")
         probe_sites = [f for f in found if f[2]]
         literal_sites = [f for f in found if not f[2]]
-        self.assertEqual(len(probe_sites), 19)
+        self.assertEqual(len(probe_sites), 20)
         self.assertEqual(len(literal_sites), 5)
+        self.assertEqual(sum(1 for _, s, p in found
+                             if p and s == "JointResult.__post_init__: GATE_SCOPES[n]"), 3,
+                         "the two `== \'all\'` subscripts and this round\'s new `in`-spelled guard, "
+                         "all three under ONE declaration")
         self.assertEqual({s.split(": ", 1)[1] for _, s, _ in literal_sites},
                          {"ARM_FACTORIES['C_init']", "ARM_FACTORIES['C0']", "ARM_FACTORIES['C_shuf']"})
         self.assertEqual(len({s for _, s, _ in probe_sites}), 15, "distinct (function, lookup) pairs")
         self.assertIn("PRIMARY", self._word_containers())
         self.assertIn("SUBJECT_KIND_CODE", self._word_containers())
         self.assertIn("GATE_SCOPES", self._word_containers())
+
+    def test_a_word_container_whose_name_is_not_all_caps_is_collected(self):
+        """CORRECTION 3 of this round's three, and the non-vacuity proof for dropping the ALL-CAPS filter
+        (see `_word_containers`). A lowercase module-level container of words used to be invisible to this
+        tripwire AND to the key lane's `through_a_field` test, and its mutant died only on an incidental
+        total. Both halves are performed here: the container is collected, and a probe into it is then
+        reported as an undeclared probe site -- which is what makes the main tripwire fail on it.
+
+        Nothing in the module is lost by the change, asserted rather than claimed: the collected set is
+        the same with and without the retired filter."""
+        caps_only = {n for n, v in self._word_containers().items()
+                     if n.strip("_") == n.strip("_").upper()}
+        self.assertEqual(caps_only, set(self._word_containers()),
+                         "the retired ALL-CAPS filter would change the collected set today")
+        self.assertNotIn("gate_words", self._word_containers())       # precondition
+        source = _SRC_FILES["benchmark"].read_text()
+        added = source.replace(
+            "def _now() -> str:\n    return ",
+            "def _now(kind='unknown') -> str:\n    _ = gate_words[kind]\n    return ", 1)
+        self.assertNotEqual(added, source, "the anchor for the mutation is gone; update this test")
+        ast.parse(added)
+        setattr(bm, "gate_words", ("convergence",))               # a lowercase module-level word container
+        try:
+            self.assertIn("gate_words", self._word_containers(),
+                          "a module-level word container is skipped because of how its name is spelled")
+            probes = {s for _, s, p in self._constant_lookups(added) if p}
+            self.assertIn("_now: gate_words[kind]", probes)
+            self.assertNotIn("_now: gate_words[kind]", set(bm.PROBE_LANE_CONSTANT_LOOKUPS))
+        finally:
+            delattr(bm, "gate_words")
+        self.assertNotIn("gate_words", self._word_containers())   # and the module is left as it was
 
     def test_the_tripwire_fails_on_an_undeclared_and_on_a_moved_probe(self):
         """NOT VACUOUS, in the two ways this tripwire can rot. A NEW probe lookup must be reported, and
@@ -6099,6 +6262,533 @@ class TheEnumTableRowThatWasFalseIsCorrected(unittest.TestCase):
         for function in ("combine_joint", "HypothesisResult.__post_init__",
                          "JointResult.__post_init__", "verdict_from_records"):
             self.assertIn(function, doc, f"the table does not name {function}")
+
+
+class TheSerialisedGateStatesAreTheGatesTheClassValidated(unittest.TestCase):
+    """SR-10 FINDING 1, a verdict flip with NO tampering primitive and NO lying dunder.
+
+    `JointResult.__post_init__`'s completeness check filtered (`isinstance(g, GateResult)`);
+    `to_experiment_records`' `gate_m` comprehension did not. That a duck-typed eighth gate is invisible
+    to the completeness check IS documented (`carries_exemption`'s docstring, and the pinned routes in
+    this file and in `test_dashboard`). What was NOT documented is that the comprehension read
+    `.name`/`.passed` off ANY object and let a DUPLICATE NAME SILENTLY OVERWRITE a genuinely failed
+    gate's stored 0.0 with 1.0.
+
+    MEASURED pre-fix, identical on 3.12.4 and 3.13.5, through public constructors only -- no
+    `object.__setattr__`, no `str` subclass, no overridden dunder, `exempt=False` so no exemption guard
+    fires -- on a study whose `seed_list_frozen` gate GENUINELY FAILS:
+        honest : stored gate_seed_list_frozen=0.0  recompute=JOINT_INCONCLUSIVE  reasons=()
+        forged : stored gate_seed_list_frozen=1.0  recompute=JOINT_SUPPORTED     reasons=()
+
+    BOUNDED BUT NOT CLOSED, AND THE BOUND IS NOT A DEFENCE. `JointResult.verdict` stayed honest and
+    `dashboard.render_scorecard` did raise CONTRACT PROBLEM -- but the SERIALISED EVIDENCE ITSELF was
+    falsified, and `verdict_from_records`, documented as rebuilding the verdict "from them alone",
+    reported SUPPORTED with no reason. A records-only consumer never runs the dashboard.
+
+    WHY NO EXISTING TEST COVERED IT: every duck-gate fixture in this project uses a gate that PASSES
+    (`Duck.passed = True`, `DuckGate.passed = True`), so the overwrite is a no-op in all of them. A
+    second GENUINE `GateResult` with a duplicate name is correctly refused upstream, so the hole was
+    exactly the `isinstance` filter plus the unguarded overwrite."""
+    TS = "2025-01-02T03:04:05Z"
+
+    @classmethod
+    def setUpClass(cls):
+        # a study whose `seed_list_frozen` gate genuinely fails: the registered digest does not match
+        cls.res = bm.run_study(FZ, bm.fixture_oracle_gated, subject="oracle_gated",
+                               registered_digest="0" * 64, cfg=SMALL)
+
+    def setUp(self):
+        self.assertIs(self.res.verdict, J.JOINT_INCONCLUSIVE)
+        self.assertIs(next(g.passed for g in self.res.gates if g.name == "seed_list_frozen"), False)
+
+    class PlainDuck:
+        """A plain object with five class attributes. `exempt` is False, so the exemption guard that
+        catches the documented duck route never fires here."""
+        name, passed, reason, exempt, scope = "seed_list_frozen", True, "duck", False, "H3"
+
+    def duck(self, scope="H3", name="seed_list_frozen", passed=True):
+        d = type("Duck", (), {"name": name, "passed": passed, "reason": "duck", "exempt": False,
+                              "scope": scope})
+        return d()
+
+    def joint(self, gates):
+        r = self.res
+        return bm.JointResult(r.subject, r.h1, r.h2, r.h3, gates, r.seed_scores, r.ineligible,
+                              r.n_attempted, r.n_failed, r.seed_list_digest, r.registered_digest,
+                              r.config_hash, r.margins, r.subject_kind, r.fixture_name)
+
+    def outcome(self, gates):
+        j = self.joint(gates)
+        recs = bm.to_experiment_records(j, study_id="x", base_seed=7, timestamp_utc=self.TS)
+        jr = next(r for r in recs if r.name.endswith("/agg/JOINT"))
+        rv = bm.verdict_from_records(recs, SMALL)
+        return j.verdict, jr.metrics["gate_seed_list_frozen"].value, rv.joint, rv.reasons
+
+    def test_a_duck_gate_duplicating_a_FAILED_gate_name_cannot_overwrite_its_stored_zero(self):
+        """THE FINDING, pinned in the direction that moved: the JOINT record must store 0.0 for a gate
+        that failed, whatever else the list holds, and the recompute must stay INCONCLUSIVE."""
+        honest = self.outcome(self.res.gates)
+        self.assertEqual(honest, (J.JOINT_INCONCLUSIVE, 0.0, J.JOINT_INCONCLUSIVE, ()))
+        for scope in ("H3", "all"):            # both scopes flipped it pre-fix
+            forged = self.outcome((*self.res.gates, self.duck(scope=scope)))
+            self.assertEqual(forged[1], 0.0, f"scope={scope}: the stored gate state was overwritten")
+            self.assertIs(forged[2], J.JOINT_INCONCLUSIVE, f"scope={scope}")
+            self.assertEqual(forged, honest, f"scope={scope}: the record set is not the honest one")
+
+    def test_the_stored_gate_states_do_not_depend_on_the_order_of_the_list(self):
+        """The pre-fix comprehension was ORDER-DEPENDENT -- a duplicate earlier in the list lost to the
+        real gate and a duplicate later in it won -- so the serialised evidence depended on nothing a
+        reader could see. Keying on `GATE_SCOPES` makes the record set order-free, which is a stronger
+        statement than "the duplicate no longer wins" and is the one asserted."""
+        d = self.duck()
+        first = self.outcome((d, *self.res.gates))
+        last = self.outcome((*self.res.gates, d))
+        self.assertEqual(first, last)
+        self.assertEqual(first[1], 0.0)
+        # The stored gate METRICS, compared key by key and value by value across the two orders -- the
+        # tuple compared above would be equal even if a gate's state had moved to another key. (The key
+        # ORDER inside the record is `ExperimentRecord`'s, which files metrics canonically; that is
+        # SR-04's business and is deliberately not asserted here as if it were this module's.)
+        def gate_metrics(gates):
+            recs = bm.to_experiment_records(self.joint(gates), study_id="x", base_seed=7,
+                                            timestamp_utc=self.TS)
+            jr = next(r for r in recs if r.name.endswith("/agg/JOINT"))
+            return {k: v.value for k, v in jr.metrics.items() if k.startswith("gate_")}
+        honest = gate_metrics(self.res.gates)
+        self.assertEqual(set(honest), {f"gate_{n}" for n in bm.GATE_SCOPES})
+        self.assertEqual(gate_metrics((d, *self.res.gates)), honest)
+        self.assertEqual(gate_metrics((*self.res.gates, d)), honest)
+
+    def test_a_duck_gate_cannot_add_remove_or_rename_a_stored_gate_state(self):
+        """The record set is exactly the seven the scorer declares -- not six, not eight -- however many
+        objects the gate list carries. A duck under a NEW name used to add a `gate_extra_gate` metric
+        that no consumer reads and no cross-check covers."""
+        for extra in ((self.duck(name="extra_gate", scope="all"),),
+                      (self.duck(name="extra_gate", scope="all"), self.duck()),
+                      (self.duck(name="control_adequacy"),)):
+            recs = bm.to_experiment_records(self.joint((*self.res.gates, *extra)), study_id="x",
+                                            base_seed=7, timestamp_utc=self.TS)
+            jr = next(r for r in recs if r.name.endswith("/agg/JOINT"))
+            self.assertEqual({k for k in jr.metrics if k.startswith("gate_")},
+                             {f"gate_{n}" for n in bm.GATE_SCOPES}, repr(extra))
+            self.assertEqual(jr.metrics["gate_seed_list_frozen"].value, 0.0, repr(extra))
+
+    def test_the_documented_duck_route_is_still_live_and_still_caught_where_it_was(self):
+        """THE FIX DOES NOT CLOSE THE DOCUMENTED ROUTE, and this is the assertion that keeps the tests
+        which pin that route from going vacuous: a duck gate still CONSTRUCTS (the completeness check
+        still filters, as `carries_exemption` documents and `test_dashboard` pins), and the renderer is
+        still the layer that reports it. Only the SERIALISED gate states changed."""
+        j = self.joint((*self.res.gates, self.duck()))
+        self.assertEqual(len(j.gates), 8)
+        self.assertEqual(sorted(g.name for g in j.gates if isinstance(g, bm.GateResult)),
+                         sorted(bm.GATE_SCOPES))
+        self.assertIs(bm.carries_exemption((*self.res.gates, self.duck())), True)   # the fixture's own
+        from toy import dashboard as db
+        self.assertFalse(db._gate_set_ok(j.gates))
+        self.assertIn("CONTRACT PROBLEM", db.render_scorecard(j))
+
+    def test_a_second_genuine_gate_result_with_a_duplicate_name_is_still_refused_upstream(self):
+        """ISOLATION: the hole was the `isinstance` filter plus the overwrite, not the duplicate name as
+        such -- a duplicate GENUINE gate never reached the serialiser at all."""
+        real = next(g for g in self.res.gates if g.name == "seed_list_frozen")
+        with self.assertRaisesRegex(ValueError, "gates must contain exactly"):
+            self.joint((*self.res.gates, dataclasses.replace(real, passed=True)))
+
+    def test_serialising_an_incomplete_or_ambiguous_gate_view_refuses(self):
+        """The two refusals the fix adds are reachable only through a duck-typed `res`, so they are
+        pinned through one rather than left as unexercised branches."""
+        class DuckRes:
+            def __init__(self, r, gates):
+                for f in dataclasses.fields(bm.JointResult):
+                    setattr(self, f.name, getattr(r, f.name))
+                self.gates, self.deferred_gates = gates, r.deferred_gates
+        real = next(g for g in self.res.gates if g.name == "seed_list_frozen")
+        short = tuple(g for g in self.res.gates if g.name != "min_seeds")
+        with self.assertRaisesRegex(ValueError, r"missing GateResult entries for \['min_seeds'\]"):
+            bm.to_experiment_records(DuckRes(self.res, short), study_id="x", base_seed=7,
+                                     timestamp_utc=self.TS)
+        with self.assertRaisesRegex(ValueError, "two GateResult objects named 'seed_list_frozen'"):
+            bm.to_experiment_records(DuckRes(self.res, (*self.res.gates, real)), study_id="x",
+                                     base_seed=7, timestamp_utc=self.TS)
+
+    def test_a_failed_duck_gate_under_an_unknown_name_is_a_value_error_not_a_key_error(self):
+        """THE ERROR-CONTRACT LEAK IN THE SIBLING COMPREHENSION, found by the same derivation. The
+        documented duck fixtures all PASS, so `if not g.passed` skipped them and nothing covered a duck
+        that reports FAILED under a name `GATE_SCOPES` does not have. MEASURED pre-fix:
+        `KeyError: 'extra_gate'`, where this module declares ValueError; an unhashable `.name` raised
+        TypeError from the comprehension itself. Both were refusals -- nothing was fail-open -- and both
+        are now the ValueError the contract names."""
+        for name in ("extra_gate", 7, None, ["convergence"]):
+            with self.assertRaises(ValueError) as cm:
+                self.joint((*self.res.gates, self.duck(name=name, passed=False)))
+            self.assertIn("unknown name", str(cm.exception))
+            self.assertNotIsInstance(cm.exception, KeyError)
+        # a duck that reports FAILED under a REAL name is still admitted, and still fails closed
+        j = self.joint((*self.res.gates, self.duck(name="convergence", passed=False)))
+        self.assertIs(j.verdict, J.JOINT_INCONCLUSIVE)
+
+
+class ADuckTypedPerSeedScoreCannotWalkAroundSeedScores(unittest.TestCase):
+    """SR-10, THE SECOND FLIP OF THE ELEMENT LANE -- not in any brief, found by DERIVING the lane rather
+    than by inspecting the site the first finding named.
+
+    `SeedScores.__post_init__` says "THE SEED IS THE UNIT OF REPLICATION ... this is where it enters the
+    analysis path, so it is checked and NORMALISED here", and pins the defect it closes: a lying `int`
+    subclass as a seed bought `seed_list_frozen` PASSED off one seed repeated thirty times. But
+    `evaluate_gates`' `ids = [s.seed for s in scores]` read `.seed` off ANY object, so a plain
+    duck-typed score object never passed through "here" at all.
+
+    MEASURED pre-fix, identical on 3.12.4 and 3.13.5, with 30 duck score objects carrying ONE lying
+    `int` subclass (honest hash; equal to a plain `int` of the same value, so the frozen-list SUBSET
+    check finds it; unequal to another instance, so the DUPLICATE check does not collapse it) and thirty
+    genuine VARYING metric mappings:
+        duck objects : seed_list_frozen PASSED, min_seeds PASSED, JOINT_SUPPORTED, stored n_seeds 30.0,
+                       verdict_from_records -> JOINT_SUPPORTED with reasons = (), and thirty per-seed
+                       records whose provenance seed is the SAME seed
+        real SeedScores, same lying seed object, same values : seed_list_frozen FAILED,
+                       JOINT_INCONCLUSIVE
+    i.e. exactly the defect that class records as closed, reached AROUND the class instead of through
+    it. There is nothing to normalise at the read -- the admission belongs to the class and cannot be
+    applied to an object that is not of it -- so the element is REFUSED, as
+    `HypothesisResult.__post_init__` already does for a component."""
+
+    class SelSeed(int):
+        def __eq__(self, o):   return type(o) is int and int.__int__(self) == o
+        def __ne__(self, o):   return not self.__eq__(o)
+        __hash__ = int.__hash__
+
+    class DuckScore:
+        """Everything `evaluate_gates`, `analyze_scores` and `seed_records` read, off a plain object."""
+        def __init__(self, seed, src):
+            self.seed, self.metrics = seed, src.metrics
+            self.rowsets_disjoint, self.mask_ok = src.rowsets_disjoint, src.mask_ok
+            self.input_hashes = src.input_hashes
+
+        @property
+        def ok(self):
+            return True
+
+    def ducks(self):
+        one = self.SelSeed(FZ.seeds[0])
+        return [self.DuckScore(one, s) for s in synth_scores([FZ.seeds[0]] * 30, rng_seed=3)]
+
+    def test_evaluate_gates_refuses_a_duck_typed_score(self):
+        with self.assertRaisesRegex(ValueError, r"scores\[0\] is a DuckScore, not a SeedScores"):
+            bm.evaluate_gates(self.ducks(), FZ, FZ.digest, SMALL)
+
+    def test_analyze_scores_refuses_it_too_and_so_no_verdict_is_produced(self):
+        """The flip was a VERDICT, so the refusal is pinned at the function that produces one."""
+        with self.assertRaisesRegex(ValueError, "must be SeedScores objects"):
+            bm.analyze_scores(self.ducks(), frozen=FZ, registered_digest=FZ.digest, subject="duck",
+                              cfg=SMALL, subject_kind="trained")
+        # one duck among 29 honest scores is refused by index, not averaged away
+        mixed = synth_scores(FZ.seeds)[:29] + [self.DuckScore(self.SelSeed(FZ.seeds[0]),
+                                                              synth_scores(FZ.seeds)[0])]
+        with self.assertRaisesRegex(ValueError, r"scores\[29\] is a DuckScore"):
+            bm.analyze_scores(mixed, frozen=FZ, registered_digest=FZ.digest, subject="duck", cfg=SMALL)
+
+    def test_the_class_the_refusal_defers_to_still_closes_the_flip_itself(self):
+        """NOT A NEW GUARANTEE, A REACHABLE ONE: the real class, handed the SAME lying seed object and
+        the same values, normalises the seed and the seed-list gate fails. This is the comparison the
+        measurement above is against, so it is asserted rather than described."""
+        one = self.SelSeed(FZ.seeds[0])
+        real = [bm.SeedScores(one, dict(s.metrics), True, True, {})
+                for s in synth_scores([FZ.seeds[0]] * 30, rng_seed=3)]
+        self.assertEqual({type(s.seed) for s in real}, {int})          # normalised, not stored
+        j = bm.analyze_scores(real, frozen=FZ, registered_digest=FZ.digest, subject="plain", cfg=SMALL,
+                              subject_kind="trained")
+        g = {x.name: x.passed for x in j.gates}
+        self.assertFalse(g["seed_list_frozen"], "the duplicate-seed refusal is what the duck evaded")
+        self.assertIs(j.verdict, J.JOINT_INCONCLUSIVE)
+
+    def test_the_admission_is_at_the_object_so_seed_records_inherits_it(self):
+        """ONE ADMISSION PER OBJECT, as `_plain_word_fields` argues: `seed_records` reads four fields off
+        these elements, and `JointResult.__post_init__` refuses the element rather than each read
+        defending itself. The audit trail is the record set NO cross-check reads, so a duck there is
+        wrong in the only place a reader goes for per-seed provenance."""
+        j = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
+                              subject="s", cfg=SMALL)
+        f = {x.name: getattr(j, x.name) for x in dataclasses.fields(bm.JointResult)}
+        ducks = tuple(self.DuckScore(self.SelSeed(FZ.seeds[0]), s) for s in j.seed_scores)
+        with self.assertRaisesRegex(ValueError, "seed_scores must be SeedScores objects"):
+            bm.JointResult(**{**f, "seed_scores": ducks})
+        # the honest field is of course still accepted
+        self.assertEqual(len(bm.seed_records(bm.JointResult(**f), study_id="x",
+                                             timestamp_utc="2025-01-02T03:04:05Z")), 30)
+
+
+class TheElementLaneSweepIsDerivedFromTheModule(unittest.TestCase):
+    """THE THIRD LANE, and the one round 13 left half-closed. `KEY_LANE_ATTRIBUTE_LOOKUPS` enumerates
+    the mapping this module reaches through a field; `PROBE_LANE_CONSTANT_LOOKUPS` the word it looks up
+    in its own constants; `ELEMENT_LANE_ATTRIBUTE_READS` the ATTRIBUTE it reads off an ELEMENT of a
+    collection it iterates.
+
+    WHY A LANE AND NOT A PAIR OF FIXES. Round 13 wrapped `JointResult.__post_init__`'s `failed`
+    comprehension in `_plain_word` *because* "this comprehension reads `.name` off ANY object in the
+    list", and left the sibling comprehension 145 lines later unguarded -- the half-fix pattern this
+    module has already failed to three times. Deriving the lane instead of listing it found a SECOND
+    consequential site nobody had reported (`evaluate_gates`' `ids = [s.seed for s in scores]`, where a
+    duck score object walks around `SeedScores.__post_init__`) and a third, narrower one (the same
+    `failed` comprehension escaping as `KeyError` from `GATE_SCOPES[n]`). Two flips of 33 sites, and
+    neither was findable from the other.
+
+    WHAT IT ASSERTS: that the collected site set equals the declaration, keyed by ENCLOSING FUNCTION so
+    a site that MOVES fails closed rather than hiding behind identical text elsewhere; that every
+    declared site carries a reason; and -- pinned by ABSENCE -- that the one site the fix moved is no
+    longer read off the caller's list. The enumeration IS the claim; the prose is evidence."""
+
+    @staticmethod
+    def _targets(t):
+        """The simple Names a `for` statement or a comprehension generator binds."""
+        if isinstance(t, ast.Name):
+            return [t.id]
+        if isinstance(t, (ast.Tuple, ast.List)):
+            return [n for e in t.elts for n in TheElementLaneSweepIsDerivedFromTheModule._targets(e)]
+        return []
+
+    @classmethod
+    def _element_reads(cls, source):
+        """(line, 'qualname: var.attr', iterable source) for every attribute LOADED off a loop or
+        comprehension target.
+
+        The rule is a NODE-TYPE rule, not a lexical one (the class this project has retired three
+        times): the object of the attribute read must be an `ast.Name` whose id is bound by the target
+        of the enclosing `for`/generator, and the read must be a Load. Tuple targets are unpacked, so
+        `for h, hid in (...)` contributes `h` and not `hid`; `ast.Store` subscript targets are not
+        reads; and a read of a LOCAL that merely came from the collection is out of scope by the same
+        rule, which is why `evaluate_gates`' `ok_scores` comprehension is collected at its own line."""
+        tree = ast.parse(source)
+        qual = {}
+
+        def walk(node, stack):
+            for child in ast.iter_child_nodes(node):
+                qual[id(child)] = ".".join(stack) or "<module>"
+                inner = (stack + [child.name]
+                         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                         else stack)
+                walk(child, inner)
+
+        walk(tree, [])
+        found = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.For, ast.AsyncFor)):
+                groups = [(cls._targets(node.target), node.iter, node.body + node.orelse)]
+            elif isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+                names = [n for g in node.generators for n in cls._targets(g.target)]
+                sub = ([node.elt] if hasattr(node, "elt") else [node.key, node.value])
+                sub += [c for g in node.generators for c in g.ifs]
+                groups = [(names, node.generators[0].iter, sub)]
+            else:
+                continue
+            for names, it, sub in groups:
+                for s in sub:
+                    for n in ast.walk(s):
+                        if (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                                and n.value.id in names and isinstance(n.ctx, ast.Load)):
+                            found.append((n.lineno, f"{qual[id(node)]}: {n.value.id}.{n.attr}",
+                                          ast.unparse(it)))
+        return found
+
+    def test_every_attribute_read_off_a_collection_element_is_admitted_or_declared(self):
+        found = self._element_reads(_SRC_FILES["benchmark"].read_text())
+        sites = sorted({site for _, site, _ in found})
+        self.assertEqual(sites, sorted(bm.ELEMENT_LANE_ATTRIBUTE_READS),
+                         "this module reads an attribute off an element of a collection at a site that "
+                         "is neither admitted (by an instance check at or above it, or by a refusal) "
+                         "nor declared in `ELEMENT_LANE_ATTRIBUTE_READS` with its reason. Admit it, "
+                         "refuse the element, or write down the measurement that makes a caller's "
+                         "object harmless there.")
+        for site, why in bm.ELEMENT_LANE_ATTRIBUTE_READS.items():
+            self.assertTrue(why.strip() and len(why) > 80, site)
+
+    def test_the_counts_are_derived_from_the_rule(self):
+        """MY OWN COUNT, so the lane cannot quietly shrink: 33 distinct sites over 52 reads. The two
+        figures differ because several sites are read at more than one line (`c.verdict` over both
+        component tuples, `g.name` three times in `JointResult.__post_init__`), and collapsing them is
+        deliberate -- the declaration is keyed by function, so two reads of one field in one function
+        are one entry."""
+        found = self._element_reads(_SRC_FILES["benchmark"].read_text())
+        self.assertEqual(len({s for _, s, _ in found}), 33)
+        self.assertEqual(len(found), 52)
+        self.assertEqual(len(bm.ELEMENT_LANE_ATTRIBUTE_READS), 33)
+
+    def test_the_site_the_fix_moved_is_pinned_by_absence(self):
+        """THE FINDING, pinned on the AST as well as on the behaviour. `to_experiment_records` must read
+        `.passed` off the VALIDATED view (`real.items()`) and never off `res.gates`, which is the
+        caller's list. Pinned by absence so that reinstating the defect fails here too, and not only in
+        `TheSerialisedGateStatesAreTheGatesTheClassValidated`."""
+        found = self._element_reads(_SRC_FILES["benchmark"].read_text())
+        iters = {(s, it) for _, s, it in found}
+        self.assertIn(("to_experiment_records: g.passed", "real.items()"), iters)
+        self.assertNotIn(("to_experiment_records: g.passed", "res.gates"), iters)
+        # `g.name` IS still read off `res.gates` -- in the loop that builds `real`, behind the
+        # isinstance filter -- and that is declared, so its presence is pinned rather than forbidden.
+        self.assertIn(("to_experiment_records: g.name", "res.gates"), iters)
+
+    def test_the_tripwire_fails_on_the_pre_fix_shape_and_on_a_new_and_a_moved_read(self):
+        """NOT VACUOUS, in the three ways this tripwire can rot. (1) THE PRE-FIX SHAPE must be
+        reported -- reconstructed here rather than described, so the sweep is shown failing on the
+        defect it exists for. (2) A NEW read off a collection element must be reported. (3) A read that
+        MOVES to another function while keeping its text must be reported, which is the one a
+        declaration keyed on `var.attr` alone would miss."""
+        source = _SRC_FILES["benchmark"].read_text()
+        declared = set(bm.ELEMENT_LANE_ATTRIBUTE_READS)
+
+        pre_fix = source.replace(
+            'gate_m = {f"gate_{n}": MetricValue.measured(1.0 if g.passed else 0.0) '
+            'for n, g in real.items()}',
+            'gate_m = {f"gate_{g.name}": MetricValue.measured(1.0 if g.passed else 0.0) '
+            'for g in res.gates}', 1)
+        self.assertNotEqual(pre_fix, source, "the anchor for the mutation is gone; update this test")
+        ast.parse(pre_fix)
+        iters = {(s, it) for _, s, it in self._element_reads(pre_fix)}
+        self.assertIn(("to_experiment_records: g.passed", "res.gates"), iters)
+        self.assertNotIn(("to_experiment_records: g.passed", "real.items()"), iters)
+
+        added = source.replace(
+            "def _now() -> str:\n    return ",
+            "def _now(gs=()) -> str:\n    _ = [g.sneaky for g in gs]\n    return ", 1)
+        self.assertNotEqual(added, source, "the anchor for the mutation is gone; update this test")
+        ast.parse(added)
+        sites = {s for _, s, _ in self._element_reads(added)}
+        self.assertIn("_now: g.sneaky", sites)
+        self.assertNotIn("_now: g.sneaky", declared)
+
+        moved = source.replace(
+            "    def gates_ok(self) -> bool:",
+            "    def moved_elsewhere(self) -> bool:", 1)
+        self.assertNotEqual(moved, source, "the anchor for the mutation is gone; update this test")
+        ast.parse(moved)
+        sites = {s for _, s, _ in self._element_reads(moved)}
+        self.assertIn("JointResult.moved_elsewhere: g.passed", sites)
+        self.assertNotIn("JointResult.moved_elsewhere: g.passed", declared)
+        self.assertIn("JointResult.gates_ok: g.passed", declared)
+
+    def test_the_lane_declares_which_sites_are_open_rather_than_closing_them_quietly(self):
+        """The duck-typed-record route into `verdict_from_records` is DECLARED OPEN and a test documents
+        it deliberately. This fix does not close it, and the declaration says so in those words rather
+        than listing the site as admitted -- the distinction the lane exists to keep."""
+        for site in ("verdict_from_records: r.name", "verdict_from_records: r.evidence_class",
+                     "verdict_from_records: r.provenance"):
+            self.assertIn("declared open", bm.ELEMENT_LANE_ATTRIBUTE_READS[site].lower(), site)
+        # performed, not asserted: a plain object still reaches every lookup in that function
+        res = bm.run_study(FZ, bm.fixture_oracle_gated, subject="oracle_gated",
+                           registered_digest=FZ.digest, cfg=SMALL)
+        recs = bm.to_experiment_records(res, study_id="x", base_seed=7,
+                                       timestamp_utc="2025-01-02T03:04:05Z")
+
+        class DuckRecord:
+            def __init__(self, r):
+                self.name, self.metrics = r.name, r.metrics
+                self.evidence_class, self.provenance = r.evidence_class, r.provenance
+        self.assertIs(bm.verdict_from_records([DuckRecord(r) for r in recs], SMALL).joint,
+                      bm.verdict_from_records(recs, SMALL).joint)
+
+
+class PlainWordItselfIsPinnedAndNotOnlyItsCallers(unittest.TestCase):
+    """SR-10 FINDING 2. `bm._plain_word` HAD NO DIRECT UNIT TEST AT ALL, and the last line of the
+    round's own new admission carried an UNKILLED clause:
+
+        -    return x if w is None else w
+        +    return str(x) if w is None else w
+
+    unkilled by `test_benchmark`, `test_dashboard` and `test_robustness` together (742 OK with the mutant
+    in place, 3.12.4 and 3.13.5). The clause is load-bearing and `PROBE_LANE_CONSTANT_LOOKUPS`'s
+    `treatment_kind` entry leans on it BY NAME: "`None` must keep reading as 'not an arm name', which is
+    why `_plain_word` returns a non-`str` unchanged instead of stringifying it."
+
+    MEASURED CONSEQUENCE of the mutant, for an object that is NOT a `str` and merely defines `__str__`:
+        analyze_scores(..., subject_kind=obj, fixture_name="oracle_gated")
+            HEAD    -> ValueError          mutant -> ACCEPTED, subject_kind rendering 'fixture'
+        carries_exemption(gates)                  mutant -> True
+        stored subject_kind_code / loss_check_exempt      mutant -> 2.0 / 1.0
+        verdict_from_records                      mutant -> JOINT_SUPPORTED, reasons = ()
+    So `ValueError -> JOINT_SUPPORTED` for an object that merely RENDERS as "fixture". HEAD is correct;
+    the guard was simply unpinned. These tests pin the function directly AND through the public route,
+    because the function-level pin alone would not show what the clause is worth."""
+
+    class RendersAsFixture:
+        """Not a `str`. Defines `__str__` and nothing else -- no dunder is overridden, because there is
+        no dunder to override: `str(x)` on a plain object is already a route."""
+        def __str__(self):
+            return "fixture"
+
+    class RendersAsArm:
+        def __str__(self):
+            return "C0"
+
+    def test_a_non_string_is_returned_unchanged_and_never_stringified(self):
+        """THE KILLING PIN for `return str(x) if w is None else w`. `None` is the case the module's own
+        declaration names, so it is first; the others are the same clause at other types."""
+        for x in (None, 3, 3.5, True, (), [], {}, object()):
+            self.assertIs(bm._plain_word(x), x, f"{x!r} was not returned unchanged")
+        obj = self.RendersAsFixture()
+        self.assertIs(bm._plain_word(obj), obj)
+        self.assertNotIsInstance(bm._plain_word(obj), str)
+        self.assertEqual(str(obj), "fixture")        # it really does render as the admitted word
+        self.assertNotIn(bm._plain_word(obj), bm.SUBJECT_KINDS)
+        self.assertNotIn(bm._plain_word(self.RendersAsArm()), bm.ARM_NAMES)
+
+    def test_a_string_is_returned_as_the_plain_characters_it_stores(self):
+        """The other half of the same return: a `str` SUBCLASS is normalised, and to the stored
+        characters rather than to whatever `__str__` answers -- the reason it is `str.__str__` and not
+        `str()` (see `_stored_word`)."""
+        class Liar(str):
+            def __str__(self):          return "fixture"
+            def __eq__(self, o):        return o in ("trained", "fixture")
+            def __ne__(self, o):        return not self.__eq__(o)
+            __hash__ = str.__hash__
+        liar = Liar("trained")
+        out = bm._plain_word(liar)
+        self.assertIs(type(out), str)
+        self.assertEqual(str.__str__(out), "trained")
+        self.assertIsNot(out, liar)
+        plain = bm._plain_word("fixture")            # an already-plain str survives as itself
+        self.assertIs(type(plain), str)
+        self.assertEqual(plain, "fixture")
+
+    def test_the_declaration_that_leans_on_the_clause_by_name_still_does(self):
+        """The `treatment_kind` entry is the sentence the clause is FOR; pinned with normalised
+        whitespace so it reads the same on 3.12.4 and on 3.13.5, which dedents docstrings at compile
+        time."""
+        entry = " ".join(bm.PROBE_LANE_CONSTANT_LOOKUPS[
+            "treatment_kind: ARM_NAMES[_plain_word(getattr(treatment, 'arm_name', None))]"].split())
+        self.assertIn("`None` must keep reading as 'not an arm name'", entry)
+        self.assertIn("returns a non-`str` unchanged instead of stringifying it", entry)
+        doc = " ".join(bm._plain_word.__doc__.split())
+        self.assertIn("Anything that is not a `str` is returned UNCHANGED", doc)
+        self.assertIn("rather than as the characters of `'None'`", doc)
+
+    def test_the_public_route_the_clause_closes_still_refuses(self):
+        """WHAT THE CLAUSE IS WORTH, through the public API: an object that merely renders as 'fixture'
+        must not buy the gate-11(c) exemption. This is the assertion the mutant fails on."""
+        scores = synth_scores(FZ.seeds)
+        with self.assertRaises(ValueError):
+            bm.analyze_scores(scores, frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL,
+                              subject_kind=self.RendersAsFixture(), fixture_name="oracle_gated")
+        # the same refusal at the gate function itself, which normalises its own probe
+        with self.assertRaises(ValueError):
+            bm.evaluate_gates(scores, FZ, FZ.digest, SMALL, self.RendersAsFixture())
+        # and the honest word is still accepted, so the refusal is not blanket
+        ok = bm.analyze_scores(scores, frozen=FZ, registered_digest=FZ.digest, subject="s", cfg=SMALL,
+                               subject_kind="fixture", fixture_name="oracle_gated")
+        self.assertEqual(ok.subject_kind, "fixture")
+        self.assertIs(bm.carries_exemption(ok.gates), True)
+
+    def test_a_trained_treatment_declaring_a_rendering_arm_name_is_refused(self):
+        """The second site the clause carries: `ARM_NAMES[_plain_word(...)]` in `treatment_kind`, where
+        a non-`str` must keep reading as 'not an arm name'."""
+        class Treat:
+            trained_student = True
+            scorer_validation_fixture = False
+            arm_name = PlainWordItselfIsPinnedAndNotOnlyItsCallers.RendersAsArm()
+        with self.assertRaisesRegex(ValueError, "valid arm_name"):
+            bm.treatment_kind(Treat())
+        class NoName:
+            trained_student = True
+            scorer_validation_fixture = False
+        with self.assertRaisesRegex(ValueError, "valid arm_name"):
+            bm.treatment_kind(NoName())          # the `None` default, the case the declaration names
 
 
 if __name__ == "__main__":

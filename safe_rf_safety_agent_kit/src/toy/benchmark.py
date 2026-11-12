@@ -359,7 +359,17 @@ def _plain_word(x: Any) -> Any:
     caller still runs its own membership check, and `None` must keep reading as "not a gate name" rather
     than as the characters of `'None'`. Same ordering rule as `_plain_number` and `_plain_parameter`
     (normalise, THEN compare), and the same reason `str.__str__` rather than `str()`: see `_stored_word`.
-    THE SITES ARE ENUMERATED, not remembered -- see `PROBE_LANE_CONSTANT_LOOKUPS`."""
+    THE SITES ARE ENUMERATED, not remembered -- see `PROBE_LANE_CONSTANT_LOOKUPS`.
+    WHAT THAT ENUMERATION DOES NOT REACH, stated because its scope would otherwise read as wider than it
+    is. It collects the SUBSCRIPT, `.get` and `in` spellings of a lookup. TWO COMPARISON-SPELLED probes
+    into module constants sit outside all three: `set(self.metrics) != set(SEED_METRICS)` in
+    `SeedScores.__post_init__` and `sorted(names) != sorted(GATE_SCOPES)` in `JointResult.__post_init__`.
+    Both let a caller's `__eq__` / `__hash__` decide against a module constant, and both are admitted
+    anyway for reasons that are at the sites and are NOT interchangeable: the first normalises the keys
+    with `_word_keyed` on the line above, so the sets compared are the stored words; the second compares
+    names the loop beneath it has plainified, and `GateResult.__post_init__`'s own measurement records
+    that this comparison is NOT what closed that site. MEASURED as not consequential, and declared here
+    rather than promoted: a THIRD comparison-spelled probe would be a new finding, not a new entry."""
     w = _stored_word(x)
     return x if w is None else w
 
@@ -448,8 +458,14 @@ ENUM_ADMISSIONS = ("_enum_member", "Verdict", "JointVerdict", "EvidenceClass")
 # but the payload walk reaches RECORD mappings and nothing else, so `self.newmap[k]` on any other object
 # was covered by neither. MEASURED: mutant M9c (a new mapping field plus a verdict-deciding variable-key
 # read of it) was unkilled by `test_benchmark`, `test_dashboard` and `test_robustness` together. Collecting
-# variable keys costs four more declarations, listed below, and closes the gap by enumeration instead of by
-# a promise about where the other sweep looks.
+# variable keys costs THREE more declarations, listed below, and closes the gap by enumeration instead of
+# by a promise about where the other sweep looks.
+#   THAT FIGURE SAID "four" AND WAS WRONG, corrected here and in the test that repeated it: this table
+# went 3 -> 6 (`s.metrics`, `other.params`, `teacher.params` PLUS `self.metrics`, `o.conditioned`,
+# `o.unconditioned`), which is three more and not four. The other half of the claim -- "two of which say
+# this is a `range` index" -- is right (`o.conditioned`, `o.unconditioned`). The length of this table is
+# now PINNED by the test rather than narrated here, because a figure in a test is pinned and a correction
+# in a comment is not; that is the lesson this round's third accounting correction was itself about.
 KEY_LANE_ATTRIBUTE_LOOKUPS = MappingProxyType({
     "s.metrics": "ADMITTED AT THE CLASS, not at the site: `SeedScores.__post_init__` runs `_word_keyed` "
                  "over `metrics` before its exact-key-set check, so every `s.metrics[...]` in this module "
@@ -573,6 +589,184 @@ PROBE_LANE_CONSTANT_LOOKUPS = MappingProxyType({
         "student still gets 'trained'. What is closed is the narrower thing -- the declared arm name is "
         "validated against the characters it stores, so it cannot pass validation as one arm and then be "
         "cached, scored and reported as another.",
+})
+
+
+# Every place this module reads an ATTRIBUTE off an ELEMENT of a collection it iterates -- the THIRD lane
+# of the same rule as `KEY_LANE_ATTRIBUTE_LOOKUPS` (the mapping it reaches through a field) and
+# `PROBE_LANE_CONSTANT_LOOKUPS` (the word it looks up in its own constants). A DECLARATION on the same
+# terms: `test_benchmark.TheElementLaneSweepIsDerivedFromTheModule` collects every attribute read whose
+# object is the target of a `for` statement or of a comprehension generator in this file, keyed by
+# ENCLOSING FUNCTION, and fails if the set differs -- so a NEW read off a collection element has to be
+# admitted or written down here with its reason.
+#   WHY THE LANE EXISTS AT ALL, and why a list of two was not enough. Round 13 wrapped
+# `JointResult.__post_init__`'s `failed = {_plain_word(g.name): g ...}` *because* "this comprehension
+# reads `.name` off ANY object in the list" -- and left the sibling comprehension 145 lines later,
+# `to_experiment_records`' `gate_m`, unguarded, where a DUPLICATE duck-typed gate name overwrote a
+# genuinely failed gate's stored 0.0 with 1.0 and `verdict_from_records` reported JOINT_SUPPORTED with
+# `reasons = ()` (SR-10 Finding 1; the measurement is at the site). DERIVING the lane rather than listing
+# it found a SECOND flip nobody had reported: `evaluate_gates`' `ids = [s.seed for s in scores]`, where a
+# duck-typed score object walks around `SeedScores.__post_init__` -- the one place the seed is normalised
+# -- and buys seed_list_frozen PASSED, JOINT_SUPPORTED and a clean recompute off ONE seed repeated thirty
+# times (measurement at that site too). Two sites of 33 were consequential and neither was findable from
+# the other; that is the argument for enumeration over inspection.
+#   THE INVARIANT: an attribute read off a collection element either reaches an object whose class has
+# already admitted the field, or is refused, or is declared fail-closed WITH ITS MEASUREMENT. "A reviewer
+# looked at it" is not an entry.
+ELEMENT_LANE_ATTRIBUTE_READS = MappingProxyType({
+    # ---- admitted by an INSTANCE CHECK at or above the site: the element cannot be anything but the
+    # ---- class that normalises the field, so the class's admission reaches the read.
+    "HypothesisResult.__post_init__: c.verdict":
+        "`if not all(isinstance(c, ComponentResult) for c in self.components + self.converged_components)` "
+        "raises BEFORE this read, so `verdict` is the one `ComponentResult.__post_init__` DERIVED from the "
+        "interval rather than a value an element supplied. This is the shape every other entry in this "
+        "lane is measured against: refuse the element, then read it.",
+    "HypothesisResult.__post_init__: c.metric":
+        "the same instance check, one line above. `metric` only reaches `reasons`, which is prose, but it "
+        "is read off the same validated element and is declared rather than left to be inferred from the "
+        "verdict entry above it.",
+    "HypothesisResult.__post_init__: c.reason":
+        "the same instance check, and `reason` is `init=False` on `ComponentResult` -- DERIVED by "
+        "`interval_verdict` beside the verdict, never supplied -- so this read cannot carry a caller's "
+        "prose even before the instance check is considered. It reaches `HypothesisResult.reasons` and "
+        "nothing else; see `c.metric` for the shape of the argument.",
+    "JointResult.__post_init__: h.hid":
+        "`if not isinstance(h, HypothesisResult) or h.hid != hid` -- the instance check is the FIRST "
+        "operand and `or` short-circuits, so the comparison never runs on a non-HypothesisResult. The "
+        "second read (the failed-global-gate loop) runs after all three slots have passed that check.",
+    "JointResult.__post_init__: h.verdict":
+        "the same loop, and an unadmittable verdict is REFUSED there rather than interpreted below "
+        "(`_enum_member(Verdict, h.verdict) is None` raises) -- because the two gate invariants read it in "
+        "OPPOSITE directions and no single default for 'cannot tell what this is' is fail-closed at both.",
+    "evaluate_gates: s.seed":
+        "REFUSED AT THIS FUNCTION: every element of `scores` must be a real `SeedScores` or the call "
+        "raises, because `SeedScores.__post_init__` is the only place the seed is normalised and this read "
+        "feeds both seed-list gates. THE MEASURED FLIP IS AT THE REFUSAL ITSELF: duck score objects "
+        "carrying one lying `int` subclass bought seed_list_frozen PASSED, min_seeds PASSED, "
+        "JOINT_SUPPORTED and a recompute of JOINT_SUPPORTED with `reasons = ()` off a single seed.",
+    "evaluate_gates: s.ok":
+        "the same refusal, which also makes `ok` the derived property (`all(_metric_ok(...))`) rather than "
+        "a flag an element asserts -- a duck returning True from `ok` with nothing measured inflated "
+        "`n_ok` and so the min_seeds and failure_rate gates.",
+    "evaluate_gates: s.metrics":
+        "the same refusal; `ok_scores` is a local list comprehended from the already-refused `scores`. "
+        "`SeedScores.__post_init__` normalises these KEYS with `_word_keyed` and requires the exact key "
+        "set, which is what makes `s.metrics['E_loss_ratio']` at gate 11(c) the producer's own metric.",
+    "analyze_scores: s.ok":
+        "`evaluate_gates(scores, ...)` is called before these reads and refuses a non-`SeedScores` "
+        "element, so this function inherits the refusal rather than repeating it. Stated rather than "
+        "assumed: if that call ever moves below these reads, this entry is wrong and the lane says so.",
+    "analyze_scores: s.metrics":
+        "the same inherited refusal; the values go through `_metric_read`, so an unreadable metric is "
+        "dropped from the series rather than coerced. See `s.ok`.",
+    "seed_records: s.seed":
+        "ADMITTED AT THE OBJECT: `JointResult.__post_init__` refuses a `seed_scores` element that is not a "
+        "`SeedScores`, so the seed this writes into `RunProvenance` is the plain int that class stored. "
+        "One admission per object beats one per site here for the same reason `_plain_word_fields` exists: "
+        "`seed_records` alone reads four fields off these elements.",
+    "seed_records: s.metrics":
+        "the same class refusal, which carries the `_word_keyed` key normalisation and the exact-key-set "
+        "check into the per-seed audit trail -- the record set NO cross-check anywhere reads, so a wrong "
+        "key here is wrong in the only place a reader goes for per-seed provenance.",
+    "seed_records: s.ok":
+        "the same class refusal; `ok` decides this record's `evidence_class` (TOY_RESULT vs UNKNOWN), so an "
+        "element asserting it would be labelling its own evidence class.",
+    "seed_records: s.input_hashes":
+        "the same class refusal. The KEYS of this mapping are additionally normalised by `RunProvenance`'s "
+        "own construction boundary, which raises on collision -- deliberately left there rather than "
+        "duplicated here, and recorded as that boundary's business.",
+    "to_experiment_records: h.hid":
+        "`res.h1/h2/h3` are instance-checked by `JointResult.__post_init__`, so the hid is the one "
+        "`HypothesisResult.__post_init__` normalised with `_plain_word_fields` and refused against "
+        "`PRIMARY` -- which matters because `_tag` subscripts `PRIMARY` with it to pick the record NAME.",
+    "to_experiment_records: h.components":
+        "the same class refusal on the slot, and `HypothesisResult.__post_init__`'s own instance check on "
+        "the tuple's elements, so `comps` holds genuine `ComponentResult`s two steps up.",
+    "to_experiment_records: h.converged_components":
+        "the same two steps; see `h.components`. Its length is additionally bounded by "
+        "`len(self.converged_components) > len(CONVERGED)` at the class.",
+    "to_experiment_records: c.metric":
+        "`comps` is `h.components` / `h.converged_components`, both instance-checked at "
+        "`HypothesisResult.__post_init__`, so this is a genuine `ComponentResult.metric`. NOT NORMALISED "
+        "AT THAT CLASS and deliberately so: `__post_init__` admits `margin`, `min_n` and `width_tol` but "
+        "not `metric`, which `_tag` reads through `startswith`/`in`/`replace`. MEASURED and declared NOT "
+        "CONSEQUENTIAL -- the collapse direction fails closed (the tag names a record "
+        "`verdict_from_records` then requires and cannot find), and the swap direction is FULLY LATERAL: "
+        "same tag set, same joint verdict, same reasons.",
+    "to_experiment_records: c.margin":
+        "the same instance check, and `ComponentResult.__post_init__` STORES WHAT WAS CHECKED -- "
+        "`_check_margin`'s plain float -- so `_agg_metrics` writes the validated number and not a third "
+        "conversion of the caller's object.",
+    "to_experiment_records: c.pair":
+        "the same instance check; every scalar of the pair is read through `IntervalPair._bound` and the "
+        "checked metric reader at the point of use, so this read carries no number of its own.",
+    "to_experiment_records: g.passed":
+        "ITERATES `real.items()`, NOT `res.gates`: `real` is built one loop above behind "
+        "`isinstance(g, GateResult)`, refuses a duplicate name and refuses an incomplete set, so this "
+        "element is a validated gate and `passed` is the exact bool `GateResult.__post_init__` required. "
+        "THIS IS SR-10 FINDING 1 AND THE MEASUREMENT IS AT THE SITE; the entry is written against the "
+        "iterable because reading the same field off `res.gates` is what the defect was.",
+    # ---- MODULE-BUILT ELEMENTS: unreachable by a caller's object, and why.
+    "analyze_scores: g.name":
+        "UNREACHABLE BY A CALLER'S OBJECT: `gates` is the local tuple `evaluate_gates` returned two lines "
+        "above, every element of which this module constructed with `GateResult(...)` in this process. No "
+        "caller supplies, appends to or replaces it. Declared so the site is enumerated rather than "
+        "overlooked -- the property no previous round's fix had.",
+    "analyze_scores: g.passed":
+        "the same in-process tuple; see `g.name`. This read decides the `glob` blocking list, so it would "
+        "matter if the tuple were ever caller-supplied, which is the reason the entry is here.",
+    "analyze_scores: g.reason":
+        "the same in-process tuple, and `GateResult.__post_init__` requires `reason` to be a `str`. It "
+        "reaches the `glob` / `g12` blocking strings and nothing else -- prose carried into "
+        "`HypothesisResult.reasons`, never a number and never a verdict. Declared because the lane "
+        "enumerates reads, not just the consequential ones.",
+    "analyze_scores: g.scope":
+        "the same in-process tuple, and `scope` is the `GATE_SCOPES` lookup on the gate's own normalised "
+        "name, declared in `PROBE_LANE_CONSTANT_LOOKUPS`.",
+    # ---- DUCK-TYPED ELEMENTS DELIBERATELY ADMITTED, each fail-closed WITH ITS MEASUREMENT. A gate list
+    # ---- may carry a non-`GateResult`: that is documented at `carries_exemption` and a test in
+    # ---- `test_dashboard` pins the route, so these sites must read ducks and must not be made to refuse.
+    "JointResult.__post_init__: g.name":
+        "THREE READS, all on a list that may carry a duck: the completeness check FILTERS "
+        "(`isinstance(g, GateResult)`), the `failed` loop normalises with `_plain_word` AND now refuses an "
+        "unknown name with a ValueError instead of escaping as `KeyError` from `GATE_SCOPES[n]` "
+        "(measured: a duck named 'extra_gate' with a FALSY `passed` -- the documented duck fixtures all "
+        "PASS, so nothing covered it). Admitting the duck is deliberate: refusing it here would break the "
+        "`carries_exemption` route this module documents and `test_dashboard` pins.",
+    "JointResult.__post_init__: g.passed":
+        "read off ANY object, deliberately, and FAIL-CLOSED in both directions: a duck that reports FAILED "
+        "enters `failed` and can only ADD a blocking gate (or now be refused by name), and a duck that "
+        "reports PASSED is skipped and can take nothing away, because no invariant here is of the form "
+        "'some gate passed'. The direction is the whole of the argument and it is stated, not implied.",
+    "JointResult.gates_ok: g.passed":
+        "`all(g.passed for g in self.gates if g.scope == 'all')` -- a duck CANNOT MASK a failed real gate, "
+        "because `all` requires every element, so the only direction a duck moves this property is toward "
+        "False. An extra failing duck making an honest result INCONCLUSIVE is the conservative error and "
+        "is accepted as such.",
+    "JointResult.gates_ok: g.scope":
+        "the same `all`; a duck that answers a scope other than 'all' removes ITSELF from the "
+        "comprehension and nothing else, and a duck answering 'all' can only add a conjunct. "
+        "`dashboard._gate_set_ok` is what reports the extra object to a reader, and it does not filter.",
+    "to_experiment_records: g.name":
+        "read off ANY object in the loop that BUILDS `real`, which is the point: the read happens AFTER "
+        "`isinstance(g, GateResult)` has `continue`d past every duck, so the name entering `real` is the "
+        "one `GateResult.__post_init__` normalised and refused against `GATE_SCOPES`. The duck is ignored "
+        "rather than refused, exactly as the completeness check ignores it.",
+    # ---- DECLARED OPEN, and not closed quietly.
+    "verdict_from_records: r.name":
+        "THE DUCK-TYPED RECORD ROUTE IS DECLARED OPEN: this function ENFORCES NO INSTANCE CHECK, and a "
+        "plain object with `name`, `metrics`, `evidence_class` and `provenance` reaches every lookup. "
+        "`r.name` is read through `_stored_word`, so the tag is cut out of the characters the name STORES "
+        "and a `str` subclass cannot file a record under another component's tag. A test documents the "
+        "route deliberately; it is listed here as OPEN rather than as admitted.",
+    "verdict_from_records: r.evidence_class":
+        "THE SAME ROUTE, DECLARED OPEN, and the read itself is closed: `_enum_member(EvidenceClass, ...) is not "
+        "EvidenceClass.TOY_RESULT` raises, so a non-member that merely compares equal to TOY_RESULT is "
+        "refused rather than accepted.",
+    "verdict_from_records: r.provenance":
+        "THE SAME ROUTE, DECLARED OPEN; the mapping it reaches is normalised at the read "
+        "(`_word_keyed(r.provenance.input_hashes).get('config')`), which is the key-lane admission "
+        "declared in `KEY_LANE_ATTRIBUTE_LOOKUPS`, not an element-lane one.",
 })
 
 
@@ -1975,6 +2169,29 @@ def evaluate_gates(scores: Sequence[SeedScores], frozen: FrozenSeedList, registe
     # `exempt = subject_kind == "fixture"`, the one line that says whether gate 11(c)'s E-loss check runs
     # at all. See `_plain_word`.
     subject_kind = _plain_word(subject_kind)
+    # EVERY ELEMENT OF `scores` MUST BE A REAL `SeedScores`. THE DEFECT THIS CLOSES (SR-10, the SECOND
+    # flip of this lane, found by DERIVING the lane rather than from a report): `SeedScores.__post_init__`
+    # says "THE SEED IS THE UNIT OF REPLICATION ... this is where it enters the analysis path, so it is
+    # checked and NORMALISED here" -- but `ids = [s.seed for s in scores]` below reads `.seed` off ANY
+    # object, so a plain duck-typed score object never passes through "here" at all, and both seed-list
+    # gates are `__hash__`/`__eq__` on whatever that field holds. MEASURED at the pre-fix HEAD, identical
+    # on 3.12.4 and 3.13.5, with 30 duck score objects carrying ONE lying `int` subclass (honest hash;
+    # equal to a plain `int` of the same value so the frozen-list SUBSET check finds it, unequal to another
+    # instance so the DUPLICATE check does not collapse it) and thirty genuine VARYING metric mappings:
+    #     duck objects : seed_list_frozen PASSED, min_seeds PASSED, JOINT_SUPPORTED, stored n_seeds 30.0,
+    #                    verdict_from_records -> JOINT_SUPPORTED with `reasons = ()`, and thirty per-seed
+    #                    records whose provenance seed is the SAME seed
+    #     real SeedScores, same lying seed object, same values : seed_list_frozen FAILED,
+    #                    JOINT_INCONCLUSIVE -- because `__post_init__` normalised the seed to a plain int
+    # i.e. exactly the defect `SeedScores.__post_init__` records as closed, reached AROUND the class
+    # instead of through it. There is nothing to normalise at this site -- the admission belongs to the
+    # class and cannot be applied to an object that is not of it -- so the element is REFUSED, which is
+    # also what `HypothesisResult.__post_init__` does for a component. See `ELEMENT_LANE_ATTRIBUTE_READS`.
+    wrong = [i for i, s in enumerate(scores) if not isinstance(s, SeedScores)]
+    if wrong:
+        raise ValueError(f"scores[{wrong[0]}] is a {type(scores[wrong[0]]).__name__}, not a SeedScores: "
+                         f"per-seed scores must be SeedScores objects, because the seed and the metric "
+                         f"keys are normalised at that class and nowhere else")
     gates = []
     ids = [s.seed for s in scores]
     if registered_digest is None:
@@ -2105,12 +2322,36 @@ class JointResult:
         names = [g.name for g in self.gates if isinstance(g, GateResult)]
         if sorted(names) != sorted(GATE_SCOPES):
             raise ValueError(f"gates must contain exactly {sorted(GATE_SCOPES)} (empty gates do not pass vacuously)")
+        # EVERY ELEMENT OF `seed_scores` MUST BE A REAL `SeedScores`, admitted at the OBJECT and not at the
+        # four sites `seed_records` reads. See `evaluate_gates` for the measurement: `SeedScores.
+        # __post_init__` is the only place the seed and the metric keys are normalised, and a duck-typed
+        # score object reaches `seed_records` (`s.seed` -> `RunProvenance`, `s.metrics` -> the record) with
+        # neither applied. `analyze_scores` builds this field from scores `evaluate_gates` already refused,
+        # so this check is what covers a hand-built result. See `ELEMENT_LANE_ATTRIBUTE_READS`.
+        if not all(isinstance(s, SeedScores) for s in self.seed_scores):
+            raise ValueError("seed_scores must be SeedScores objects: the seed and the metric keys are "
+                             "normalised at that class and nowhere else, and `seed_records` serialises "
+                             "whatever this field holds")
         # Single-place invariant, independent of how the HypothesisResults were built (e.g. without `blocking`):
-        # `_plain_word` ON THE KEYS: `g.name` is normalised by `GateResult.__post_init__`, but this
-        # comprehension reads `.name` off ANY object in the list -- a hand-built gate list may carry a
-        # duck-typed one, exactly as `carries_exemption` already documents -- so the normalisation is
-        # here and not left to the class. See `PROBE_LANE_CONSTANT_LOOKUPS`.
-        failed = {_plain_word(g.name): g for g in self.gates if not g.passed}
+        # `_plain_word` ON THE NAMES: `g.name` is normalised by `GateResult.__post_init__`, but this loop
+        # reads `.name` off ANY object in the list -- a hand-built gate list may carry a duck-typed one,
+        # exactly as `carries_exemption` already documents -- so the normalisation is here and not left to
+        # the class. See `PROBE_LANE_CONSTANT_LOOKUPS` and `ELEMENT_LANE_ATTRIBUTE_READS`.
+        # IT WAS A DICT COMPREHENSION AND THE SUBSEQUENT `GATE_SCOPES[n]` THEN ESCAPED THE MODULE'S STATED
+        # ERROR CONTRACT. MEASURED at the pre-fix HEAD, a duck gate named 'extra_gate' with a FALSY
+        # `passed` (the documented `Duck`/`DuckGate` fixtures all PASS, so `if not g.passed` skipped them
+        # and nothing covered this): `dataclasses.replace(res, gates=(*res.gates, DuckUnknown()))` ->
+        # `KeyError: 'extra_gate'`, where this module declares ValueError. An unhashable `.name` raised
+        # TypeError from the comprehension itself for the same reason. Both are refusals, so nothing was
+        # fail-open; both are now the ValueError the contract names, decided before the subscript runs.
+        failed = {}
+        for g in self.gates:
+            if g.passed:
+                continue
+            n = _plain_word(g.name)
+            if not isinstance(n, str) or n not in GATE_SCOPES:
+                raise ValueError(f"the gate list reports a failed gate under the unknown name {g.name!r}")
+            failed[n] = g
         if any(GATE_SCOPES[n] == "all" for n in failed):
             bad = [h.hid for h in (self.h1, self.h2, self.h3)
                    if _enum_member(Verdict, h.verdict) is not Verdict.INCONCLUSIVE]
@@ -2214,6 +2455,16 @@ def _agg_metrics(pair: IntervalPair, margin: float, n_failed: int, subject_kind:
 def _tag(hid: str, metric: str, conv: bool = False) -> str:
     # The probe picks the component table that decides whether this record is filed as `H3` or as
     # `H3a`/`H3b` -- i.e. the name `verdict_from_records` will require. See `_plain_word`.
+    # `metric` IS NOT ADMITTED AND THAT IS MEASURED, NOT OVERLOOKED. `ComponentResult.__post_init__`
+    # normalises `margin`, `min_n` and `width_tol` but not `metric`, and this line plus
+    # `c.metric.replace("_conv", "")` at the call site read THREE overridable `str` methods
+    # (`startswith`, `__contains__` via `in`, `replace`) off a caller-supplied `ComponentResult.metric`.
+    # MEASURED on both interpreters: the COLLAPSE direction fails closed -- the tag names a record
+    # `verdict_from_records` then requires and cannot find (`records missing for [...]`) -- and the SWAP
+    # direction is FULLY LATERAL: the same tag set, the same joint verdict, the same reasons, because the
+    # a/b split only decides which of two same-shaped records a component is filed in. No consequence, so
+    # no admission; recorded here so the next reader does not have to re-derive it. See
+    # `ELEMENT_LANE_ATTRIBUTE_READS["to_experiment_records: c.metric"]`.
     hid = _plain_word(hid)
     if len(PRIMARY[hid]) == 1:
         return hid
@@ -2255,7 +2506,41 @@ def to_experiment_records(res: JointResult, *, study_id: str, base_seed: int, ti
                     notes=f"{TOY_LABEL} PRIMARY {h.hid} component {c.metric} [{kind}] subject={res.subject} "
                           f"subject_kind={res.subject_kind} fixture_name={res.fixture_name}. "
                           f"Informational only; flags: {list(c.pair.flags)}"))
-    gate_m = {f"gate_{g.name}": MetricValue.measured(1.0 if g.passed else 0.0) for g in res.gates}
+    # THE SERIALISED GATE STATES ARE KEYED ON THIS MODULE'S OWN GATE NAMES and read only off objects the
+    # class's completeness check actually validated. THE DEFECT THIS CLOSES (SR-10 Finding 1): this was
+    # `{f"gate_{g.name}": ... for g in res.gates}`, which reads `.name`/`.passed` off ANY object in the
+    # list and lets a DUPLICATE NAME SILENTLY OVERWRITE a genuinely failed gate's stored 0.0 with 1.0. It
+    # is the exact sibling of `JointResult.__post_init__`'s `failed` comprehension 145 lines above, which
+    # round 13 wrapped in `_plain_word` *because* "this comprehension reads `.name` off ANY object in the
+    # list" -- and left this one unguarded: the half-fix pattern this module has already failed to three
+    # times. MEASURED, identical on 3.12.4 and 3.13.5, on a study whose `seed_list_frozen` gate GENUINELY
+    # FAILS (registered-digest mismatch), with a plain object carrying five class attributes -- no
+    # `object.__setattr__`, no `str` subclass, no overridden dunder, `exempt=False` so the exemption guard
+    # never fires:
+    #     honest : stored gate_seed_list_frozen=0.0  verdict_from_records -> JOINT_INCONCLUSIVE
+    #     forged : stored gate_seed_list_frozen=1.0  verdict_from_records -> JOINT_SUPPORTED, reasons=()
+    # `JointResult.verdict` stayed honest and `dashboard.render_scorecard` did raise CONTRACT PROBLEM, and
+    # THAT BOUND IS NOT A DEFENCE: the SERIALISED EVIDENCE ITSELF was falsified -- the JOINT record stored
+    # 1.0 for a gate that failed -- and `verdict_from_records`, documented as rebuilding the verdict "from
+    # them alone", reported SUPPORTED with no reason. A records-only consumer never runs the dashboard.
+    # A second GENUINE `GateResult` with a duplicate name was already refused upstream, so the hole was
+    # exactly the `isinstance` filter at the completeness check plus this unguarded overwrite. Keying on
+    # `GATE_SCOPES` means the record set cannot gain, lose, duplicate or reorder a gate whatever the list
+    # holds; the two refusals below are reachable only through a duck-typed `res`. See
+    # `ELEMENT_LANE_ATTRIBUTE_READS`.
+    real = {}
+    for g in res.gates:
+        if not isinstance(g, GateResult):
+            continue      # invisible to the completeness check (documented), and invisible here too
+        if g.name in real:
+            raise ValueError(f"gates contain two GateResult objects named {g.name!r}; refusing to "
+                             f"serialise an ambiguous gate state")
+        real[g.name] = g
+    absent = [n for n in GATE_SCOPES if n not in real]
+    if absent:
+        raise ValueError(f"gates are missing GateResult entries for {absent}; refusing to serialise a "
+                         f"JOINT record whose gate states are incomplete")
+    gate_m = {f"gate_{n}": MetricValue.measured(1.0 if g.passed else 0.0) for n, g in real.items()}
     gate_m.update({"n_seeds": MetricValue.measured(float(res.n_attempted - res.n_failed)),
                    "n_failed": MetricValue.measured(float(res.n_failed)),
                    "n_deferred_checks": MetricValue.measured(float(len(res.deferred_gates))),
