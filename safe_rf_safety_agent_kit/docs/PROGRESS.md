@@ -9789,3 +9789,198 @@ Measured identically on both interpreters: `stability.py` has 21 `isinstance` si
 1403 + 12 = 1415. `scripts/test_baseline.txt` regenerated in the bare venv: **one row**, `toy_tests.test_stability 72 1` → `84 1` — the bare-skip column stays **1**, which the fixer predicted and verified by simulating an absent numpy. Zero slack.
 
 **SR-06 stays `[ ]`.** The fixer is not the attester, and this fix has had no independent pass. **Verified stays 9 of 17.**
+
+## Round 16 — SR-06 fails on a FOURTH axis, then the conversion protocol is closed as a class
+
+**Date:** 2026-11-11. HEAD at attestation `a31d273`.
+
+### Four attestations, four different axes
+
+SR-06 has now been marked once and honestly unmarked, then failed re-attestation on **four distinct
+axes**: **provenance** (the commit recording its QA PASS introduced the errors), **interpreter
+portability** (3.13's compile-time docstring dedent), **the intake family** (`__iter__` raising →
+bare `TypeError` out of family), and now **the conversion protocol** (`__float__` raising → the same).
+Each was found by an attester who was told not to trust the previous round's estimate of what
+remained. **The axis count is the finding:** a task does not fail four times on four axes because the
+work is bad — the numerics have passed on their merits since round 12 — it fails because *"adversarial
+numeric unit cases fail safely"* is a claim about a boundary, and a boundary has as many faces as the
+language has protocols. This journal should stop writing "only needs X" and write "pending
+re-attestation".
+
+### FINDING G2 (blocking) — Finding C's defect class, three sites over
+
+Round 15 widened `_materialised` to `except Exception`. **The three `float()` sites two screens away
+still caught exactly `OverflowError`:** `check_finite_scalar:160-162`, `_validated_masked_values:360-362`,
+`_sq:482-484`. A caller-defined `numbers.Real` whose `__float__` raises:
+
+| | 3.12.4 (numpy 2.4.6) | 3.13.5 (numpy 2.4.4) |
+|---|---|---|
+| **before** | IN 0, `ValueError`-only 9, **OUT 36**, returned 0 (45) | identical |
+| **after** | **IN 45**, 0, 0, 0 | identical |
+
+5 exception classes × 9 public entry points. All 45 are now `NonNumericError` with `__cause__` set;
+`OverflowError` keeps each site's own policy. The `WIDEN_FLOAT_CATCHES` mutant was **unkilled at
+84/181/48 OK** — Finding C's invisibility exactly — and the inverse mutant is now killed on both
+interpreters by four tests, with the regression modules untouched, so the pin sits in the module that
+owns it.
+
+**Four reasons it blocked, each independently checkable, and the two that matter most:**
+
+- **The module already owned this duty at these very sites.** `except OverflowError` exists precisely
+  to convert a conversion-protocol failure into the family, and `test_huge_int_is_stability_error`
+  asserts a bare one must not escape. The policy was "conversion failures stay in family" with exactly
+  one class enumerated — **Note D's defect verbatim**, one round later, in the same file.
+- **The stated exclusion did not reach it.** The enumeration excluded `float()`/`int()` because *"the
+  conversion protocol is documented above as taken at its word."* **Taken at its word is about LYING;
+  it says nothing about RAISING.** The exclusion was unswept inside the very comment block round 15
+  added to make the set non-arbitrary. *A reason that is true of one direction and silent about the
+  other reads, to the next person, as covering both.*
+- `CLAUDE.md`'s rule-9 smell fired on the file itself: `_liar`'s docstring recorded that `__float__` is
+  *deliberately* not overridden — **and that avoidance had already been partly recanted**, since
+  `test_f5` overrides `__float__` and found a real defect. The avoidance held for lying conversions;
+  the raising direction was never swept.
+
+### Three channels nobody had reported, found by deriving the enumeration
+
+A derivation over **218 raw coercion sites** yields **7 protocols — 4 reachable and closed, 3
+discharged by measurement** — declared in the module and re-derived by a set-equality test, so a new
+`float`/`int`/`bool`/`len`/`repr`/`Fraction`/`!r` anywhere fails closed (verified: adding `len(mask)`
+to `check_mask` kills it).
+
+1. **`repr()` in every error message.** A raising `__repr__` escaped from **9** positions — including
+   **one on valid input**: `_sq`'s underflow message interpolates `prediction=`/`target=`, so **the
+   module's own `UnderflowError` was replaced by a bare `RuntimeError` while it was being raised.** A
+   guard destroyed by the act of reporting its own refusal. 21 `{x!r}` sites now route through
+   `_shown`.
+2. **`type(x).__name__`** — a metaclass with a raising `__name__` property escaped **8** message
+   positions on both interpreters. **Not** the known-open `__class__` channel, because `type()` ignores
+   a `__class__` property — so it was closable here rather than deferred. 9 sites now route through
+   `_type_name`.
+3. **`Fraction()` on a Rational with a raising `numerator`** — 3 of 6 classes escaped
+   `_distinct_values`' four-class catch tuple; the other three were already in family.
+
+**The error-message channel is the generalisable lesson.** Every guard in this kit reports its refusal
+by interpolating the offending object. That interpolation is a protocol call on hostile input, *inside
+the raise path*, and it had been invisible for sixteen rounds because a message is read as diagnostics
+rather than as a read of the caller's object.
+
+### The derivation failed four times, and two failures are worth more than the fix
+
+- **Pass 1 listed the `repr` channel mechanically and then discharged it as "diagnostics, not a
+  read."** That is **the original defect's own reasoning at the next site over, for the second round
+  running** — round 15's v1 derivation made the structurally identical mistake about `_as_flat_items`
+  cleaning containers rather than elements. Probing killed it: 9 escapes.
+- **Pass 2 did not prune nested `FunctionDef`s**, so `call()`'s `len()` calls were counted under
+  `check_gradient` too: 22 rows instead of 20. **Had it not been caught, the table would have encoded
+  the bug and the set equality would have "passed."** A derived declaration checked against a
+  derivation that shares the bug is not a check — this is the sharpest statement yet of why a
+  derivation must be watched failing.
+- **Pass 3 wrote a discharge that was true at HEAD and false after its own change** (a `tuple`
+  subclass with a raising `__len__`). Measured, corrected, disclosed, pinned.
+- **Pass 4: its own fix was invisible.** The `_type_name` mutant was **unkilled by all of
+  `test_stability`** until the test was written. Found by mutating its own fix, not by reading it.
+
+### FINDING G1 — the carve-out was false where its two halves meet
+
+`grad_fn` is a callable **whose return value is a data argument**, so when it is lazy the data half
+wins and *"propagates unwrapped … covers nothing else"* was false. Measured: an honest generator /
+genexp / `map()` `grad_fn` is **supported input** returning a full report; the same generator raising
+`ZeroDivisionError` mid-body — **the carve-out's own example class** — came out as a `ShapeError` whose
+message was false twice (nothing's `__iter__` raised; the body did, during `__next__`, and the
+generator *is* usable as a sequence). Both doc-only mutants, delete and invert, were **unkilled**.
+
+Now: the carve-out names the lazy case and reaches *"the call itself and nothing else"*;
+`_materialised` splits `iter(obj)` from `tuple(it)` inside one `try` with a `reading` flag and two
+messages, the lazy one saying the failure is the producer's and that the module cannot tell it apart
+from a shape problem. **And the cost is disclosed where a caller reads it:** `except ValueError:
+skip_batch()` now absorbs the caller's own `ZeroDivisionError` as a shape complaint. That cost is
+*asserted*, not just written. Eight doc-only mutants killed on both interpreters.
+
+### `test_c4` — the recurring defect, named and corrected rather than argued away
+
+`test_c4`'s docstring claimed structural reach its AST half did not have: it matched only a **literal**
+`hasattr(x, "__iter__")`, so a new `_eager()` helper is **killed by `test_c1` with exactly 9 subTest
+failures while `test_c4` stays silent**. The docstring now states what the matcher matches and what it
+does not, and credits `test_c1` with the real protection. The matcher was widened to `iter(` and
+`getattr(_, "__iter__")` — *a strictly smaller gap, stated rather than claimed away.* The remaining gap
+(a bare `tuple(x)` with no probe) is left open **with its reason**: a matcher flagging `tuple(` would
+flag 13 legitimate module-built tuples and need its own exclusion list to police.
+
+### `test_c1`'s floor: the blindness performed two ways
+
+Instrumented: **1785 in-family refusals over 105 `(function, case, parameter, position)` triples × 17
+shapes, 61 distinct `(function, parameter, position)` combinations, 0 returns, 0 escapes** — all
+asserted. The instrumentation reproduces the attester's HEAD figure exactly (1260 over the same 105
+triples with HEAD's 12 shapes), which is how a figure earns trust.
+
+With only the old `assertGreater(swept, 400)` restored:
+
+| truncation | refusals | floor | pinned figures |
+|---|---|---|---|
+| shapes cut to 4 | 420 | **OK** | **FAILED** (`len(shapes)` 4 ≠ 17) |
+| element + sub-element positions dropped, all 17 shapes kept | 663 | **OK** | **FAILED** (`positions` 21 ≠ 61) |
+
+Two-thirds of the sweep can vanish behind that floor. Same shape as the `assertGreaterEqual(swept, 100)`
+that hid 29 cases in `test_benchmark` two rounds ago — **the third instance of a floor standing in for a
+figure in this project.**
+
+### Both wrong figures corrected, and the policing widened beyond one class
+
+*"found FIVE candidates and discharged two"* → **"discharged ONE"** (the list marks four intake rows and
+one discharge). The policing now **counts end-of-row markers in both comment blocks via
+`inspect.getsource`** — so it works under `-OO` — and compares them against the words written there;
+killed by three figure mutants, with the per-protocol figures re-derived from the AST and killed by two
+more. Previously only `LoadBearingSentences` was policed.
+
+*"`_is_row_like` happens to absorb it at the nestedness probe; nothing else does"* → **the measured
+scope.** Round 15's `_materialised` had silently closed part of the known-open `__class__` channel by
+moving the `isinstance` inside the `try`: with a raising `__class__` property the **outer** positions
+and the **row** position now come out in family, while **element positions, `denominator` and
+`expected_len` still escape as a bare `RuntimeError`.` Only the in-family half is asserted — **the
+escaping half is the open finding and pinning it would pin a defect, which the new test says in
+writing.**
+
+### Note E's `skipIf`: kept, reconciled, policed
+
+The numpy skip stays, and the distinction is written down: Note E's hazard is a guard that can skip a
+pin **whose subject still exists** (`-OO` strips docstrings but leaves every behaviour assertable),
+whereas with no numpy there is no `np.bool_` to hand `check_mask` at all, so the alternatives are a
+skip or a silently vacuous pass — **and this skip is counted**, enforced by the baseline's bare column,
+which is exactly what the hazardous shape is not. A new test derives the file's whole skip inventory
+from its AST: exactly one decorator, on the named test, conditioned on `np is None`, zero inline
+`skipTest`. The `_DOCSTRINGS_PRESENT` residue is gone.
+
+### Measurements
+
+| run | interpreter / environment | result |
+|---|---|---|
+| `test_stability` | 3.12.4 (numpy 2.4.6, torch 2.7.1) | **100 OK** (was 84) |
+| `test_stability` | 3.13.5 miniconda (numpy 2.4.4, no torch) | **100 OK** |
+| `test_stability` | both, **`-OO`** | **100 OK** |
+| `test_stability` | 3.12.4, **numpy absent** (bare venv), normal and `-OO` | **100 OK, skipped=1** |
+| `test_robustness` / `test_checkpoint` | both, normal | 181 OK / 48 OK |
+| **full suite** | **3.12.4** | **1431 ran, 2 skipped, 0 failed**, rc=0 |
+| **full suite** | **3.13.5**, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` | **1431 ran, 84 skipped, 0 failed**, rc=0 |
+| `run_tests.sh --expect none --twice` | bare 3.12.4 venv | **1431 / 90 / 0**, `run1 == run2`, identical per-module counts and skip list |
+
+1415 + 16 = 1431. Baseline regenerated in the bare venv: **one row**, `toy_tests.test_stability 84 1`
+→ **`100 1`**, bare-skip column unchanged, zero slack. Every new pin watched failing pre-fix on both
+interpreters (identical inventories: 279 failures + 87 errors across 11 tests). Lint profile identical
+to HEAD, zero added findings.
+
+### Open, handed up, and not half-fixed
+
+- **`test_robustness` is red under `-OO`** — `FAILED (failures=3, errors=8)` on both interpreters **at
+  `a31d273` and byte-identical after this change** (the failure-set diff is empty). Pre-existing, not
+  SR-06's, and `-OO` is not a mode this project runs. **SR-11's file**, and Note E's `_doc()` shape is
+  the available fix.
+- **The same three message channels exist next door, uncounted.** Static counts only, no probing of
+  other owners' modules: `robustness.py` has **14** `{…!r}`, **14** `type(x).__name__`, **18** `float(`;
+  `checkpoint.py` has 5, 6, 0. In `stability.py` those exact channels produced **45 + 9 + 8**
+  out-of-family outcomes. The probes are reusable and were handed over rather than run across
+  ownership boundaries.
+- **The raising-`__class__` channel** stays open, kit-wide, ~85 `isinstance` sites in three files,
+  deliberately unpinned.
+
+**SR-06 stays `[ ]`.** The fixer is not the attester and this fix has had no independent pass. **Verified
+stays 9 of 17.**

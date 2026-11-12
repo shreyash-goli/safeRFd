@@ -14,7 +14,12 @@ talk a guard out of raising. What that does NOT cover, stated rather than left
 to be discovered: a number a caller's own `__float__`/`__int__` or a
 caller-supplied CALLABLE returns is taken as the value, by protocol -- this
 module cannot see behind it, and `check_finite_scalar` is documented to return
-`float(value)`. Validators never mutate their arguments and return fresh
+`float(value)`. TAKEN AT ITS WORD IS ABOUT LYING, NOT ABOUT RAISING: a
+conversion protocol that RAISES produces no value to take at anyone's word, so
+it is a failed READ of a data argument and is converted to this module's family
+(NonNumericError, with the original chained) rather than escaping it -- see the
+conversion enumeration below, which decides every coercion protocol this module
+applies to caller data. Validators never mutate their arguments and return fresh
 immutable copies (tuples) of validated data.
 
 Exception design: every error derives from `StabilityError`, which derives from
@@ -156,13 +161,13 @@ def check_finite_scalar(value, name: str = "value") -> float:
     yields `0.0` (numerically equal; the sign of zero is not preserved).
     """
     if isinstance(value, bool) or not isinstance(value, Real):
-        raise NonNumericError(f"{name} is not a real number: {value!r} ({type(value).__name__})")
+        raise NonNumericError(f"{name} is not a real number: {_shown(value)} ({_type_name(value)})")
     try:
-        f = float(value)
+        f = _as_float(value, name)          # a RAISING __float__ stays in family (NonNumericError)
     except OverflowError:
         raise NonFiniteError(f"{name} is not representable as a finite float: too large") from None
     if not math.isfinite(f):
-        raise NonFiniteError(f"{name} is non-finite: {f!r}")
+        raise NonFiniteError(f"{name} is non-finite: {_shown(f)}")
     return f
 
 
@@ -187,7 +192,7 @@ def check_finite_matrix(m: Sequence[Sequence[float]], name: str = "matrix") -> t
 
 def _finite_at(v, where: str) -> float:
     if isinstance(v, bool) or not isinstance(v, Real):
-        raise NonNumericError(f"{where} is not a real number: {v!r} ({type(v).__name__})")
+        raise NonNumericError(f"{where} is not a real number: {_shown(v)} ({_type_name(v)})")
     return check_finite_scalar(v, where)
 
 
@@ -196,7 +201,10 @@ def _finite_at(v, where: str) -> float:
 # listed: a site exists wherever the ITERATOR PROTOCOL or an ATTRIBUTE LOOKUP is applied to an
 # object the CALLER handed over -- as opposed to a tuple this module already built. Deriving it
 # mechanically (`tests/toy_tests/test_stability.py`, the C-series tests re-derive it) found FIVE
-# candidates and discharged two:
+# candidates and discharged ONE. (That figure read "discharged two" while the list below marks one
+# discharge and four intake points, and nothing asserted it;
+# `test_the_derived_figures_in_these_comments_match_their_lists` now counts the end-of-row markers
+# in this comment block and fails when a word here and the list disagree.)
 #
 #   _as_flat_items  -- every outer sequence: values, mask-bearing data, prediction, target,
 #                      point, param_grad, before/after, the analytic gradient     [intake]
@@ -219,12 +227,22 @@ def _finite_at(v, where: str) -> float:
 # position the earlier fix believed it had closed. It is inside the same `try` now.
 #
 # NOT in this enumeration, each for a stated reason:
-#   * `len()` -- every `len()` here is taken on a tuple this module built.
-#   * `float()` / `int()` -- the conversion protocol is documented above as taken at its word.
+#   * `len()`, `float()`, `int()`, `bool()`, `repr()`, `Fraction()` -- CONVERSION protocols rather
+#     than intake, so they have their own derived enumeration, immediately below, which decides
+#     each one. The reason this line used to give -- "the conversion protocol is documented above
+#     as taken at its word" -- did not reach them: taken at its word is about LYING and says
+#     nothing about RAISING. Measured while that line stood: a raising `__float__` produced 45
+#     out-of-family outcomes and a raising `__repr__` nine more.
 #   * `isinstance()` against a lying or RAISING `__class__` -- a different class of channel: it
 #     reaches every `isinstance` in this module (and its siblings), not the intake points, so it
-#     is not closed here and must not be assumed closed. `_is_row_like` happens to absorb it at
-#     the nestedness probe; nothing else does.
+#     is not closed here and must not be assumed closed. MEASURED SCOPE at this commit, because
+#     this sentence is what the next owner reads about an open finding: with a `@property
+#     __class__` that raises RuntimeError, the OUTER positions (`values`, `mask`, `point`,
+#     `before`/`after`, `param_grad`) and the ROW position come out IN FAMILY -- the outer ones
+#     because `_materialised` keeps `isinstance(obj, _NOT_A_SEQUENCE)` inside its `try`, the row
+#     one because `_is_row_like` absorbs it -- while the ELEMENT positions, `denominator` and
+#     `expected_len` still escape as a bare RuntimeError. So it is NOT absorbed "at the nestedness
+#     probe" alone, which is what this comment claimed, and it is NOT closed.
 _NOT_A_SEQUENCE = (str, bytes, Mapping, set, frozenset)
 
 # Exceptions from a caller's object that are NOT converted into this module's family: they report
@@ -232,6 +250,118 @@ _NOT_A_SEQUENCE = (str, bytes, Mapping, set, frozenset)
 # them. (The BaseException-only exits -- KeyboardInterrupt, SystemExit, GeneratorExit -- are
 # already outside `except Exception`.)
 _UNCONVERTED = (MemoryError, RecursionError, SystemError)
+
+
+# ------------------------------------------------- caller-input conversion protocols
+# THE SECOND ENUMERATION, derived the same mechanical way and for the same reason: the intake set
+# above covers what happens when the ITERATOR PROTOCOL or an ATTRIBUTE LOOKUP on a caller's object
+# raises, and left the next protocol over -- CONVERSION -- catching exactly one class
+# (`OverflowError`) at three sites. A site exists wherever this module applies a BUILT-IN COERCION
+# to an object the CALLER handed over, as opposed to a float, int, tuple or list this module
+# produced. DERIVED by walking this file's own AST for every application of
+# `float`/`int`/`bool`/`len`/`repr` (the `{...!r}` conversion included), `type(x).__name__` and
+# `Fraction`, then deciding each by the PROVENANCE of its operand.
+# `tests/toy_tests/test_stability.py::test_g2d_...` re-derives the set from the AST and fails
+# closed when a new site appears. SEVEN protocols; FOUR have reachable sites, and all four are
+# closed here:
+#
+#   float()            -- 4 calls in 3 statements: check_finite_scalar,
+#                         _validated_masked_values, _sq (both operands). Every one of them goes
+#                         through `_as_float`, and `float()` itself is spelled once, there.
+#                                                                                   [converted]
+#   repr(), as `{x!r}` -- 22 interpolations, every one of them in an error message, and the
+#                         operand is the caller's own object at 9 reachable positions -- one of
+#                         them on VALID input: `_sq`'s underflow message shows `prediction=` and
+#                         `target=`, so a raising `__repr__` replaced an in-family UnderflowError
+#                         with a bare RuntimeError. All go through `_shown`.         [converted]
+#   type(x).__name__   -- 14 interpolations. A metaclass with a raising `__name__` property
+#                         reaches every one. This is NOT the `__class__` channel above: `type()`
+#                         ignores a `__class__` property, so it is a separate and closable site.
+#                         All go through `_type_name`.                               [converted]
+#   Fraction(...)      -- 2 calls in 1 statement, `_distinct_values`, which READS a Rational's
+#                         `numerator` and `denominator`.                             [converted]
+#   int()              -- 0 calls. `_plain_real` calls `int.__int__(v)`, a type-level call an
+#                         override cannot intercept, and every int-ness decision here is an
+#                         `isinstance`, never a conversion.                          DISCHARGED
+#   bool()             -- 1 call, `_is_nested`'s `bool(outer)`, on a tuple this module built. A
+#                         mask entry's own `__bool__` is never consulted: the strict-bool gate
+#                         runs before `any(items)` (measured: an `int` subclass whose `__bool__`
+#                         raises is refused with MaskTypeError).                     DISCHARGED
+#   len()              -- 24 calls, every one on a tuple or list this module built (a
+#                         `_materialised` result, or `list(p)`), so a raising or lying `__len__`
+#                         cannot reach one. MEASURED, including the one behaviour change in this
+#                         fix: a `tuple` subclass whose `__len__` raises is now ACCEPTED and read
+#                         correctly, where HEAD refused it in family -- `_materialised` reads
+#                         through `iter(obj)` so that a lazy producer's failure can be described
+#                         truthfully, and `tuple(iterator)` no longer consults the object's own
+#                         `__len__`/`__length_hint__`. Accepting it is right: such an object IS
+#                         usable as a sequence, its elements are read verbatim, and every `len()`
+#                         that decides anything is taken on this module's copy. DISCHARGED
+#
+# NOT conversion, so deliberately not re-decided here: the ARITHMETIC and COMPARISON dunders.
+# They are the module docstring's own claim, closed by `_plain_real` at every guard and swept by
+# the derived liar sweep in the tests. `_same`'s bare `==` is the one of them whose left operand
+# comes back from a caller's CALLABLE, and `_plain_real` closes it there too (measured: a callable
+# that swaps in a value whose `__eq__` raises still gets "mutated its input in place"). A `name=`
+# label's `__format__`/`__str__` is also outside: that parameter is annotated `str`, and the
+# message is the only thing it reaches.
+#
+# WHY CONVERTED RATHER THAN EXEMPTED: see the module docstring. Taken at its word is about LYING.
+# Measured before this fix, identically on 3.12.4 and 3.13.5: a caller-defined `numbers.Real`
+# whose `__float__` raises gave 45/45 outcomes outside StabilityError (5 exception classes x 9
+# public entry points), 36 of them outside ValueError entirely; a raising `__repr__` escaped from
+# 9 positions; a Rational with a raising `numerator` escaped from 3 of 6. Not one of the three
+# permitted test modules noticed any of it.
+def _shown(v) -> str:
+    """`repr(v)` for a message, degraded to a placeholder when the caller's `__repr__` raises.
+
+    A message is DIAGNOSTIC, so this does not raise: losing the real refusal because the object
+    being refused cannot describe itself would be strictly worse than losing the description, and
+    the exception TYPE -- which is what a caller branches on -- is unaffected either way. The
+    BaseException-only exits and `_UNCONVERTED` still propagate, as everywhere else here.
+    """
+    try:
+        return repr(v)
+    except _UNCONVERTED:
+        raise
+    except Exception as e:
+        return f"<unshowable {_type_name(v)}: its __repr__ raised {_type_name(e)}>"
+
+
+def _type_name(v) -> str:
+    """`type(v).__name__` for a message, degraded the same way `_shown` is.
+
+    `type(v)` is safe (it ignores a `__class__` property), but `__name__` on the resulting class is
+    an attribute lookup that a metaclass can answer with an exception. Same policy, same reason.
+    """
+    try:
+        return type(v).__name__
+    except _UNCONVERTED:
+        raise
+    except Exception:
+        return "<unnamed type>"
+
+
+def _as_float(v, what: str) -> float:
+    """`float(v)` with a RAISING conversion kept inside this module's family.
+
+    `OverflowError` is re-raised UNCONVERTED on purpose: it is not a failed conversion but a
+    representability answer, and each of the three call sites has its own policy for it (a
+    NonFiniteError here, `math.inf` in `_validated_masked_values` and `_sq`). Everything else means
+    the object declared itself `Real` and then could not produce a number, which is a failed read
+    of a data argument: NonNumericError, with the original chained.
+    """
+    try:
+        return float(v)
+    except OverflowError:
+        raise
+    except _UNCONVERTED:
+        raise
+    except StabilityError:
+        raise
+    except Exception as e:
+        raise NonNumericError(f"{what} is not usable as a real number: float({_shown(v)}) raised "
+                              f"{_type_name(e)}") from e
 
 
 def _materialised(obj, exc, what: str) -> tuple:
@@ -247,18 +377,42 @@ def _materialised(obj, exc, what: str) -> tuple:
     entirely -- from the two sites that DID wrap, so widening the catch is what matches the policy
     those wrappers were written for. The original exception is chained (`from e`) and named in the
     message, so widening loses no diagnostic.
+
+    THE COST OF THAT WIDENING, stated here because this is where a caller reads about it: the
+    module docstring's "existing callers that already catch ValueError keep working" has a flip
+    side. A caller running `except ValueError: skip_batch()` now ABSORBS an exception of its own
+    making -- a `ZeroDivisionError` in the generator it passed as `values`, say -- as a shape
+    complaint about that argument, and carries on. That is a real loss: an unrelated caller bug
+    becomes an expected-and-handled condition. It is accepted deliberately, because the module
+    cannot tell "this object is not a sequence" from "this sequence's producer failed" without
+    guessing, and the alternative (letting it through) is the out-of-family escape this helper
+    exists to prevent. `__cause__` carries the original, so the diagnosis is not lost; a caller
+    that needs to tell the two apart must inspect `__cause__` rather than the class.
+
+    WHICH HALF FAILED is tracked and said, because the message used to assert the wrong one: a
+    LAZY producer (a generator, a genexp, a `map()`) raises from its BODY during `tuple(it)`,
+    not from `__iter__` or an attribute lookup, and such an object IS usable as a sequence.
+    `reading` separates the two without splitting the `try` -- splitting it is what left the
+    row site half-fixed in the first place.
     """
+    reading = False
     try:
         if not isinstance(obj, _NOT_A_SEQUENCE) and hasattr(obj, "__iter__"):
-            return tuple(obj)
+            it = iter(obj)
+            reading = True
+            return tuple(it)
     except _UNCONVERTED:
         raise
     except StabilityError:
         raise
     except Exception as e:
-        raise exc(f"{what}, got {type(obj).__name__} (its __iter__ or attribute lookup raised "
-                  f"{type(e).__name__}, so it is not usable as a sequence)") from e
-    raise exc(f"{what}, got {type(obj).__name__}")
+        if reading:
+            raise exc(f"{what}, got {_type_name(obj)} (it is iterable, but reading its elements "
+                      f"raised {_type_name(e)}: the failure is its producer's, which this module "
+                      f"cannot tell apart from a shape problem -- see __cause__)") from e
+        raise exc(f"{what}, got {_type_name(obj)} (its __iter__ or attribute lookup raised "
+                  f"{_type_name(e)}, so it is not usable as a sequence)") from e
+    raise exc(f"{what}, got {_type_name(obj)}")
 
 
 def _is_row_like(v) -> bool:
@@ -313,13 +467,13 @@ def check_mask(mask: Sequence[bool], expected_len: int | None = None, name: str 
     items = _materialised(mask, MaskTypeError, f"{name} must be a sequence of bool")
     for i, b in enumerate(items):
         if not isinstance(b, bool):
-            raise MaskTypeError(f"{name}[{i}] must be a strict bool, got {b!r} ({type(b).__name__}); "
+            raise MaskTypeError(f"{name}[{i}] must be a strict bool, got {_shown(b)} ({_type_name(b)}); "
                                 "truthiness is not accepted")
     if expected_len is not None:
         want = _plain_real(expected_len)
         if isinstance(want, bool) or not isinstance(want, int):
-            raise MaskLengthError(f"expected_len must be an int element count, got {expected_len!r} "
-                                  f"({type(expected_len).__name__})")
+            raise MaskLengthError(f"expected_len must be an int element count, got {_shown(expected_len)} "
+                                  f"({_type_name(expected_len)})")
         if len(items) != want:
             raise MaskLengthError(f"{name} length {len(items)} != data length {want}")
     if not any(items):
@@ -355,16 +509,16 @@ def _validated_masked_values(values, mask, name: str, strict: bool):
         for j, v in enumerate(r):
             where = f"{name}[{i}][{j}]" if width > 1 or _is_nested(outer) else f"{name}[{i}]"
             if isinstance(v, bool) or not isinstance(v, Real):
-                raise NonNumericError(f"{where} is not a real number: {v!r} ({type(v).__name__})")
+                raise NonNumericError(f"{where} is not a real number: {_shown(v)} ({_type_name(v)})")
             if use or strict:
                 try:
-                    fv = float(v)
+                    fv = _as_float(v, where)
                 except OverflowError:  # huge int: not representable, never a bare OverflowError
                     fv = math.inf
                 if not math.isfinite(fv):
                     tag = "" if use else " (masked OUT; strict_masked_out=True rejects hidden non-finite values)"
                     raise NonFiniteError(f"{where} is non-finite or not representable as a float: "
-                                         f"{fv!r}{tag}")
+                                         f"{_shown(fv)}{tag}")
                 row.append(fv)
         if use:
             kept.append(tuple(row))
@@ -405,7 +559,8 @@ def masked_mean_checked(values, mask: Sequence[bool], denominator: int, *,
     each is materialised exactly once.
     """
     if isinstance(denominator, bool) or not isinstance(denominator, int):
-        raise NormalizationMismatchError(f"denominator must be an int element count, got {denominator!r}")
+        raise NormalizationMismatchError("denominator must be an int element count, got "
+                                         f"{_shown(denominator)}")
     denom = _plain_real(denominator)    # decide AND divide on the stored int, never on the object
     kept, mk, width = _validated_masked_values(values, mask, name, strict_masked_out)
     n_entries = sum(mk)
@@ -421,7 +576,7 @@ def masked_mean_checked(values, mask: Sequence[bool], denominator: int, *,
     total = sum(v for r in kept for v in r)
     result = total / denom
     if not math.isfinite(result):
-        raise NonFiniteError(f"masked mean overflowed or became non-finite: {result!r}")
+        raise NonFiniteError(f"masked mean overflowed or became non-finite: {_shown(result)}")
     return result
 
 
@@ -466,19 +621,30 @@ def _distinct_values(a, b, fa: float, fb: float) -> bool:
     subclass cannot answer for itself). A `Real` with no exact rational reading falls back to the
     floats `_sq` already converted, rather than escaping the documented error family -- measured:
     `Fraction(np.float32(1e-40))` raises TypeError, and a numpy `float32` pair must not do that here.
+
+    EVERY exception and not those four classes: `Fraction(x)` READS a `Rational`'s `numerator` and
+    `denominator`, which are the caller's properties, so the enumerated tuple (TypeError,
+    ValueError, OverflowError, ZeroDivisionError) left the rest of them escaping this module's
+    family from a guard that was in the middle of refusing an underflow. Measured at the previous
+    spelling, both interpreters: a `Rational` whose `numerator` raises RuntimeError, KeyError or
+    AttributeError came out as that bare class, while the same object raising one of the four
+    enumerated classes was refused with UnderflowError. The fallback is the right answer for all
+    of them -- "no exact rational reading, use the floats `_sq` already converted".
     """
     try:
         return Fraction(_plain_real(a)) != Fraction(_plain_real(b))
-    except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+    except _UNCONVERTED:
+        raise
+    except Exception:
         return fa != fb
 
 
 def _sq(a, b):
     for label, v in (("prediction", a), ("target", b)):
         if isinstance(v, bool) or not isinstance(v, Real):
-            raise NonNumericError(f"{label} element is not a real number: {v!r} ({type(v).__name__})")
+            raise NonNumericError(f"{label} element is not a real number: {_shown(v)} ({_type_name(v)})")
     try:
-        fa, fb = float(a), float(b)
+        fa, fb = _as_float(a, "prediction element"), _as_float(b, "target element")
         d = fa - fb
         sq = d * d
     except OverflowError:
@@ -490,7 +656,7 @@ def _sq(a, b):
     # see `_distinct_values`, which is where the two halves of that sentence are kept together.)
     if sq == 0.0 and _distinct_values(a, b, fa, fb):
         raise UnderflowError(f"squared error underflowed to 0.0 from nonzero input "
-                             f"(prediction={a!r}, target={b!r}); refusing a silent zero")
+                             f"(prediction={_shown(a)}, target={_shown(b)}); refusing a silent zero")
     return sq
 
 
@@ -553,13 +719,24 @@ def check_gradient(fn: Callable[[list], float], grad_fn: Callable[[list], Sequen
       * non-finite fn values during differencing (NonFiniteError).
     Mismatch raises GradientMismatchError naming the coordinate.
 
-    Other behaviour: an exception raised inside the caller's `fn`/`grad_fn`
-    (e.g. ZeroDivisionError) propagates unwrapped; it is not a StabilityError.
-    That carve-out is about CALLABLES the caller supplies for this module to
-    INVOKE, and it covers nothing else. An exception raised while a DATA
-    argument is probed or materialised -- a broken `__iter__`, a `__getattr__`
-    that raises -- is converted to this module's family instead, whatever its
-    class, and the original is chained as `__cause__`.
+    Other behaviour: an exception the caller's `fn`/`grad_fn` raises WHILE THIS
+    MODULE CALLS IT (e.g. ZeroDivisionError) propagates unwrapped; it is not a
+    StabilityError. That carve-out is about CALLABLES this module INVOKES, and
+    it reaches the call itself and nothing else -- in particular it does NOT
+    reach a LAZY return value. `grad_fn` may return a generator, a generator
+    expression or a `map()`, all of which are supported input and all of which
+    return a full report here; a generator whose BODY raises does so later,
+    while this module materialises that returned DATA, so it is converted to
+    this module's family like any other data read. Measured: a generator
+    `grad_fn` whose body raises ZeroDivisionError yields ShapeError, not
+    ZeroDivisionError. The carve-out used to say "about CALLABLES ... and it
+    covers nothing else", which was false exactly where its two halves meet: a
+    `grad_fn` is a callable whose return value is a data argument, and for a
+    lazy one the data half decides. An exception raised while a DATA argument is
+    probed, materialised or produced -- a broken `__iter__`, a `__getattr__`
+    that raises, a lazy producer's body, a `__float__` that raises -- is
+    converted to this module's family instead, whatever its class, and the
+    original is chained as `__cause__`.
     `point`, like every sequence argument in this module, is materialised once
     (generators are consumed a single time at validation).
 
@@ -577,7 +754,7 @@ def check_gradient(fn: Callable[[list], float], grad_fn: Callable[[list], Sequen
     for label, v in (("step", step), ("rtol", rtol), ("atol", atol), ("zero_tol", zero_tol)):
         f = check_finite_scalar(_plain_real(v), label)
         if f < 0 or (label == "step" and f == 0):
-            raise StabilityError(f"{label} must be {'> 0' if label == 'step' else '>= 0'}, got {v!r}")
+            raise StabilityError(f"{label} must be {'> 0' if label == 'step' else '>= 0'}, got {_shown(v)}")
         config.append(f)
     # The normalised floats REPLACE the caller's objects for the rest of this function. The validated
     # value used to sit in `f` and be discarded, which is what left the `<= zero_tol` rejection and the
@@ -587,7 +764,7 @@ def check_gradient(fn: Callable[[list], float], grad_fn: Callable[[list], Sequen
     n = len(p0)
     for i, x in enumerate(p0):
         if x + step == x or x - step == x:
-            raise StabilityError(f"step {step!r} is too small to change point[{i}]={x!r} "
+            raise StabilityError(f"step {_shown(step)} is too small to change point[{i}]={_shown(x)} "
                                  "(below float resolution); finite differences would be meaningless")
 
     def call(func, label, p):
@@ -620,10 +797,10 @@ def check_gradient(fn: Callable[[list], float], grad_fn: Callable[[list], Sequen
     num = tuple(num)
     for i, (a, d) in enumerate(zip(g, num)):
         if not math.isfinite(d):
-            raise NonFiniteError(f"numeric gradient[{i}] is non-finite: {d!r}")
+            raise NonFiniteError(f"numeric gradient[{i}] is non-finite: {_shown(d)}")
         if abs(a - d) > atol + rtol * max(abs(a), abs(d)):
             raise GradientMismatchError(
-                f"gradient mismatch at index {i}: analytic={a!r}, finite-difference={d!r}, "
+                f"gradient mismatch at index {i}: analytic={_shown(a)}, finite-difference={_shown(d)}, "
                 f"|diff|={abs(a - d):.3e} > atol {atol} + rtol {rtol} * max(|a|,|d|) (step {step})")
     abs_err = max(abs(a - d) for a, d in zip(g, num))
     rel_err = max(abs(a - d) / max(abs(a), abs(d), 1e-300) for a, d in zip(g, num))
@@ -684,7 +861,7 @@ def check_params_changed(before: Sequence[float], after: Sequence[float], *,
         raise StabilityError("min_abs_change must be >= 0")
     delta = max(abs(x - y) for x, y in zip(a, b))
     if not math.isfinite(delta):
-        raise NonFiniteError(f"{name} change overflowed to {delta!r}")
+        raise NonFiniteError(f"{name} change overflowed to {_shown(delta)}")
     if delta <= mc:
-        raise NoOpUpdateError(f"{name} unchanged by update: max |change| {delta!r} <= {mc!r}")
+        raise NoOpUpdateError(f"{name} unchanged by update: max |change| {_shown(delta)} <= {_shown(mc)}")
     return delta

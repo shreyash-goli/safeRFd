@@ -7,6 +7,7 @@ import math
 import sys
 import types
 import unittest
+from numbers import Rational, Real
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -42,7 +43,25 @@ class Truthy:
 # leaves every BEHAVIOURAL assertion running, and
 # `test_e_the_docstring_guard_is_inert_in_a_normal_run` asserts it is inert whenever docstrings
 # exist, which is every run this project makes.
-_DOCSTRINGS_PRESENT = st.__doc__ is not None
+#
+# A module-level `_DOCSTRINGS_PRESENT = st.__doc__ is not None` used to sit here. It had exactly
+# one consumer -- the first assertion of that test -- and that assertion is now written there
+# directly against `st.__doc__`, which is what it was always about. A constant whose only purpose
+# is to be asserted equal to its own definition is residue, and residue in a file about
+# load-bearing sentences is the wrong kind of example.
+#
+# THE ONE REAL `skipIf` IN THIS FILE, reconciled with the paragraph above rather than left to
+# look like a contradiction: `Masks.test_numpy_scalars_rejected` is guarded by
+# `@unittest.skipIf(np is None)`. Note E's hazard is a guard that can skip a pin whose SUBJECT
+# STILL EXISTS -- `-OO` strips docstrings but leaves every behaviour assertable, so skipping
+# there would hide a pin and still report OK. The numpy guard is the other case: without numpy
+# there is no `np.bool_`/`np.int64` to hand `check_mask`, so there is nothing to assert, and the
+# alternatives are a skip or a silently vacuous pass. The skip is better because it is COUNTED:
+# `scripts/test_baseline.txt`'s bare-environment column records exactly this one skip, and
+# `scripts/run_tests.sh` fails a bare run that reports fewer. An UNCOUNTED skip is the hazard;
+# this one is the project's only skip here and
+# `test_the_only_skip_in_this_file_is_the_counted_numpy_one` asserts it stays the only one.
+# Every other numpy-dependent assertion in this file is behind a plain `if np is not None`.
 
 
 def _doc(obj):
@@ -95,6 +114,46 @@ _BROKEN_ITER_OTHER = tuple((f"__iter__ raises {e.__name__}", _iter_raises(e))
 # The fourth site's shapes.
 _BROKEN_GETATTR = tuple((f"__getattr__ raises {e.__name__}", _getattr_raises(e))
                         for e in (RuntimeError, ValueError, TypeError, KeyError))
+
+# FINDING G2. The same defect class one protocol over: a CONVERSION this module invokes on the
+# caller's data raises. `_iter_raises` is to the iterator protocol what `_float_raises` is to the
+# conversion protocol, and the shapes join the sibling table above so that the derived sweep
+# (`test_c1`) reaches the `float()` sites at every data position instead of a hand-written list of
+# three. Measured at the commit before this one, identically on 3.12.4 and 3.13.5: 5 exception
+# classes x 9 public entry points = 45/45 outcomes outside StabilityError, 36 of them outside
+# ValueError entirely, because each `float()` site caught exactly `OverflowError`.
+#
+# The object has to be a `numbers.Real`: the type gate runs first, so a non-Real never reaches a
+# conversion. These are the stub implementations `Real`'s abstract set requires, nothing more.
+_REAL_STUBS = {"__trunc__": lambda s: 0, "__floor__": lambda s: 0, "__ceil__": lambda s: 0,
+               "__round__": lambda s, n=None: 0, "__abs__": lambda s: s, "__neg__": lambda s: s,
+               "__pos__": lambda s: s, "__add__": lambda s, o: s, "__radd__": lambda s, o: s,
+               "__mul__": lambda s, o: s, "__rmul__": lambda s, o: s,
+               "__truediv__": lambda s, o: s, "__rtruediv__": lambda s, o: s,
+               "__pow__": lambda s, o: s, "__rpow__": lambda s, o: s, "__mod__": lambda s, o: s,
+               "__rmod__": lambda s, o: s, "__floordiv__": lambda s, o: s,
+               "__rfloordiv__": lambda s, o: s, "__lt__": lambda s, o: False,
+               "__le__": lambda s, o: False, "__eq__": lambda s, o: False, "__hash__": lambda s: 0}
+
+
+def _float_raises(exc):
+    """A caller-defined `numbers.Real` whose `__float__` raises `exc`. A FACTORY, like the intake
+    shapes, because a site may legitimately consume its argument."""
+    return lambda: type(f"FloatRaises{exc.__name__}", (Real,),
+                        dict(_REAL_STUBS,
+                             __float__=lambda s: (_ for _ in ()).throw(exc("float() boom"))))()
+
+
+_FLOAT_EXCS = (ZeroDivisionError, KeyError, RuntimeError, TypeError, ValueError)
+_BROKEN_FLOAT = tuple((f"__float__ raises {e.__name__}", _float_raises(e)) for e in _FLOAT_EXCS)
+
+
+def _repr_raises(exc):
+    """A caller object whose `__repr__` raises: the protocol every error MESSAGE here invokes on
+    the value it is refusing. Not a `Real`, so it is refused for being non-numeric -- and the
+    refusal used to be replaced by this exception while the message was being built."""
+    return lambda: type(f"ReprRaises{exc.__name__}", (),
+                        {"__repr__": lambda s: (_ for _ in ()).throw(exc("repr boom"))})()
 
 
 class Finite(unittest.TestCase):
@@ -602,11 +661,21 @@ def _liar(value):
     """An `int`/`float` subclass STORING `value` that lies through every comparison and arithmetic
     dunder a guard might be written in, while telling the truth through the conversion protocol.
 
-    `__float__`/`__int__` are deliberately NOT overridden: `check_finite_scalar` is documented to
-    return `float(value)`, so a lying conversion is a value this module is documented to take at its
-    word, and a test that wrapped it would be asserting something the module never claimed. What the
-    module DOES claim is the invariant asserted below: a liar that converts honestly cannot change any
-    outcome, because no guard is decided by the caller's object."""
+    `__float__`/`__int__` are deliberately NOT overridden HERE, and the scope of that avoidance has
+    been narrowed twice, because as written it was CLAUDE.md's rule-9 smell and it hid two defects:
+
+      * a LYING conversion (an honest-looking float from a `__float__` that answers something else)
+        is a value `check_finite_scalar` is documented to return, so this sweep does not wrap it --
+        but `test_f5` does, in the other direction, and found a real defect: a `NanFloat` whose
+        `__float__` answered innocuously while the object STORED nan obtained a PASS report for a
+        wrong gradient. So "the module never claimed it" was already only half true.
+      * a RAISING conversion was never swept at all, in either direction, and that is FINDING G2:
+        a `__float__` that raises is not a value to take at anyone's word, it is a failed read, and
+        it escaped the declared family 45 times. It is swept now, by `_BROKEN_FLOAT` through the
+        derived `test_c1` sweep and by `ConversionIsDerivedNotEnumerated` position by position.
+
+    What this liar asserts is the remaining invariant: a liar that converts HONESTLY cannot change
+    any outcome, because no guard is decided by the caller's object."""
     base = int if isinstance(value, int) else float
     ns = {"__eq__": lambda s, o: True, "__ne__": lambda s, o: False,
           "__lt__": lambda s, o: True, "__le__": lambda s, o: True,
@@ -1161,18 +1230,43 @@ class IntakeIsDerivedNotEnumerated(unittest.TestCase):
     """
 
     def test_c1_every_intake_position_keeps_its_failure_in_family(self):
-        """The derived sweep. Every bound argument, every element, every sub-element, every shape."""
-        shapes = _BROKEN_ITER + _BROKEN_ITER_OTHER + _BROKEN_GETATTR
-        swept = 0
+        """The derived sweep. Every bound argument, every element, every sub-element, every shape --
+        of the iterator protocol AND, since G2, of the conversion protocol.
+
+        THE FIGURE IS PINNED, NOT FLOORED. This assertion used to read
+        `assertGreater(swept, 400)` while the sweep performed 1260 in-family refusals over 105
+        (case, parameter, position) triples: 3x slack, so a regression that silently dropped two
+        thirds of the sweep passed. That is the `assertGreaterEqual(swept, 100)` defect which hid
+        29 cases two rounds ago, reproduced in the test written to replace it.
+
+        THE FLOOR'S BLINDNESS, PERFORMED rather than asserted, two ways, both measured against
+        this file with only the floor restored:
+          * `shapes` truncated to its first four entries: 420 refusals -- `assertGreater(swept,
+            400)` reports OK, the figures below FAIL (`len(shapes)` 4 != 17).
+          * the element and sub-element positions dropped while all 17 shapes are kept: 663
+            refusals over 21 positions instead of 61 -- two thirds of the sweep gone, and again
+            `assertGreater(swept, 400)` reports OK while the figures below FAIL.
+        (The same instrumentation reproduces the figure the attester measured at HEAD: with
+        HEAD's 12 shapes the sweep performs 1260 refusals over the same 105 triples.)
+
+        So the exact product is pinned, the two failure counters are pinned at zero (that is the
+        property), and the position and triple counts are pinned separately, because a regression
+        can shrink either factor while keeping `swept == triples * shapes` true.
+        """
+        shapes = _BROKEN_ITER + _BROKEN_ITER_OTHER + _BROKEN_GETATTR + _BROKEN_FLOAT
+        swept = returned = escaped = 0
+        positions, triples = set(), set()
         for name in sorted(_CASES):
             fn, sig = getattr(st, name), inspect.signature(getattr(st, name))
-            for args, kwargs, why in _CASES[name]:
+            for ci, (args, kwargs, why) in enumerate(_CASES[name]):
                 b0 = sig.bind(*args, **kwargs)
                 for pname, given in list(b0.arguments.items()):
                     if (name, pname) in _NOT_A_LYING_NUMBER:
                         continue        # str labels, bool flags, and the two documented callables
                     for label, make in shapes:
                         for where, variant in _with_broken(given, make):
+                            positions.add((name, pname, where))
+                            triples.add((name, ci, pname, where))
                             b = sig.bind(*args, **kwargs)
                             b.arguments[pname] = variant
                             with self.subTest(function=name, parameter=pname, at=where, shape=label):
@@ -1182,14 +1276,27 @@ class IntakeIsDerivedNotEnumerated(unittest.TestCase):
                                     swept += 1
                                     continue
                                 except BaseException as e:
+                                    escaped += 1
                                     self.fail(f"{type(e).__name__} escaped the declared family "
                                               f"from {name}({pname}=...) at {where} with a "
                                               f"{label}: {e}")
+                                    continue
+                                returned += 1
                                 self.fail(f"{name}({pname}=...) RETURNED {out!r} at {where} with "
-                                          f"a {label}: an object that cannot be iterated must not "
-                                          "produce a number")
-        self.assertGreater(swept, 400, "the sweep collapsed to almost nothing: it is supposed to "
-                                       "reach every intake position of every case")
+                                          f"a {label}: an object that cannot be iterated or "
+                                          "converted must not produce a number")
+        self.assertEqual((returned, escaped), (0, 0),
+                         "every swept position must REFUSE, in family: these are the two ways out")
+        self.assertEqual(len(shapes), 17, "4 broken-__iter__ shapes + 4 other raising classes + "
+                                          "4 hostile __getattr__ + 5 raising __float__")
+        self.assertEqual(len(positions), 61, "distinct (function, parameter, position) "
+                                             "combinations the sweep reaches")
+        self.assertEqual(len(triples), 105, "distinct (function, case, parameter, position) "
+                                            "triples: a lost _CASES row shows up here")
+        self.assertEqual(swept, len(triples) * len(shapes))
+        self.assertEqual(swept, 1785, "the measured sweep at this commit: 105 triples x 17 shapes. "
+                                      "A regression that drops two thirds of it fails HERE, which "
+                                      "a `> 400` floor did not")
 
     def test_c2_note_d_a_broken_iter_stays_in_family_whatever_it_raises(self):
         """NOTE D. The two sibling wrappers caught only `TypeError`, so the SAME broken `__iter__`
@@ -1265,14 +1372,29 @@ class IntakeIsDerivedNotEnumerated(unittest.TestCase):
             st.check_finite_sequence(plain)
 
     def test_c4_the_intake_points_are_the_only_places_that_probe_or_materialise(self):
-        """The STRUCTURAL half: `_materialised` and `_is_row_like` are the only two places that
-        probe or materialise caller-supplied input, so a fifth site cannot be HALF-fixed the way
-        the third was. Derived from the module's own AST, not from a list of names.
+        """The STRUCTURAL half, stated as narrowly as the mechanism actually is.
 
-        This project's recurring pattern is the half-fix -- `benchmark.py` had the same thing 145
-        lines apart in the same round -- and the thing that makes it recur is that each site is
-        spelled out by hand. This test fails if any function outside the two helpers spells the
-        probe itself.
+        WHAT THE AST HALF MATCHES, exactly: a call to the NAME `hasattr` or `getattr` whose second
+        argument is the literal constant `"__iter__"`, or a call to the name `iter`, in a function
+        other than `_materialised` / `_is_row_like`. WHAT IT DOES NOT MATCH, and nothing here
+        pretends otherwise: a non-literal spelling (`probe = "__iter__"; hasattr(x, probe)`), a
+        `tuple(x)` / `list(x)` with no probe at all, a `for` loop over caller input, or any
+        materialisation reached through another module. This docstring used to claim the two
+        helpers were "the only two places that probe or materialise caller-supplied input" -- a
+        reach claim three spellings wider than its matcher, which is this project's single
+        recurring defect (a correction in round 10 replaced exactly such a claim with a driven
+        enumeration under the heading "the enumeration is the claim").
+
+        WHAT ACTUALLY PROTECTS THE PROPERTY IS BEHAVIOURAL, AND IT IS `test_c1`. Measured: a
+        brand-new `_eager()` helper that materialises `values` in `masked_mean_checked` with no
+        `hasattr`, no `iter` and no `_materialised` is KILLED by `test_c1` (9 failures) while this
+        test stays silent. So the credit belongs to the derived sweep; the AST half's job is the
+        narrower one of stopping the probe from being RESPELLED by hand at a site that already
+        exists, which is how the row site came to be half-fixed.
+
+        The textual half below is this test's real structural teeth: five named derived intake
+        points must each still route through their helper, and the discharged candidate must still
+        be discharged by the code rather than by argument.
         """
         import ast
         src = inspect.getsource(st)
@@ -1281,11 +1403,15 @@ class IntakeIsDerivedNotEnumerated(unittest.TestCase):
             if fn.name in ("_materialised", "_is_row_like"):
                 continue
             for node in ast.walk(fn):
-                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                        and node.func.id == "hasattr" and len(node.args) == 2
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                    continue
+                if node.func.id == "iter":
+                    offenders.append(f"{fn.name}() line {node.lineno}: iter(_)")
+                if (node.func.id in ("hasattr", "getattr") and len(node.args) >= 2
                         and isinstance(node.args[1], ast.Constant)
                         and node.args[1].value == "__iter__"):
-                    offenders.append(f"{fn.name}() line {node.lineno}: hasattr(_, '__iter__')")
+                    offenders.append(f"{fn.name}() line {node.lineno}: "
+                                     f"{node.func.id}(_, '__iter__')")
         self.assertEqual(offenders, [], "an intake probe is spelled outside the two helpers; route "
                                         "it through _materialised / _is_row_like instead")
         for helper in ("_materialised", "_is_row_like"):
@@ -1302,6 +1428,462 @@ class IntakeIsDerivedNotEnumerated(unittest.TestCase):
         self.assertIn('call(grad_fn, "grad_fn", p0)', g_src)
         self.assertIn('call(fn, "fn", q)', g_src)
         self.assertIn('p0 = check_finite_sequence(point, "point")', g_src)
+
+
+# FINDING G2. The conversion-protocol sites of `toy.stability`, DERIVED from its AST the way the
+# intake sites were, with one row per (function, protocol, operand) and the decision in writing.
+# The test below re-derives the set and compares; a new `float()`, `repr()`, `len()`, `bool()`,
+# `int()` or `Fraction()` anywhere in the module fails here until it is decided.
+_CONVERSION_SITES = {
+    ("_as_float", "float", "v"):
+        "THE one float() in the module. The three conversion sites all call this helper, which "
+        "turns a raising __float__ into NonNumericError and re-raises OverflowError unconverted",
+    ("_shown", "repr", "v"):
+        "THE one repr() in the module. Every error message interpolates through this helper, "
+        "which degrades a raising __repr__ to a placeholder instead of losing the refusal",
+    ("_distinct_values", "Fraction", "_plain_real(a)"):
+        "Fraction() READS a Rational's numerator/denominator, which are the caller's properties; "
+        "the handler is `except Exception` -> the float fallback, so a raising one stays in family",
+    ("_distinct_values", "Fraction", "_plain_real(b)"):
+        "the same statement, the other operand",
+    ("_is_nested", "bool", "outer"):
+        "`outer` is a tuple this module built (`_materialised`'s return), so no caller __bool__",
+    ("_as_rows", "len", "r"): "a `_materialised` row tuple",
+    ("_as_rows", "len", "rows[0]"): "a tuple of `_materialised` row tuples",
+    ("_split_values", "len", "rows[0]"): "a tuple `_as_rows` built",
+    ("_validated_masked_values", "len", "outer"): "a tuple `_as_flat_items` built",
+    ("check_mask", "len", "items"): "a tuple `_materialised` built",
+    ("check_params_changed", "len", "a"): "a tuple of floats `check_finite_sequence` returned",
+    ("check_params_changed", "len", "b"): "a tuple of floats `check_finite_sequence` returned",
+    ("masked_squared_error_mean", "len", "p_outer"): "a tuple `_as_flat_items` built",
+    ("masked_squared_error_mean", "len", "t_outer"): "a tuple `_as_flat_items` built",
+    ("masked_squared_error_mean", "len", "pr[0]"): "a tuple `_as_rows` built",
+    ("masked_squared_error_mean", "len", "tr[0]"): "a tuple `_as_rows` built",
+    ("check_gradient", "len", "p0"): "a tuple of floats `check_finite_sequence` returned",
+    ("check_gradient", "len", "g_items"): "a tuple `_as_flat_items` built",
+    ("call", "len", "arg"): "`arg = list(p)`, built here; the caller's callable may MUTATE it, "
+                            "which is the point of the comparison, but it is still a list",
+    ("call", "len", "snap"): "`snap = tuple(arg)`, built here",
+}
+
+
+class ConversionIsDerivedNotEnumerated(unittest.TestCase):
+    """FINDING G2, closed as a CLASS: a CONVERSION protocol this module invokes on caller data.
+
+    This is FINDING C's defect one protocol over. There, a protocol the module consults
+    (`__iter__`) raised and a bare exception left the declared family; here the protocol is
+    `__float__`, and `float()` caught exactly `OverflowError` at all three sites -- the same
+    shape as NOTE D, whose sibling wrappers caught exactly `TypeError`. Measured at the commit
+    before this one, identically on 3.12.4 and 3.13.5: a caller-defined `numbers.Real` whose
+    `__float__` raises produced 45/45 outcomes outside StabilityError (5 exception classes x 9
+    public entry points), 36 of them outside ValueError entirely. The equivalent invisibility was
+    measured too: adding `except Exception -> NonNumericError` at `check_finite_scalar`'s
+    `float()` was unkilled by test_stability (84 OK), test_robustness (181 OK) and test_checkpoint
+    (48 OK). These tests are what make that false.
+
+    Deriving the set rather than fixing the three reported sites found THREE MORE protocols with
+    reachable sites, none of them in any report: `repr()` through every `{...!r}` in every error
+    message (including one on VALID input, `_sq`'s underflow message, where a raising `__repr__`
+    replaced an in-family UnderflowError with a bare RuntimeError), `type(x).__name__` through a
+    metaclass, and `Fraction()` in `_distinct_values`, which reads a Rational's own `numerator`.
+    """
+
+    @staticmethod
+    def _positions(o):
+        """The nine public entry points a caller's value reaches a conversion through."""
+        return (("check_finite_scalar", lambda: st.check_finite_scalar(o)),
+                ("check_finite_sequence", lambda: st.check_finite_sequence([o])),
+                ("check_finite_matrix", lambda: st.check_finite_matrix([[o]])),
+                ("masked_mean_checked", lambda: st.masked_mean_checked([o], [True], 1)),
+                ("masked_squared_error_mean",
+                 lambda: st.masked_squared_error_mean([o], [0.0], [True], 1)),
+                ("require_parameter_gradient", lambda: st.require_parameter_gradient([o])),
+                ("check_params_changed", lambda: st.check_params_changed([o], [1.0])),
+                ("check_gradient(point)",
+                 lambda: st.check_gradient(lambda p: 1.0, lambda p: [1.0], [o])),
+                ("check_gradient(step)",
+                 lambda: st.check_gradient(lambda p: p[0] ** 2, lambda p: [2.0], [1.0], step=o)))
+
+    def test_g2a_a_raising_float_stays_in_family_at_every_position(self):
+        """The 45, position by position and class by class. Each must be in family, each must
+        still be a ValueError (what existing callers catch), and each must chain the original."""
+        seen = 0
+        for exc in _FLOAT_EXCS:
+            make = _float_raises(exc)
+            for label, call in self._positions(make()):
+                with self.subTest(raises=exc.__name__, position=label):
+                    with self.assertRaises(st.NonNumericError) as cm:
+                        call()
+                    self.assertIsInstance(cm.exception, ValueError)
+                    self.assertIn("not usable as a real number", str(cm.exception))
+                    self.assertIn(exc.__name__, str(cm.exception))
+                    self.assertIsInstance(cm.exception.__cause__, exc)
+                    seen += 1
+        self.assertEqual(seen, 45, "5 exception classes x 9 public entry points: the measurement "
+                                   "this test exists to invert")
+        # OverflowError keeps its own policy at each of the three sites, unconverted by the helper
+        with self.assertRaises(st.NonFiniteError):
+            st.check_finite_scalar(10 ** 400)
+        self.assertEqual(st.masked_mean_checked([1.0, 10 ** 400], [True, False], 1,
+                                                strict_masked_out=False), 1.0)
+        with self.assertRaises(st.NonFiniteError):
+            st.masked_squared_error_mean([10 ** 400], [0.0], [True], 1)
+
+    def test_g2b_a_raising_repr_cannot_replace_the_refusal_it_describes(self):
+        """The site nobody reported, and the worst of the three: the module is already RAISING an
+        in-family error and the message formatting replaces it with a foreign exception.
+
+        The last position is the one that matters most: the input there is VALID (a float subclass
+        storing a tiny value), `_sq` has decided to refuse an underflow, and a raising `__repr__`
+        turned that UnderflowError into a bare RuntimeError.
+        """
+        for exc in (RuntimeError, KeyError, ZeroDivisionError):
+            make = _repr_raises(exc)
+            rows = (("check_finite_scalar", st.NonNumericError,
+                     lambda o: st.check_finite_scalar(o)),
+                    ("check_finite_sequence element", st.NonNumericError,
+                     lambda o: st.check_finite_sequence([o])),
+                    ("check_mask entry", st.MaskTypeError, lambda o: st.check_mask([True, o], 2)),
+                    ("check_mask expected_len", st.MaskLengthError,
+                     lambda o: st.check_mask([True, False], o)),
+                    ("denominator", st.NormalizationMismatchError,
+                     lambda o: st.masked_mean_checked([1.0], [True], o)),
+                    ("masked_mean element", st.NonNumericError,
+                     lambda o: st.masked_mean_checked([o], [True], 1)),
+                    ("_sq element", st.NonNumericError,
+                     lambda o: st.masked_squared_error_mean([o], [0.0], [True], 1)),
+                    ("check_gradient step", st.StabilityError,
+                     lambda o: st.check_gradient(lambda p: 1.0, lambda p: [1.0], [1.0], step=o)))
+            for label, want, call in rows:
+                with self.subTest(raises=exc.__name__, position=label):
+                    with self.assertRaises(want) as cm:
+                        call(make())
+                    self.assertIn("unshowable", str(cm.exception))
+                    self.assertIn(exc.__name__, str(cm.exception))
+            # the step position needs a NEGATIVE value to reach its message
+            class _Neg(float):
+                def __repr__(self):
+                    raise exc("repr boom")
+                __hash__ = float.__hash__
+            with self.subTest(raises=exc.__name__, position="step must be > 0 message"):
+                with self.assertRaisesRegex(st.StabilityError, "step must be > 0"):
+                    st.check_gradient(lambda p: 1.0, lambda p: [1.0], [1.0], step=_Neg(-1.0))
+            # VALID input, a refusal already decided: the UnderflowError must survive its message
+            class _Tiny(float):
+                def __repr__(self):
+                    raise exc("repr boom")
+                __hash__ = float.__hash__
+            with self.subTest(raises=exc.__name__, position="_sq underflow message on VALID input"):
+                with self.assertRaises(st.UnderflowError) as cm:
+                    st.masked_squared_error_mean([_Tiny(1e-200)], [0.0], [True], 1)
+                self.assertIn("unshowable", str(cm.exception))
+        # an honest object is still shown by `repr`, so no message text changed for anyone else
+        with self.assertRaises(st.NonNumericError) as cm:
+            st.check_finite_sequence([1.0, None], "v")
+        self.assertIn(repr(None), str(cm.exception))
+
+    def test_g2c_a_rational_whose_numerator_raises_stays_in_family(self):
+        """`_distinct_values` names four exception classes in its handler, and `Fraction(x)` READS
+        a Rational's `numerator`/`denominator`. Measured before the widening: `RuntimeError`,
+        `KeyError` and `AttributeError` came out bare, while the four enumerated classes were
+        refused with UnderflowError -- 3 of 6 escaping from the same statement."""
+        def tiny_rational(exc):
+            ns = {"numerator": property(lambda s: (_ for _ in ()).throw(exc("numerator boom"))),
+                  "denominator": property(lambda s: 1),
+                  "__float__": lambda s: 1e-200}
+            return type(f"RatRaises{exc.__name__}", (Rational,), dict(_REAL_STUBS, **ns))()
+        for exc in (RuntimeError, KeyError, AttributeError, ZeroDivisionError, TypeError,
+                    ValueError):
+            with self.subTest(numerator_raises=exc.__name__):
+                with self.assertRaises(st.UnderflowError):
+                    st.masked_squared_error_mean([tiny_rational(exc)], [0.0], [True], 1)
+        # the property the widening must not lose: an honest exact tiny Fraction is still refused
+        from fractions import Fraction as _F
+        with self.assertRaises(st.UnderflowError):
+            st.masked_squared_error_mean([_F(1, 10 ** 400)], [0.0], [True], 1)
+        self.assertEqual(st.masked_squared_error_mean([1e-200], [1e-200], [True], 1), 0.0)
+
+    def test_g2d_the_conversion_enumeration_is_derived_not_written(self):
+        """The fail-closed half, and the module's own figures re-derived from its AST.
+
+        The intake enumeration's stated exclusion of `float()`/`int()` was "the conversion
+        protocol is documented above as taken at its word" -- unswept, because taken at its word
+        is about LYING and says nothing about RAISING. So the exclusion is replaced by a derived
+        enumeration with the same fail-closed property the intake set has: a new coercion applied
+        anywhere in the module fails HERE until someone decides it in writing.
+        """
+        import ast, re
+        src = inspect.getsource(st)
+        tree = ast.parse(src)
+
+        def own_nodes(fn):
+            stack = list(fn.body)
+            while stack:
+                n = stack.pop()
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    continue                      # a nested function is its own subject
+                yield n
+                stack.extend(ast.iter_child_nodes(n))
+
+        coercions = ("float", "int", "bool", "len", "repr", "Fraction")
+        derived, by_proto, shown, typed = set(), {}, 0, 0
+        as_float_calls, as_float_lines = 0, set()
+        for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+            for node in own_nodes(fn):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                    if node.func.id in coercions:
+                        arg = ast.unparse(node.args[0]) if node.args else ""
+                        derived.add((fn.name, node.func.id, arg))
+                        by_proto[node.func.id] = by_proto.get(node.func.id, 0) + 1
+                    elif node.func.id == "_shown":
+                        shown += 1
+                    elif node.func.id == "_type_name":
+                        typed += 1
+                    elif node.func.id == "_as_float":
+                        as_float_calls += 1
+                        as_float_lines.add(node.lineno)
+                if isinstance(node, ast.FormattedValue) and node.conversion == ord("r"):
+                    derived.add((fn.name, "!r", ast.unparse(node.value)))
+        self.assertEqual(derived, set(_CONVERSION_SITES),
+                         "a coercion protocol is applied at a site this enumeration does not "
+                         "decide: give it a row in _CONVERSION_SITES with the reason it is safe, "
+                         "or route it through _as_float / _shown / _type_name")
+        for key, why in _CONVERSION_SITES.items():
+            with self.subTest(site=key):
+                self.assertTrue(why.strip(), f"{key} has no decision written")
+        # the structural claim, stated exactly: float() and repr() are spelled ONCE each, in their
+        # helper, and no `{...!r}` conversion survives anywhere in the module
+        self.assertEqual([k for k in derived if k[1] == "float"], [("_as_float", "float", "v")])
+        self.assertEqual([k for k in derived if k[1] == "repr"], [("_shown", "repr", "v")])
+        self.assertEqual([k for k in derived if k[1] == "!r"], [])
+        self.assertEqual([k for k in derived if k[1] == "int"], [],
+                         "int() has no site: _plain_real calls int.__int__ at type level")
+        # and the figures the comment block quotes are this AST's figures
+        block = src.split("caller-input conversion protocols")[1].split("def _shown")[0]
+        fig = dict(float_calls=r"float\(\)\s+-- (\d+) calls in (\d+) statements",
+                   shown=r"repr\(\), as `\{x!r\}` -- (\d+) interpolations",
+                   typed=r"type\(x\)\.__name__\s+-- (\d+) interpolations",
+                   frac=r"Fraction\(\.\.\.\)\s+-- (\d+) calls in (\d+) statement",
+                   ints=r"int\(\)\s+-- (\d+) calls", bools=r"bool\(\)\s+-- (\d+) call",
+                   lens=r"len\(\)\s+-- (\d+) calls")
+        m = {k: re.search(v, block) for k, v in fig.items()}
+        for k, mm in m.items():
+            self.assertIsNotNone(mm, f"the conversion enumeration no longer quotes its {k} figure")
+        self.assertEqual((int(m["float_calls"].group(1)), int(m["float_calls"].group(2))),
+                         (as_float_calls, len(as_float_lines)),
+                         "the float() figure: calls to _as_float, and the statements holding them")
+        self.assertEqual(int(m["shown"].group(1)), shown, "_shown interpolations")
+        self.assertEqual(int(m["typed"].group(1)), typed, "_type_name interpolations")
+        self.assertEqual(int(m["frac"].group(1)), by_proto.get("Fraction", 0))
+        self.assertEqual(int(m["ints"].group(1)), by_proto.get("int", 0))
+        self.assertEqual(int(m["bools"].group(1)), by_proto.get("bool", 0))
+        self.assertEqual(int(m["lens"].group(1)), by_proto.get("len", 0))
+        for helper in ("_as_float", "_shown", "_type_name"):
+            self.assertTrue(callable(getattr(st, helper, None)), f"{helper} is gone")
+
+    def test_g2f_a_type_whose_name_raises_cannot_replace_the_refusal_either(self):
+        """`type(x).__name__` is the other protocol every message here invokes on caller data.
+
+        `type(x)` itself is safe -- it ignores a `__class__` property, which is exactly why this is
+        NOT the kit-wide `__class__` finding and IS closable in this file -- but `__name__` on the
+        resulting class is an attribute lookup a METACLASS can answer with an exception. Measured
+        before `_type_name` existed: a bare RuntimeError out of `check_finite_scalar` and
+        `check_finite_sequence`. Pinned because the fix was invisible without it: reverting
+        `_type_name` to re-raise was unkilled by the whole of test_stability until this test.
+        """
+        meta = type("NameBoom", (type,), {"__name__": property(
+            lambda cls: (_ for _ in ()).throw(RuntimeError("name boom")))})
+        hidden = meta("Hidden", (), {})
+        rows = (("check_finite_scalar", lambda: st.check_finite_scalar(hidden()), True),
+                ("sequence element", lambda: st.check_finite_sequence([hidden()]), True),
+                ("outer argument", lambda: st.check_finite_sequence(hidden()), True),
+                ("mask entry", lambda: st.check_mask([True, hidden()], 2), True),
+                ("expected_len", lambda: st.check_mask([True], hidden()), True),
+                ("masked element", lambda: st.masked_mean_checked([hidden()], [True], 1), True),
+                ("_sq element",
+                 lambda: st.masked_squared_error_mean([hidden()], [0.0], [True], 1), True),
+                # `masked_mean_checked`'s divisor message shows the value and not the type name,
+                # so there is nothing for `_type_name` to reach there: in family is the whole claim
+                ("denominator", lambda: st.masked_mean_checked([1.0], [True], hidden()), False))
+        for label, call, names_the_type in rows:
+            with self.subTest(position=label):
+                with self.assertRaises(st.StabilityError) as cm:
+                    call()
+                if names_the_type:
+                    self.assertIn("<unnamed type>", str(cm.exception))
+        # the EXCEPTION class `_materialised` names in its message goes through it as well
+        hidden_exc = meta("HiddenExc", (Exception,), {})
+        broken = type("IterHiddenExc", (), {
+            "__iter__": lambda s: (_ for _ in ()).throw(hidden_exc("boom"))})()
+        with self.assertRaises(st.ShapeError) as cm:
+            st.check_finite_sequence(broken)
+        self.assertIn("<unnamed type>", str(cm.exception))
+
+    def test_g2g_the_unconverted_trio_still_propagates_through_every_helper(self):
+        """`_UNCONVERTED` -- MemoryError, RecursionError, SystemError -- reports the state of the
+        interpreter rather than the shape of the input, so all four helpers re-raise it instead of
+        describing it. That policy was written in `stability.py` and asserted nowhere, which made
+        every `except _UNCONVERTED: raise` line a free mutation; it is asserted here for the
+        intake helper and for the three conversion helpers alike."""
+        for exc in (MemoryError, RecursionError, SystemError):
+            with self.subTest(exc=exc.__name__):
+                with self.assertRaises(exc):                     # _materialised
+                    st.check_finite_sequence(_iter_raises(exc)())
+                with self.assertRaises(exc):                     # _as_float
+                    st.check_finite_scalar(_float_raises(exc)())
+                with self.assertRaises(exc):                     # _shown, inside a refusal message
+                    st.check_finite_scalar(_repr_raises(exc)())
+                meta = type("NameExplodes", (type,), {"__name__": property(
+                    lambda cls, e=exc: (_ for _ in ()).throw(e("name boom")))})
+                with self.assertRaises(exc):                     # _type_name
+                    st.check_finite_scalar(meta("H", (), {})())
+
+    def test_g2e_the_discharged_protocols_are_discharged_by_measurement(self):
+        """Three protocols the enumeration DISCHARGES, each probed rather than argued, because a
+        discharge believed rather than measured is how the `call()` candidate nearly slipped."""
+        hostile = type("IndexBoom", (), {
+            "__index__": lambda s: (_ for _ in ()).throw(RuntimeError("index")),
+            "__int__": lambda s: (_ for _ in ()).throw(RuntimeError("int")),
+            "__bool__": lambda s: (_ for _ in ()).throw(RuntimeError("bool")),
+            "__len__": lambda s: (_ for _ in ()).throw(RuntimeError("len"))})
+        with self.assertRaises(st.MaskLengthError):          # int()/__index__ are never consulted
+            st.check_mask([True, False], hostile())
+        with self.assertRaises(st.NormalizationMismatchError):
+            st.masked_mean_checked([1.0], [True], hostile())
+        # a mask entry's own __bool__ is never consulted: the strict-bool gate precedes any()
+        with self.assertRaises(st.MaskTypeError):
+            st.check_mask([type("BoolBoom", (int,), {
+                "__bool__": lambda s: (_ for _ in ()).throw(RuntimeError("bool"))})(1)], 1)
+        # len() is taken on this module's copy, never on the caller's object. The behaviour change
+        # this fix makes, pinned as the enumeration describes it: such an object is now ACCEPTED
+        # and read verbatim (HEAD refused it, incidentally, via `tuple(obj)`).
+        lying_len = type("LenBoom", (tuple,), {
+            "__len__": lambda s: (_ for _ in ()).throw(RuntimeError("len"))})
+        self.assertEqual(st.check_finite_sequence(lying_len((1.0, 2.0))), (1.0, 2.0))
+        self.assertEqual(st.check_mask(lying_len((True, False)), 2), (True, False))
+        with self.assertRaises(st.NormalizationMismatchError):   # and `len` still decides on the copy
+            st.masked_mean_checked(lying_len((1.0, 2.0)), [True, True], 1)
+        # `_same`'s bare `==` is the one comparison whose operand a caller's CALLABLE places, and
+        # `_plain_real` closes it there: the mutation is still detected, in family.
+        def swap(p):
+            p[0] = type("EqBoom", (float,), {
+                "__eq__": lambda s, o: (_ for _ in ()).throw(RuntimeError("eq")),
+                "__ne__": lambda s, o: (_ for _ in ()).throw(RuntimeError("ne")),
+                "__hash__": float.__hash__})(99.0)
+            return 1.0
+        with self.assertRaisesRegex(st.StabilityError, "mutated its input"):
+            st.check_gradient(swap, _G_QUAD, [1.0, 2.0])
+
+
+class TheCarveOutWhereItsHalvesMeet(unittest.TestCase):
+    """FINDING G1. `grad_fn` is a CALLABLE whose RETURN VALUE is a data argument, and when it is
+    lazy the data half decides -- so "an exception raised inside the caller's `fn`/`grad_fn`
+    propagates unwrapped ... that carve-out is about CALLABLES ... and it covers nothing else" was
+    false exactly where its two halves meet.
+
+    Measured: a plain generator-function `grad_fn` is SUPPORTED input (HEAD returns a full
+    `GradientCheckReport` for it, and for a genexp and a `map()`), while the same generator raising
+    `ZeroDivisionError` mid-body -- the carve-out's own example class, inside the caller's own
+    `grad_fn` -- yields a `ShapeError`. Both halves of the old message were also wrong: neither
+    `__iter__` nor an attribute lookup raised (the body did, during `__next__`), and the generator
+    IS usable as a sequence. The paragraph was unpinned as well: deleting it, and inverting it to
+    say data exceptions propagate unwrapped too, were both unkilled by all three permitted modules
+    on both interpreters.
+    """
+
+    _F = staticmethod(lambda p: p[0] ** 2 + 3.0 * p[1])
+
+    class _Dom(Exception):
+        """a caller's own domain exception: the class the module can know nothing about"""
+
+    def test_g1a_a_lazy_grad_fn_is_supported_input_and_its_body_is_a_data_read(self):
+        def honest(p):
+            yield 2.0 * p[0]
+            yield 3.0
+        for label, gf in (("generator function", honest),
+                          ("generator expression", lambda p: (v for v in (2.0 * p[0], 3.0))),
+                          ("map()", lambda p: map(float, [2.0 * p[0], 3.0]))):
+            with self.subTest(supported=label):
+                r = st.check_gradient(self._F, gf, [1.0, 2.0])
+                self.assertIsInstance(r, st.GradientCheckReport)
+                self.assertEqual(r.analytic, (2.0, 3.0))
+        for exc in (ZeroDivisionError, KeyError, AttributeError, self._Dom, ValueError,
+                    RuntimeError):
+            def bad(p, e=exc):
+                yield 2.0 * p[0]
+                raise e("the caller's own grad_fn body")
+            with self.subTest(lazy_body_raises=exc.__name__):
+                with self.assertRaises(st.ShapeError) as cm:
+                    st.check_gradient(self._F, bad, [1.0, 2.0])
+                self.assertIsInstance(cm.exception.__cause__, exc)
+        # the EAGER half of the carve-out is unchanged: the call itself propagates unwrapped
+        with self.assertRaises(ZeroDivisionError):
+            st.check_gradient(self._F, lambda p: 1 / 0, [1.0, 2.0])
+        with self.assertRaises(ZeroDivisionError):
+            st.check_gradient(lambda p: 1 / 0, lambda p: [2.0, 3.0], [1.0, 2.0])
+        # and the same lazy producer at the other data positions
+        def gx(exc, vals=(1.0, 2.0)):
+            return (v if i == 0 else (_ for _ in ()).throw(exc("body"))
+                    for i, v in enumerate(vals))
+        for exc in (ZeroDivisionError, KeyError, self._Dom):
+            for label, call in (("values", lambda e=exc: st.check_finite_sequence(gx(e))),
+                                ("row", lambda e=exc: st.check_finite_matrix([gx(e)])),
+                                ("masked values",
+                                 lambda e=exc: st.masked_mean_checked(gx(e), [True, True], 2)),
+                                ("point", lambda e=exc: st.check_gradient(
+                                    lambda p: p[0] ** 2, lambda p: [2 * p[0], 0.1], gx(e))),
+                                ("param_grad",
+                                 lambda e=exc: st.require_parameter_gradient(gx(e)))):
+                with self.subTest(position=label, raises=exc.__name__):
+                    with self.assertRaises(st.StabilityError):
+                        call()
+
+    def test_g1b_the_materialised_message_blames_the_half_that_failed(self):
+        """The message asserted `__iter__` had raised when the producer's BODY had, and asserted
+        the object was "not usable as a sequence" when it was. One `try`, two descriptions."""
+        def bad(p):
+            yield 2.0 * p[0]
+            raise ZeroDivisionError("body")
+        with self.assertRaises(st.ShapeError) as cm:
+            st.check_gradient(self._F, bad, [1.0, 2.0])
+        msg = str(cm.exception)
+        self.assertIn("it is iterable, but reading its elements raised ZeroDivisionError", msg)
+        self.assertIn("the failure is its producer's", msg)
+        self.assertNotIn("__iter__ or attribute lookup raised", msg)
+        self.assertNotIn("not usable as a sequence", msg)
+        # the OTHER half still says what it always said, and must not be relabelled
+        with self.assertRaises(st.ShapeError) as cm2:
+            st.check_finite_sequence(_iter_raises(RuntimeError)())
+        self.assertIn("its __iter__ or attribute lookup raised RuntimeError", str(cm2.exception))
+        self.assertNotIn("reading its elements", str(cm2.exception))
+        with self.assertRaises(st.ShapeError) as cm3:
+            st.check_finite_sequence(_getattr_raises(KeyError)())
+        self.assertIn("its __iter__ or attribute lookup raised KeyError", str(cm3.exception))
+        # and the ordinary refusal, with nothing raised at all, keeps the plain message
+        with self.assertRaises(st.ShapeError) as cm4:
+            st.check_finite_sequence(5)
+        self.assertEqual(str(cm4.exception), "values must be a sequence of numbers, got int")
+
+    def test_g1c_the_cost_of_the_widening_is_real_and_disclosed(self):
+        """The flip side of "existing callers that already catch ValueError keep working", which
+        was written nowhere: a caller's own `ZeroDivisionError`, raised in the generator it passed,
+        now arrives as this module's shape complaint and is absorbed by `except ValueError`.
+
+        The classification is defensible -- the module genuinely cannot tell "not a sequence" from
+        "this sequence's producer failed" -- so what is asserted here is the COST and its
+        mitigation (`__cause__`), not a different behaviour.
+        """
+        def caller_bug():
+            yield 1.0
+            raise ZeroDivisionError("the caller's own bug, not a shape problem")
+        absorbed = False
+        try:
+            st.check_finite_sequence(caller_bug())
+        except ValueError as e:                 # the caller's `except ValueError: skip_batch()`
+            absorbed = True
+            self.assertIsInstance(e, st.ShapeError)
+            self.assertIsInstance(e.__cause__, ZeroDivisionError)   # the diagnosis is not lost
+        self.assertTrue(absorbed, "the documented cost is that this IS absorbed as a ValueError")
 
 
 class FiguresAndDocPinInventory(unittest.TestCase):
@@ -1363,21 +1945,122 @@ class FiguresAndDocPinInventory(unittest.TestCase):
         A previous correction in this project put its replacement figure in a docstring and a
         comment -- which is the error the correction was about -- so this one is a count derived
         from the class and compared against the word written in its docstring.
+
+        It fired as intended when FINDING G1 and G2 added D5, D6 and D7: the figure moved from
+        four to seven and this test failed until the docstring said so.
         """
         passages = {k: v for k, v in vars(LoadBearingSentences).items()
                     if k.startswith("D") and isinstance(v, str)}
         withdrawn = {k for k in passages if k.endswith("_WITHDRAWN")}
         positive = {k for k in passages if k not in withdrawn}
-        self.assertEqual(len(positive), 4, f"positive passages: {sorted(positive)}")
+        self.assertEqual(len(positive), 7, f"positive passages: {sorted(positive)}")
         self.assertEqual(len(withdrawn), 1, f"withdrawn passages: {sorted(withdrawn)}")
         src = inspect.getsource(LoadBearingSentences)
-        self.assertEqual(src.count("assertIn("), 5, "cleandoc'd assertIn doc pins")
-        self.assertEqual(src.count("assertNotIn("), 1)
+        self.assertEqual(src.count("assertIn("), 8, "cleandoc'd assertIn doc pins")
+        self.assertEqual(src.count("assertNotIn("), 2)
         doc = _doc(LoadBearingSentences)
         if doc is not None:
             self.assertIn(f"{self._WORD[len(positive)]} passages", doc,
                           "the figure in the docstring disagrees with the class")
             self.assertIn(f"{self._WORD[len(withdrawn)].lower()} withdrawn sentence", doc)
+
+    def test_the_derived_figures_in_these_comments_match_their_lists(self):
+        """The policing of derived figures, EXTENDED from docstrings to the two comment blocks.
+
+        `test_the_load_bearing_sentence_count_is_derived_not_written` polices one figure, in one
+        class docstring. The intake enumeration's own figure was outside that reach and was wrong:
+        it said the derivation "found FIVE candidates and discharged two" while its list marks four
+        intake points and ONE discharge -- a derived figure in a comment, asserted by nothing,
+        which is the exact category that test exists for. So the policing is extended here to
+        count the end-of-row markers in both comment blocks and compare them with the words the
+        blocks write. `inspect.getsource` reads the file, so this works under `-OO` too, where a
+        docstring pin cannot.
+        """
+        src = inspect.getsource(st)
+        intake = src.split("# THE ENUMERATION of sites where caller-supplied input")[1]
+        intake = intake.split("_NOT_A_SEQUENCE = (")[0]
+        self.assertEqual(intake.count("[intake]"), 4, "intake rows in the first enumeration")
+        self.assertEqual(intake.count("DISCHARGED"), 1, "discharged candidates")
+        total = intake.count("[intake]") + intake.count("DISCHARGED")
+        self.assertIn(f"found {self._WORD[total].upper()}", intake,
+                      "the candidate figure disagrees with the list below it")
+        self.assertIn(f"candidates and discharged {self._WORD[intake.count('DISCHARGED')].upper()}",
+                      intake, "the discharge figure disagrees with the list below it")
+        conv = src.split("caller-input conversion protocols")[1].split("def _shown")[0]
+        converted, discharged = conv.count("[converted]"), conv.count("DISCHARGED")
+        self.assertEqual((converted, discharged), (4, 3), "the conversion enumeration's rows")
+        self.assertIn(f"{self._WORD[converted + discharged].upper()} protocols", conv)
+        self.assertIn(f"{self._WORD[converted].upper()} have reachable sites", conv)
+
+    def test_the_open_class_channel_sentence_is_its_measured_scope(self):
+        """The sentence the NEXT OWNER reads about an open finding, which makes it load-bearing.
+
+        It used to say `_is_row_like` "happens to absorb it at the nestedness probe; nothing else
+        does" -- false since the intake fix moved `isinstance(obj, _NOT_A_SEQUENCE)` inside
+        `_materialised`'s `try`. Measured at this commit on both interpreters with a `@property
+        __class__` raising RuntimeError: the OUTER positions and the ROW position come out IN
+        FAMILY; the ELEMENT positions, `denominator` and `expected_len` still escape as a bare
+        RuntimeError.
+
+        ONLY the in-family half is asserted. The escaping half is a known open finding recorded in
+        `docs/PROGRESS.md`, reaching ~85 `isinstance` sites across three files and needing a
+        kit-wide decision by those files' owners: a test asserting that it escapes would PIN A
+        DEFECT and make the eventual fix fail here.
+        """
+        src = inspect.getsource(st)
+        self.assertIn("MEASURED SCOPE at this commit", src)
+        self.assertIn("still escape as a bare RuntimeError", src)
+        self.assertNotIn("happens to absorb it at", src)     # the withdrawn, false claim
+        self.assertIn("it is NOT closed", src)
+
+        def hostile():
+            class C:
+                @property
+                def __class__(self):
+                    raise RuntimeError("class boom")
+
+                def __iter__(self):
+                    return iter([1.0, 2.0])
+            return C()
+        for label, call in (("outer values", lambda: st.check_finite_sequence(hostile())),
+                            ("mask", lambda: st.check_mask(hostile(), 2)),
+                            ("row", lambda: st.check_finite_matrix([hostile()])),
+                            ("point", lambda: st.check_gradient(lambda p: 1.0,
+                                                                lambda p: [1.0], hostile())),
+                            ("before", lambda: st.check_params_changed(hostile(), [1.0, 2.0])),
+                            ("param_grad", lambda: st.require_parameter_gradient(hostile()))):
+            with self.subTest(in_family_at=label):
+                with self.assertRaises(st.StabilityError):
+                    call()
+
+    def test_the_only_skip_in_this_file_is_the_counted_numpy_one(self):
+        """NOTE E's principle versus the one real `@unittest.skipIf` in this file, reconciled.
+
+        The hazard Note E names is a guard that can skip a pin whose SUBJECT STILL EXISTS: under
+        `-OO` every behaviour is still assertable, so skipping there hides a pin and reports OK.
+        `test_numpy_scalars_rejected` is the other case -- without numpy there is no `np.bool_` or
+        `np.int64` to hand `check_mask`, so there is nothing to assert, and the alternatives are a
+        skip or a silently vacuous pass. The skip is the better one because it is COUNTED:
+        `scripts/test_baseline.txt` records exactly one bare-environment skip for this module and
+        `scripts/run_tests.sh` fails a bare run reporting fewer. The hazard is an UNCOUNTED skip,
+        so what this test pins is that this stays the only skip in the file, and that no test
+        skips itself from inside -- either would change the counted figure or hide a pin.
+        """
+        import ast
+        src = inspect.getsource(sys.modules[__name__])
+        tree = ast.parse(src)
+        decorated = [(n.name, ast.unparse(d)) for n in ast.walk(tree)
+                     if isinstance(n, ast.FunctionDef) for d in n.decorator_list
+                     if "skip" in ast.unparse(d)]
+        self.assertEqual(len(decorated), 1, f"skip decorators in this file: {decorated}")
+        self.assertEqual(decorated[0][0], "test_numpy_scalars_rejected")
+        self.assertIn("np is None", decorated[0][1])
+        self.assertIn("numpy not installed", decorated[0][1])
+        inline = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                  and isinstance(n.func, ast.Attribute) and n.func.attr in ("skipTest", "skip")]
+        self.assertEqual(inline, [], "a test that skips itself is an uncounted skip")
+        # every OTHER numpy-dependent assertion is behind a plain `if`, which cannot skip
+        self.assertEqual(src.count("if np is not None:"), 2)
 
     def test_e_the_docstring_guard_is_inert_in_a_normal_run(self):
         """NOTE E. `python -OO` strips docstrings, so `inspect.cleandoc(None)` raised
@@ -1394,7 +2077,7 @@ class FiguresAndDocPinInventory(unittest.TestCase):
         running, including under `-OO`. This test asserts the guard is inert whenever docstrings
         exist, which is every run this project makes.
         """
-        self.assertEqual(_DOCSTRINGS_PRESENT, sys.flags.optimize < 2)
+        self.assertEqual(st.__doc__ is not None, sys.flags.optimize < 2)
         for obj in (st, st.check_gradient, st.check_finite_scalar, st.masked_mean_checked,
                     st.check_mask, st.check_finite_sequence, LoadBearingSentences):
             with self.subTest(obj=getattr(obj, "__name__", obj)):
@@ -1467,7 +2150,7 @@ class FiguresAndDocPinInventory(unittest.TestCase):
 
 
 class LoadBearingSentences(unittest.TestCase):
-    """Four passages that were wider than their mechanism, each pinned to its own passage, plus
+    """Seven passages that were wider than their mechanism, each pinned to its own passage, plus
     one withdrawn sentence pinned ABSENT.
 
     Both figures are ASSERTED, not merely written: `FiguresAndDocPinInventory` re-derives them
@@ -1497,6 +2180,24 @@ talk a guard out of raising.""")
     CPython 3.12+ compensated float summation (sum([1e16, 1.0, -1e16]) is
     1.0 there, not 0.0); masked means can differ in the last bits on
     older Pythons.""")
+    # FINDING G1: the carve-out, narrowed to the eagerly-raised case and with the lazy case named.
+    # The previous wording ended "and it covers nothing else", which a lazy `grad_fn` falsified.
+    D5 = inspect.cleandoc("""Other behaviour: an exception the caller's `fn`/`grad_fn` raises WHILE THIS
+    MODULE CALLS IT (e.g. ZeroDivisionError) propagates unwrapped; it is not a
+    StabilityError. That carve-out is about CALLABLES this module INVOKES, and
+    it reaches the call itself and nothing else -- in particular it does NOT
+    reach a LAZY return value.""")
+    # FINDING G1: the cost of the widening, which was written nowhere.
+    D6 = inspect.cleandoc("""
+    A caller running `except ValueError: skip_batch()` now ABSORBS an exception of its own
+    making -- a `ZeroDivisionError` in the generator it passed as `values`, say -- as a shape
+    complaint about that argument, and carries on. That is a real loss: an unrelated caller bug
+    becomes an expected-and-handled condition.""")
+    # FINDING G2: lying versus raising, the distinction the old exclusion did not make.
+    D7 = inspect.cleandoc("""TAKEN AT ITS WORD IS ABOUT LYING, NOT ABOUT RAISING: a
+conversion protocol that RAISES produces no value to take at anyone's word, so
+it is a failed READ of a data argument and is converted to this module's family
+(NonNumericError, with the original chained) rather than escaping it""")
 
     def test_d1_module_headline_matches_its_mechanism(self):
         doc = _doc(st)
@@ -1543,6 +2244,56 @@ talk a guard out of raising.""")
                               atol=_liar(1e-6), zero_tol=_liar(0.0))
         self.assertEqual(r, st.check_gradient(_F_QUAD, _G_QUAD, [1.0, 2.0]))
         self.assertEqual((type(r.step), type(r.rtol), type(r.atol)), (float, float, float))
+
+    def test_d5_the_carve_out_covers_the_call_and_not_a_lazy_return_value(self):
+        """The passage, plus both halves of the behaviour it now describes: eager raises propagate
+        unwrapped, a lazy producer's body is a data read and is converted."""
+        doc = _doc(st.check_gradient)
+        if doc is not None:
+            self.assertIn(self.D5, doc)
+            self.assertNotIn("INVOKE, and it covers nothing else", doc,
+                             "the wider sentence is back: a lazy grad_fn falsifies it")
+        with self.assertRaises(ZeroDivisionError):               # the call itself
+            st.check_gradient(_F_QUAD, lambda p: 1 / 0, [1.0, 2.0])
+
+        def lazy_bad(p):
+            yield 2.0 * p[0]
+            raise ZeroDivisionError("the caller's own grad_fn body")
+        with self.assertRaises(st.ShapeError):                   # the returned DATA
+            st.check_gradient(_F_QUAD, lazy_bad, [1.0, 2.0])
+
+        def lazy_good(p):
+            yield 2.0 * p[0]
+            yield 3.0
+        self.assertEqual(st.check_gradient(_F_QUAD, lazy_good, [1.0, 2.0]).analytic, (2.0, 3.0))
+
+    def test_d6_the_cost_of_converting_a_data_read_is_disclosed(self):
+        """The passage, plus the cost itself: a caller's own exception absorbed by their own
+        `except ValueError`, with `__cause__` as the stated mitigation."""
+        doc = _doc(st._materialised)
+        if doc is not None:
+            self.assertIn(self.D6, doc)
+
+        def caller_bug():
+            yield 1.0
+            raise ZeroDivisionError("the caller's own bug")
+        with self.assertRaises(ValueError) as cm:
+            st.check_finite_sequence(caller_bug())
+        self.assertIsInstance(cm.exception, st.ShapeError)
+        self.assertIsInstance(cm.exception.__cause__, ZeroDivisionError)
+
+    def test_d7_lying_and_raising_conversions_are_different_claims(self):
+        """The passage, plus the two directions it separates: a LYING `__float__` is still taken
+        at its word, a RAISING one is a failed read and stays in family."""
+        doc = _doc(st)
+        if doc is not None:
+            self.assertIn(self.D7, doc)
+        lying = type("LyingReal", (Real,), dict(_REAL_STUBS, __float__=lambda s: 2.5))()
+        self.assertEqual(st.check_finite_scalar(lying), 2.5)      # taken at its word
+        for exc in _FLOAT_EXCS:
+            with self.subTest(raises=exc.__name__):
+                with self.assertRaises(st.NonNumericError):
+                    st.check_finite_scalar(_float_raises(exc)())
 
     def test_d4_compensated_summation_claim_matches_its_accumulation(self):
         """The fourth passage. It was the one load-bearing figure with no pin at all, and it is a
