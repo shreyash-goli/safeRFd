@@ -99,8 +99,18 @@ footer{font-size:12px;color:#444;margin:20px 0}
 
 # ------------------------------------------------------------------ escaping
 def _e(value: Any) -> str:
-    """The ONLY path from a value to HTML text/attributes."""
-    return html.escape(str(value), quote=True)
+    """The ONLY path from a value to HTML text/attributes.
+
+    `str(value)` IS A PROTOCOL CALL, and on anything but a plain `str` it is the CALLER'S (round 12).
+    Being the only path is what makes guarding it here the fix for the whole TEXT family rather than for
+    the cells that happened to be measured: every `_e` of a caller-supplied object -- and `PROTOCOL_SITES`
+    counts them -- now renders `_UNREADABLE` where it used to raise. The `type(value) is str` fast path is
+    not an exemption but an identity: `str.__str__` of a plain `str` is that same object, so the branch
+    says only that the common case needs no admission, and it keeps this function (called on the order of
+    a thousand times per page) off `_spoken`'s extra frame."""
+    if type(value) is str:
+        return html.escape(value, quote=True)
+    return html.escape(_spoken(value, str), quote=True)
 
 
 def _visible(text: str) -> str:
@@ -127,7 +137,15 @@ def _untrusted(value: Any, label: str = "") -> str:
     # slice below reads the real buffer either way, so the TEXT shown was never wrong -- only this
     # module's claim about whether it was complete. `_word` collapses the subclass to the characters it
     # stores, so the length measured is the length of the string displayed.
-    s = _word(value) if isinstance(value, str) else repr(value)
+    # AND `_spoken(value)`, NOT `repr(value)`, FOR THE NON-STRING BRANCH (round 12), which is the same
+    # finding re-opened in the same function: `repr()` is permitted to return a `str` SUBCLASS, so an
+    # object whose `__repr__` returns a 400-character subclass whose `__len__` returns 0 rendered 300
+    # characters here with NO marker -- through the PUBLIC `render_dashboard` API, at
+    # `snapshot["behind_by_field_note"]`, in the Source-diff inventory. The honest 400-character `repr`
+    # does show the marker; the subclass did not. `_spoken` admits the ANSWER as well as asking for it,
+    # so this branch now measures a plain `str` exactly as the string branch does -- and a `__repr__`
+    # that RAISES renders `_UNREADABLE` instead of taking the page down.
+    s = _word(value) if isinstance(value, str) else _spoken(value)
     clipped = len(s) > MAX_TEXT
     s = _visible(s[:MAX_TEXT]) + (" [... truncated]" if clipped else "")
     cap = f"UNTRUSTED FREE TEXT{(' (' + label + ')') if label else ''} - NOT EVIDENCE"
@@ -156,7 +174,7 @@ def _coerce_class(value: Any, run_record: bool = False) -> tuple[EvidenceClass, 
     w = _word(value)
     try:
         ec = EvidenceClass.parse(value if w is None else w)
-    except ValueError:
+    except Exception:       # noqa: BLE001 - round 12: `parse` ends in a hash lookup on the caller
         return EvidenceClass.UNKNOWN, "invalid evidence label; shown as UNKNOWN"
     if run_record and ec is EvidenceClass.SOURCE_OBSERVED:
         return EvidenceClass.UNKNOWN, "SOURCE_OBSERVED is not valid on a run record; shown as UNKNOWN"
@@ -618,6 +636,121 @@ def _word_text(x: Any, why: str) -> str:
     return _e(_visible(w)) if w is not None else _unknown(why)
 
 
+# ---------------------------------------------- THE CALLER'S PROTOCOLS (round 12; scheme note item 9)
+# THE FOURTH FORGEABLE CATEGORY, AND ITS CAUSE. Rounds 8, 9 and 11 closed three categories of forgeable
+# thing -- numbers, decisive words, and a `Mapping`'s keys -- by admitting the VALUE the caller's object
+# stores. Every one of those admissions reads a value; none of them covers an object that REFUSES to be
+# read. Round 8 knew this and said so: `CONVERSION_DUNDERS` carries a `"RAISE"` member because "a
+# `__float__` that raises took BOTH renderers down with ZeroDivisionError". The word lane and the key
+# lane were built from that template WITH THE `RAISE` MEMBER DROPPED, while their prose kept the stronger
+# promise ("whatever it shows must come from the STORED TEXT", "byte-identical OR ... FAIL CLOSED"). All
+# three sweeps CATCH a raise -- `"a raise IS the finding"` is in each of them -- and two of them never
+# PRODUCED one. That is this project's signature defect: a mechanism whose stated reach exceeds its
+# mechanism. `RAISE` is restored to both lanes in `test_dashboard.py`, and these three functions are what
+# the restored lanes then required.
+#
+# MEASURED at the previous HEAD, 3.12.4 and 3.13.5 BYTE-IDENTICALLY, 22 page-down positions and one
+# silent text loss. NINE of them through the fully public `render_dashboard(data)` API with no
+# `object.__setattr__` anywhere -- the snapshot and `records` are the API's own arguments:
+#     snapshot["fork"] / ["upstream"] / ["audit_date"] / ["behind_by_field_note"] = any object whose
+#         `__repr__` raises                                   -> ZeroDivisionError out of render_dashboard
+#     snapshot["changed_files"][0]["filename"] likewise        -> ZeroDivisionError
+#     records[0] whose metaclass `__name__` raises             -> ZeroDivisionError
+#     records[0] whose metaclass `__name__` returns `12345`    -> TypeError into `_visible`
+#     records whose `__iter__` raises anything but TypeError   -> ZeroDivisionError
+#     snapshot["behind_by_field_note"] whose `__repr__` returns a `str` SUBCLASS LYING ON `__len__`
+#         -> THE PAGE RENDERS, 300 of 400 characters shown, and NO "[... truncated]" marker. That is
+#         round 9's own finding re-opened: `_untrusted` was fixed with `_word(value)` but only inside
+#         `if isinstance(value, str)`, and `repr()` is permitted to return a `str` SUBCLASS, so the
+#         non-string branch re-admitted the identical defeat at the very function round 9 fixed. A lie
+#         about the TEXT is inside the box's own "UNTRUSTED FREE TEXT - NOT EVIDENCE" caption; a lie
+#         about HOW MUCH WAS SHOWN is not, and that is the claim `_untrusted` makes and broke.
+# and thirteen more at the `object.__setattr__` tier (the tier of every round-9 and round-11 finding):
+# `GateResult.reason`, `MetricValue.reason`, `ComponentResult.metric` (in its three prose siblings --
+# `_weaker_than_protocol`, `_n_sources_disagree`, `_interval_sources_disagree` -- which is where the
+# page says WHICH finding it is), `JointResult.subject_kind` (a protocol call inside the
+# problem-message path), `ExperimentRecord.metrics` non-string keys, `HypothesisResult.verdict` and
+# `ComponentResult.verdict` unhashable, and `train.history` by `__iter__` or by a raising property.
+#
+# THESE ARE FINDINGS BY THE MODULE'S OWN STANDARD. `_metric_cell`'s docstring calls a raise "A page taken
+# down, outside this module's stated error contract"; `_finite_number`'s calls the `10**400` raise "a page
+# taken down, which contradicts this module's own docstring promise". Under all 22 inputs NO PANEL
+# RENDERS AT ALL, which is neither UNKNOWN nor zero -- and "an absent key renders its panel as UNKNOWN,
+# never as zero or empty" is the module docstring, while "missing results render as UNKNOWN, not 0" is
+# SR-13's literal acceptance phrase.
+#
+# THE THREE FAMILIES, DERIVED FROM THE SOURCE RATHER THAN LISTED HERE. `protocol_call_sites()` in
+# `test_dashboard.py` walks this file's AST and names every position where it invokes an overridable
+# protocol on a value: TEXT (`str`/`repr`/`format`/`__name__`), ITERATION (`for`/`list`/`tuple`/...) and
+# ATTRIBUTE (`getattr`). `PROTOCOL_SITES` classifies every one of them and
+# `test_every_protocol_call_on_caller_data_is_admitted` asserts set equality, so a new `str(caller_obj)`
+# cannot be added without being classified -- the derivation `LEN_SITES` is for `len()`, one lane out.
+_UNREADABLE = "object with no readable text"
+
+
+def _spoken(x: Any, how: Any = repr) -> str:
+    """THE ONE ADMISSION for TEXT THIS PAGE OBTAINS BY INVOKING A PROTOCOL ON A CALLER-SUPPLIED OBJECT.
+
+    `_word` admits a string by reading the characters it stores. There is nothing to read when the value
+    is not a string: the page must ASK the object, and asking is `__repr__`, `__str__`, `__format__` or a
+    metaclass `__name__` -- every one of them caller-defined, every one of them free to raise, and
+    `__repr__` and `__str__` free to return a `str` SUBCLASS that then lies about its own length. This
+    function makes both outcomes a rendered UNKNOWN instead of a traceback:
+
+      * the protocol RAISES -> `_UNREADABLE`, a fixed phrase this module owns. The object named nothing
+        readable, which is the same ruling `_word` makes for a non-string and `_finite_float` for a
+        non-number: refuse the value, render UNKNOWN, never take the page down.
+      * the protocol ANSWERS -> `_word` of the answer, so what is measured and displayed is a PLAIN
+        `str` of the characters the answer holds. That is the half that restores `_untrusted`'s
+        truncation marker, and it is the same argument `_word`'s own docstring makes one level in.
+
+    IT IS NOT A HONESTY CHECK and makes no claim to be: a `__repr__` that answers with a lie is still a
+    lie, and the two DECLARED "bare" residuals (`GateResult.reason`, `MetricValue.reason`) are routed
+    through here deliberately with `how=str`, so the residual stays exactly as open as round 5 and round
+    9 left it -- a lie still shows, a raise no longer kills the page.
+    `test_the_two_bare_string_residuals_are_still_open` goes red if that ever changes."""
+    try:
+        s = how(x)
+    except Exception:       # noqa: BLE001 - an object that refuses to be read is malformed input
+        return _UNREADABLE
+    w = _word(s)
+    return w if w is not None else _UNREADABLE
+
+
+def _type_name(x: Any) -> str:
+    """The NAME of `x`'s class, admitted. `type(x).__name__` is an attribute of the METACLASS, so a
+    caller may make it raise or return a non-string: measured, a `records` entry whose metaclass
+    `__name__` raised took the page down with ZeroDivisionError, and one returning `12345` took it down
+    with `TypeError: 'int' object is not iterable` inside `_visible`."""
+    return _spoken(x, lambda o: type(o).__name__)
+
+
+def _attr(obj: Any, name: str, default: Any = None) -> Any:
+    """`getattr` with a default that also fails closed on a PROPERTY THAT RAISES.
+
+    `getattr(o, n, d)` returns `d` for AttributeError and for nothing else, so a duck-typed stand-in
+    whose attribute is a property that raises reaches no default at all: measured, an object with a
+    raising `history` property took `render_dashboard` down. Attribute access is a protocol like any
+    other and this is its admission."""
+    try:
+        return getattr(obj, name, default)
+    except Exception:       # noqa: BLE001
+        return default
+
+
+def _iterated(x: Any) -> Optional[list]:
+    """`list(x)` or None for "not iterable", which every caller renders as UNKNOWN or refuses.
+
+    `__iter__` is overridable and `isinstance(x, (list, tuple))` admits a SUBCLASS, so a `list` subclass
+    whose `__iter__` raises passes every structural check this module makes and then takes the page down
+    on the `for`. Measured on `records` (whose own `except TypeError` caught the wrong exception type) and
+    on `train.history`."""
+    try:
+        return list(x)
+    except Exception:       # noqa: BLE001
+        return None
+
+
 def _word_keyed(m: Any) -> dict:
     """THE ONE ADMISSION for the KEYS of a caller-supplied `Mapping` this page looks words up in. A plain
     `dict` keyed by the characters each key STORES. Fails closed: a key whose stored word is ambiguous
@@ -689,7 +822,9 @@ def _word_keyed(m: Any) -> dict:
 #                  it. `_gate_set_ok` catches the forgery instead.
 #            THE PER-SITE FIGURES ARE DELIBERATELY NOT WRITTEN HERE (round 11). Three stood in this
 #            comment -- "54 of 54", "27 of 27", "54 of 54" -- and NONE of them reproduced: measured, the
-#            same sweep gives 48 of 48, 4 of 4 and 42 of 42, every one of which failed closed. The
+#            same sweep gives 48 of 48, 4 of 4 and 42 of 42, every one of which failed closed -- and
+#            round 12's restored `RAISE` member moves those three to 54, 5 and 49, which is why even a
+#            CORRECTED figure does not belong in a comment. The live ones are in `KEY_LANE_FIGURES`. The
 #            substance was right and the arithmetic had rotted, because a figure in a comment is a figure
 #            nothing goes red about -- the per-sentence-pinning gap CLAUDE.md names. They now live in
 #            `KEY_LANE_FIGURES` in `test_dashboard.py`, next to the loop that produces them and
@@ -725,6 +860,36 @@ STORED_WORDS = {
     "MetricValue": {"reason": "bare"},
 }
 WORD_LANES = ("shown", "key", "bare")
+
+# EVERY caller-supplied STRING this renderer reads as an ELEMENT of a tuple-valued field of a rendered
+# dataclass, by the class that holds it, with its LANE (round 12). The element twin of `STORED_WORDS`,
+# and it exists because the field-level enumeration STRUCTURALLY COULD NOT SEE THESE: `string_fields_of`
+# matches the annotation whole (`^str$|^Optional[str]$`) and all four of these are annotated bare
+# `tuple`, `walk_payload` stops at dataclasses, and `container_sites()` forges a container's `__len__`
+# and never its entries.
+#
+#   IntervalPair.flags          "key", and LOAD-BEARING: `_n_problem`'s source (2) is
+#       `MIN_SEEDS_FLAG in pair.flags`, which is the ELEMENT's `__eq__` and not the field's. Measured in
+#       both directions and fail-closed in both -- a lying element on an honest study moves the page to
+#       the source-B paragraph and drops the decisive styling; the same liar hiding a real flag on a
+#       genuinely below-minimum run still fires source A with SAMPLE SIZE CONTRADICTED. It was a note
+#       with a measurement; being a caller-supplied string a DECISION reads is what puts it in a lane.
+#   HypothesisResult.blocking / supported_blockers   "key": read for TRUTHINESS only
+#       (`bool(getattr(h, "supported_blockers", ()))` and the `blocking` test in `_eff_hypothesis`), so
+#       an element lie can only add a blocker, never remove the recomputation that would catch it.
+#   HypothesisResult.reasons    "shown", and the "shown" lane's TRIVIAL CASE: this module contains ZERO
+#       occurrences of `reasons`, so no lie moves a byte today. It is declared for exactly the reason
+#       `RunProvenance.python_version` is -- the day it gains a cell it inherits the assertion with no
+#       edit here -- and it is declared at all because round 12's enumeration (`tuple_fields_of`) is the
+#       first one that could see it.
+#
+# `test_every_tuple_field_of_a_rendered_class_is_declared` enumerates `dataclasses.fields()` and fails if
+# a tuple-valued field is in neither this table nor `ELEMENT_FIELDS_NOT_STRINGS`, so a NEW tuple field
+# cannot be added without being classified.
+STORED_WORD_ELEMENTS = {
+    "IntervalPair": {"flags": "key"},
+    "HypothesisResult": {"blocking": "key", "supported_blockers": "key", "reasons": "shown"},
+}
 
 # EVERY stored number this renderer turns into a figure or feeds to a verdict, by the class that holds
 # it. Keyed by class NAME, not by the class, so this table does not add an import-time dependency on
@@ -779,7 +944,7 @@ def _admitted(obj: Any, cls_name: str) -> Optional[dict]:
     and it is one of only two that do."""
     out = {}
     for attr, kind in STORED_NUMBERS[cls_name].items():
-        v = getattr(obj, attr, _MISSING)
+        v = _attr(obj, attr, _MISSING)
         a = None if v is _MISSING else _NUM_KINDS[kind](v)
         if a is None:
             return None
@@ -858,7 +1023,11 @@ def _metric_cell(mv: Any) -> str:
         if v is not None:
             return f'<span class="measured">{_e(_num(v))}</span>'
         reason = mv.reason if mv.value is None else "malformed measured value"
-        return f'<span class="unknown">UNKNOWN</span> <span class="caveat">{_e(_visible(str(reason))[:MAX_TEXT])}</span>'
+        # `_spoken(reason, str)`, not `str(reason)` (round 12). A DECLARED "bare" residual: the caller's
+        # `__str__` is still what is shown, so a lie still shows and the residual is as open as round 9
+        # left it -- but a `__str__` that RAISES no longer takes the page down, which is the ruling this
+        # docstring already makes above for a raising `__float__`.
+        return f'<span class="unknown">UNKNOWN</span> <span class="caveat">{_e(_visible(_spoken(reason, str))[:MAX_TEXT])}</span>'
     return '<span class="unknown">UNKNOWN</span> <span class="caveat">not recorded</span>'
 
 
@@ -888,8 +1057,9 @@ def _metric_table(metrics: Optional[Mapping], expected: Iterable[str] = ()) -> s
     with `_untrusted`'s admitted text and valued from the entry's own `MetricValue`, so a lying key can
     change neither which rows exist nor what is in them, and the `expected` set is answered against the
     words the keys STORE. Sorting is by that stored word; equal words keep mapping order, so the output
-    is deterministic. A non-string key still gets its row (nothing is hidden) and is ordered by `repr`,
-    which is what `_untrusted` shows for it."""
+    is deterministic. A non-string key still gets its row (nothing is hidden) and is ordered by `_spoken`,
+    which is what `_untrusted` shows for it -- `repr` until round 12, when a non-string key whose
+    `__repr__` raises was measured taking the whole page down from this sort key."""
     metrics = metrics if isinstance(metrics, Mapping) else {}
     try:
         items = list(metrics.items())
@@ -901,7 +1071,7 @@ def _metric_table(metrics: Optional[Mapping], expected: Iterable[str] = ()) -> s
         w = _word(k)
         if w is not None:
             stored.add(w)
-        rows_by_word.append((w if w is not None else repr(k), k, v))
+        rows_by_word.append((w if w is not None else _spoken(k), k, v))
     for n in expected:
         w = _word(n)
         if w is None or w in stored:
@@ -979,7 +1149,7 @@ def _render_snapshot(snap: Any) -> str:
         # correct one, because the rows and the total then have ONE source. The malformed-entry branch
         # increments too -- a malformed entry is still an entry, and it renders a row of its own.
         n_rows = 0
-        for f in files:
+        for f in (_iterated(files) or ()):     # a `list` SUBCLASS may refuse to be iterated
             n_rows += 1
             if not isinstance(f, Mapping):
                 rows += f"<tr><td colspan=3>{_unknown('malformed entry')}</td></tr>"
@@ -1012,9 +1182,10 @@ def _render_snapshot(snap: Any) -> str:
     # extra UNKNOWN and the panel still badged SOURCE_OBSERVED. A commit entry that is not a string now
     # reads UNKNOWN rather than its `repr`: it names no commit, and this list is a list of hashes.
     commits = snap.get("fork_commits")
+    commit_list = _iterated(commits) if isinstance(commits, (list, tuple)) else None
     commits_html = ("<ul>" + "".join(f"<li><code>{_word_text(c, 'malformed commit entry')}</code></li>"
-                                     for c in commits) + "</ul>"
-                    if isinstance(commits, (list, tuple)) else "<p>" + _unknown("fork_commits not present") + "</p>")
+                                     for c in commit_list) + "</ul>"
+                    if commit_list is not None else "<p>" + _unknown("fork_commits not present") + "</p>")
     mb = snap.get("merge_base")
     mb_html = f"<code>{_word_text(mb, 'merge_base not present')}</code>" if isinstance(mb, str) \
         else _unknown("merge_base not present")
@@ -1051,7 +1222,10 @@ def _valid_history(history: Any) -> tuple[list, int]:
     good, bad = [], 0
     if not isinstance(history, (list, tuple)):
         return good, 0
-    for row in history:
+    rows = _iterated(history)           # a `list` SUBCLASS passes the check above and may still refuse
+    if rows is None:
+        return good, 0
+    for row in rows:
         try:
             s, l, g = row
             nums = [_finite_number(v) for v in (s, l, g)]
@@ -1099,10 +1273,10 @@ def _render_train(train: Any) -> str:
     if train is None:
         return _panel("Toy training curves", EvidenceClass.UNKNOWN,
                       "<p>" + _unknown("no training result supplied; no curve drawn (not a flat zero curve)") + "</p>")
-    rec = getattr(train, "record", None)
+    rec = _attr(train, "record")
     if isinstance(train, ExperimentRecord):
         rec = train
-    hist, bad = _valid_history(getattr(train, "history", None))
+    hist, bad = _valid_history(_attr(train, "history"))
     problem = None
     if isinstance(rec, ExperimentRecord):
         ec, problem = _coerce_class(rec.evidence_class, run_record=True)
@@ -1124,7 +1298,7 @@ def _render_train(train: Any) -> str:
         body += "<p>" + _unknown("no usable history; no curve drawn") + "</p>"
     if bad:
         body += f'<p class="warn">{_e(bad)} malformed history row(s) omitted.</p>'
-    if getattr(train, "loss_increased", False) is True:
+    if _attr(train, "loss_increased", False) is True:
         body += '<p class="warn">loss_increased: final loss exceeded initial loss.</p>'
     body += _metric_table(rec.metrics if isinstance(rec, ExperimentRecord) else None, TRAIN_EXPECTED)
     if isinstance(rec, ExperimentRecord):
@@ -1137,10 +1311,10 @@ def _record_idents(rec: ExperimentRecord) -> str:
     p = rec.provenance
     out = (f"<table><tr><th>field</th><th>value (unverified)</th></tr>"
            f"<tr><td>name</td><td>{_untrusted(rec.name, 'name')}</td></tr>"
-           f"<tr><td>run_id</td><td>{_untrusted(getattr(p, 'run_id', None), 'run_id')}</td></tr>"
-           f"<tr><td>code_version</td><td>{_untrusted(getattr(p, 'code_version', None), 'code_version')}</td></tr>"
-           f"<tr><td>timestamp_utc</td><td>{_untrusted(getattr(p, 'timestamp_utc', None))}</td></tr>"
-           f"<tr><td>seed</td><td>{_untrusted(getattr(p, 'seed', None))}</td></tr></table>")
+           f"<tr><td>run_id</td><td>{_untrusted(_attr(p, 'run_id', None), 'run_id')}</td></tr>"
+           f"<tr><td>code_version</td><td>{_untrusted(_attr(p, 'code_version', None), 'code_version')}</td></tr>"
+           f"<tr><td>timestamp_utc</td><td>{_untrusted(_attr(p, 'timestamp_utc', None))}</td></tr>"
+           f"<tr><td>seed</td><td>{_untrusted(_attr(p, 'seed', None))}</td></tr></table>")
     if rec.notes is not None:
         out += f"<p>notes: {_untrusted(rec.notes, 'notes')}</p>"
     return out
@@ -1164,10 +1338,14 @@ def _vcoerce(enum_cls, value):
     function had resolved from the lie. The recomputation was right and the comparison was made against
     the wrong member. `_word` hands the enum the characters the object stores, so the member compared is
     the member the result recorded."""
+    # `except Exception`, not `except ValueError` (round 12): `enum_cls(value)` on the un-admitted
+    # object is a `_value2member_map_` lookup, which is the caller's `__hash__`, and an unhashable
+    # value whose `__hash__` RAISES took the card down -- measured on every
+    # `HypothesisResult.verdict` and every `ComponentResult.verdict`.
     w = _word(value)
     try:
         return enum_cls(value if w is None else w)
-    except ValueError:
+    except Exception:       # noqa: BLE001 - not a valid enum value, however it refuses
         return None
 
 
@@ -1237,7 +1415,7 @@ def _subject_kind(joint: Any) -> tuple:
     Why seven rounds missed it, counted rather than argued:
     `test_absent_or_invalid_subject_kind_renders_UNKNOWN` swept exactly ten values and 0 OF 10 WAS A `str`
     SUBCLASS INSTANCE -- round 7's "0 of 107" in the string lane. That table now carries the shape."""
-    raw = getattr(joint, "subject_kind", _MISSING)
+    raw = _attr(joint, "subject_kind", _MISSING)
     problem = None
     text = _word(raw)
     if raw is _MISSING:
@@ -1245,7 +1423,11 @@ def _subject_kind(joint: Any) -> tuple:
         problem = "subject_kind is absent from this result; shown as UNKNOWN"
     elif text is None or text not in _SUBJECT_KIND_LABELS:
         kind = "unknown"
-        problem = f"subject_kind {_visible(text if text is not None else str(raw))[:60]!r} is not one of " \
+        # `_spoken(raw, str)`, not `str(raw)` (round 12): a PROTOCOL CALL INSIDE THE PROBLEM-MESSAGE
+        # PATH, so the one branch that exists to report a malformed value was the branch a malformed
+        # value took the page down from -- measured, ZeroDivisionError for a non-string `subject_kind`
+        # whose `__repr__` raises and for an object whose `__str__` raises.
+        problem = f"subject_kind {_visible(text if text is not None else _spoken(raw, str))[:60]!r} is not one of " \
                   f"{sorted(_SUBJECT_KIND_LABELS)}; shown as UNKNOWN"
     else:
         kind = text
@@ -1322,7 +1504,7 @@ def _contract_problems() -> list:
         if params[:3] != ["pair", "margin", "direction"] or not {"width_tol", "min_n"} <= set(params):
             probs.append(f"interval_verdict signature changed: {params}")
     except Exception as ex:  # noqa: BLE001 - any failure is a contract problem
-        probs.append(f"interval_verdict not inspectable: {type(ex).__name__}")
+        probs.append(f"interval_verdict not inspectable: {_type_name(ex)}")
     # The parameter NAMES being present is not enough: `_protocol_params` needs their DEFAULTS, and it is
     # the sole source of the protocol floor every recomputation applies. Measured before this existed: an
     # `interval_verdict` declaring `width_tol`/`min_n` with no defaults passed the signature check above,
@@ -1334,7 +1516,7 @@ def _contract_problems() -> list:
         _protocol_params()
     except Exception as ex:  # noqa: BLE001 - any failure is a contract problem
         probs.append(f"interval_verdict protocol parameters (width_tol, min_n) unreadable: "
-                     f"{type(ex).__name__}: {ex}")
+                     f"{_type_name(ex)}: {ex}")
     if {v.value for v in Verdict} != {"SUPPORTED", "UNSUPPORTED", "INCONCLUSIVE"}:
         probs.append("Verdict members changed")
     if {v.value for v in JointVerdict} != {"JOINT_SUPPORTED", "JOINT_UNSUPPORTED", "JOINT_INCONCLUSIVE"}:
@@ -1361,7 +1543,7 @@ def _declared(metric: Any, margins: Any) -> tuple:
     for table in (*bm.PRIMARY.values(), bm.CONVERGED):
         for m, direction, attr in table:
             if m == metric:
-                return direction, _finite_number(getattr(margins, attr, None))
+                return direction, _finite_number(_attr(margins, attr, None))
     raise LookupError(f"metric {metric!r} not in the protocol tables")
 
 
@@ -1689,11 +1871,18 @@ def _n_problem(pair: Any, n: int, min_n: int, measured_n: Optional[int]) -> Opti
     if n > measured_n:
         return (f"a component claims {n} seeds but the study records only {measured_n} measured seeds "
                 f"(attempted minus failed): a component cannot be measured on more seeds than succeeded")
-    flags = getattr(pair, "flags", None)
+    flags = _attr(pair, "flags", None)
     if not isinstance(flags, tuple):
         return "the interval's own flags field is not a tuple, so the producer's sample-size statement " \
                "cannot be read"
-    if MIN_SEEDS_FLAG in flags and n >= min_n:
+    # THE ELEMENTS ARE ADMITTED, NOT THE TUPLE (round 12). `MIN_SEEDS_FLAG in flags` is the ELEMENT's
+    # `__hash__`/`__eq__`, not the tuple's and not the flag's: a `str` SUBCLASS element STORING exactly
+    # `MIN_SEEDS_FLAG` whose `__eq__` answers as any other word made this membership test False, so the
+    # producer's own sample-size statement went unread while the characters the interval stores say it
+    # plainly. That is `_word`'s argument one container deep, and `db.STORED_WORD_ELEMENTS` declares the
+    # lane. `_word` of each element, then a plain-string membership test, so the word compared is the
+    # word stored; a non-string element names no flag and is dropped rather than allowed to raise.
+    if MIN_SEEDS_FLAG in [w for w in (_word(f) for f in flags) if w is not None] and n >= min_n:
         return (f"the producer flagged this interval {MIN_SEEDS_FLAG!r} but its stored n is {n}, which "
                 f"is not below the declared minimum {min_n}")
     return None
@@ -1847,13 +2036,13 @@ def _gate_scope(g: Any) -> str:
 
 
 def _failed(g: Any) -> bool:
-    return getattr(g, "passed", None) is not True
+    return _attr(g, "passed", None) is not True
 
 
 def _eff_component(c: Any, withheld: bool, contract_bad: bool, margins: Any, measured_n: Optional[int],
                    series: Mapping) -> tuple:
     """(displayed verdict or None, mismatch). Decisive only if stored AND recomputed agree and nothing withholds it."""
-    stored = _vcoerce(Verdict, getattr(c, "verdict", None))
+    stored = _vcoerce(Verdict, _attr(c, "verdict", None))
     rec = _recompute(c, margins, measured_n, series)
     if stored is None or rec is None or rec is not stored:
         return Verdict.INCONCLUSIVE, True
@@ -1922,12 +2111,12 @@ def _weaker_than_protocol(joint: Any) -> list:
         except Exception:  # noqa: BLE001
             continue
         for c in comps:
-            mn, wt = _count(getattr(c, "min_n", None)), _finite_number(getattr(c, "width_tol", None))
+            mn, wt = _count(_attr(c, "min_n", None)), _finite_number(_attr(c, "width_tol", None))
             if mn is not None and 0 <= mn < mn_declared:
-                out.append(f"{_word(h.hid)}/{_visible(str(c.metric))[:40]}: min_n={mn} is below the protocol "
+                out.append(f"{_word(h.hid)}/{_visible(_spoken(c.metric, str))[:40]}: min_n={mn} is below the protocol "
                            f"minimum {mn_declared}")
             if wt is not None and wt > wt_declared:
-                out.append(f"{_word(h.hid)}/{_visible(str(c.metric))[:40]}: width_tol={_num(wt)} is wider than "
+                out.append(f"{_word(h.hid)}/{_visible(_spoken(c.metric, str))[:40]}: width_tol={_num(wt)} is wider than "
                            f"the protocol tolerance {_num(wt_declared)}")
     return out
 
@@ -1959,13 +2148,13 @@ def _n_sources_disagree(joint: Any, measured_n: Optional[int]) -> list:
         except Exception:  # noqa: BLE001
             continue
         for c in comps:
-            pair = getattr(c, "pair", None)
-            n, mn = _count(getattr(pair, "n", None)), _count(getattr(c, "min_n", None))
+            pair = _attr(c, "pair", None)
+            n, mn = _count(_attr(pair, "n", None)), _count(_attr(c, "min_n", None))
             if n is None or mn is None:
                 continue        # not a count at all: the kind functions alarm on that, with their words
             p = _n_problem(pair, n, mn, measured_n)
             if p is not None:
-                out.append(f"{_word(h.hid)}/{_visible(str(getattr(c, 'metric', '?')))[:40]}: {p}")
+                out.append(f"{_word(h.hid)}/{_visible(_spoken(_attr(c, 'metric', '?'), str))[:40]}: {p}")
     return out
 
 
@@ -1993,12 +2182,12 @@ def _interval_sources_disagree(joint: Any, series: Mapping) -> list:
         except Exception:  # noqa: BLE001
             continue
         for c in comps:
-            nums = _admitted(getattr(c, "pair", None), "IntervalPair")
+            nums = _admitted(_attr(c, "pair", None), "IntervalPair")
             if nums is None:
                 continue        # ill-typed, not contradicted: the kind functions say so in their words
-            p = _interval_problem(nums, _series_of(series, getattr(c, "metric", _MISSING)))
+            p = _interval_problem(nums, _series_of(series, _attr(c, "metric", _MISSING)))
             if p is not None:
-                out.append(f"{_word(h.hid)}/{_visible(str(getattr(c, 'metric', '?')))[:40]}: {p}")
+                out.append(f"{_word(h.hid)}/{_visible(_spoken(_attr(c, 'metric', '?'), str))[:40]}: {p}")
     return out
 
 
@@ -2052,10 +2241,10 @@ def _eff_hypothesis(h: Any, hid: str, gates: tuple, contract_bad: bool, margins:
     mismatch = any(_eff_component(c, False, False, margins, measured_n, series)[1] for c in h.components)
     if None in rc:
         return Verdict.INCONCLUSIVE, True
-    blocked = bool(getattr(h, "blocking", ())) or any(
+    blocked = bool(_attr(h, "blocking", ())) or any(
         _failed(g) and (_gate_scope(g) == "all" or hid in _gate_scope(g) or _gate_scope(g) not in _KNOWN_SCOPES)
         for g in gates)
-    sup_block = bool(getattr(h, "supported_blockers", ())) or any(
+    sup_block = bool(_attr(h, "supported_blockers", ())) or any(
         _failed(g) and _gate_scope(g) == "H3" for g in gates) and hid == "H3"
     if blocked:
         rv = Verdict.INCONCLUSIVE
@@ -2066,11 +2255,11 @@ def _eff_hypothesis(h: Any, hid: str, gates: tuple, contract_bad: bool, margins:
     else:
         rv = Verdict.INCONCLUSIVE
     if rv is Verdict.SUPPORTED and hid == "H3":
-        conv = tuple(getattr(h, "converged_components", ()) or ())
+        conv = tuple(_attr(h, "converged_components", ()) or ())
         if sup_block or not conv or not all(_recompute(c, margins, measured_n, series) is Verdict.SUPPORTED
                                             for c in conv):
             rv = Verdict.INCONCLUSIVE
-    stored = _vcoerce(Verdict, getattr(h, "verdict", None))
+    stored = _vcoerce(Verdict, _attr(h, "verdict", None))
     if stored is not rv:
         return Verdict.INCONCLUSIVE, True
     return (Verdict.INCONCLUSIVE if contract_bad else rv), mismatch
@@ -2114,13 +2303,19 @@ def _joint_wellformed(j: Any) -> bool:
         return False
     for h, hid in ((j.h1, "H1"), (j.h2, "H2"), (j.h3, "H3")):
         if not isinstance(h, HypothesisResult) or _word(h.hid) != hid \
-                or not isinstance(h.components, tuple) or not h.components:
+                or not isinstance(h.components, tuple):
             return False
-        if not all(isinstance(c.pair, IntervalPair) for c in h.components):
+        # `_iterated`, not `for c in h.components` (round 12): a `tuple` SUBCLASS satisfies the
+        # `isinstance` above and its `__iter__` is still the caller's. A component list that cannot be
+        # iterated is a card this renderer REFUSES -- which is what this function is for -- rather than
+        # a page taken down two frames further in.
+        comps = _iterated(h.components)
+        if not comps or not all(isinstance(_attr(c, "pair"), IntervalPair) for c in comps):
             return False
-    if not isinstance(getattr(j, "margins", None), bm.Margins):   # fail closed: no margins, no cross-check, no figures
+    if not isinstance(_attr(j, "margins"), bm.Margins):   # fail closed: no margins, no cross-check, no figures
         return False
-    return isinstance(j.gates, tuple) and bool(j.gates) and all(hasattr(g, "passed") for g in j.gates)
+    gates = _iterated(j.gates) if isinstance(j.gates, tuple) else None
+    return bool(gates) and all(_attr(g, "passed", _MISSING) is not _MISSING for g in gates)
 
 
 _HNAMES = {"H1": "Suppression (S)", "H2": "Retention (L)", "H3": "Selectivity (delta)"}
@@ -2136,7 +2331,7 @@ def render_scorecard(joint: Any) -> str:
                       '<p class="warn">REFUSED: not a complete JointResult (H1 suppression, H2 retention and H3 '
                       'selectivity must be reported together). No figures shown.</p>')
     problems = _contract_problems()
-    gates = tuple(joint.gates)
+    gates = tuple(_iterated(joint.gates) or ())   # `_joint_wellformed` has already refused an empty one
     gate_set_bad = not _gate_set_ok(gates)
     if gate_set_bad:
         problems = [*problems, "validity-gate NAME set does not match benchmark.GATE_SCOPES: a gate was "
@@ -2173,7 +2368,7 @@ def render_scorecard(joint: Any) -> str:
         if mm or gate_set_bad:
             mismatch.append(hid)
         groups = [(h.components, "")]
-        conv = tuple(getattr(h, "converged_components", ()) or ()) if hid == "H3" else ()
+        conv = tuple(_attr(h, "converged_components", ()) or ()) if hid == "H3" else ()
         if conv:
             groups.append((conv, " (converged-budget)"))
         for comps, suffix in groups:
@@ -2224,11 +2419,16 @@ def render_scorecard(joint: Any) -> str:
         jv = JointVerdict.JOINT_INCONCLUSIVE
     if bad:
         jv = JointVerdict.JOINT_INCONCLUSIVE
-    deferred = tuple(joint.deferred_gates) if isinstance(getattr(joint, "deferred_gates", None), (tuple, list)) else ()
+    deferred = tuple(_iterated(_attr(joint, "deferred_gates")) or ()) \
+        if isinstance(_attr(joint, "deferred_gates"), (tuple, list)) else ()
     cond = f" CONDITIONAL on {len(deferred)} unimplemented gate(s)" if deferred or joint.complete_gate_coverage is not True else ""
     gate_rows = "".join(
         f"<tr><td>{_untrusted(g.name, 'gate')}</td><td>{'PASS' if g.passed is True else 'FAIL'}</td>"
-        f"<td>{_e(_visible(str(g.reason))[:MAX_TEXT])}</td></tr>" for g in gates)
+        # `_spoken(g.reason, str)`: the other DECLARED "bare" residual, routed on the same terms as
+        # `_metric_cell`'s -- the caller's `__str__` still decides the text, a raise no longer kills the
+        # card. Measured: a `str` subclass storing the honest reason whose `__str__` raises took
+        # `render_scorecard` down with ZeroDivisionError.
+        f"<td>{_e(_visible(_spoken(g.reason, str))[:MAX_TEXT])}</td></tr>" for g in gates)
     # Both numbers are read out of the scorer at render time and both are figures on the page, so both go
     # through the scheme. Measured at HEAD, where only the `except` guarded them: `bonferroni_level`
     # patched to return `nan`/`inf` printed "Bonferroni level nan"/"inf", patched to return the STRING
@@ -2372,7 +2572,7 @@ def _render_uncertainty(joint: Any) -> str:
     # whole card, so nothing here is reached. See C2.)
     marg = ""
     for k in ("delta_S", "delta_R", "delta_sel"):
-        v = getattr(m, k, _MISSING)
+        v = _attr(m, k, _MISSING)
         # kind "num", the SAME admission `_declared` now uses -- and the reason the absent case is kept
         # separate is only the wording, not a second check.
         cell = _unknown(f"{k} is absent from the Margins object; NOT zero") if v is _MISSING else \
@@ -2381,7 +2581,8 @@ def _render_uncertainty(joint: Any) -> str:
     body = ("<p>Margins are proposed defaults with no empirical basis (HYPOTHESIS, not findings).</p>"
             f"<table><tr><th>margin</th><th>value</th></tr>{marg}</table>"
             "<p>Unimplemented (deferred) validity gates: "
-            + _e(", ".join(_visible(str(d)) for d in joint.deferred_gates) or "none listed") + ".</p>"
+            + _e(", ".join(_visible(_spoken(d, str)) for d in (_iterated(joint.deferred_gates) or ()))
+                 or "none listed") + ".</p>"
             "<p>Any SUPPORTED verdict is conditional on these. UNKNOWN means unmeasured, never zero.</p>")
     return _panel("Uncertainty and protocol limits", EvidenceClass.HYPOTHESIS, body)
 
@@ -2390,9 +2591,12 @@ def _render_uncertainty(joint: Any) -> str:
 def _render_records(records: Any) -> str:
     if records is None:
         return _panel("Experiment records", EvidenceClass.UNKNOWN, "<p>" + _unknown("no records supplied") + "</p>")
-    try:
-        recs = list(records)
-    except TypeError:
+    # `_iterated`, NOT `except TypeError` (round 12). `__iter__` is the caller's, and it may raise
+    # ANYTHING: measured, a `records` object whose `__iter__` raised ZeroDivisionError went straight
+    # through this handler and out of `render_dashboard`. A list that cannot be iterated is a list this
+    # panel cannot show, whatever the exception type says.
+    recs = _iterated(records)
+    if recs is None:
         return _panel("Experiment records", EvidenceClass.UNKNOWN,
                       '<p class="warn">records is not iterable; nothing shown.</p>')
     rows, classes, skipped = "", set(), 0
@@ -2401,7 +2605,7 @@ def _render_records(records: Any) -> str:
             classes.add(EvidenceClass.UNKNOWN)
             skipped += 1
             rows += (f'<tr><td colspan=4><span class="warn">ENTRY IS NOT AN ExperimentRecord (type '
-                     f'{_e(_visible(type(r).__name__))}); contents not rendered</span> '
+                     f'{_e(_visible(_type_name(r)))}); contents not rendered</span> '
                      f'{_unknown("cannot be labelled")}</td></tr>')
             continue
         ec, prob = _coerce_class(r.evidence_class, run_record=True)
@@ -2535,7 +2739,7 @@ def write_dashboard(path: Optional[Any] = None, data: Optional[Mapping] = None) 
     except FileNotFoundError:
         st = None
     except OSError as ex:
-        raise ValueError(f"refusing: cannot inspect the destination ({type(ex).__name__})") from None
+        raise ValueError(f"refusing: cannot inspect the destination ({_type_name(ex)})") from None
     if st is not None:
         if stat.S_ISLNK(st.st_mode):
             raise ValueError("refusing to write through a symlink")

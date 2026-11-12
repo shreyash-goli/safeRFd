@@ -9984,3 +9984,206 @@ to HEAD, zero added findings.
 
 **SR-06 stays `[ ]`.** The fixer is not the attester and this fix has had no independent pass. **Verified
 stays 9 of 17.**
+
+## Round 17 — SR-13 fails tenth, then the fourth forgery category is closed at its cause
+
+**Date:** 2026-11-11. HEAD at attestation `9bbbe75`.
+
+### The tenth attestation found the fourth category, and its cause is a dropped tuple member
+
+SR-13's nine previous failures walked outward through **categories of forgeable thing**: numbers
+(round 8), figures **and decisive words** (round 9), the caller's `Mapping` **and its keys** (round 11).
+Each fix was correct; each left the next category standing. The fourth category is **a caller-supplied
+protocol that RAISES, rather than one that lies about a value** — and the cause is mechanical:
+
+- number lane: `CONVERSION_DUNDERS = (…, "__format__", **"RAISE"**)` — round 8 put `RAISE` in
+  deliberately, because *"a `__float__` that raises took BOTH renderers down with ZeroDivisionError"*.
+- word and key lanes (rounds 9 and 11): `WORD_DUNDERS = ("eq", "str", "len", "format", "getitem")` and
+  `key_liar` — **no `RAISE` member at all.**
+
+**The later lanes were built from the number lane's template with the `RAISE` member dropped, while
+their prose kept the stronger promise** (*"whatever it shows must come from the STORED TEXT"*, *"the pin
+requires … or to FAIL CLOSED"*). All three sweeps *catch* a raise — `"a raise IS the finding"` appears
+in each — but two never *produce* one. Nine rounds of escaping defects trace to one missing member in
+two tuples. **This is the signature defect in its purest form yet: not a wrong guard, a correct guard
+whose proof was copied with a hole in it.**
+
+### 23 positions driven, 22 raises + 1 silent text loss → 0
+
+Nine of them through the **fully public `render_dashboard(data)` API with no `object.__setattr__`**:
+`snapshot["fork"]`, `["upstream"]`, `["audit_date"]`, `["behind_by_field_note"]`,
+`changed_files[0]["filename"]`, a metaclass `__name__` that raises or returns `12345`, and `records`
+whose `__iter__` raises anything but `TypeError`. **Under all of them no panel rendered at all** —
+neither UNKNOWN nor zero, and *"missing results render as UNKNOWN, not 0"* is SR-13's literal acceptance
+clause. The module convicted itself: `_metric_cell`'s docstring calls a raise *"A page taken down,
+outside this module's stated error contract"*, and `test_a_forged_bound_cannot_crash_the_whole_render`
+exists for precisely this.
+
+Post-fix each position renders something a reader can act on — an UNKNOWN panel
+(`records is not iterable; nothing shown.`), a row alarm (`ENTRY IS NOT AN ExperimentRecord (type object
+with no readable text); contents not rendered`), or `SUBJECT KIND PROBLEM` — with `SAMPLE SIZE
+CONTRADICTED` and `below the protocol minimum` still firing where they should. Honest renders are
+**sha256-identical pre/post**.
+
+**Closed at the cause, not at the cells:** `_e`, the module's declared single funnel, now routes through
+a `_spoken` admission, so the TEXT family is closed at the funnel rather than at the 16 measured
+positions.
+
+### The truncation-marker loss re-opened round 9's own finding at the function round 9 fixed
+
+Round 9 measured *a 400-character value rendering 300 with no `[... truncated]` marker* and fixed it
+with `_word(value)` — **inside `if isinstance(value, str)`**. `repr()` may return a `str` **subclass**,
+so the non-string branch re-admitted the identical defeat, through the public API, in the Source-diff
+inventory. Measured: lying-`__len__` subclass pre `marker=False shown=300`, post `marker=True
+shown=300`, identical to the honest 400-char `repr`. The complementary half is pinned too — a
+`__len__`→9999 answer must **not** invent a marker. *A guard placed inside a type check is only as wide
+as the type check.*
+
+### The derivation failed four times, and the fourth was a regression rather than a miscount
+
+1. A text scan reported every docstring in the module — they all discuss `str()`/`repr()`. Replaced with AST.
+2. Scanning `ast.Call` only **missed `.__name__` entirely** — two of the nine public positions — because
+   `__name__` is an `ast.Attribute`. **No amount of reading the call table would have surfaced that.**
+3. No notion of "inside a `try`" reported `_gate_set_ok`'s `str(g.name)` as open; it is guarded and its
+   raise is absorbed into the correct alarm. Routing it would have pushed an admission **where the raise
+   is the mechanism.**
+4. **The expensive one.** The ATTRIBUTE family was routed everywhere, `try` bodies included — which
+   **reintroduced a fail-open a docstring had been written against**: `getattr(s,"ok",None)` does not
+   fail safe because `SeedScores.ok` is a property that subscripts `self.metrics`, so routing it made
+   `_seed_series` skip the unreadable seed and return a 29-element series where it must return `None`.
+   Caught by `test_an_unusable_second_source_fails_closed_and_is_never_skipped`. 11 sites reverted, and
+   the rule now asserts **both** directions so it cannot recur either way.
+
+**A derivation's failures are the evidence that it is a derivation.** Three of the last three rounds had
+one, and in two of them a flaw would have been encoded into the declared table while the set-equality
+check reported success.
+
+### The five disabled assertions, re-enabled — and `CLAUDE.md` names this one
+
+`CLAUDE.md`: *"Do not disable tests or delete failing checks to claim completion."* Five assertions were
+switched off with `if False else` or an unreachable guard, and **every one was measured to pass**.
+Disabling a *passing* check is worse than leaving a failing one: it removes protection with no red to
+explain it and no record of why. One of them, `:147`, had replaced the kit's **smoke test for the write
+path** with `assertEqual(x, x)` — and "smoke test" is SR-13's first acceptance clause. Another exempted
+`"TOY_RESULT_CONFIRMED"` from a check that all four values, including that one, satisfy.
+
+All five now re-enabled or their dead alternative deleted, **each killed by its own mutant with the
+traceback naming the re-enabled line**, not a sibling.
+
+### Figures: the fifth instance, and the floors' blindness performed
+
+Round 11's two headline numbers were **prose with a floor underneath**: *"8 of its 120"* and *"77 of its
+81"* against `assertGreater(forgeries, 50)` and `> 60` — slack **70 and 21**, so 58% of the string sweep
+and 26% of the key sweep could vanish green. **The same defect round 11 correctly fixed for the key lane
+and the word lane and did not apply to its own two new sweeps.** Now `CALLER_STRING_FIGURES = (12, 132)`
+and `KEY_SWEEP_FIGURES = (5, 162)` asserted exactly, with
+`test_the_floor_is_blind_and_the_pin_is_not` **performing** it: 10 of 12 sites → 110 forgeries satisfies
+*both* floors and fails the pin. Five derived-set sizes now pinned exactly beside their floors.
+
+**Floors deliberately kept with slack, and the reasoning is a limit on the rule rather than an
+exception:** three floors bound a *property* of a hostile-value table (how many plain values, how many
+subclass instances), not the size of a derived enumeration — pinning those exactly would turn every
+legitimate widening of the hostile tables red, which is the opposite of what they are for.
+
+Both wrong prose figures corrected **and asserted**: `payload_walk_sorted.__doc__`'s *"13 mappings …
+6 swept"* is **10 and 4**, and the docstring had **conflated two different quantities** (6 is
+`caller_mapping_sites()`'s total, which includes two record-`metrics` sites no payload walk can reach) —
+now asserted as a difference, `6 − 4 == 2`. The docstring points at the table and quotes its own wrong
+figure exactly once inside the retraction, the count-1 pin shape. And `:4692`'s *"6 × 5 × 2"* is
+`(6, 10, 2)`, with the 120 renders **counted where they happen** — the first attempt counted 12 because
+it incremented per field rather than per value, **caught by the pin itself.**
+
+### Closing the structural gap carried a live finding, which is why declaring it would have been wrong
+
+The brief offered "close the structural gap or declare it". The fixer closed it, and the sweep found a
+**third direction nobody had driven**:
+
+- **`HypothesisResult.reasons`** → the lane's trivial case, for exactly `RunProvenance.python_version`'s
+  reason. Gap closed rather than declared.
+- **`IntervalPair.flags`** → swept, **and it was not fail-closed in all directions.** Both previously
+  measured directions did fail closed. The third did not: **an element storing exactly `MIN_SEEDS_FLAG`
+  whose `__eq__` answers as another word makes `MIN_SEEDS_FLAG in pair.flags` False**, so the producer's
+  own sample-size statement goes unread *while the characters it stores say it plainly*. Fixed by
+  admitting the elements; all three directions now pinned over every dunder including RAISE.
+- **`blocking`/`supported_blockers`** → `supported_blockers` is empty on every public-route fixture, so
+  the sweep **injects** a declared vocabulary element and compares against the same tuple injected
+  *plain* — the key lane's reference discipline one level in, with every declared field asserted to have
+  forged at least one element.
+
+All four fields are annotated bare `tuple`, **so no annotation regex could see them** — the enumeration
+is derived by value. That is why `reasons` inherited nothing from the `python_version` precedent: the
+mechanism structurally could not see it.
+
+### Three corrections to my brief, each measured
+
+1. **`ComponentResult.metric` with a raising `__str__` does not take the honest page down.** On
+   `joint()` nothing calls `str(c.metric)`; the raise needs a study where a prose sibling actually
+   appends. My reasoning was right about the site and wrong about the fixture — *an unguarded call is
+   not a reachable call until a fixture reaches it.*
+2. **`isinstance` sites are 34, not 31**, by AST, and **34 both pre- and post-fix** — so round 12
+   neither widened nor closed the `__class__` channel. My 31 is not reproducible by any spelling.
+3. **`IntervalPair.flags` was not fail-closed in all directions** — I relayed two measured directions as
+   settling the question. See above.
+
+### `-OO` fixed with the `test_stability` shape
+
+Chosen over noting it: `_doc(obj)` returning `inspect.cleandoc(obj.__doc__)` or `None` behind a plain
+`if` — **deliberately not `skipUnless`**, so nothing can be skipped in a mode this project does run.
+All 7 doc assertions routed; **260 OK under `-OO` on both interpreters** (was 247, errors=6). The
+`cleandoc` on both sides also satisfies the interpreter-portability rule.
+
+### Wall clock, itemised, with the trims derived
+
+**104.0 → 128.4 s on 3.12.4 (+23.4%)**, 110.3 → 137.8 s on 3.13.5. Per-class deltas sum to +22.6 s
+against a measured +24.4 s; the ~1.8 s residue is per-class startup double-counted plus two extra full
+renders from the re-enabled assertions. Two trims, both **derived rather than hand-written**: RAISE is
+emitted once per `(site, honest text)` instead of once per lie text, because `word_liar(text, shown,
+"RAISE")` ignores `shown` — **and that identity is asserted, not assumed** (715 pairs instead of 804);
+and the key sweep hoists the plainified reference render out of the maker loop (81 refs instead of 162),
+explicitly a trim of the rendered *string*, never of the payload. **Rejected:** caching the payload
+(round 11's recorded reason — forgeries mutate frozen dataclasses in place), and a per-protocol RAISE
+member (6× the sweep for no new information, since every refusing protocol must end in the same
+admitted UNKNOWN).
+
+### A derived constraint worth keeping
+
+**A key whose `__hash__` raises is not a reachable input at all** — `{key_raiser("a"): 1}` dies inside
+`dict.__setitem__`. So `key_raiser` keeps `str.__hash__` and refuses everything else. That is a
+measurement, not a softening, and it is recorded in the function's docstring rather than as an
+exemption.
+
+### The second concurrency violation of the session, self-reported
+
+The fixer ran a one-line edit and a busy-wait `until`-loop while two suite measurements were in flight,
+**discarded both affected measurements and re-ran the trio serially**, with the 3.12 re-run agreeing to
+0.1 s. Disclosed against itself without being asked. **That rule has now been broken twice in one
+session — once by me, once by an owner — after I widened it in `CLAUDE.md` to bind across owners.** Both
+times the measurements were discarded rather than reported, which is the behaviour the rule is for; but
+a rule broken twice by the people who wrote it down is a rule that needs to be in the brief, not only
+in the project file.
+
+### Measurements
+
+| run | interpreter / environment | result |
+|---|---|---|
+| `test_dashboard` | 3.12.4 (numpy 2.4.6, torch 2.7.1) | **260 OK**, 128.4 s (was 247, 104.0 s) |
+| `test_dashboard` | 3.13.5 miniconda (numpy 2.4.4, no torch) | **260 OK**, 137.8 s |
+| `test_dashboard` | both, **`-OO`** | **260 OK** (was 247, errors=6) |
+| `test_benchmark` / `test_schema` | both | 338 OK / 55 OK, unchanged |
+| **full suite** | **3.12.4** | **1444 ran, 2 skipped, 0 failed**, rc=0 |
+| **full suite** | **3.13.5**, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` | **1444 ran, 84 skipped, 0 failed**, rc=0 |
+
+1431 + 13 = 1444. No cross-owner request: both candidates were measured **already closed upstream** —
+`benchmark.analyze_scores` raises the same `ValueError` for a RAISE liar as for a hash-honest one, and
+`schema` plainifies a RAISE-liar `ExperimentRecord.name` and `metrics` key on the public route.
+
+### Left open deliberately
+
+The **raising-`__class__` channel** stays unpinned as the kit-wide finding; a new test pins its **scope**
+(34 call sites) and **asserts that `_spoken`/`_iterated`/`_attr` did NOT close it**, since they run after
+`isinstance` has decided what a value is. Nothing was closed incidentally. The
+**component-level invalid-verdict residual** is the module's pre-existing pinned design — an unhashable
+`ComponentResult.verdict` now renders byte-identically to the same field holding `"zzz"` or `object()`.
+
+**SR-13 stays `[ ]`** — the fixer is not the attester, and SR-13 depends on SR-10, which depends on
+SR-06. **Verified stays 9 of 17.**

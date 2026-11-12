@@ -23,6 +23,24 @@ from toy import dashboard as db
 from toy.schema import EvidenceClass as EC, ExperimentRecord, MetricValue, RunProvenance
 from toy.teacher_student import train
 
+def _doc(obj):
+    """`inspect.cleandoc(obj.__doc__)`, or None when docstrings are stripped (`python -OO`).
+
+    `test_stability`'s helper, adopted verbatim and for its reason. MEASURED on this file at the
+    previous HEAD: `python -OO -m unittest tests.toy_tests.test_dashboard` ran 247 and FAILED with
+    errors=6 on BOTH interpreters, every one a `__doc__` of `None` (4 x "argument of type 'NoneType'
+    is not iterable", 1 x "'NoneType' has no attribute 'count'", 1 x "'NoneType' has no attribute
+    'lower'"). NO LIVE VACUITY WAS REVEALED -- in all six the behavioural assertions run BEFORE the doc
+    line -- and `-OO` is not a mode this project runs, so this is a note and not a finding. It is fixed
+    with a plain `if`, DELIBERATELY NOT `skipUnless`: a skip can hide a real failure in a normal run,
+    while `if _doc(x) is not None` cannot skip anything in any mode this project does run.
+
+    `inspect.cleandoc` on both sides is also the interpreter-fragility rule: 3.13 dedents docstrings at
+    compile time and 3.12 does not, so a doc pin must normalise."""
+    d = getattr(obj, "__doc__", None)
+    return None if d is None else inspect.cleandoc(d)
+
+
 SNAP = db.load_snapshot()
 SMALL = bm.BenchmarkConfig(n_boot=500)
 FZ = bm.freeze_seed_list(7, 30)
@@ -144,7 +162,13 @@ class Smoke(unittest.TestCase):
         p = db.write_dashboard(None, full())
         self.assertTrue(p.exists())
         self.assertFalse(db._inside_repo(p))
-        self.assertEqual(p.read_text(encoding="utf-8"), db.render_dashboard(full()) if False else p.read_text(encoding="utf-8"))
+        # RE-ENABLED (round 12). This read `db.render_dashboard(full()) if False else
+        # p.read_text(...)`, i.e. `assertEqual(x, x)` -- a tautology where a live pin used to be, in the
+        # kit's smoke test for the write path, and "smoke test" is SR-13's first acceptance clause.
+        # MEASURED before re-enabling: the real assertion PASSES, 20642 bytes both sides, on both
+        # interpreters. A disabled assertion that would have passed is protection removed for no stated
+        # reason, which is the thing CLAUDE.md names ("Do not disable tests or delete failing checks").
+        self.assertEqual(p.read_text(encoding="utf-8"), db.render_dashboard(full()))
         with self.assertRaises(ValueError):
             db.write_dashboard(db.REPO_ROOT / "docs" / "x.html", {})
         with tempfile.TemporaryDirectory() as t:
@@ -294,7 +318,8 @@ class CannotDisplayUnsupportedAsConfirmed(unittest.TestCase):
             h = db.render_dashboard({"records": [rec(ec=ec, notes=self.CONFIRM)], "train":
                                      dataclasses.replace(train(3, steps=3, timestamp_utc=TS), record=rec(ec=ec))})
             body = h.split("</aside>")[1]
-            self.assertNotIn("ev-toy", body.replace("ev-toy\">TOY", "")) if False else None
+            # RE-ENABLED (round 12): measured to pass for all three evidence classes before enabling.
+            self.assertNotIn("ev-toy", body.replace("ev-toy\">TOY", ""))
             self.assertEqual(body.count('data-evidence="TOY_RESULT"'), 0)
             self.assertEqual(self.verdict_spans(h), [])
             self.assertIn("NOT EVIDENCE", h)
@@ -314,7 +339,11 @@ class CannotDisplayUnsupportedAsConfirmed(unittest.TestCase):
             r = rec()
             object.__setattr__(r, "evidence_class", bad)
             h = db.render_dashboard({"records": [r]})
-            self.assertIn("invalid evidence label", h) if bad != "TOY_RESULT_CONFIRMED" else None
+            # THE EXEMPTION IS GONE (round 12). It read `... if bad != "TOY_RESULT_CONFIRMED" else
+            # None`, an exemption for a precondition that does not exist: MEASURED, all four values --
+            # `"TOY_RESULT_CONFIRMED"` included -- produce "invalid evidence label". The guard weakened
+            # the test for nothing.
+            self.assertIn("invalid evidence label", h, repr(bad))
             self.assertEqual(h.split("</aside>")[1].count('data-evidence="TOY_RESULT"'), 0)
 
     def test_forged_stored_verdicts_not_shown(self):
@@ -353,7 +382,11 @@ class CannotDisplayUnsupportedAsConfirmed(unittest.TestCase):
         self.assertIn("not a safety finding", h)
         self.assertIn("NOT VALIDATED", h)
         self.assertNotRegex(db._CSS, r"(green|#0f0|#0a0|#2e7d32|lime)")
-        self.assertNotIn("confirmed", db.render_dashboard(full()).lower().replace("never ", "").replace("not confirm", "").replace("does not confirm", "")) if False else None
+        # RE-ENABLED (round 12): measured to pass before enabling. The three `replace`s strip the
+        # page's own denials ("never confirmed", "does not confirm any safety claim") so what is left is
+        # any POSITIVE use of the word, of which there must be none.
+        self.assertNotIn("confirmed", db.render_dashboard(full()).lower()
+                         .replace("never ", "").replace("not confirm", "").replace("does not confirm", ""))
         self.assertNotIn("class=\"confirmed", h)
 
     def test_hypothesis_panel_is_hatched_not_evidence(self):
@@ -1109,9 +1142,11 @@ class VerdictCoreSurvivors(unittest.TestCase):
         self.assertEqual(hyp_cells(h)["H3"], "SUPPORTED")
         self.assertNotIn("INTERVAL CONTRADICTED", h)
         self.assertNotIn("NOT shown", h)
-        self.assertIn("producer-asserted", db._component_sets_ok.__doc__)
-        self.assertIn("producer-asserted", db._recompute.__doc__)
-        self.assertNotIn("is not a residual", db._recompute.__doc__)
+        if _doc(db._component_sets_ok) is not None:
+            self.assertIn("producer-asserted", _doc(db._component_sets_ok))
+        if _doc(db._recompute) is not None:
+            self.assertIn("producer-asserted", _doc(db._recompute))
+            self.assertNotIn("is not a residual", _doc(db._recompute))
 
     def test_component_set_check_fails_closed_if_tables_vanish(self):
         j = joint()
@@ -1756,8 +1791,15 @@ class UnknownNeverZero(unittest.TestCase):
             self.assertNotIn(" 0,", line.replace("UNKNOWN", ""))
         j = joint()
         object.__setattr__(j, "n_failed", 0)
-        self.assertIn("failed <span class=\"measured\">0</span>" if False else "failed 0",
-                      re.search(r"<p>Attempted .*?</p>", db.render_scorecard(j)).group(0))
+        # THE DEAD ALTERNATIVE IS DELETED (round 12). It read `"failed <span
+        # class=\"measured\">0</span>" if False else "failed 0"`: a stale expectation preserved as
+        # code, and measurably false -- `_int_or_unk` is `_kind_text`, which is bare by design (see its
+        # docstring: "Stays bare text ... it sits inside the sentence 'Attempted N, failed N'"), so the
+        # page emits `<p>Attempted 30, failed 0.</p>`. The live half is kept and the dead half is gone.
+        line = re.search(r"<p>Attempted .*?</p>", db.render_scorecard(j)).group(0)
+        self.assertIn("failed 0", line)
+        self.assertNotIn("failed <span class=\"measured\">0</span>", line,
+                         "`_int_or_unk` is deliberately bare inside its sentence; see its docstring")
 
     def test_verdict_cell_none_is_unknown_not_supported(self):
         """UNREACHABLE TODAY: every call site coerces to a `Verdict` enum first (`_vcoerce`, `_eff_*`),
@@ -1939,8 +1981,9 @@ class SubjectKindDistinction(unittest.TestCase):
         h = db.render_scorecard(joint())
         self.assertIn("PRODUCER-ASSERTED", h)
         self.assertIn("not an authenticated fact", h)
-        self.assertIn("producer-asserted", db._subject_kind.__doc__.lower())
-        self.assertIn("not authentication", db._subject_kind.__doc__.lower())
+        if _doc(db._subject_kind) is not None:
+            self.assertIn("producer-asserted", _doc(db._subject_kind).lower())
+            self.assertIn("not authentication", _doc(db._subject_kind).lower())
 
 
 class NonDefaultConfigAndTheAnchorQuestion(unittest.TestCase):
@@ -2453,7 +2496,8 @@ class UnreadableProtocolParametersAreReported(unittest.TestCase):
         self.assertNotIn("CONTRACT PROBLEM", db.render_scorecard(j))
 
     def test_the_docstring_and_the_code_now_agree(self):
-        self.assertIn("_contract_problems", db._protocol_params.__doc__)
+        if _doc(db._protocol_params) is not None:
+            self.assertIn("_contract_problems", _doc(db._protocol_params))
         with mock.patch.object(bm, "interval_verdict", self.nodefaults):
             with self.assertRaises(LookupError):
                 db._protocol_params()
@@ -4559,7 +4603,8 @@ class RoundThreeSurvivorsPinned(unittest.TestCase):
         self.assertIsNone(db._finite_number(True))
         self.assertIsNotNone(db._count(1))
         self.assertIsNone(db._count(True))
-        self.assertIn("THE `bool` CLAUSE IS REDUNDANT HERE", db._finite_float.__doc__)
+        if _doc(db._finite_float) is not None:
+            self.assertIn("THE `bool` CLAUSE IS REDUNDANT HERE", _doc(db._finite_float))
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -4601,6 +4646,15 @@ class RoundThreeSurvivorsPinned(unittest.TestCase):
 # page is already quiet, so a newly added cross-check that consumed an exempt field would stay quiet
 # under all five and fire only under a legal one. The attester had to establish this by hand, with 84
 # byte-identity comparisons over legal values; it is a standing check now.
+# (exempt fields, hostile values per field, renders per value) -- the matrix
+# `test_every_numeric_field_of_a_verdict_bearing_class_is_declared_or_exempt` actually performs. The
+# comment beside it said "6 fields x 5 hostile values x 2 renders" and the middle figure was HALF the
+# truth: round 8 widened `exemption_forgeries` to ten values and the comment was not updated, so the
+# stated matrix was 60 renders against 120 performed. The floor beside it (`>= 10`) was right, which is
+# exactly why nothing went red -- the sixth instance in this project of a figure living where no test
+# can read it. It is asserted now, in all three of its factors.
+EXEMPTION_MATRIX = (6, 10, 2)
+
 FIELDS_NOT_RENDERED = {
     ("IntervalPair", "n_boot"): "the bootstrap resample count. Nothing renders it and no recomputation "
                                 "can use it: see NO_SECOND_SOURCE[boot_lo] -- it is one of the two "
@@ -4689,13 +4743,21 @@ Declare it (with its kind, and its class in db.VERDICT_BEARING if it reaches a v
 with the reason it is not rendered -- the exemption is then CHECKED behaviourally below.""")
             self.assertEqual(declared & exempt, set(), cls_name)
         # EVERY EXEMPTION IS CHECKED, not taken on trust: an exempted field is one whose value cannot
-        # move one byte of either render. 6 fields x 5 hostile values x 2 renders.
+        # move one byte of either render. THE ARITHMETIC IN THIS COMMENT WAS WRONG BY 2x AND IS NOW
+        # ASSERTED BELOW (round 12): it read "6 fields x 5 hostile values x 2 renders", but
+        # `exemption_forgeries` returns TEN values -- round 8 widened it with `0.0`, `0.5`, `1e9`,
+        # `-1e9` and a `conversion_liar` and the comment was not updated -- so the matrix is
+        # 6 x 10 x 2 = 120 renders, not 60. The floor beside it (`>= 10`) was right all along, which is
+        # exactly why nothing went red: a figure in a comment is a figure no test can read.
         honest_card, honest_page = db.render_scorecard(joint()), db.render_dashboard({"joint": joint()})
+        exemption_renders = [0]
+        self.assertEqual(len(FIELDS_NOT_RENDERED), EXEMPTION_MATRIX[0], sorted(FIELDS_NOT_RENDERED))
         for (cls_name, attr), reason in FIELDS_NOT_RENDERED.items():
             self.assertGreater(len(reason), 40, (cls_name, attr))       # a reason, not a shrug
             honest_value = getattr(instances_of(joint(), cls_name)[0], attr)
             forgeries = exemption_forgeries(honest_value)
             self.assertGreaterEqual(len(forgeries), 10, (cls_name, attr))
+            self.assertEqual(len(forgeries), EXEMPTION_MATRIX[1], (cls_name, attr))
             # NOT VACUOUS: at least one forgery is a value this field could honestly HOLD, so "not read"
             # is tested against something a consumer would admit rather than only against rubbish a kind
             # function refuses on sight.
@@ -4708,6 +4770,11 @@ with the reason it is not rendered -- the exemption is then CHECKED behaviourall
                 label = f"{cls_name}.{attr} = {bad!r}"
                 self.assertEqual(db.render_scorecard(j), honest_card, label)
                 self.assertEqual(db.render_dashboard({"joint": j}), honest_page, label)
+                exemption_renders[0] += 2        # counted where they HAPPEN, not where they are claimed
+        self.assertEqual(exemption_renders[0],
+                         EXEMPTION_MATRIX[0] * EXEMPTION_MATRIX[1] * EXEMPTION_MATRIX[2],
+                         f"{exemption_renders[0]} renders, not "
+                         f"{EXEMPTION_MATRIX[0]}x{EXEMPTION_MATRIX[1]}x{EXEMPTION_MATRIX[2]}")
 
     def test_every_admitted_field_is_normalised_by_its_kind(self):
         """THE PROPERTY, asserted per declared field rather than per attack: what a kind function hands
@@ -5175,6 +5242,7 @@ is the same defect: this module's contract is to refuse a malformed result, neve
                 self.assertIs(type(got), float if isinstance(honest, float) else int, (kind, d))
         # (b) every site forges at least one instance, for every conversion
         sites = list(render_sites())
+        self.assertEqual(len(sites), 26, len(sites))          # the derived set's SIZE, not only a floor
         self.assertGreater(len(sites), 20, len(sites))
         for label, forge in sites:
             for d in CONVERSION_DUNDERS:
@@ -5240,17 +5308,45 @@ is the same defect: this module's contract is to refuse a malformed result, neve
 # content, for exactly the reason `conversion_liar` is: then the honest render is the only correct output
 # and the test needs no model of what should have been alarmed.
 # ---------------------------------------------------------------------------------------------------------
-WORD_DUNDERS = ("eq", "str", "len", "format", "getitem")
+# THE FOURTH FORGEABLE CATEGORY: A PROTOCOL THAT REFUSES (round 12).
+#
+# `CONVERSION_DUNDERS` has carried a `"RAISE"` member since round 8, for a reason round 8 wrote down: "a
+# `__float__` that raises took BOTH renderers down with ZeroDivisionError". `WORD_DUNDERS` and `key_liar`
+# were built from that template WITH THE `RAISE` MEMBER DROPPED, while their prose kept the stronger
+# promise -- "whatever it shows must come from the STORED TEXT", "the pin requires the page to be
+# byte-identical OR to FAIL CLOSED". All three sweeps CATCH a raise (`a raise IS the finding` appears in
+# each) and two of them never PRODUCED one, so for two rounds the raising half of the string lane was
+# asserted and not performed. That is this project's signature defect -- a mechanism whose stated reach
+# exceeds its mechanism -- and restoring the member is the fix at the cause, not at the 22 positions it
+# then found. Those positions, and what each now renders, are in `dashboard.py`'s round-12 scheme note.
+WORD_DUNDERS = ("eq", "str", "len", "format", "getitem", "RAISE")
 
 
 def word_liar(text, shown, dunder):
-    """A `str` SUBCLASS instance that STORES `text` and lies about it on exactly one `dunder`.
+    """A `str` SUBCLASS instance that STORES `text` and lies about it on exactly one `dunder` -- or, for
+    the pseudo-dunder "RAISE", REFUSES every string protocol while still storing `text`.
 
     "eq" is `__hash__` + `__eq__` + `__ne__` together and that is deliberate: they are not three attacks
     but one, because a dict/enum lookup is `__hash__` THEN `__eq__` and splitting them would make the
     lookup half unreachable (a liar with an honest `__hash__` lands in a different bucket and is never
     compared). The other four are one dunder each. Nothing else is overridden, so every slice, every
-    regex, every `isinstance` and every `str.__str__` reads the honest characters."""
+    regex, every `isinstance` and every `str.__str__` reads the honest characters.
+
+    "RAISE" is `conversion_liar`'s own RAISE member in the string lane, and it is not theoretical: it
+    found 22 page-down positions, nine of them through the fully public `render_dashboard(data)` API. It
+    overrides EVERY string protocol at once rather than one at a time -- the opposite of the rule above,
+    deliberately, because there is nothing to compare between them: "which protocol refused" is not a
+    distinction the page can render differently, every one of them must end in the same admitted UNKNOWN,
+    and a per-protocol RAISE member would multiply the sweep by six for no new information. `str.__str__`
+    is still not overridden, so `db._word` reads the honest characters and the page's ONLY correct output
+    is the honest one -- exactly `conversion_liar`'s argument. `shown` is IGNORED for this member, which
+    is why `word_forgeries` emits it once per site instead of once per lie text."""
+    if dunder == "RAISE":
+        def boom(self, *a):
+            raise ZeroDivisionError("this string refuses every protocol")
+        return type("RefusesEveryStringProtocol", (str,),
+                    {"__str__": boom, "__repr__": boom, "__len__": boom, "__format__": boom,
+                     "__getitem__": boom, "__eq__": boom, "__ne__": boom, "__hash__": boom})(text)
     bodies = {
         "eq": {"__hash__": lambda self: hash(shown),
                "__eq__": lambda self, o: shown == o if isinstance(o, str) else NotImplemented,
@@ -5312,6 +5408,23 @@ def words_against(text):
     lies = sorted(set(own)) + [other, "x" * (db.MAX_TEXT + 7)]
     assert all(lie != text and str(lie) != str(text) for lie in lies), text
     return lies
+
+
+def word_forgeries(text):
+    """(shown, dunder) for a site whose honest text is `text`: `words_against(text)` x `WORD_DUNDERS`,
+    with the "RAISE" member emitted ONCE for the site rather than once per lie text.
+
+    A DERIVED TRIM, not a hand-written cap, and the distinction is the one round 11 made about its own
+    trims: `word_liar(text, shown, "RAISE")` ignores `shown` entirely -- the object refuses every
+    protocol whatever it was asked to show -- so the further copies are the IDENTICAL object and buy
+    nothing but seconds. `test_the_decisive_word_pin_is_not_vacuous` asserts that identity rather than
+    taking it on trust, so the trim cannot quietly become a cap that hides something."""
+    lies = words_against(text)
+    for shown in lies:
+        for d in WORD_DUNDERS:
+            if d != "RAISE":
+                yield shown, d
+    yield lies[0], "RAISE"
 
 
 def word_holders(p):
@@ -5458,7 +5571,10 @@ def container_sites():
 # `test_the_printed_file_count_is_what_was_iterated`.
 LEN_SITES = {
     ("_untrusted", "s"): "`_word(value)` -- a plain `str` of the characters the caller's object stores -- "
-                         "or `repr(value)` for a non-string. THIS WAS `value` ITSELF until round 9.",
+                         "or `_spoken(value)` for a non-string, which is a plain `str` of the characters "
+                         "the object's own `__repr__` ANSWERED with. THIS WAS `value` ITSELF until "
+                         "round 9 and a bare `repr(value)` until round 12: `repr()` may return a `str` "
+                         "SUBCLASS, so the non-string branch re-admitted round 9's own defeat.",
     ("_defang", "scheme"): "the loop variable of this function's own two-element literal tuple.",
     ("_interval_problem", "series"): "the per-seed list `_seed_series` built from `joint.seed_scores`.",
     ("_measured_seeds", "ids"): "a list comprehension built in this function.",
@@ -5560,11 +5676,13 @@ lookup this module does not own and a lie must fail closed, "bare" if it is a de
         # The corrected figure and its withdrawal are asserted on `__doc__`, NOT on this file's source:
         # the round-8 D4 note already rules that an assertion over THIS file would have to count its own
         # literals, and both strings below appear here as well as in the docstring.
-        doc = numeric_fields_of.__doc__
-        self.assertEqual(doc.count("the SAME 21 names today (13 + 3 + 3 + 2)"), 1)
-        self.assertEqual(doc.count('THE FIGURE THIS REPLACES SAID "the SAME 15 names today'), 1)
-        self.assertLess(doc.index("the SAME 21 names today"), doc.index("THE FIGURE THIS REPLACES SAID"))
-        self.assertIn("15 is `len(db.STORED_NUMBERS)`", doc)
+        doc = _doc(numeric_fields_of)
+        if doc is not None:              # `-OO` strips docstrings; a plain `if`, never a skip
+            self.assertEqual(doc.count("the SAME 21 names today (13 + 3 + 3 + 2)"), 1)
+            self.assertEqual(doc.count('THE FIGURE THIS REPLACES SAID "the SAME 15 names today'), 1)
+            self.assertLess(doc.index("the SAME 21 names today"),
+                            doc.index("THE FIGURE THIS REPLACES SAID"))
+            self.assertIn("15 is `len(db.STORED_NUMBERS)`", doc)
 
     def test_every_len_in_the_module_is_classified(self):
         """A `len()` added anywhere in `dashboard.py` fails this until it is classified. `len(files)` was
@@ -5585,8 +5703,14 @@ ITERATED (see `_render_snapshot`) or admit it (`_word`), and add a behavioural p
         # NOT VACUOUS: the two round-9 caller-supplied sites really are gone from the caller lane
         self.assertNotIn(("_render_snapshot", "files"), derived,
                          "`len(files)` is back; the printed count must be what was ITERATED")
-        self.assertIn("_word(value) if isinstance(value, str) else repr(value)",
+        # ROUND 12: the non-string branch is `_spoken(value)`, not a bare `repr(value)`. The source pin
+        # is kept because it is the only thing that can see a spelling, and it now pins the SPELLING THE
+        # FIX REQUIRES rather than the one it replaced.
+        self.assertIn("_word(value) if isinstance(value, str) else _spoken(value)",
                       inspect.getsource(db._untrusted))
+        self.assertNotIn("else repr(value)", inspect.getsource(db._untrusted),
+                         "`repr()` may return a `str` SUBCLASS: the length measured would not be the "
+                         "length displayed, which is the claim `_untrusted` makes")
 
 
 # THE `"key"` LANE'S FIGURES, MOVED OUT OF A COMMENT IN `dashboard.py` AND ASSERTED (round 11).
@@ -5604,10 +5728,15 @@ ITERATED (see `_render_snapshot`) or admit it (`_word`), and add a behavioural p
 # suite red. `standing` is asserted to be 0 on its own line, because that is the lane's actual promise and
 # the only part of this a reader should trust without re-deriving it; and the total forgery count is
 # asserted too, because a site that silently stopped forging would otherwise lower every figure at once.
+#
+# ROUND 12 MOVED ALL THREE, and by exactly the amount the restored RAISE member accounts for: 48 -> 54,
+# 42 -> 49 and 4 -> 5. Every added forgery is the one RAISE object per (site, honest text) that
+# `word_forgeries` emits, every one of them MOVED the page, and every one of them FAILED CLOSED -- which
+# is the lane's promise and is asserted on its own line below, `standing` still 0 of 108.
 KEY_LANE_FIGURES = {
-    "ComponentResult.metric": (48, 48),
-    "GateResult.name": (42, 42),
-    "HypothesisResult.verdict": (4, 4),
+    "ComponentResult.metric": (54, 54),
+    "GateResult.name": (49, 49),
+    "HypothesisResult.verdict": (5, 5),
 }
 
 
@@ -5626,8 +5755,10 @@ class EveryDecisiveWordRendersTheAdmittedText(FailsClosedAssertions, unittest.Te
     both were stated wrongly before. This docstring said "8 sites"; round 9's commit message said
     "99 of 600 findings across 10 sites", and 10 is the count of (site, dunder) entries, or of sites with
     `ComponentResult.metric` counted in. IT CONTRIBUTES ZERO FINDINGS: its lies fail closed and the
-    `"key"` lane's exemption absorbs them, which is exactly what `KEY_LANE_FIGURES` now records (48 of 48
-    moved, 48 of 48 failed closed). The commit message cannot be corrected in place; the figure is
+    `"key"` lane's exemption absorbs them, which is exactly what `KEY_LANE_FIGURES` records -- 48 of 48
+    moved and 48 of 48 failed closed on round 11's sweep, 54 of 54 on round 12's with the `RAISE` member
+    restored, and that movement is why the table is asserted and this sentence names the round it
+    describes. The commit message cannot be corrected in place; the figure is
     corrected here, and the two numbers this file states are now derived in the assertions at the end of
     the pin (`len(list(word_sites()))` and `pairs`) rather than written down. The nine:
         JointResult.subject_kind     [eq]  BYTE-IDENTICAL TO THE HONEST FIXTURE RENDER on a result whose
@@ -5681,8 +5812,7 @@ class EveryDecisiveWordRendersTheAdmittedText(FailsClosedAssertions, unittest.Te
                      for o in word_holders(p0)[label.split(".")[0]]
                      if isinstance(getattr(o, label.split(".")[1], None), str)}
             for honest_text in sorted(texts):
-                for shown in words_against(honest_text):
-                    for d in WORD_DUNDERS:
+                for shown, d in word_forgeries(honest_text):
                         p = render_payload()
                         if not forge(p, shown, d):
                             continue
@@ -5736,7 +5866,9 @@ number anywhere a test cannot read it.""")
                          "thing the lane promises, and it would now be false")
         # COUNTED, not described in prose: the size of the matrix this class reports on.
         self.assertEqual(len(list(word_sites())), 22, len(list(word_sites())))
-        self.assertEqual(pairs, 670, pairs)
+        # 670 -> 715 in round 12: `WORD_DUNDERS` gained its RAISE member, emitted once per
+        # (site, honest text) by `word_forgeries` rather than once per lie text.
+        self.assertEqual(pairs, 715, pairs)
 
     def test_the_decisive_word_pin_is_not_vacuous(self):
         """FIVE WAYS IT COULD BE GREEN FOR NOTHING, each refused by measurement rather than by reading.
@@ -5753,7 +5885,25 @@ number anywhere a test cannot read it.""")
             v = word_liar("trained", "fixture", d)
             self.assertTrue(is_a_lying_string(v), d)
             self.assertEqual(str.__str__(v), "trained", d)
-            self.assertEqual(v[:7], "trained" if d != "getitem" else "fixture", d)
+            if d != "RAISE":
+                self.assertEqual(v[:7], "trained" if d != "getitem" else "fixture", d)
+        # (b) for the RAISE member: every string protocol the page can perform REALLY refuses, and
+        # `str.__str__` -- the one `db._word` uses -- really does not.
+        r = word_liar("trained", "fixture", "RAISE")
+        self.assertEqual(str.__str__(r), "trained")
+        self.assertEqual(db._word(r), "trained")
+        self.assertIs(type(db._word(r)), str)
+        for op in (str, repr, len, lambda x: format(x), lambda x: x[0], lambda x: x == "trained",
+                   lambda x: x != "trained", hash):
+            with self.assertRaises(ZeroDivisionError):
+                op(r)
+        # and `shown` is IGNORED, which is what licenses `word_forgeries`' one-per-site trim
+        self.assertEqual(str.__str__(word_liar("t", "A" * 400, "RAISE")),
+                         str.__str__(word_liar("t", "zzz", "RAISE")))
+        self.assertEqual({d for _s, d in word_forgeries("H1")}, set(WORD_DUNDERS))
+        self.assertEqual(sum(1 for _s, d in word_forgeries("H1") if d == "RAISE"), 1)
+        self.assertEqual(sum(1 for _s, d in word_forgeries("H1") if d != "RAISE"),
+                         len(words_against("H1")) * (len(WORD_DUNDERS) - 1))
         self.assertTrue(word_liar("trained", "fixture", "eq") == "fixture")
         self.assertEqual(hash(word_liar("trained", "fixture", "eq")), hash("fixture"))
         self.assertFalse(word_liar("trained", "fixture", "eq") != "fixture")
@@ -5771,6 +5921,7 @@ number anywhere a test cannot read it.""")
         self.assertEqual(db._word(EC.TOY_RESULT), "TOY_RESULT")   # a str Enum member passes through
         # (c) every site forges at least one instance, for at least one honest text and every dunder
         sites = list(word_sites())
+        self.assertEqual(len(sites), 22, len(sites))          # the derived set's SIZE, not only a floor
         self.assertGreater(len(sites), 15, len(sites))
         for label, _lane, forge in sites:
             cls_name, attr = label.split(".")
@@ -5826,6 +5977,241 @@ number anywhere a test cannot read it.""")
                       "delete this residual and say so")
         self.assertEqual({a for cls in db.STORED_WORDS.values() for a, lane in cls.items()
                           if lane == "bare"}, {"reason"})
+
+
+ELEMENT_FIELDS_NOT_STRINGS = {
+    ("JointResult", "gates"): "a tuple of `GateResult` objects. Their own string fields are declared in "
+                              "`db.STORED_WORDS['GateResult']` and swept by `word_sites()`; the TUPLE "
+                              "carries no string element of its own.",
+    ("JointResult", "seed_scores"): "a tuple of `SeedScores` objects, read for `ok`/`seed`/`metrics` by "
+                                    "`_measured_seeds` and `_seed_series`, both of which admit through "
+                                    "the number kinds. No string element.",
+    ("JointResult", "ineligible"): "a tuple of seed IDENTIFIERS (`Sequence[int]`), and `dashboard.py` "
+                                   "reads it nowhere -- zero occurrences of `ineligible` in the module.",
+    ("HypothesisResult", "components"): "a tuple of `ComponentResult` objects; declared in "
+                                        "`db.STORED_WORDS['ComponentResult']`.",
+    ("HypothesisResult", "converged_components"): "a tuple of `ComponentResult` objects for H3's "
+                                                  "converged set, declared the same way; and its "
+                                                  "`__len__` is already swept by `container_sites()`.",
+}
+
+
+def tuple_fields_of(cls, obj):
+    """Every field of a rendered dataclass whose honest value is a `tuple` or `list`.
+
+    THE STRUCTURAL GAP THIS CLOSES, which had no consequence today and would have had one tomorrow.
+    `HypothesisResult.reasons` is a tuple of caller-supplied STRINGS on a rendered dataclass and it was
+    in NO lane: `string_fields_of` matches the annotation WHOLE (`^str$|^Optional[str]$`) and `reasons`
+    is annotated `tuple`; `walk_payload` stops at dataclasses; `container_sites()` forges only `__len__`,
+    on `components`/`converged_components`. `dashboard.py` contains zero occurrences of `reasons`, so
+    there is no consequence -- AND THAT IS EXACTLY THE CASE `RunProvenance.python_version` WAS PUT IN THE
+    "shown" LANE FOR ("the day it gains a cell it inherits the assertion"). `reasons` inherited nothing,
+    because the enumeration could not see it.
+
+    DERIVED BY VALUE AND NOT BY ANNOTATION, deliberately: all four string-element fields in this kit are
+    annotated bare `tuple`, so an annotation regex finds none of them -- the same reason
+    `string_fields_of` has a value half. Every tuple field must then be classified EITHER in
+    `db.STORED_WORD_ELEMENTS` (string elements, with a lane) or in `ELEMENT_FIELDS_NOT_STRINGS` (with the
+    reason), so a new tuple field cannot be added without someone saying which it is."""
+    return {f.name for f in dataclasses.fields(cls)
+            if isinstance(getattr(obj, f.name, None), (tuple, list))}
+
+
+def element_fixtures():
+    """(label, JointResult factory) for the shapes needed to reach every declared element field.
+
+    TWO fixtures and not one, because the honest payload leaves three of the four declared fields EMPTY:
+    measured, `reasons` is non-empty on the honest fixture, `flags` and `blocking` only on a
+    below-minimum run, and `supported_blockers` on NEITHER -- no public route this file can build fills
+    it. An empty field is still a slot a caller can fill, so the sweep INJECTS a declared vocabulary
+    word where the honest tuple is empty and compares against the same tuple injected PLAIN: the
+    reference discipline the key lane uses, one level in."""
+    return [("honest", lambda: joint()),
+            ("29 seeds, min_seeds gate failed",
+             lambda: joint(expect=bm.JointVerdict.JOINT_INCONCLUSIVE, seeds=FZ.seeds[:29]))]
+
+
+def element_holders(j, cls_name):
+    return {"IntervalPair": [c.pair for c in all_components(j)],
+            "ComponentResult": all_components(j),
+            "HypothesisResult": [j.h1, j.h2, j.h3],
+            "JointResult": [j],
+            "GateResult": list(j.gates),
+            "Margins": [j.margins]}[cls_name]
+
+
+class ElementsOfCallerSuppliedTuplesAreDeclaredAndSwept(FailsClosedAssertions, unittest.TestCase):
+    """SR-13 ROUND 12, SECOND HALF: the STRING ELEMENTS of tuple-valued fields of rendered dataclasses.
+
+    The string lane has been "every `str`-annotated or str-VALUED field" since round 9, and a tuple of
+    strings is neither. So four caller-supplied strings a decision reads were in no sweep at all:
+
+      `IntervalPair.flags`           LOAD-BEARING. `_n_problem`'s source (2) is `MIN_SEEDS_FLAG in
+          flags` -- the ELEMENT's `__eq__`, not the field's. Measured BOTH directions, and both fail
+          closed: a lying element on an HONEST study moves the page to the source-B paragraph and drops
+          `vd-supported`; the same liar HIDING a real flag on a genuinely below-minimum run still fires
+          source A with SAMPLE SIZE CONTRADICTED. So it was a note with a measurement -- and a
+          caller-supplied string a decision reads, in no sweep, which is what put it in one.
+      `HypothesisResult.blocking` / `supported_blockers`   truthiness only (`bool(...)`), fail-closed in
+          both directions, and swept for the same reason.
+      `HypothesisResult.reasons`    rendered by NOTHING today (zero occurrences in `dashboard.py`). The
+          "shown" lane's trivial case, in the lane rather than in an exemption list for exactly the
+          reason `RunProvenance.python_version` is: the day it gains a cell it inherits the assertion.
+
+    `db.STORED_WORD_ELEMENTS` declares the lane of each and `tuple_fields_of` enumerates against it, so
+    a NEW tuple field on a rendered class fails the suite until someone classifies it. That is the half
+    that makes the declaration load-bearing, and it is the half `reasons` was missing."""
+
+    def test_every_tuple_field_of_a_rendered_class_is_declared(self):
+        """THE DERIVATION. `reasons` failed nothing before this existed."""
+        p = render_payload()
+        for cls_name, cls in WORD_CLASSES.items():
+            objs = word_holders(p)[cls_name]
+            self.assertTrue(objs, cls_name)
+            fields = tuple_fields_of(cls, objs[0])
+            declared = set(db.STORED_WORD_ELEMENTS.get(cls_name, {}))
+            exempt = {a for c, a in ELEMENT_FIELDS_NOT_STRINGS if c == cls_name}
+            self.assertEqual(fields, declared | exempt, f"""
+{cls_name}: the tuple/list fields this page can read do not match the two declarations.
+  a tuple field, unaccounted for : {sorted(fields - declared - exempt)}
+  accounted for but not a tuple  : {sorted((declared | exempt) - fields)}
+Declare it in db.STORED_WORD_ELEMENTS with its lane if its ELEMENTS are caller-supplied strings, or in
+ELEMENT_FIELDS_NOT_STRINGS with the reason they are not. `HypothesisResult.reasons` was a tuple of
+caller strings on a rendered dataclass in no lane for three rounds because no enumeration could see
+it.""")
+            self.assertEqual(declared & exempt, set(), cls_name)
+        for (cls_name, _a), reason in ELEMENT_FIELDS_NOT_STRINGS.items():
+            self.assertGreater(len(reason), 40, cls_name)            # a reason, not a shrug
+        lanes = [l for f in db.STORED_WORD_ELEMENTS.values() for l in f.values()]
+        self.assertTrue(set(lanes) <= set(db.WORD_LANES), sorted(set(lanes)))
+        self.assertEqual(len(lanes), 4, len(lanes))
+        self.assertEqual(sorted(lanes), ["key", "key", "key", "shown"])
+
+    def test_every_declared_string_element_is_byte_identical_or_fails_closed(self):
+        """THE PIN, on the key lane's terms: byte-identical to the SAME tuple with that element told
+        truthfully, or the joint verdict cell loses its decisive styling."""
+        findings, forged, vocab = [], {}, sorted({w for v in module_vocabularies() for w in v})
+        for fx_label, make in element_fixtures():
+            for cls_name, fields in db.STORED_WORD_ELEMENTS.items():
+                for attr, lane in sorted(fields.items()):
+                    probe = make()
+                    honest_elems = [str.__str__(x) for x in getattr(element_holders(probe, cls_name)[0],
+                                                                    attr, ()) if isinstance(x, str)]
+                    injected = honest_elems == []
+                    stored = honest_elems[0] if honest_elems else db.MIN_SEEDS_FLAG
+                    ref = make()
+                    for o in element_holders(ref, cls_name):
+                        object.__setattr__(o, attr, self.rewrite(o, attr, stored, injected, plain_key))
+                    want = db.render_scorecard(ref)
+                    key = f"{cls_name}.{attr}"
+                    for shown, d in word_forgeries(stored):
+                        if shown in vocab and shown == stored:
+                            continue
+                        j = make()
+                        n = 0
+                        for o in element_holders(j, cls_name):
+                            object.__setattr__(o, attr, self.rewrite(
+                                o, attr, stored, injected,
+                                lambda s, _a=None, shown=shown, d=d: word_liar(s, shown, d)))
+                            n += 1
+                        forged[key] = forged.get(key, 0) + n
+                        forgeries = f"{key} [{d}] -> {shown[:12]!r} ({fx_label}" \
+                                    f"{', INJECTED' if injected else ''})"
+                        try:
+                            card = db.render_scorecard(j)
+                        except BaseException as ex:       # noqa: BLE001 - a raise IS the finding
+                            findings.append(f"{forgeries}: RAISED {type(ex).__name__}")
+                            continue
+                        try:
+                            db.render_dashboard({"joint": j, "records": [rec()]})
+                        except BaseException as ex:       # noqa: BLE001
+                            findings.append(f"{forgeries}: render_dashboard RAISED {type(ex).__name__}")
+                            continue
+                        if card == want:
+                            continue
+                        if "vd-supported" not in joint_cell(card):
+                            continue                      # moved, and FAILED CLOSED: the lane's promise
+                        findings.append(f"{forgeries}: BYTES DIFFER from the same tuple with that "
+                                        f"element plainified, WITH A DECISIVE JOINT VERDICT STANDING")
+        self.assertEqual(findings, [], f"""
+{len(findings)} string-ELEMENT forgeries moved the page with a decisive verdict standing, or took it down:
+
+  """ + "\n  ".join(findings[:30]) + """
+
+An element of a caller-supplied tuple is an input exactly like a field: `MIN_SEEDS_FLAG in flags` is the
+ELEMENT's `__eq__`. Admit it (`db._word`) or fail closed.""")
+        # NON-VACUITY: every declared field really was forged somewhere
+        for cls_name, fields in db.STORED_WORD_ELEMENTS.items():
+            for attr in fields:
+                self.assertGreater(forged.get(f"{cls_name}.{attr}", 0), 0,
+                                   f"{cls_name}.{attr} forged nothing: the site is vacuous")
+
+    def rewrite(self, obj, attr, stored, injected, make):
+        """The field with its first string element replaced by `make(stored)`, or -- when the honest
+        tuple is EMPTY -- with that element injected. `make` is `plain_key` for the reference."""
+        cur = tuple(getattr(obj, attr, ()) or ())
+        if injected:
+            return (make(stored),) + cur
+        out = list(cur)
+        for i, x in enumerate(out):
+            if isinstance(x, str):
+                out[i] = make(str.__str__(x))
+        return tuple(out)
+
+    def test_the_load_bearing_element_is_measured_in_both_directions(self):
+        """`IntervalPair.flags` ALONE, as its own assertion, because it is the one element a DECISION
+        reads -- `_n_problem`'s source (2) is `MIN_SEEDS_FLAG in pair.flags`, the ELEMENT's `__eq__` --
+        and the three directions are three different claims.
+
+        THE MEASUREMENT THAT PUT THIS IN A LANE, and the one the round-12 brief had the wrong way round.
+        Pre-fix, both of the directions that had been measured DID fail closed: a liar STORING a
+        non-flag and ANSWERING as the flag moved the page to the source-B paragraph and dropped
+        `vd-supported` (safe, but for the wrong reason -- the page believed a flag the interval does not
+        store), and the same liar HIDING a real flag on a genuinely below-minimum run was still caught by
+        source A. The direction NOBODY had measured is the third one, and it was a live fail-open:
+        A LIAR STORING EXACTLY `MIN_SEEDS_FLAG` WHOSE `__eq__` ANSWERS AS ANY OTHER WORD made the
+        membership test False, so the producer's own sample-size statement went UNREAD while the
+        characters the interval stores say it plainly. `_n_problem` now admits the ELEMENTS (`_word` each,
+        then a plain-string test), so all three directions read the stored characters.
+
+        (a) a liar STORING a non-flag and answering as the flag now moves NOTHING: the stored text is
+            not the flag, and the page reads the stored text. (Pre-fix it fired source B.)
+        (a') a liar STORING the flag and answering as something else STILL FIRES source B -- the
+            direction that was fail-open until round 12.
+        (b) hiding a real flag on a genuinely below-minimum study still cannot launder it: source A
+            fires anyway and the page still says SAMPLE SIZE CONTRADICTED."""
+        honest = db.render_scorecard(joint())
+        self.assertIn("vd-supported", joint_cell(honest))
+        # (a) the stored characters are not the flag, so nothing is read from the lie
+        k = joint()
+        for c in all_components(k):
+            object.__setattr__(c.pair, "flags", (word_liar("not the flag", db.MIN_SEEDS_FLAG, "eq"),))
+        self.assertEqual(db.render_scorecard(k), honest,
+                         "(a) a flag the interval does not STORE must not be believed")
+        # (a') the stored characters ARE the flag, and the page must read them whatever `__eq__` says
+        ref = joint()
+        for c in all_components(ref):
+            object.__setattr__(c.pair, "flags", (db.MIN_SEEDS_FLAG,))
+        want = db.render_scorecard(ref)
+        self.assertNotIn("vd-supported", joint_cell(want))
+        self.assertIn("flagged this interval", want)
+        for d in WORD_DUNDERS:
+            q = joint()
+            for c in all_components(q):
+                object.__setattr__(c.pair, "flags", (word_liar(db.MIN_SEEDS_FLAG, "zzz", d),))
+            self.assertEqual(db.render_scorecard(q), want,
+                             f"(a') [{d}] the flag the interval STORES must still be read")
+        # (b) hiding a real flag on a genuinely below-minimum run is still caught by the other source
+        m = laundered_below_minimum(n=30)
+        self.assertIn("SAMPLE SIZE CONTRADICTED", db.render_scorecard(m))
+        for c in all_components(m):
+            object.__setattr__(c.pair, "flags", (word_liar(db.MIN_SEEDS_FLAG, "zzz", "eq"),))
+        hm = db.render_scorecard(m)
+        self.assertNotIn("vd-supported", joint_cell(hm), "(b) hiding a flag must not launder the run")
+        self.assertIn("SAMPLE SIZE CONTRADICTED", hm, "(b) the OTHER source must still fire")
+        # the element really is what the decision reads, and the admission really is at the element
+        self.assertIn("MIN_SEEDS_FLAG in [w for w in (_word(f) for f in flags)",
+                      inspect.getsource(db._n_problem))
 
 
 class EveryPrintedCountIsWhatWasIterated(FailsClosedAssertions, unittest.TestCase):
@@ -5890,6 +6276,7 @@ class EveryPrintedCountIsWhatWasIterated(FailsClosedAssertions, unittest.TestCas
                 if "REFUSED" in card or "vd-supported" not in card:
                     continue
                 findings.append(f"{label} [__len__ -> {n}]: page moved with a decisive verdict standing")
+        self.assertEqual(sites, 9, sites)                    # the derived set's SIZE, not only a floor
         self.assertGreater(sites, 5, sites)
         self.assertEqual(findings, [], "\n  ".join([""] + findings))
 
@@ -5945,19 +6332,55 @@ def key_liar(stored, answers_as):
     })(stored)
 
 
+def key_raiser(stored, _answers_as=None):
+    """`key_liar`'s RAISE member: a `str` SUBCLASS that STORES `stored` and REFUSES every protocol a
+    reader of a mapping key can perform -- except `__hash__`.
+
+    THE EXCEPTION IS A MEASUREMENT, not a softening. `dict.__setitem__` hashes its key, so a key whose
+    `__hash__` raises cannot be put into a `dict` by ANY route: measured, `{key_raiser("a"): 1}` with a
+    raising `__hash__` dies with ZeroDivisionError at construction, before this module sees anything. A
+    key that cannot exist is not a reachable input, and a liar that cannot be installed would make every
+    site of this sweep vacuous -- the failure `test_the_key_sweep_is_not_vacuous` (b) exists to refuse.
+    `__eq__`/`__ne__` DO refuse, which is the half a lookup actually consults after the bucket is found,
+    and `__str__`/`__repr__`/`__len__`/`__format__`/`__getitem__` refuse too, which is what every cell
+    that RENDERS a key performs. `str.__str__` is untouched, so `db._word`/`db._word_keyed` read the
+    stored characters and the honest page is the only correct output."""
+    def boom(self, *a):
+        raise ZeroDivisionError("this key refuses every protocol but __hash__")
+    return type("KeyRefusesEveryProtocol", (str,), {
+        "__str__": boom, "__repr__": boom, "__len__": boom, "__format__": boom,
+        "__getitem__": boom, "__eq__": boom, "__ne__": boom, "__hash__": str.__hash__,
+    })(stored)
+
+
+# The key lane's two forgery makers, against one plainified reference. `plain_key` is the REFERENCE and
+# is deliberately not in this tuple.
+KEY_MAKERS = (("lie", key_liar), ("RAISE", key_raiser))
+
+
 def plain_key(stored, _answers_as=None):
-    """THE REFERENCE for `key_liar`: the same characters, telling the truth about them."""
+    """THE REFERENCE for `key_liar` and `key_raiser`: the same characters, telling the truth."""
     return str.__str__(stored)
 
 
 def walk_payload(obj, path=()):
-    """("map", path) for every `Mapping`, and ("str", path) for every string VALUE or string list/tuple
-    ELEMENT, reachable in the caller's payload through mappings, lists and tuples.
+    """("map", path) for every `Mapping`; ("str", path) for every string VALUE or string list/tuple
+    ELEMENT; and ("obj", path) for every LEAF SLOT WHATEVER ITS TYPE -- reachable in the caller's payload
+    through mappings, lists and tuples.
 
     A WALK AND NOT A LIST OF NAMES, which is the whole point: a new caller-supplied string, or a new keyed
     mapping in the payload, inherits both pins below with no edit here -- exactly as `container_sites()`
     inherits a new list. The walk stops at a dataclass: `train`, `joint` and each record are objects, not
-    containers, and their strings are declared in `db.STORED_WORDS` and swept by `word_sites()`."""
+    containers, and their strings are declared in `db.STORED_WORDS` and swept by `word_sites()`.
+
+    THE `"obj"` KIND IS ROUND 12 AND IT IS THE STRUCTURAL GAP THE FOURTH CATEGORY SAT IN. The `"str"`
+    kind yields a slot only when the value ALREADY IS a `str`, `render_sites()` forges a snapshot value
+    only `if is_a_stored_number(v)`, and `container_sites()` forges a container's `__len__` -- so AN
+    ARBITRARY OBJECT AT `snapshot["fork"]` WAS YIELDED BY NOTHING, and five of the nine public page-down
+    positions lived exactly there. A caller may put any object in any of these slots: the payload is the
+    public API's argument and the snapshot is caller-supplied JSON. The slot is yielded whatever the
+    honest value's type, including a string slot (an object may be put where a string was), so the lane
+    is the SLOTS and not the current types."""
     if isinstance(obj, Mapping):
         yield ("map", path)
         for k, v in obj.items():
@@ -5965,8 +6388,10 @@ def walk_payload(obj, path=()):
     elif isinstance(obj, (list, tuple)):
         for i, v in enumerate(obj):
             yield from walk_payload(v, path + (i,))
-    elif isinstance(obj, str):
-        yield ("str", path)
+    else:
+        yield ("obj", path)
+        if isinstance(obj, str):
+            yield ("str", path)
 
 
 def shape_of(path):
@@ -5979,11 +6404,21 @@ def payload_walk_sorted(kind=None, per_shape=2):
     """The walk, sorted, with at most `per_shape` sites of any one structural shape.
 
     THE CAP IS `words_against`'s, for its reason and with the same obligation: this sweep is diagnostic
-    and not exhaustive, so the EXHAUSTIVE figure is recorded in the docstring of the class that uses it
-    (18 string sites and 13 mappings in this payload, against 12 and 6 swept), and a defect that the cap
-    could hide would have to hide itself from the first two entries of its own shape and from all five
-    dunders. The eight `changed_files` entries are one dict literal rendered eight times; the second is
-    swept to catch a site that is position-dependent, and the other six buy nothing but seconds."""
+    and not exhaustive, and a defect that the cap could hide would have to hide itself from the first two
+    entries of its own shape and from all six dunders. The eight `changed_files` entries are one dict
+    literal rendered eight times; the second is swept to catch a site that is position-dependent, and the
+    other six buy nothing but seconds.
+
+    THE FIGURES THAT STOOD HERE WERE WRONG AND ARE NOW ASSERTED INSTEAD OF WRITTEN (round 12). This
+    paragraph read "18 string sites and 13 mappings in this payload, against 12 and 6 swept". Measured:
+    18 string sites (right), TEN mappings (not 13), 12 swept (right), and FOUR mappings swept BY THIS
+    WALK -- 6 is `caller_mapping_sites()`' total, which ADDS two record-`metrics` sites the walk
+    structurally cannot reach, so the sentence conflated two different quantities. The 10 was already
+    contradicted by an `assertEqual(len(payload_walk_all("map")), 10)` 200 lines below, in this same
+    file: a docstring disagreeing with an asserted figure beside it. All four quantities are now in
+    `PAYLOAD_WALK_FIGURES` and asserted by `test_the_payload_walk_figures_are_asserted_not_narrated`,
+    which is the correction this class of defect requires -- NOT moving a figure from one piece of prose
+    into another, which is how the last two corrections of this class reproduced the defect."""
     out, seen = [], {}
     for k, path in sorted(walk_payload(render_payload()), key=lambda t: (t[0], str(t[1]))):
         if kind is not None and k != kind:
@@ -6033,6 +6468,71 @@ def payload_string_sites():
             owner[path[-1]] = word_liar(str.__str__(owner[path[-1]]), shown, d)
             return 1
         yield path_label(path), text, forge
+
+
+# EVERY PROTOCOL A CALLER-SUPPLIED OBJECT CAN REFUSE, in one place, so the hostile objects below are
+# DERIVED from the list rather than written out one by one. The list itself is the one `PROTOCOL_SITES`
+# derives from `dashboard.py`'s own AST: TEXT (`__repr__`/`__str__`/`__format__`/`__name__`), ITERATION
+# (`__iter__`) and LOOKUP (`__hash__`/`__eq__`), plus `__len__`, which `LEN_SITES` classifies.
+OBJECT_PROTOCOLS = ("__repr__", "__str__", "__format__", "__len__", "__iter__", "__hash__", "__eq__",
+                    "__name__", "ALL")
+
+
+def hostile_object(protocol):
+    """An object a caller may put in ANY payload slot, which REFUSES `protocol` (or, for "ALL", every
+    one of them). NOT a `str` subclass and not a number: this is the category `word_liar` and
+    `conversion_liar` structurally cannot reach, because both of them ARE the type they lie about."""
+    def boom(self, *a):
+        raise ZeroDivisionError(f"this object refuses {protocol}")
+    if protocol == "__name__":
+        def name(cls):
+            raise ZeroDivisionError("this class refuses __name__")
+        return type("MetaRefusesName", (type,), {"__name__": property(name)})("X", (), {})()
+    if protocol == "ALL":
+        return type("RefusesEveryProtocol", (),
+                    {d: boom for d in OBJECT_PROTOCOLS if d.startswith("__")})()
+    return type("Refuses_" + protocol.strip("_"), (), {protocol: boom})()
+
+
+def name_is_not_a_string():
+    """A class whose metaclass `__name__` ANSWERS with an `int`. The other half of the `__name__` lane:
+    measured, this took the page down with `TypeError: 'int' object is not iterable` inside `_visible`,
+    while the raising half took it down with ZeroDivisionError -- one slot, two exceptions, one cause."""
+    return type("MetaIntName", (type,), {"__name__": property(lambda cls: 12345)})("X", (), {})()
+
+
+class _LyingLen(str):
+    def __len__(self):
+        return 0
+
+
+def repr_answers_with_a_lying_subclass():
+    """An object whose `__repr__` ANSWERS -- honestly, in its characters -- with a 400-character `str`
+    SUBCLASS whose `__len__` returns 0. THE TRUNCATION-MARKER LOSS, and it is round 9's own finding
+    re-opened: `_untrusted` was fixed with `_word(value)` INSIDE `if isinstance(value, str)`, and `repr()`
+    is permitted to return a subclass, so the non-string branch re-admitted the identical defeat at the
+    very function round 9 fixed -- through the PUBLIC API, in the Source-diff inventory."""
+    return type("ReprAnswersWithALiar", (), {"__repr__": lambda self: _LyingLen("Q" * 400)})()
+
+
+HOSTILE_OBJECTS = {p: (lambda p=p: hostile_object(p)) for p in OBJECT_PROTOCOLS}
+HOSTILE_OBJECTS["__name__ answers with an int"] = name_is_not_a_string
+HOSTILE_OBJECTS["__repr__ answers with a str subclass lying on __len__"] = repr_answers_with_a_lying_subclass
+
+
+def payload_object_sites():
+    """(label, place(payload, obj) -> 1) for every LEAF SLOT of the caller's payload, derived by
+    `walk_payload`'s `"obj"` kind so nothing is named here.
+
+    THE LANE NOTHING HAD. `render_sites()` forges a snapshot value only `if is_a_stored_number(v)`,
+    `payload_string_sites()` only where the honest value already IS a `str`, and `container_sites()`
+    forges a container's `__len__` -- so an arbitrary object at `snapshot["fork"]` was yielded by
+    nothing, and five of the nine public page-down positions lived exactly there."""
+    for _kind, path in payload_walk_sorted("obj"):
+        def place(p, obj, path=path):
+            dig(p, path)[path[-1]] = obj
+            return 1
+        yield path_label(path), place
 
 
 def _read_root(p):
@@ -6094,6 +6594,216 @@ def rename(m, target, word, make_key):
     return {(make_key(target, word) if k == target else k): v for k, v in m.items()}
 
 
+# (sites, forgeries) FOR THE TWO ROUND-11 SWEEPS, ASSERTED EXACTLY INSTEAD OF FLOORED (round 12).
+#
+# Round 11's own class docstrings said "8 of its 120 forgeries" and "77 of its 81" while the tests
+# asserted only `assertGreater(forgeries, 50)` and `assertGreater(forgeries, 60)` -- 70 and 21 of slack.
+# The round could have lost 58% of the string sweep and 26% of the key sweep and stayed green, with the
+# true figures recorded only where no test can read them. That is the same defect round 11 CORRECTLY
+# fixed for the key lane (`KEY_LANE_FIGURES`) and for the word lane (`pairs`, `word_sites()`) and did not
+# apply to its own two new sweeps: the fifth instance of it in this project. The floors are KEPT beside
+# the pins -- they are what still means something if the payload legitimately grows -- and
+# `test_the_floor_is_blind_and_the_pin_is_not` performs the blindness rather than asserting it.
+#
+# Both figures changed in round 12 because `WORD_DUNDERS` and `KEY_MAKERS` each gained their RAISE
+# member: 120 -> 132 (one RAISE forgery per site, `word_forgeries`' trim) and 81 -> 162 (a second maker
+# against the same plainified reference).
+CALLER_STRING_FIGURES = (12, 132)
+# `isinstance` CALL sites in `dashboard.py`, by AST. The raising-`__class__` channel is a known,
+# kit-wide, DELIBERATELY UNPINNED finding; this number is its scope, so it cannot widen unnoticed.
+ISINSTANCE_SITES = 34
+# (`_attr` sites outside a try, bare `getattr` sites inside one), as distinct (function, operand) keys.
+ATTR_SITES = (19, 9)
+KEY_SWEEP_FIGURES = (5, 162)
+
+# THE PAYLOAD WALK, counted. `payload_walk_sorted.__doc__` used to state four of these in prose and two
+# of them were wrong -- "13 mappings" for 10, and "6 swept" for the 4 THIS WALK reaches (6 is
+# `caller_mapping_sites()`' total, which adds two record-`metrics` sites no walk of the payload can
+# reach). The 10 was already contradicted by an assertion in this same file.
+PAYLOAD_WALK_FIGURES = {
+    "str sites, all": 18, "str sites, swept": 12,
+    "map sites, all": 10, "map sites, swept": 4,
+    "obj (leaf) slots, all": 40, "obj (leaf) slots, swept": 22,
+    "caller_mapping_sites(), total": 6,
+}
+
+
+class NoCallerSuppliedObjectTakesThePageDown(FailsClosedAssertions, unittest.TestCase):
+    """SR-13 ROUND 12: THE FOURTH FORGEABLE CATEGORY -- a caller-supplied protocol that REFUSES.
+
+    Rounds 8, 9 and 11 walked outward through categories of forgeable THING: numbers (8), figures and
+    decisive words (9), the caller's `Mapping` and its keys (11). Each fix was correct and each left the
+    next category standing. This one is not another thing: it is the same things REFUSING TO BE READ.
+    Round 8 already knew it mattered -- `CONVERSION_DUNDERS` carries a `"RAISE"` member because "a
+    `__float__` that raises took BOTH renderers down with ZeroDivisionError" -- and rounds 9 and 11 built
+    their lanes from that template WITH THE MEMBER DROPPED while keeping the stronger prose. Restoring
+    it found 22 page-down positions and one silent text loss, NINE of them through the fully public
+    `render_dashboard(data)` API with no `object.__setattr__` anywhere.
+
+    THIS CLASS IS THE LANE THE OTHER THREE STRUCTURALLY COULD NOT REACH: `word_liar` IS a `str` and
+    `conversion_liar` IS a number, so neither can stand where the honest value was not one.
+    `walk_payload`'s `"obj"` kind yields the SLOT instead of the value, so a caller may put any object
+    anywhere the payload has a leaf -- which is what a caller can actually do, the payload being the
+    public API's own argument and the snapshot being caller-supplied JSON.
+
+    WHAT IT ASSERTS, in the module's own words rather than this test's. `render_dashboard` promises that
+    "an absent key renders its panel as UNKNOWN, never as zero or empty" and that "a malformed object is
+    refused with NO figures"; `_metric_cell`'s docstring calls a raise "a page taken down, outside this
+    module's stated error contract". So: the render must COMPLETE, it must still be a whole labelled
+    page, and a refusing object must never BUY a decisive verdict. It does NOT assert what the text
+    says: an object that answers dishonestly is still dishonest, and `_spoken` makes no claim otherwise.
+
+    WHAT IT IS NOT. Not a proof that the `__class__` channel is closed -- that is a known, deliberately
+    unpinned kit-wide finding, and `test_the_isinstance_channel_is_still_open_and_counted` states its
+    measured scope instead of pinning its behaviour."""
+
+    def honest(self):
+        return db.render_dashboard(render_payload())
+
+    def test_no_caller_supplied_object_takes_the_page_down(self):
+        """THE PIN. Every leaf slot x every protocol a caller can make refuse."""
+        honest = self.honest()
+        findings, sites, forgeries = [], 0, 0
+        for label, place in payload_object_sites():
+            sites += 1
+            for kind, make in sorted(HOSTILE_OBJECTS.items()):
+                p = render_payload()
+                self.assertEqual(place(p, make()), 1, label)
+                forgeries += 1
+                try:
+                    page = db.render_dashboard(p)
+                except BaseException as ex:          # noqa: BLE001 - a raise IS the finding
+                    findings.append(f"{label} [{kind}]: RAISED {type(ex).__name__}")
+                    continue
+                if not (page.startswith("<!DOCTYPE html>") and page.rstrip().endswith("</html>")):
+                    findings.append(f"{label} [{kind}]: the page is not a complete document")
+                if page.count("<section") != 5 or page.count("<section") != page.count('data-evidence="'):
+                    findings.append(f"{label} [{kind}]: {page.count('<section')} labelled sections, not 5")
+                if page.count("vd-supported") > honest.count("vd-supported"):
+                    findings.append(f"{label} [{kind}]: BOUGHT a decisive verdict "
+                                    f"({page.count('vd-supported')} > {honest.count('vd-supported')})")
+        self.assertEqual(sites, PAYLOAD_WALK_FIGURES["obj (leaf) slots, swept"], sites)
+        self.assertEqual(forgeries, sites * len(HOSTILE_OBJECTS), forgeries)
+        self.assertEqual(findings, [], f"""
+{len(findings)} of {forgeries} (leaf slot x refusing protocol) inputs took the page down, truncated it, or
+bought a verdict:
+
+  """ + "\n  ".join(findings[:40]) + """
+
+A caller-supplied object that REFUSES a protocol is malformed INPUT, not an internal error: admit the
+text (`db._spoken`), the iteration (`db._iterated`) or the attribute (`db._attr`) and render UNKNOWN.
+This module's contract is to refuse a malformed result, never to take the page down -- `_metric_cell`'s
+own docstring rules exactly that for a raising `__float__`.""")
+
+    def test_the_truncation_marker_survives_a_repr_that_answers_with_a_liar(self):
+        """ROUND 9'S OWN FINDING, RE-OPENED AND CLOSED, at the function round 9 fixed.
+
+        `_untrusted` measures `len(s)` to decide whether to print "[... truncated]". Round 9 made the
+        STRING branch read `_word(value)` for exactly that reason. `repr()` may return a `str` SUBCLASS,
+        so the NON-STRING branch handed a lying `__len__` straight to the measurement. MEASURED pre-fix
+        through the PUBLIC API at `snapshot["behind_by_field_note"]`: 300 of 400 characters shown and NO
+        marker, while the honest 400-character `repr` showed one. A lie about the TEXT is inside the
+        box's own "UNTRUSTED FREE TEXT - NOT EVIDENCE" caption; a lie about HOW MUCH WAS SHOWN is not."""
+        for value, who in ((repr_answers_with_a_lying_subclass(), "a __repr__ answering with a liar"),
+                           (type("H", (), {"__repr__": lambda self: "Q" * 400})(), "an honest __repr__")):
+            p = render_payload()
+            p["snapshot"] = dict(p["snapshot"], behind_by_field_note=value)
+            h = db.render_dashboard(p)
+            self.assertEqual(h.count("Q"), db.MAX_TEXT, who)
+            self.assertIn("[... truncated]", h, f"{who}: 300 of 400 characters shown with no marker")
+        # and the box still shows the whole of a SHORT answer, with no marker invented
+        p = render_payload()
+        p["snapshot"] = dict(p["snapshot"],
+                             behind_by_field_note=type("S", (), {"__repr__": lambda self: "short"})())
+        h = db.render_dashboard(p)
+        self.assertIn('<span class="untrusted">short</span>', h)
+        # the complementary half of round 9's measurement: a marker for a truncation that never happened
+        p = render_payload()
+        p["snapshot"] = dict(p["snapshot"], behind_by_field_note=type(
+            "L", (), {"__repr__": lambda self: type("Long", (str,), {"__len__": lambda s: 9999})("n")})())
+        h = db.render_dashboard(p)
+        self.assertNotIn("[... truncated]", h, "a marker for a truncation that never happened")
+
+    def test_the_object_lane_is_not_vacuous(self):
+        """(a) the hostile objects must really refuse the protocol they name, and must NOT be a `str` or
+            a number (otherwise this lane duplicates `word_liar`/`conversion_liar` and reaches nothing
+            new); (b) the slots must be DERIVED and must include the five that carried public findings;
+            (c) the lane must be able to FAIL -- against the pre-fix spellings, it reports."""
+        # (a)
+        for kind, make in sorted(HOSTILE_OBJECTS.items()):
+            o = make()
+            self.assertNotIsInstance(o, (str, int, float), kind)
+            self.assertFalse(dataclasses.is_dataclass(o), kind)
+        for p in OBJECT_PROTOCOLS:
+            if p in ("__name__", "ALL"):
+                continue
+            o = hostile_object(p)
+            op = {"__repr__": repr, "__str__": str, "__format__": lambda x: format(x),
+                  "__len__": len, "__iter__": iter, "__hash__": hash,
+                  "__eq__": lambda x: x == 1}[p]
+            with self.assertRaises(ZeroDivisionError, msg=p):
+                op(o)
+        with self.assertRaises(ZeroDivisionError):
+            repr(hostile_object("ALL"))
+        with self.assertRaises(ZeroDivisionError):
+            type(hostile_object("__name__")).__name__                      # noqa: B018
+        self.assertEqual(type(name_is_not_a_string()).__name__, 12345)
+        r = repr_answers_with_a_lying_subclass()
+        self.assertEqual(len(repr(r)), 0, "the answer must really lie about its own length")
+        self.assertEqual(str.__str__(repr(r)), "Q" * 400)
+        # (b)
+        labels = {label for label, _p in payload_object_sites()}
+        for needed in ("payload['snapshot']['fork']", "payload['snapshot']['upstream']",
+                       "payload['snapshot']['audit_date']", "payload['snapshot']['behind_by_field_note']",
+                       "payload['snapshot']['changed_files'][0]['filename']",
+                       "payload['records'][0]", "payload['train']", "payload['joint']"):
+            self.assertIn(needed, labels, needed)
+        # ... and a slot whose honest value is NOT a string, which the string lane cannot reach
+        self.assertIn("payload['snapshot']['ahead_by']", labels)
+        # (c) with `_spoken` reading the object directly, the snapshot slots report
+        with mock.patch.object(db, "_spoken", lambda x, how=repr: how(x)):
+            p = render_payload()
+            p["snapshot"] = dict(p["snapshot"], fork=hostile_object("__repr__"))
+            with self.assertRaises(ZeroDivisionError):
+                db.render_dashboard(p)
+        # ... and with `_iterated` reading it directly, the records slot reports
+        with mock.patch.object(db, "_iterated", lambda x: list(x)):
+            p = render_payload()
+            p["records"] = hostile_object("__iter__")
+            with self.assertRaises(ZeroDivisionError):
+                db.render_dashboard(p)
+        self.assertEqual(db.render_dashboard(render_payload()), self.honest())   # patches undone
+
+    def test_the_isinstance_channel_is_still_open_and_counted(self):
+        """A KNOWN, KIT-WIDE, DELIBERATELY UNPINNED FINDING, stated with its measured scope so round 12
+        cannot be read as having closed it. A raising `__class__` defeats `isinstance`, and
+        `dashboard.py` has 31 `isinstance` sites of which 19 are reachable from caller data and outside
+        any `try`. THE BEHAVIOUR IS NOT PINNED -- pinning it would pin a defect. What is pinned is the
+        COUNT, so the channel cannot quietly widen, and the fact that `_spoken`/`_iterated`/`_attr` did
+        NOT close it: they admit a value once `isinstance` has decided what it is."""
+        # BY AST, not by text: every docstring in `dashboard.py` discusses `isinstance` and a text
+        # count reports the documentation -- `module_code_by_line`'s own reason. Measured 34 CALL sites
+        # at the previous HEAD and 34 now, so round 12 neither widened nor closed the channel. (The
+        # brief this round worked from said 31; 31 is not reproducible by any spelling measured here,
+        # and the figure is corrected to the derived one rather than restated.)
+        n = len([x for x in ast.walk(ast.parse(inspect.getsource(db)))
+                 if isinstance(x, ast.Call) and isinstance(x.func, ast.Name)
+                 and x.func.id == "isinstance"])
+        self.assertEqual(n, ISINSTANCE_SITES,
+                         f"{n} isinstance call sites, not {ISINSTANCE_SITES}; the raising-`__class__` "
+                         f"channel is a known open finding and its SCOPE is pinned here, not its "
+                         f"behaviour -- pinning the behaviour would pin a defect")
+
+        class RaisingClass:
+            @property
+            def __class__(self):
+                raise ZeroDivisionError("__class__ refuses")
+        with self.assertRaises(ZeroDivisionError):
+            isinstance(RaisingClass(), str)
+        # and it is NOT closed by round 12's admissions: `_spoken` is reached only after `isinstance`
+        self.assertIn("if type(value) is str:", inspect.getsource(db._e))
+
+
 class EveryCallerSuppliedStringRendersTheAdmittedText(FailsClosedAssertions, unittest.TestCase):
     """SR-13 ROUND 11, FIRST HALF: the strings the caller hands in LOOSE, which belong to no rendered
     class and so were in no lane.
@@ -6115,8 +6825,7 @@ class EveryCallerSuppliedStringRendersTheAdmittedText(FailsClosedAssertions, uni
         findings, sites, forgeries = [], 0, 0
         for label, text, forge in payload_string_sites():
             sites += 1
-            for shown in words_against(text):
-                for d in WORD_DUNDERS:
+            for shown, d in word_forgeries(text):
                     p = render_payload()
                     self.assertEqual(forge(p, shown, d), 1, label)
                     forgeries += 1
@@ -6133,6 +6842,15 @@ class EveryCallerSuppliedStringRendersTheAdmittedText(FailsClosedAssertions, uni
             p = render_payload()
             forge(p, "zzz", "str")
             self.assertEqual(db.render_scorecard(p["joint"]), honest_card, label)
+        # THE FIGURES, ASSERTED EXACTLY AND NOT ONLY FLOORED (round 12). `assertGreater(forgeries, 50)`
+        # on 120 had 70 of slack: this sweep could have lost 58% of itself and stayed green, with the
+        # true figure recorded only in the class docstring where no test can read it. That is the same
+        # defect round 11 correctly fixed for the key lane (`KEY_LANE_FIGURES`) and the word lane
+        # (`pairs == 670`, `word_sites() == 22`) and did not apply to its own two new sweeps -- the
+        # fifth instance of it in this project. The floor is kept BELOW the pin, not instead of it: it
+        # is the assertion that still means something if the payload legitimately grows.
+        self.assertEqual(sites, CALLER_STRING_FIGURES[0], sites)
+        self.assertEqual(forgeries, CALLER_STRING_FIGURES[1], forgeries)
         self.assertGreater(sites, 9, sites)
         self.assertGreater(forgeries, 50, forgeries)
         self.assertEqual(findings, [], f"""
@@ -6144,6 +6862,71 @@ TEXT honest and only one string dunder lying:
 A string the caller hands in through the payload mapping is an input exactly like a declared field, and
 the page must render the characters it STORES: admit once (`_word` / `_word_text`) and render the admitted
 text. No bare `str()` and no bare `_e()`, of a mapping value or of a list element.""")
+
+    def test_the_payload_walk_figures_are_asserted_not_narrated(self):
+        """THE FOUR FIGURES `payload_walk_sorted.__doc__` USED TO STATE, two of which were wrong.
+
+        It read "18 string sites and 13 mappings in this payload, against 12 and 6 swept". Measured: 18
+        string sites and 12 swept are right; there are TEN mappings, not 13; and FOUR of them are swept
+        BY THIS WALK -- 6 is `caller_mapping_sites()`' own total, which ADDS two record-`metrics` sites
+        the walk structurally cannot reach, so one sentence conflated two different quantities. The 10
+        was ALREADY contradicted by `assertEqual(len(payload_walk_all("map")), 10)` in this same file,
+        200 lines below the docstring: a figure in prose disagreeing with a figure in an assertion
+        beside it, which is the whole argument for not writing figures in prose.
+
+        The correction is NOT to move the sentence somewhere tidier -- that is how the last two
+        corrections of this class reproduced the defect they were fixing. It is to put every quantity
+        where a test reads it, and to make the docstring POINT HERE instead of restating them."""
+        got = {
+            "str sites, all": len(payload_walk_all("str")),
+            "str sites, swept": len(payload_walk_sorted("str")),
+            "map sites, all": len(payload_walk_all("map")),
+            "map sites, swept": len(payload_walk_sorted("map")),
+            "obj (leaf) slots, all": len(payload_walk_all("obj")),
+            "obj (leaf) slots, swept": len(payload_walk_sorted("obj")),
+            "caller_mapping_sites(), total": len(list(caller_mapping_sites())),
+        }
+        self.assertEqual(got, PAYLOAD_WALK_FIGURES, got)
+        # THE CONFLATION, ASSERTED AS A DIFFERENCE: the two quantities the old sentence merged are not
+        # equal, and the gap is exactly the two record-`metrics` sites no payload walk can reach.
+        self.assertEqual(got["caller_mapping_sites(), total"] - got["map sites, swept"], 2)
+        walked = {label for label, _r, _w in caller_mapping_sites()}
+        self.assertEqual({w for w in walked if w.startswith("record ")},
+                         {"record train.record.metrics", "record records[0].metrics"})
+        # and the docstring must not state a figure again: it may only point at this table
+        doc = _doc(payload_walk_sorted)
+        if doc is not None:
+            self.assertIn("PAYLOAD_WALK_FIGURES", doc)
+            # the WITHDRAWAL DISCIPLINE, not an absence test: the docstring QUOTES the wrong figure
+            # inside its own retraction, as this project requires, so the pin is that it appears
+            # exactly ONCE. Restoring it as a live claim makes two and fails -- the same spelling
+            # `TheSubjectKindValueTable` uses, and for the same reason.
+            self.assertEqual(doc.count("13 mappings"), 1)
+
+    def test_the_floor_is_blind_and_the_pin_is_not(self):
+        """THE BLINDNESS, PERFORMED. `assertGreater(forgeries, 50)` on 132 has 81 of slack: a truncation
+        that threw away 61% of this sweep would satisfy the floor and report nothing. The same shape
+        `test_stability` and `test_benchmark` now perform for their own floors -- a floor is evidence
+        that a sweep exists, never evidence that it is the sweep that was measured."""
+        full = list(payload_string_sites())
+        truncated = full[:10]                     # 10 of 12 sites: over BOTH floors, under the pin
+        forgeries = sum(len(list(word_forgeries(t))) for _l, t, _f in truncated)
+        self.assertGreater(len(truncated), 9, "the truncated sweep must still SATISFY the site floor")
+        self.assertGreater(forgeries, 50, "the truncated sweep must still SATISFY the forgery floor")
+        self.assertNotEqual(forgeries, CALLER_STRING_FIGURES[1],
+                            "... and must FAIL the pin, which is the whole point")
+        self.assertNotEqual(len(truncated), CALLER_STRING_FIGURES[0])
+        # the same for the key sweep: drop the biggest site and the floor still passes
+        kept = [s for s in caller_mapping_sites() if s[0] != "payload['snapshot']"]
+        n = 0
+        t = NoMappingKeyServesAValueUnderAnotherName("test_a_swallowed_expected_metric_still_renders_UNKNOWN")
+        for label, read, write in kept:
+            keys = sorted(k for k in read(render_payload()) if isinstance(k, str))
+            if len(keys) < 2:
+                continue
+            n += len([s for k in keys for s in t.shapes(keys, k)]) * len(KEY_MAKERS)
+        self.assertGreater(n, 60, "the truncated key sweep must still SATISFY the floor")
+        self.assertNotEqual(n, KEY_SWEEP_FIGURES[1], "... and must FAIL the pin")
 
     def test_the_caller_string_sweep_is_not_vacuous(self):
         """FOUR WAYS IT COULD BE GREEN FOR NOTHING.
@@ -6240,7 +7023,13 @@ class NoMappingKeyServesAValueUnderAnotherName(FailsClosedAssertions, unittest.T
 
     def test_no_key_lie_changes_the_page_relative_to_the_same_mapping_plainified(self):
         """THE PIN. The reference for each forgery is the SAME mapping with that key told truthfully, so
-        a page that moves is a page reading a word the mapping does not store."""
+        a page that moves is a page reading a word the mapping does not store.
+
+        ROUND 12 ADDS THE `RAISE` MAKER, which this lane never had for the reason the word lane never
+        had it: both were built from the number lane's template with that member dropped. The reference
+        render is computed ONCE per (shape, target, argument) and reused across the makers -- a trim of
+        the RENDERED STRING, never of the payload, because `render_payload()` must stay one fresh
+        mutable payload per forgery (round 11 rejected caching the payload for exactly that reason)."""
         findings, sites, forgeries = [], 0, 0
         shape_fns = {"displace": displace, "rename": rename}
         for label, read, write in caller_mapping_sites():
@@ -6252,23 +7041,30 @@ class NoMappingKeyServesAValueUnderAnotherName(FailsClosedAssertions, unittest.T
                 fn = shape_fns[shape]
                 ref = render_payload()
                 write(ref, fn(read(ref), target, arg, plain_key))
-                lie = render_payload()
-                write(lie, fn(read(lie), target, arg, key_liar))
-                forgeries += 1
                 try:
                     want = db.render_dashboard(ref)
                 except BaseException as ex:              # noqa: BLE001
                     findings.append(f"{label} {shape} {target!r}/{arg!r}: the PLAINIFIED reference "
                                     f"RAISED {type(ex).__name__}")
                     continue
-                try:
-                    got = db.render_dashboard(lie)
-                except BaseException as ex:              # noqa: BLE001 - a raise IS the finding
-                    findings.append(f"{label} {shape} {target!r}/{arg!r}: RAISED {type(ex).__name__}")
-                    continue
-                if got != want:
-                    findings.append(f"{label} {shape} target={target!r} other={arg!r}: BYTES DIFFER "
-                                    f"from the same mapping with that key plainified")
+                for maker_name, maker in KEY_MAKERS:
+                    lie = render_payload()
+                    write(lie, fn(read(lie), target, arg, maker))
+                    forgeries += 1
+                    try:
+                        got = db.render_dashboard(lie)
+                    except BaseException as ex:          # noqa: BLE001 - a raise IS the finding
+                        findings.append(f"{label} {shape} {target!r}/{arg!r} [{maker_name}]: "
+                                        f"RAISED {type(ex).__name__}")
+                        continue
+                    if got != want:
+                        findings.append(f"{label} {shape} target={target!r} other={arg!r} "
+                                        f"[{maker_name}]: BYTES DIFFER from the same mapping with that "
+                                        f"key plainified")
+        # THE FIGURES, ASSERTED EXACTLY (round 12), for the reason `CALLER_STRING_FIGURES` gives:
+        # `assertGreater(forgeries, 60)` on 81 had 21 of slack and the true figure lived only in prose.
+        self.assertEqual(sites, KEY_SWEEP_FIGURES[0], sites)
+        self.assertEqual(forgeries, KEY_SWEEP_FIGURES[1], forgeries)
         self.assertGreater(sites, 3, sites)
         self.assertGreater(forgeries, 60, forgeries)
         self.assertEqual(findings, [], f"""
@@ -6483,8 +7279,9 @@ class TheSubjectKindValueTable(unittest.TestCase):
         anything. The refusal is now ASSERTED rather than tolerated, and the class docstring is pinned
         below so the stale prose cannot outlive the behaviour again. The three render rows live in
         `test_the_three_rows`, which uses route (d) and is unaffected."""
-        self.assertIn("THE PUBLIC ROUTE IS NOW REFUSED UPSTREAM", TheSubjectKindValueTable.__doc__,
-                      "the class docstring no longer describes what this class proves")
+        if _doc(TheSubjectKindValueTable) is not None:
+            self.assertIn("THE PUBLIC ROUTE IS NOW REFUSED UPSTREAM", _doc(TheSubjectKindValueTable),
+                          "the class docstring no longer describes what this class proves")
         # COUNT, not absence, and both of the obvious spellings were measured wrong before this one.
         # `assertNotIn('and no verdict moves\"\"\"')` is VACUOUS -- a docstring's value never contains its
         # own delimiter -- and the mutant restoring the withdrawn clause passed against it. Plain
@@ -6493,8 +7290,9 @@ class TheSubjectKindValueTable(unittest.TestCase):
         # withdrawal discipline requires it to do. So the pin is the one the rest of the kit uses:
         # the withdrawn phrase may appear exactly ONCE, as a quotation. Restoring it as a live claim
         # makes two, and fails.
-        self.assertEqual(TheSubjectKindValueTable.__doc__.count("and no verdict moves"), 1,
-                         "the withdrawn claim must appear exactly once, quoted inside its retraction")
+        if _doc(TheSubjectKindValueTable) is not None:
+            self.assertEqual(_doc(TheSubjectKindValueTable).count("and no verdict moves"), 1,
+                             "the withdrawn claim must appear exactly once, quoted inside its retraction")
         for d in WORD_DUNDERS:
             with self.subTest(dunder=d):
                 liar = word_liar("trained", "fixture", d)
@@ -6527,6 +7325,261 @@ class TheSubjectKindValueTable(unittest.TestCase):
         self.assertIs(type(j.subject_kind), str, "the stored characters are what is kept")
         self.assertFalse(bm.carries_exemption(j.gates),
                          "a label storing 'trained' is no longer granted the fixture exemption")
+
+
+# ===========================================================================================================
+# SR-13 ROUND 12: THE DERIVATION FOR THE FOURTH CATEGORY.
+#
+# `LEN_SITES` is this file's precedent and its argument applies one lane out: a `len()` added anywhere in
+# `dashboard.py` fails a test until it is classified, because `len(files)` was the eighth conversion and a
+# registry of its call sites is the derivation that would have named it. The fourth category is the same
+# problem for every OTHER overridable protocol. Three families, each derived from the module's own AST:
+#
+#   TEXT      `str(x)`, `repr(x)`, `format(x, ...)` and `.__name__`. Thirteen of the 22 measured page-down
+#             positions and the whole truncation-marker loss were here. `PROTOCOL_SITES` classifies every
+#             site; the rule is that NONE may be a caller-supplied operand outside a guard.
+#   ITERATION `_iterated(...)`, which is `list(x)` admitted. `ITERATION_SITES` says what each one iterates.
+#   ATTRIBUTE `getattr` vs `_attr`, asserted as a RULE in both directions rather than as a table, because
+#             the rule is mechanical and the table would be 46 rows of the same sentence.
+#
+# THE DERIVATION FAILED FOUR TIMES BEFORE IT WAS RIGHT, and each failure is the reason a clause exists:
+#   (1) the first scan was a text search and reported every docstring in the module, which all discuss
+#       `str()` and `repr()` -- `module_code_by_line`'s own lesson, re-learned. It is AST now.
+#   (2) it scanned only `ast.Call` of `str`/`repr`, and so MISSED `.__name__` entirely -- which is two of
+#       the nine public positions (`records[0]` whose metaclass `__name__` raises, and the one that
+#       answers with `12345`). `__name__` is an `ast.Attribute`, not a call, and no amount of looking at
+#       the call table would have shown it.
+#   (3) it had no notion of "inside a try", so it reported `_gate_set_ok`'s `str(g.name)` -- which is
+#       guarded and whose raise is ABSORBED into the correct `gate NAME set does not match` alarm -- as an
+#       open site, and would have had `_spoken` pushed into a place where the raise is the mechanism.
+#   (4) THE EXPENSIVE ONE, and it was a real regression rather than a mis-count: the ATTRIBUTE family was
+#       routed EVERYWHERE, including inside `try` bodies. `_seed_series`'s own docstring says why that is
+#       wrong -- "`getattr(s, 'ok', None)` does NOT fail safe on its own: `SeedScores.ok` is a PROPERTY
+#       that subscripts `self.metrics`" -- and routing it made the function SKIP the unreadable entry and
+#       return a 29-element series where it must return None, which is the series-SHORTENING fail-open the
+#       docstring was written against. `test_an_unusable_second_source_fails_closed_and_is_never_skipped`
+#       caught it. Eleven sites were reverted, and the rule below asserts BOTH directions so the mistake
+#       cannot be made again in either one.
+# ===========================================================================================================
+PROTOCOL_SITES = {
+    # Every `str()`/`repr()`/`format()`/`.__name__` in `dashboard.py`, by (enclosing function, operand
+    # source). Each value must begin with MODULE, GUARDED or ADMISSION -- never OPEN.
+    ("_casefold_inside", "r"): "MODULE: a `Path` this function was handed by `_inside_repo`, which "
+                               "resolved it; not caller data at all.",
+    ("_casefold_inside", "root"): "MODULE: `REPO_ROOT`, a module constant computed from `__file__`.",
+    ("_component_sets_ok", "c.metric"): "GUARDED: caller data, inside this function's own `try`, which "
+                                        "returns False -- a component-set alarm, which is fail-closed.",
+    ("_gate_scope", "g.scope"): "GUARDED: caller data (a PROPERTY of another owner's class), inside the "
+                                "`try` that returns '' and so makes the scope unknown and blocking.",
+    ("_gate_set_ok", "g.name"): "GUARDED: caller data, inside the `try` that returns False and raises "
+                                "the correct `gate NAME set does not match` alarm. Measured.",
+    ("_is_device_dir", "parent"): "MODULE: a `Path` resolved by `write_dashboard` before this is "
+                                  "called; the caller supplies a path string, never this object.",
+    ("_num", "float(x)"): "MODULE: the `float` this expression just built, downstream of all four kind "
+                          "functions. The module's only `float()`.",
+    ("_svg_series", "v"): "MODULE: a tick value this function computed from `_valid_history`'s admitted "
+                          "numbers.",
+    ("_svg_series", "x0"): "MODULE: `min(xs)` of `_valid_history`'s admitted numbers.",
+    ("_svg_series", "x1"): "MODULE: `max(xs)` of the same admitted numbers, adjusted in this function "
+                           "when the series is a single point; never a caller object.",
+    ("_type_name", "type(o).__name__"): "ADMISSION: this IS the admission for the `__name__` protocol, "
+                                        "and it is inside `_spoken`'s `try`.",
+    ("write_dashboard", "out.parent"): "MODULE: the parent of a `Path` this function resolved itself, "
+                                       "used only to build the temp-file name beside the target.",
+}
+
+ITERATION_SITES = {
+    ("_joint_wellformed", "h.components"): "a `tuple` SUBCLASS satisfies the `isinstance` above and its "
+                                           "`__iter__` is still the caller's; a component list that "
+                                           "cannot be read is a card this function REFUSES.",
+    ("_joint_wellformed", "j.gates"): "the same argument for the gate list: `isinstance(j.gates, tuple)` "
+                                      "admits a SUBCLASS, and a gate list that cannot be read is a card "
+                                      "this function refuses rather than a page taken down later.",
+    ("_render_records", "records"): "the public `records` argument. Its own `except TypeError` caught "
+                                    "the wrong exception type: measured, a `__iter__` raising "
+                                    "ZeroDivisionError went straight through it and out of "
+                                    "`render_dashboard`.",
+    ("_render_snapshot", "commits"): "`snapshot['fork_commits']`, caller-supplied JSON; a `list` "
+                                     "SUBCLASS passes `isinstance` and may refuse to be iterated.",
+    ("_render_snapshot", "files"): "`snapshot['changed_files']`, the same, and the panel whose printed "
+                                   "count is SR-13's first named deliverable.",
+    ("_render_uncertainty", "joint.deferred_gates"): "read off the result; a class-level constant that "
+                                                     "`object.__setattr__` can replace.",
+    ("_valid_history", "history"): "`train.history`, a caller-supplied sequence. Measured: a `list` "
+                                   "subclass whose `__iter__` raises took `render_dashboard` down.",
+    ("render_scorecard", "_attr(joint, 'deferred_gates')"): "the same deferred-gate list, read again "
+                                                            "for the CONDITIONAL note that names how "
+                                                            "many gates are unimplemented.",
+    ("render_scorecard", "joint.gates"): "the gate tuple again, after `_joint_wellformed` has admitted "
+                                         "it; re-read here because the card needs it as a sequence and "
+                                         "the caller's `__iter__` may answer differently each time.",
+}
+
+
+def protocol_call_sites(module):
+    """(enclosing function, operand source) -> the set of TEXT protocols invoked there, for every
+    `str(...)`, `repr(...)`, `format(...)` and `.__name__` in `module`, by AST.
+
+    AST and not a text scan, for `module_code_by_line`'s reason and because the first draft of this
+    derivation WAS a text scan and reported every docstring in `dashboard.py` -- all of which discuss
+    these very spellings. `.__name__` is an `ast.Attribute` and not a call, which is why it is matched
+    separately: the second draft scanned calls only and missed it, and `__name__` is two of the nine
+    public page-down positions."""
+    src = Path(inspect.getsourcefile(module)).read_text(encoding="utf-8")
+    owner = enclosing_functions(module)
+    out = {}
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id in ("str", "repr", "format") and node.args:
+            out.setdefault((owner.get(node.lineno, "<module>"), ast.unparse(node.args[0])),
+                           set()).add(node.func.id)
+        if isinstance(node, ast.Attribute) and node.attr == "__name__":
+            out.setdefault((owner.get(node.lineno, "<module>"), ast.unparse(node)),
+                           set()).add("__name__")
+    return out
+
+
+def call_sites_of(module, name, guarded_only=None):
+    """Every `name(...)` call site in `module` as (enclosing function, first-argument source), optionally
+    restricted to those INSIDE (`True`) or OUTSIDE (`False`) a `try:` body."""
+    src = Path(inspect.getsourcefile(module)).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    owner = enclosing_functions(module)
+    guarded = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Try):
+            for b in node.body:
+                for i in range(b.lineno, (b.end_lineno or b.lineno) + 1):
+                    guarded.add(i)
+    out = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name:
+            g = node.func.lineno in guarded
+            if guarded_only is not None and g != guarded_only:
+                continue
+            key = (owner.get(node.lineno, "<module>"),
+                   ast.unparse(node.args[0]) if node.args else "")
+            out.setdefault(key, []).append(node.lineno)
+    return out
+
+
+class EveryProtocolCallOnCallerDataIsAdmitted(unittest.TestCase):
+    """SR-13 ROUND 12, THE DERIVATION HALF -- the half that makes the 22 positions a CLASS and not a list.
+
+    The behavioural half is `NoCallerSuppliedObjectTakesThePageDown` plus the RAISE members of the word,
+    key and element lanes. This half is the one that goes red when someone adds the NEXT `str(obj)`."""
+
+    def test_every_text_protocol_call_is_classified(self):
+        """THE DERIVATION. A new `str(x)`/`repr(x)`/`format(x)`/`.__name__` in `dashboard.py` fails this
+        until it is classified, and may not be classified OPEN."""
+        derived = protocol_call_sites(db)
+        self.assertEqual(set(derived), set(PROTOCOL_SITES), f"""
+the TEXT-protocol call sites in dashboard.py do not match PROTOCOL_SITES.
+  in the module, unclassified: {sorted(set(derived) - set(PROTOCOL_SITES))}
+  classified but gone:         {sorted(set(PROTOCOL_SITES) - set(derived))}
+Say what built each operand. If it is CALLER-SUPPLIED and the call is outside a `try` that fails closed,
+route it through `db._spoken` (or `db._type_name`) -- `__repr__`, `__str__`, `__format__` and a metaclass
+`__name__` are all the caller's, all free to RAISE, and `__repr__`/`__str__` are free to answer with a
+`str` SUBCLASS that then lies about its own length.""")
+        self.assertEqual(len(derived), 12, sorted(derived))
+        for key, why in PROTOCOL_SITES.items():
+            self.assertRegex(why, r"^(MODULE|GUARDED|ADMISSION): ", key)
+            self.assertGreater(len(why), 50, key)
+            self.assertIn(key[0], set(enclosing_functions(db).values()), key)
+        # THE RULE: nothing is left OPEN, and the three positions that used to be are gone by NAME.
+        self.assertEqual([k for k, v in PROTOCOL_SITES.items() if v.startswith("OPEN")], [])
+        for gone in (("_untrusted", "value"), ("_metric_table", "k"), ("_metric_cell", "reason"),
+                     ("_subject_kind", "raw"), ("render_scorecard", "g.reason"),
+                     ("_weaker_than_protocol", "c.metric"), ("_render_records", "type(r).__name__"),
+                     ("_n_sources_disagree", "getattr(c, 'metric', '?')"),
+                     ("_interval_sources_disagree", "getattr(c, 'metric', '?')"),
+                     ("_render_uncertainty", "d"), ("_e", "value")):
+            self.assertNotIn(gone, derived, f"{gone} is a bare TEXT protocol on caller data again")
+        # ... and each of them really is routed now, in the source of the function that holds it
+        self.assertIn("_spoken(value)", inspect.getsource(db._untrusted))
+        self.assertIn("_spoken(k)", inspect.getsource(db._metric_table))
+        self.assertIn("_spoken(reason, str)", inspect.getsource(db._metric_cell))
+        self.assertIn("_spoken(raw, str)", inspect.getsource(db._subject_kind))
+        self.assertIn("_spoken(g.reason, str)", inspect.getsource(db.render_scorecard))
+        self.assertIn("_spoken(c.metric, str)", inspect.getsource(db._weaker_than_protocol))
+        self.assertIn("_type_name(r)", inspect.getsource(db._render_records))
+        self.assertIn("_spoken(value, str)", inspect.getsource(db._e))
+        self.assertGreaterEqual(len(call_sites_of(db, "_spoken")), 9)
+
+    def test_every_iteration_of_caller_data_is_admitted(self):
+        """`_iterated` is `list(x)` admitted, and its call sites are the ITERATION family."""
+        derived = call_sites_of(db, "_iterated")
+        self.assertEqual(set(derived), set(ITERATION_SITES), f"""
+the `_iterated()` call sites in dashboard.py do not match ITERATION_SITES.
+  in the module, unclassified: {sorted(set(derived) - set(ITERATION_SITES))}
+  classified but gone:         {sorted(set(ITERATION_SITES) - set(derived))}""")
+        self.assertEqual(len(derived), 9, sorted(derived))
+        for key, why in ITERATION_SITES.items():
+            self.assertGreater(len(why), 50, key)
+        # the handler that caught the WRONG exception type is gone
+        self.assertNotIn("except TypeError:", inspect.getsource(db._render_records))
+        self.assertIsNone(db._iterated(hostile_object("__iter__")))
+        self.assertIsNone(db._iterated(object()))
+        self.assertEqual(db._iterated((1, 2)), [1, 2])
+
+    def test_the_attribute_family_is_a_rule_in_both_directions(self):
+        """THE RULE, AND IT COST A RED TEST TO GET THE SECOND HALF RIGHT.
+
+        OUTSIDE a `try`, `getattr(caller_obj, ...)` does not fail safe: its default applies to
+        AttributeError and nothing else, so a PROPERTY that raises leaves the function. Every such site
+        is `_attr`, with ONE declared exception.
+
+        INSIDE a `try` that fails closed, THE RAISE IS THE MECHANISM, and `_attr` BREAKS it. Measured:
+        routing `_seed_series`'s `getattr(s, "ok", None)` made it SKIP an unreadable seed and return a
+        29-element series where it must return None -- the series-shortening fail-open that function's
+        own docstring was written against. So the second assertion is not symmetry for its own sake: it
+        is the one that would have caught the mistake in the first place."""
+        out_bare = call_sites_of(db, "getattr", guarded_only=False)
+        self.assertEqual(set(out_bare), {("_contract_problems", "bm")}, f"""
+bare `getattr` outside a `try` in dashboard.py: {sorted(out_bare)}
+A raising PROPERTY is not an AttributeError, so the default never applies. Use `db._attr`.
+The ONE exception is `getattr(bm, 'GATE_SCOPES', None)`: that is a read of another owner's MODULE, not of
+caller-supplied data, and a patched or missing scorer table is a declared contract problem that
+`_contract_problems` already reports in its own words.""")
+        in_attr = call_sites_of(db, "_attr", guarded_only=True)
+        self.assertEqual(in_attr, {}, f"""
+`db._attr` INSIDE a `try:` body: {sorted(in_attr)}
+There the raise is the mechanism, and swallowing it turns a refusal into a silent skip. See
+`_seed_series`'s docstring and `test_an_unusable_second_source_fails_closed_and_is_never_skipped`.""")
+        # counted as DISTINCT (enclosing function, operand) keys, the same unit `LEN_SITES` uses
+        self.assertEqual(len(call_sites_of(db, "_attr", guarded_only=False)), ATTR_SITES[0],
+                         sorted(call_sites_of(db, "_attr", guarded_only=False)))
+        self.assertEqual(len(call_sites_of(db, "getattr", guarded_only=True)), ATTR_SITES[1],
+                         sorted(call_sites_of(db, "getattr", guarded_only=True)))
+        # and `_attr` really does absorb a raising property, which `getattr` does not
+        class P:
+            @property
+            def x(self):
+                raise ZeroDivisionError("refuses")
+        with self.assertRaises(ZeroDivisionError):
+            getattr(P(), "x", None)
+        self.assertIsNone(db._attr(P(), "x"))
+        self.assertEqual(db._attr(P(), "y", 7), 7)
+
+    def test_spoken_admits_the_answer_as_well_as_asking_for_it(self):
+        """`_spoken`'s two halves, each on its own line, because they close two different findings:
+        the RAISE half is 22 page-down positions and the ANSWER half is the truncation marker."""
+        self.assertEqual(db._spoken(hostile_object("__repr__")), db._UNREADABLE)
+        self.assertEqual(db._spoken(hostile_object("__str__"), str), db._UNREADABLE)
+        self.assertEqual(db._spoken(name_is_not_a_string(), lambda o: type(o).__name__), db._UNREADABLE)
+        self.assertEqual(db._type_name(hostile_object("__name__")), db._UNREADABLE)
+        self.assertEqual(db._type_name(name_is_not_a_string()), db._UNREADABLE)
+        self.assertEqual(db._type_name(object()), "object")
+        # the ANSWER half: a plain `str` of the characters the answer holds, never the subclass
+        answer = db._spoken(repr_answers_with_a_lying_subclass())
+        self.assertIs(type(answer), str)
+        self.assertEqual(len(answer), 400, "the length measured must be the length displayed")
+        # an honest object is untouched, which is why the honest page is byte-identical
+        self.assertEqual(db._spoken("x"), "'x'")
+        self.assertEqual(db._spoken(7, str), "7")
+        self.assertEqual(db._e(7), "7")
+        self.assertEqual(db._e(hostile_object("__str__")), db._UNREADABLE)
+        self.assertGreater(len(db._UNREADABLE), 10)
 
 
 if __name__ == "__main__":
