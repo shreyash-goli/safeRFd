@@ -10722,3 +10722,206 @@ family at both positions on both interpreters, numpy present and absent, and **i
 `benchmark.py:2094` remain **SR-10's**, unmeasured here and unclaimed.
 
 **SR-06 stays `[ ]`** — the fixer is not the attester. **Verified stays 9 of 17.**
+
+## Round 21 — SR-06's eighth attestation: three apparatus notes fixed, one recorded as a limit
+
+**Date:** 2026-11-12. HEAD at attestation `d03229e`, tree clean at start. Owner: `src/toy/stability.py`,
+`tests/toy_tests/test_stability.py`, this entry. **Not committed** — left dirty for the orchestrator.
+
+SR-06 **passed** behaviourally for the eighth time. Nothing below is a numerics failure. All four notes
+are about the **apparatus**: what the tests can see and what the prose claims they can see.
+
+### FINDING P — the route accounting closed route granularity for callable-placed parameters only, and said it closed it for all of them
+
+Round 20 (Finding L) moved `_CLASS_CHANNEL_POSITIONS`' accounting keys from `(function, parameter)` to
+`(function, parameter, route)`. But the only thing that made a **route** fail closed was the
+cross-check against `_CALLABLE_PLACED` — which, as its name says, covers the positions a caller's
+*callable* occupies. **For a DATA parameter a route still needed no row and got no excuse**, and one
+was missing: `masked_squared_error_mean`'s `mask` at the **ELEMENT** position. Its sibling
+`masked_mean_checked` has had both of its mask routes since the table was written, which is what makes
+this an omission rather than a decision.
+
+**Measured here, not relayed** (both interpreters, numpy present and absent): a bare `RuntimeError`
+out of `check_mask`'s own `isinstance(v, bool)`, reached `masked_squared_error_mean` →
+`masked_mean_checked` → `_validated_masked_values` → `check_mask`.
+
+**The sentence at `stability.py:295-297` was the overclaim**: it said the test *"accounts for all 41
+positions AT ROUTE GRANULARITY so a new one cannot be missing from BOTH halves."* False for data
+parameters, for exactly the reason above. It is rewritten to name its three derivations and to say what
+closes **nothing**: a route *kind* nobody has driven is held by the hand-written `_ROUTE_KINDS`
+enumeration and by no derivation at all.
+
+The closure added is **two-sided** and derived: every `outer` data route has an `element` sibling and
+vice versa, with `_NO_ELEMENT_ROUTE` (empty at this commit, and that emptiness is a statement) to
+decline a genuinely element-less sequence parameter **in writing**. The second direction was not in the
+brief and earns its own kill: dropping an **outer** row with the figures edited to match was unkilled by
+all three suites on both interpreters before this round.
+
+**One correction to the brief's account.** The brief said the missing route was *"in neither half of the
+MEASURED SCOPE sentence."* It was not. The escaping half opens with **"every ELEMENT position"**, which
+covers it as a class. What it was missing from was the **table** — so the figure 41 had no measurement
+behind it, and nothing drove the route. The honest statement of the defect is *a figure with no
+measurement*, not *a route in neither half*. The prose's class word is now itself pinned, since the
+half-membership loop deliberately skips the element kind and leans on that one word.
+
+### Two routes DRIVEN AND DECLINED, recorded instead of absent
+
+`masked_squared_error_mean`/`prediction`/`row` and `/target`/`row` are **unreachable as rows**:
+`_is_row_like` catches the hostile `__class__` inside its own `try` and answers `False` (now asserted
+**from the object**, not from a comment), so `_is_nested` says "flat" and the object goes to the ELEMENT
+check — **the identical escape site** the element rows already drive (`_sq`'s `isinstance(v, bool)`,
+confirmed by traceback). The in-family `ShapeError` the attester first saw there was its own
+**2D-target fixture** complaining that prediction and target disagree about shape, before the hostile
+object was read at all. Both declines are now written in `_ROUTE_DRIVEN_AND_DECLINED`, because *a
+declined route recorded by absence reads exactly like a route nobody drove.*
+
+**An asymmetry recorded rather than tidied, and it was not in the brief:**
+`("masked_mean_checked", "values", "row")` **is** a row in the table and is unreachable in **precisely
+the same way** — measured at the same site as its own element row (`_validated_masked_values:603` for
+both). It stays, because the module's MEASURED SCOPE sentence names it by hand as the contrast with
+`check_finite_matrix`'s row, which is a real row route through `_materialised`. Declining `msem`'s two
+while keeping `mmc`'s one is an inconsistency; it is written down in the table rather than resolved by
+deleting a row the prose names.
+
+### FINDING Q — a cross-reference pin that asserted the signpost and not where it pointed
+
+`test_h1`'s pin was `assertIn("THE MEASUREMENT THAT ESTABLISHED THAT HAS ONE HOME", msrc)`. The
+**destination** — *"the module docstring at the top of this file"* — sat on the **next comment line**,
+outside the needle. Repointing it at `tests/toy_tests/test_robustness.py` while leaving the capitalised
+words intact was **unkilled by all three suites on both interpreters**; deleting the passage was killed.
+*A cross-reference whose destination nothing reads is a signpost with a blank face.*
+
+Both pins now assert `preamble + destination`, from a `_MODULE_XREFS` table, over source **unwrapped**
+by a helper that collapses comment and docstring line breaks — the needles could not otherwise cross the
+wrap. The sibling pin at `_same`'s docstring was described in the brief as *"safe only by luck"* because
+its needle happened to contain its own destination. **Confirmed, and the luck was partial**: rewording
+`the MODULE DOCSTRING` → another file was killed on the pristine tree, but rewording the destination's
+**tail** (`which is its one home` → `which is one of its homes`), which sat outside the old needle, was
+**unkilled by all three suites on both interpreters**. Both are killed now.
+
+### FINDING R — two f-string conversions in neither side of a derivation that claims to fail closed
+
+`test_g2d` tested `node.conversion == ord("r")` and `elif == -1`. `ord("s")` (115) and `ord("a")` (97)
+matched **neither** branch, so a `{x!s}` or `{x!a}` interpolation — a real `str()`/`ascii()` coercion
+of possibly-hostile input — was counted in neither `derived` nor `bare_fmt`, and so was invisible to
+the set equality against `_CONVERSION_SITES` **and** to the `__format__` row's figures at once. Finding
+I's shape one axis over. Zero such sites exist at HEAD (histogram `{-1: 111}`), so there was **no
+behavioural consequence**; the defect was against the **fail-closed property the derivation claims for
+itself**, which is the load-bearing part.
+
+All four conversion values are decided now, and the partition is asserted **total**
+(`bare_fmt + coerced_fmt == len(FormattedValue nodes)`, plus the conversion-value set contained in the
+four), so a value CPython adds later cannot fall through either.
+
+**Proof, with the behavioural kill separated from the derivation kill** — because the obvious mutant
+proves the wrong thing. A `{v!s}` on *caller data* (`_sq`'s refusal message) is killed on the pristine
+tree by **three behavioural ERRORs** in `test_g2b`, since `str()` falls through to a raising
+`__repr__` — and **`test_g2d` itself passed**, i.e. the derivation never saw it. So the clean probe uses
+a **module-produced operand** (`{result!s}` in the overflow message), where nothing but the partition
+can see the site: unkilled by all three suites on both interpreters before, killed after. Same for
+`{result!a}`.
+
+### Measurements
+
+All runs `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` cleared, **serial** — never alongside another
+suite. `-B`, never `-I`. Three permitted suites: `test_stability`, `test_robustness`, `test_checkpoint`
+(the modules that import `toy.stability`; `test_dashboard` does not).
+
+| run | interpreter / environment | result |
+|---|---|---|
+| `test_stability` | 3.12.4 (numpy 2.4.6, torch) | **106 OK** |
+| `test_stability` | 3.13.5 miniconda (numpy 2.4.4, no torch) | **106 OK** |
+| `test_stability` | both, **`-OO`** | **106 OK** |
+| `test_stability` | both, numpy absent | **106 OK, skipped=1** |
+| `test_stability` | both, **`-OO` + numpy absent** | **106 OK, skipped=1** |
+| `test_robustness` / `test_checkpoint` | both, normal and `-OO` | 197 OK / 48 OK |
+| full suite | — | **not run: the orchestrator's job** |
+
+Test count unchanged at **106** — no test was added, disabled or deleted; `scripts/test_baseline.txt`
+needs no edit. `ruff check --select E9,F63,F7,F82` clean on both files. Diff: `stability.py` **+23/−8**
+(comment text only), `test_stability.py` **+255/−25**, this entry **+203/−0**.
+
+**The driven figures, re-measured independently of the table's verdict column** (a sweep that drives all
+42 routes and compares what comes back against what the row claims), in four environments:
+
+| environment | rows | in family | escaping | mismatches |
+|---|---|---|---|---|
+| 3.12.4, numpy 2.4.6 | 42 | 14 | 28 (all bare `RuntimeError`) | 0 |
+| 3.12.4, numpy absent | 42 | 14 | 28 | 0 |
+| 3.13.5, numpy 2.4.4 | 42 | 14 | 28 | 0 |
+| 3.13.5, numpy absent | 42 | 14 | 28 | 0 |
+
+**41 → 42, 14 unchanged, 27 → 28.** The brief's figures were right; they are used because they were
+re-derived, not because they were relayed. The three needles that carried them as literals
+(`"41 driven positions"`, `"14 IN FAMILY and 27 escaping"`, the `ESCAPING (27)` split marker) now read
+the counts off the table with f-strings, so prose and table can no longer be kept in step by hand.
+
+### Mutants — 15, on `git archive HEAD` copies in a scratchpad, never the working tree
+
+| mutant | pristine tree | after the fix |
+|---|---|---|
+| `TBL_DROP_A_DATA_ROUTE_v2` (drop `mmc`/`mask`/`element`, figures consistent) | **unkilled**, 3 suites × 2 interpreters | **KILLED** (`outer_routes - element_routes`) |
+| `TBL_DROP_AN_OUTER_ROUTE` (drop `check_params_changed`/`before`/`outer`, figures consistent) | **unkilled**, 3 × 2 | **KILLED** (`element_routes - outer_routes`) |
+| `TBL_DROP_A_WRITTEN_SLOT_control` | KILLED | **KILLED** (still) |
+| `TBL_BOGUS_NO_ELEMENT_EXCUSE` (excuse a parameter that has no outer route) | n/a | **KILLED** |
+| `TBL_DROP_A_DATA_ROUTE_EXCUSED_BLANK` (drop the row, excuse it with `"  "`) | n/a | **KILLED** (`why.strip()`) |
+| `XREF_DESTINATION_REWORDED` (→ `test_robustness.py`, preamble intact) | **unkilled**, 3 × 2 | **KILLED** |
+| `XREF_DELETED_control` | KILLED | **KILLED** (still) |
+| `XREF_SIBLING_DESTINATION_REWORDED` | KILLED (the luck) | **KILLED** |
+| `XREF_SIBLING_TAIL_REWORDED` (tail outside the old needle) | **unkilled**, 3 × 2 | **KILLED** |
+| `FSTRING_S_SITE` / `FSTRING_A_SITE` (`{v!s}`/`{v!a}` on caller data) | killed **behaviourally** (3 errors in `test_g2b`); **`test_g2d` OK** — the derivation never saw it | **KILLED** by `derived == _CONVERSION_SITES` |
+| `FSTRING_S_SAFE_OPERAND` / `FSTRING_A_SAFE_OPERAND` (module-produced operand) | **unkilled**, 3 × 2 | **KILLED** |
+| `PIN_D1_RELINDENT` / `PIN_D8_RELINDENT` / `PIN_D9_RELINDENT` | KILLED normally on both; **unkilled under `-OO`**, 3 × 2 | unchanged (see note below) |
+
+Every kill was confirmed to fire on the **intended** assertion, not incidentally, by reading the first
+`self.assert…` line of each traceback. Kills verified on both interpreters.
+
+### NOTE — the `-OO` environment row is weaker evidence than the other rows
+
+Recorded, **not** fixed, and stated as a limit of that row rather than as a new failure.
+
+`test_stability` is **106 OK under `-OO`** and that row is real as far as it goes. But **18 doc-half
+assertions sit behind 13 docstring-existence guards and go dark under `-OO`**, so the `-OO` row
+exercises materially less apparatus than the normal row at the same green count. Measured, both
+interpreters, all three suites: the relative-indent mutants on the **D1**, **D8** and **D9** passages —
+each adds two spaces to one continuation line of a pinned docstring, so `cleandoc` renders it
+differently — are **KILLED normally and UNKILLED under `-OO`**.
+
+**The brief's figure was 16 behind 11 guards. Derived here: 16 behind 11 spelled `if doc is not None:`,
+plus 2 more behind 2 guards spelled `_doc(st.check_gradient) is not None` and
+`_doc(st.check_finite_scalar) is not None` — 18 behind 13 in total.** This is the *same* spelling hazard
+this file already recorded for its numpy guards (`if _np is not None:` was invisible to a count that
+looked for `if np is not None:`), recurring for doc guards, and it means the briefed figure was the
+narrow spelling's figure. Nothing counts these guards; the figure above is an AST derivation and lives
+only in this entry, so **it will rot** — which is the argument for deriving it in a test if the `-OO`
+row is ever to carry weight.
+
+### Derivations that failed before they were right
+
+This project asks for these on the record.
+
+1. **`_unwrapped`, first spelling.** `re.sub(r"\n\s*(?:#[ \t]?)?", " ", text)` consumed the `#` and one
+   space and **left `stability.py`'s five-space comment indent**, so `every ELEMENT position` still did
+   not match and the pin failed on a correct file. Correct spelling takes the indent on both sides of
+   the break: `r"[ \t]*\n[ \t]*(?:#[ \t]*)?"`. Watched fail; the failure is recorded beside the regex.
+2. **The FINDING P docstring paragraph, inserted mid-sentence.** Anchored on *"rather than written
+   freely here."*, which is the **tail** of the previous sentence, splitting it in two. Caught by
+   reading the rendered docstring, not by any test — docstring prose in that test is not pinned, which
+   is itself worth knowing.
+3. **The `{x!s}` mutant, first choice of site.** Placed on caller data, where three behavioural tests
+   kill it and the derivation never runs — it would have "proved" the widening while proving nothing
+   about it. Re-sited onto a module-produced operand, and the original kept as evidence that `test_g2d`
+   passes on the pristine tree with the site present.
+4. **The route figures were not typed from the brief.** 42 and 14/28 were observed as assertion
+   failures against the pristine literals first, then re-derived twice: once from the table, once by
+   driving all 42 routes in four environments.
+
+### Cross-owner
+
+Nothing here changes behaviour: the `stability.py` diff is **comment text only**, and the 42-route
+drive is byte-identical before and after the edit in all four environments. The `__class__` channel is
+still **declared and unpinned on purpose** — the escaping rows assert nothing, and the fix remains the
+three owners' joint decision. The route count other owners should now quote for this module is **42
+(14 in family, 28 escaping)**, not 41/27.
+
+**SR-06 stays `[ ]`** — the fixer is not the attester, and this fix has had no independent pass.

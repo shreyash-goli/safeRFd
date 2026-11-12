@@ -1351,6 +1351,41 @@ class ReAttestationRegressions(unittest.TestCase):
             st.masked_mean_checked([1e308, 1e308], [True, True], 2)
 
 
+def _unwrapped(text: str) -> str:
+    r"""`text` with COMMENT and DOCSTRING line wraps collapsed to single spaces.
+
+    A needle that spans a wrap matches nothing, which is why the cross-reference pins in `test_h1`
+    used to stop at the last word before the line break -- and the last word before the line
+    break, for both cross-references in `stability.py`, came BEFORE the destination. The `split`
+    figure in the same test solved this the other way, by writing the `
+` and the continuation
+    into the needle, which pins the WRAP POSITION as well as the words: re-flow that paragraph and
+    a correct sentence fails. This collapses instead, so a needle is one flat line and survives
+    re-wrapping.
+    """
+    import re
+    # The comment body's own indentation is INSIDE the wrap and must go with it: the first spelling
+    # of this was `\n\s*(?:#[ \t]?)?`, which consumed the `#` and one space and left the five
+    # spaces of `stability.py`'s comment indent, so `every ELEMENT position` still did not match.
+    return re.sub(r"[ \t]*\n[ \t]*(?:#[ \t]*)?", " ", text)
+
+
+# FINDING Q. The two cross-references that replaced the deleted copies of the 30-cell measurement,
+# each as (CAPITALISED PREAMBLE, DESTINATION). The pins used to assert the preamble only, and for
+# the first of the two the destination sat on the NEXT comment line, outside the needle: measured,
+# the destination reworded to a different file while the capitalised words stood was unkilled by all
+# three permitted suites on both interpreters, and deleting the whole passage was killed. A
+# cross-reference whose destination nothing reads is a signpost with a blank face -- and "one home"
+# is only worth writing if the reader can find the home. The second pin happened to contain its own
+# destination and was therefore safe BY LUCK, not by design; it is in this table for the design.
+_MODULE_XREFS = (
+    ("THE MEASUREMENT THAT ESTABLISHED THAT HAS ONE HOME,",
+     "the module docstring at the top of this file"),
+    ("The cell-by-cell measurement of what that cost is in",
+     "the MODULE DOCSTRING, which is its one home"),
+)
+
+
 class TheFifthAxisIsACallablePlacedOperand(unittest.TestCase):
     """FINDING H, closed as a CLASS: the operand of a bare guard that a caller's CALLABLE placed.
 
@@ -1438,10 +1473,26 @@ class TheFifthAxisIsACallablePlacedOperand(unittest.TestCase):
                 self.assertIn(figure, LoadBearingSentences.D1,
                               "the one home must be the PINNED passage, not an unpinned copy")
         # and the two cross-references that replaced the deleted copies are load-bearing: without
-        # them the places that need the figure no longer say where it lives.
-        self.assertIn("THE MEASUREMENT THAT ESTABLISHED THAT HAS ONE HOME", msrc)
-        self.assertIn("The cell-by-cell measurement of what that cost is in the MODULE DOCSTRING",
-                      msrc)
+        # them the places that need the figure no longer say where it lives. FINDING Q: each pin
+        # asserts its DESTINATION and not only its capitalised preamble. The first one's
+        # destination was on the next COMMENT LINE, outside the needle, so a mutant that repointed
+        # it at `tests/toy_tests/test_robustness.py` -- a file that does not hold the figure -- was
+        # unkilled by all three permitted suites on both interpreters, while deleting the passage
+        # died. `_unwrapped` is what makes a needle able to cross that line break at all.
+        flat = _unwrapped(msrc)
+        self.assertNotEqual(flat, msrc, "_unwrapped collapsed nothing, so the needles below are "
+                                        "only testing what a plain assertIn already tested")
+        self.assertTrue(_MODULE_XREFS, "an empty cross-reference table pins nothing at all")
+        for preamble, destination in _MODULE_XREFS:
+            with self.subTest(xref=preamble):
+                self.assertEqual(flat.count(preamble), 1,
+                                 "the cross-reference's preamble is gone, or there are now two of "
+                                 "it: a signpost repeated is the three-copies problem again")
+                self.assertIn(f"{preamble} {destination}", flat,
+                              "the cross-reference no longer names WHERE the one home is. A "
+                              "preamble-only pin is satisfied by a signpost pointing anywhere, "
+                              "which is what it was measured doing: the destination reworded to "
+                              "another file, the capitalised words intact, and nothing failed")
 
     def test_h2_the_rule_is_a_plain_number_or_a_write_and_the_narrowing_is_stated(self):
         """What `_same` now does with each shape of write, INCLUDING the one behaviour change.
@@ -1867,6 +1918,20 @@ class IntakeIsDerivedNotEnumerated(unittest.TestCase):
 # scopes were unvisited and a coercion in any of them was unkilled by all three suites on both
 # interpreters. `int()` is in the candidate set the walker looks for and has no site, which is why
 # it is DISCHARGED in the module's table rather than absent from it.
+# FINDING R. The f-string conversions that are COERCIONS of caller data, by the integer `ast`
+# stores in `FormattedValue.conversion`. `ast` uses `ord()` of the letter, and -1 for no conversion
+# at all. The walker below used to test `== ord("r")` and `elif == -1`, which left `ord("s")` (115,
+# `{x!s}`, a `str()` call on the operand) and `ord("a")` (97, `{x!a}`, an `ascii()` call, which
+# calls `repr()`) matching NEITHER branch: a real coercion of possibly-hostile input counted in
+# neither `derived` nor `bare_fmt`, and so visible to neither side of the coverage check. At this
+# commit there are no such sites -- the conversion histogram is `{-1: 111}`, where the 111 is the
+# `__format__` row's own figure that this test already re-derives and the `-1` is now asserted
+# exclusive -- so there was no behavioural consequence, and the defect was against the FAIL-CLOSED
+# property this derivation claims for ITSELF, which is the part of it that is load-bearing.
+# Finding I's shape one axis over: invisible to the walker and to the table at once. The partition
+# is asserted TOTAL below, so a fifth conversion value cannot fall through either.
+_FMT_CONVERSIONS = {ord("r"): "!r", ord("s"): "!s", ord("a"): "!a"}
+
 _CONVERSION_SITES = {
     ("_as_float", "float", "v"):
         "THE one float() in the module. The three conversion sites all call this helper, which "
@@ -2236,7 +2301,7 @@ class ConversionIsDerivedNotEnumerated(unittest.TestCase):
 
         derived, by_proto, shown, typed = set(), {}, 0, 0
         as_float_calls, as_float_lines = 0, set()
-        attributed, bare_fmt, label_fmt = [], 0, 0
+        attributed, bare_fmt, label_fmt, coerced_fmt = [], 0, 0, 0
         for scope, body in scopes(tree):
             for node in own_nodes(body):
                 if isinstance(node, (ast.Call, ast.FormattedValue)):
@@ -2255,8 +2320,13 @@ class ConversionIsDerivedNotEnumerated(unittest.TestCase):
                         as_float_calls += 1
                         as_float_lines.add(node.lineno)
                 if isinstance(node, ast.FormattedValue):
-                    if node.conversion == ord("r"):
-                        derived.add((scope, "!r", ast.unparse(node.value)))
+                    # FINDING R: all four conversion values are decided. `!s` and `!a` are
+                    # coercions of the operand exactly as `!r` is, so they go to `derived` and must
+                    # earn a `_CONVERSION_SITES` row; `-1` is the bare `{x}` `__format__` route.
+                    if node.conversion in _FMT_CONVERSIONS:
+                        coerced_fmt += 1
+                        derived.add((scope, _FMT_CONVERSIONS[node.conversion],
+                                     ast.unparse(node.value)))
                     elif node.conversion == -1:
                         bare_fmt += 1
                         label_fmt += ast.unparse(node.value) in ("name", "what", "where")
@@ -2270,6 +2340,22 @@ class ConversionIsDerivedNotEnumerated(unittest.TestCase):
         self.assertEqual(len(set(attributed)), len(attributed), "a node attributed to two scopes")
         self.assertIn("<module>", {s for s, _ in scopes(tree)})
         self.assertIn("GradientCheckReport", {s for s, _ in scopes(tree)})
+        # SIDE ONE-AND-A-HALF, FINDING R: the conversion partition is TOTAL. Every `FormattedValue`
+        # in the module went to `derived` (a coercion) or to `bare_fmt` (the `__format__` route) and
+        # none fell between them. The walker tested `ord("r")` and `-1` only, so `{x!s}` and `{x!a}`
+        # -- `str()` and `ascii()` on the operand -- were counted by neither side and were therefore
+        # invisible to the set equality against `_CONVERSION_SITES` below AND to the `__format__`
+        # row's figures: the exact shape of Finding I, one axis over. Asserted as a PARTITION rather
+        # than by listing the values, so a conversion value CPython adds later cannot fall through
+        # silently either.
+        fmt_nodes = [n for n in everything if isinstance(n, ast.FormattedValue)]
+        self.assertEqual(bare_fmt + coerced_fmt, len(fmt_nodes),
+                         "an f-string interpolation is in NEITHER side of this derivation: it is "
+                         "absent from `derived`, so no _CONVERSION_SITES row is required of it, "
+                         "and absent from `bare_fmt`, so the __format__ row's figures do not see "
+                         "it either")
+        self.assertEqual({n.conversion for n in fmt_nodes} - ({-1} | set(_FMT_CONVERSIONS)), set(),
+                         "an f-string conversion value this partition does not decide")
         # SIDE TWO: protocol coverage, AS TO SPELLING as well as scope (FINDING N). Every callable
         # this module CALLS BY NAME -- bare, dotted, or through an import alias -- is either a
         # coercion the walker looks for, or this module's own function or class (whose body the
@@ -2322,7 +2408,11 @@ class ConversionIsDerivedNotEnumerated(unittest.TestCase):
         # helper, and no `{...!r}` conversion survives anywhere in the module
         self.assertEqual([k for k in derived if k[1] == "float"], [("_as_float", "float", "v")])
         self.assertEqual([k for k in derived if k[1] == "repr"], [("_shown", "repr", "v")])
-        self.assertEqual([k for k in derived if k[1] == "!r"], [])
+        for _conv, label in sorted(_FMT_CONVERSIONS.items()):
+            self.assertEqual([k for k in derived if k[1] == label], [],
+                             f"a `{{x{label}}}` interpolation coerces the operand in a message "
+                             "instead of routing it through _shown/_type_name: give it a "
+                             "_CONVERSION_SITES row with the reason it is safe, or remove it")
         self.assertEqual([k for k in derived if k[1] == "int"], [],
                          "int() has no site: _plain_real calls int.__int__ at type level")
         # and the figures the comment block quotes are this AST's figures
@@ -2356,8 +2446,10 @@ class ConversionIsDerivedNotEnumerated(unittest.TestCase):
         self.assertEqual((int(fmt.group(1)), int(fmt.group(2)), int(fmt.group(3))),
                          (bare_fmt, bare_fmt - label_fmt, label_fmt),
                          "the __format__ row's figures are not this AST's figures")
-        self.assertEqual(len([k for k in derived if k[1] == "!r"]), 0,
-                         "every repr goes through _shown, so no `{x!r}` interpolation is left")
+        self.assertEqual([k for k in derived if k[1] in set(_FMT_CONVERSIONS.values())], [],
+                         "every repr goes through _shown, so no `{x!r}` interpolation is left -- "
+                         "and none of the other coercing conversions is left either, which is the "
+                         "half of this claim the `!r`-only spelling could not make")
         # and the correction that row makes to its own reason: the label is formatted EAGERLY, on
         # the SUCCESS path. Asserted by OBSERVING the format rather than by letting one raise -- an
         # assertion that the raise escapes would pin a defect in a channel that is declared, not
@@ -2598,12 +2690,16 @@ class TheCarveOutWhereItsHalvesMeet(unittest.TestCase):
 # those owners' joint decision, so a test that pinned an escape would pin a defect and fail on the
 # eventual fix.
 #
-# REACH, stated exactly rather than implied: the PARAMETER set is derived and fails closed, and so
-# -- since FINDING L -- is the ROUTE set of every CALLABLE-PLACED parameter, cross-checked against
-# `_CALLABLE_PLACED`, which has enumerated those three routes since Finding H. The remaining ROUTE
-# KINDS are enumerated by hand in `_ROUTE_KINDS` below, one row per kind that was driven. A route
-# kind nobody drives is not in this table; a route of a position that IS in this table used to need
-# no row and get no excuse, which is Finding L.
+# REACH, stated exactly rather than implied, and it is THREE derivations and not two since FINDING
+# P: (i) the PARAMETER set is derived from the nine signatures and fails closed; (ii) the ROUTE set
+# of every CALLABLE-PLACED parameter is cross-checked against `_CALLABLE_PLACED`, which has
+# enumerated those three routes since Finding H -- that is Finding L; (iii) a DATA parameter's OUTER
+# and ELEMENT routes must come in pairs, or be declined in writing in `_NO_ELEMENT_ROUTE` -- that is
+# Finding P, and it is Finding L's own defect one parameter KIND over, because (ii) closed route
+# granularity for callable-placed positions ONLY while the comment in `stability.py` claimed route
+# granularity for all of them. The remaining ROUTE KINDS are enumerated by hand in `_ROUTE_KINDS`
+# below, one row per kind that was driven: a kind nobody drives is held by that enumeration and by
+# no derivation, which is the limit of (i)-(iii) and is now written in `stability.py` as such.
 _ROUTE_KINDS = {
     "outer": "the argument object itself",
     "row": "an element of the outer sequence of a 2D argument",
@@ -2678,6 +2774,18 @@ _CLASS_CHANNEL_POSITIONS = (
      lambda h: st.masked_squared_error_mean([1.0], [h], [True], 1)),
     ("masked_squared_error_mean", "mask", "outer", _IN_FAMILY,
      lambda h: st.masked_squared_error_mean([1.0], [2.0], h, 1)),
+    # FINDING P, A DATA PARAMETER'S SECOND ROUTE, missing for the same reason Finding L's three
+    # were: the accounting keyed on (function, parameter), `mask` was already covered by the OUTER
+    # row above, so this one needed no row and got no excuse. Finding L moved the KEYS to the route
+    # but the only thing that made a route FAIL CLOSED was the `_CALLABLE_PLACED` cross-check, which
+    # covers callable-placed positions and says nothing about data ones. The sibling
+    # `masked_mean_checked` has had both of its mask routes all along, which is what makes this an
+    # omission rather than a decision. Measured here, not relayed: a bare RuntimeError out of
+    # `check_mask`'s own `isinstance(v, bool)` -- reached through `masked_mean_checked` ->
+    # `_validated_masked_values` -> `check_mask` -- on 3.12.4 (numpy 2.4.6) and 3.13.5 (numpy
+    # 2.4.4) alike. NOT PINNED AS A BEHAVIOUR: one of the 28 escapes of the declared open channel.
+    ("masked_squared_error_mean", "mask", "element", _ESCAPES,
+     lambda h: st.masked_squared_error_mean([1.0], [2.0], [h], 1)),
     ("masked_squared_error_mean", "denominator", "scalar", _ESCAPES,
      lambda h: st.masked_squared_error_mean([1.0], [2.0], [True], h)),
     ("check_gradient", "point", "outer", _IN_FAMILY,
@@ -2754,6 +2862,51 @@ _NOT_A_CLASS_CHANNEL_POSITION = {
                                                   "isinstance-tested",
     ("masked_squared_error_mean", "strict_masked_out"): "a bool policy flag, truth-tested and never "
                                                         "isinstance-tested",
+}
+
+# FINDING P. The closure for DATA parameters that `_CALLABLE_PLACED` already gave callable-placed
+# ones. The rule, which holds for every one of the thirteen outer data routes in the table above and
+# failed on exactly one before this round: an OUTER route and an ELEMENT route COME IN PAIRS. The
+# outer position is where the argument object is materialised; the element position is where its
+# contents are read; a sequence parameter is driven at both or the table has lost one of them.
+# A sequence parameter that genuinely has no element route is declined HERE, IN WRITING, keyed
+# (function, parameter) -- because a route declined by ABSENCE is indistinguishable from a route
+# nobody thought of, which is the whole defect this accounting exists to close.
+#
+# EMPTY AT THIS COMMIT, and that is a statement rather than an omission: every one of the thirteen
+# data parameters driven at an outer position is also driven at an element position. The table
+# exists so that the thirteen can become twelve in writing instead of by deletion.
+_NO_ELEMENT_ROUTE = {}
+
+# Routes the sweep DROVE and DECLINED TO COUNT, keyed (function, parameter, route), each with the
+# reason it is not a row above. Same principle as `_NO_ELEMENT_ROUTE` and the same reason for
+# existing: a declined route recorded by absence reads exactly like a route nobody drove.
+#
+# `masked_squared_error_mean`'s `prediction` and `target` were driven at a ROW position and declined
+# because THERE IS NO ROW ROUTE THERE TO DRIVE: `_is_row_like` catches the hostile `__class__` in
+# its own `try` and answers False (asserted from the object, not from this comment, in
+# `test_the_open_class_channel_sentence_is_its_measured_scope`), so `_is_nested` says "flat" and the
+# object goes to the ELEMENT check -- the row the table already holds, at the identical escape site,
+# `_sq`'s `isinstance(v, bool)`. What the first sweep saw there was an IN-FAMILY ShapeError, and
+# that was its own fixture talking: a 2D target against a flat-looking prediction makes
+# `masked_squared_error_mean` complain that the two disagree about shape before the hostile object
+# is read at all. Driven with a flat target, the route escapes at `_sq` exactly as the element row
+# does.
+#
+# RECORDED, NOT TIDIED: `("masked_mean_checked", "values", "row")` IS a row in the table and is
+# unreachable in precisely the same way -- measured at the same site as its own element row. It
+# stays because the module's MEASURED SCOPE sentence names it by hand, as the contrast with
+# `check_finite_matrix`'s row, which is a real row route through `_materialised`. Deleting it would
+# delete a row the prose names; declining `msem`'s two here while keeping it is an asymmetry, and an
+# asymmetry written down is worth more than a tidy table nobody can audit.
+_ROUTE_DRIVEN_AND_DECLINED = {
+    ("masked_squared_error_mean", "prediction", "row"):
+        "unreachable: _is_row_like answers False for the hostile object, so _is_nested says flat "
+        "and the ELEMENT row below drives the identical site (_sq's isinstance(v, bool)). The "
+        "in-family ShapeError first seen here came from a 2D-target fixture, not from this route",
+    ("masked_squared_error_mean", "target", "row"):
+        "unreachable for the same reason as `prediction`'s row, and measured at the same site: the "
+        "nestedness probe absorbs the hostile __class__ and the element check gets the object",
 }
 
 
@@ -2895,9 +3048,9 @@ class FiguresAndDocPinInventory(unittest.TestCase):
             `masked_mean_checked`, where the nestedness probe absorbs the hostile `__class__`,
             answers "not a row", and hands the object to the ELEMENT check.
 
-        So the sentence is rewritten from a POSITION-BY-POSITION sweep: 41 driven positions, 14 in
-        family and 27 escaping, identical on 3.12.4 and 3.13.5 and with numpy absent. The fix to the
-        asymmetry is to ACCOUNT for all 41 instead of asserting 6 -- the (function, parameter) set
+        So the sentence is rewritten from a POSITION-BY-POSITION sweep: 42 driven positions, 14 in
+        family and 28 escaping, identical on 3.12.4 and 3.13.5 and with numpy absent. The fix to the
+        asymmetry is to ACCOUNT for all 42 instead of asserting 6 -- the (function, parameter) set
         is derived from the signatures and every pair must be in the table or excused -- while
         still asserting BEHAVIOUR for the in-family rows only.
 
@@ -2923,6 +3076,22 @@ class FiguresAndDocPinInventory(unittest.TestCase):
         `isinstance` sites across three files" -- is not reproducible: it reconciles only with a
         robustness figure that round 18 retired, so it is replaced by this module's own count,
         derived, with the other two modules' counts left to their owners rather than inherited.
+
+        FINDING P, which is the SAME defect as Finding L one parameter KIND over, and the figure
+        was 41 and not 42 for as long as it stood. Finding L moved the accounting's KEYS to the
+        route, but the only thing that made a route FAIL CLOSED was the cross-check against
+        `_CALLABLE_PLACED` -- which, as its name says, covers the positions a caller's CALLABLE
+        occupies. For a DATA parameter a route still needed no row and got no excuse, and one was
+        missing: `masked_squared_error_mean`'s `mask` at the ELEMENT position, whose sibling
+        `masked_mean_checked` has had both of its mask routes since the table was written. Measured
+        for this round rather than relayed: a bare RuntimeError out of `check_mask`'s own
+        `isinstance(v, bool)`, on 3.12.4 (numpy 2.4.6) and 3.13.5 (numpy 2.4.4) alike. The
+        derivation that closes it is that OUTER and ELEMENT routes come in pairs, both ways, with
+        `_NO_ELEMENT_ROUTE` to decline a genuinely element-less sequence parameter in writing. Two
+        routes were also DRIVEN AND DECLINED this round -- `prediction` and `target` at a ROW
+        position, which `_is_row_like` makes unreachable -- and they are recorded in
+        `_ROUTE_DRIVEN_AND_DECLINED` rather than left absent, because the absence of a declined
+        route and the absence of a route nobody thought of read the same.
         """
         import ast
         src = inspect.getsource(st)
@@ -2967,28 +3136,89 @@ class FiguresAndDocPinInventory(unittest.TestCase):
                               "route (2), the value the callable RETURNS, needs a row of its own "
                               "too: `grad_fn`'s returned sequence is IN FAMILY while its elements "
                               "escape, and the sentence used to put both in the escape list")
+        # FINDING P: THE SAME THING FOR DATA PARAMETERS, which the cross-check above does not
+        # reach and which `stability.py` claimed it did. The derived rule: OUTER and ELEMENT routes
+        # COME IN PAIRS, both directions. One side of it catches a route that was never added --
+        # `masked_squared_error_mean`'s mask ELEMENT route, which needed no row because the OUTER
+        # row kept `(function, parameter)` covered; the other side catches a route DELETED with the
+        # figures edited to match, which is the mutant that walked through the one-sided version.
+        outer_routes = {(f, p) for f, p, k in routes if k == "outer"}
+        element_routes = {(f, p) for f, p, k in routes if k == "element"}
+        self.assertEqual(outer_routes - element_routes, set(_NO_ELEMENT_ROUTE),
+                         "a data parameter is driven at its OUTER position and not at its ELEMENT "
+                         "position: add the element row, or decline it IN WRITING in "
+                         "_NO_ELEMENT_ROUTE. Declining by absence is how `masked_squared_error_mean`"
+                         " at a mask element came to have no row, no excuse and no measurement "
+                         "behind the figure while this test stayed green")
+        self.assertEqual(element_routes - outer_routes, set(),
+                         "a data parameter is driven at its ELEMENT position and not at its OUTER "
+                         "one. There is deliberately NO excuse table for this direction: every "
+                         "element is reached THROUGH the outer position, so this can only mean an "
+                         "outer row was deleted -- and a row deleted with the figures edited to "
+                         "match is exactly what the one-sided closure let through")
+        for key, why in _NO_ELEMENT_ROUTE.items():
+            with self.subTest(no_element_route=key):
+                self.assertIn((*key, "outer"), routes,
+                              f"{key} is excused as element-less but has no outer route either")
+                self.assertTrue(why.strip(), f"{key} is declined with no reason written")
+        for (f, p, kind), why in _ROUTE_DRIVEN_AND_DECLINED.items():
+            with self.subTest(driven_and_declined=(f, p, kind)):
+                self.assertNotIn((f, p, kind), routes,
+                                 "this route is declined in writing AND present in the table")
+                self.assertIn((f, p), {(a, b) for a, b, _k in routes},
+                              "a route is declined for a position the table no longer holds")
+                self.assertIn(kind, _ROUTE_KINDS, "a declined route of an undefined kind")
+                self.assertTrue(why.strip(), "a route declined with no reason written")
+        # and the MEASUREMENT the declined `row` routes rest on, asserted from the object rather
+        # than written in their reasons: the hostile `__class__` is absorbed inside `_is_row_like`'s
+        # own `try`, so there is no row route at `prediction`/`target` to drive. If this ever
+        # answers True those two are reachable after all and need ROWS instead of REASONS.
+        self.assertFalse(st._is_row_like(_class_boom()),
+                         "_is_row_like answers True for the hostile object, so the `row` routes "
+                         "declined in _ROUTE_DRIVEN_AND_DECLINED are reachable and must be driven")
         self.assertEqual(sorted({k for _f, _p, k in routes}), sorted(_ROUTE_KINDS),
                          "a route kind is driven that _ROUTE_KINDS does not define, or defined "
                          "there and driven nowhere: the enumeration of kinds IS the reach claim")
         for kind, why in _ROUTE_KINDS.items():
             with self.subTest(route_kind=kind):
                 self.assertTrue(why.strip(), f"{kind} has no definition written")
-        self.assertEqual(len(_CLASS_CHANNEL_POSITIONS), 41, "the driven positions")
+        self.assertEqual(len(_CLASS_CHANNEL_POSITIONS), 42, "the driven positions")
         verdicts = [v for _f, _p, _k, v, _c in _CLASS_CHANNEL_POSITIONS]
-        self.assertEqual((verdicts.count(_IN_FAMILY), verdicts.count(_ESCAPES)), (14, 27),
+        self.assertEqual((verdicts.count(_IN_FAMILY), verdicts.count(_ESCAPES)), (14, 28),
                          "the measured split the sentence is written from")
-        self.assertIn("14 IN FAMILY and 27 escaping", src)
-        self.assertIn("41 driven positions", src)
+        # and the PROSE quotes THE TABLE'S counts, derived here rather than typed a second time:
+        # the three needles below used to carry 41, 14 and 27 as literals, so prose and table could
+        # only ever be compared through a figure a human kept in step in two files.
+        fam, esc = verdicts.count(_IN_FAMILY), verdicts.count(_ESCAPES)
+        self.assertEqual(fam + esc, len(_CLASS_CHANNEL_POSITIONS),
+                         "a row carries a verdict that is neither half of the sentence")
+        self.assertIn(f"{fam} IN FAMILY and {esc} escaping", src)
+        self.assertIn(f"{len(_CLASS_CHANNEL_POSITIONS)} driven positions", src)
         self.assertIn("A POSITION HERE IS A ROUTE, not a parameter", src,
                       "the sentence must say what it counts, because the figure changed by three "
                       "without a single parameter being added")
         # and the sentence names each half's members
-        in_family_half = src.split("IN FAMILY (14)")[1].split("ESCAPING (27)")[0]
-        escaping_half = src.split("ESCAPING (27)")[1].split("_NOT_A_SEQUENCE = (")[0]
+        in_family_half = src.split(f"IN FAMILY ({fam})")[1].split(f"ESCAPING ({esc})")[0]
+        escaping_half = src.split(f"ESCAPING ({esc})")[1].split("_NOT_A_SEQUENCE = (")[0]
         # The two kinds the sentence enumerates BY PARAMETER NAME are the outer and the scalar ones;
         # the row, element and return-value kinds it describes as classes, in prose, and they are
         # checked by the split figures above rather than by name. `input_grad` is the row this makes
         # fail if it is dropped from the escape list again.
+        #
+        # REACH OF THIS LOOP, DECIDED THIS ROUND rather than left to the `continue` to imply.
+        # FINDING P asked whether the skip is still right now that element routes fail closed, and
+        # it is: the sentence covers the element, row, return-value, return-element and
+        # written-slot kinds AS CLASSES ("every ELEMENT position", "the SLOT A CALLABLE WROTE"), so
+        # a per-parameter needle for those kinds would fail on prose that is correct. What makes
+        # them fail closed is not this loop -- it is the OUTER/ELEMENT pairing rule above, the
+        # `_CALLABLE_PLACED` cross-check, and `_ROUTE_KINDS`. THE LIMIT THAT LEAVES, stated: this
+        # loop cannot tell that a class sentence still says EVERY, so the one word the element
+        # kind's whole coverage hangs on is pinned on the next line instead of trusted.
+        self.assertIn("every ELEMENT position", _unwrapped(escaping_half),
+                      "the escaping half covers the ELEMENT kind as a CLASS rather than by "
+                      "parameter name, which is the only reason the loop below is right to skip "
+                      "that kind: narrow the class word and the "
+                      f"{len(element_routes)} element routes are covered by nothing")
         for f, p, kind, verdict, _call in _CLASS_CHANNEL_POSITIONS:
             if kind not in ("outer", "scalar"):
                 continue

@@ -254,8 +254,8 @@ def _finite_at(v, where: str) -> float:
 #     every scope), not the intake points, so it is not closed here and must not be assumed
 #     closed. MEASURED SCOPE at this commit, because this sentence is what the next owner reads
 #     about an open finding, and it is written from a POSITION-BY-POSITION sweep rather than from
-#     a shape: with a `@property __class__` that raises RuntimeError, 41 driven positions over the
-#     nine public functions give 14 IN FAMILY and 27 escaping as a bare RuntimeError, identically
+#     a shape: with a `@property __class__` that raises RuntimeError, 42 driven positions over the
+#     nine public functions give 14 IN FAMILY and 28 escaping as a bare RuntimeError, identically
 #     on 3.12.4 and 3.13.5 and with numpy present and absent.
 #     A POSITION HERE IS A ROUTE, not a parameter, and that distinction is this round's correction.
 #     The sweep used to read 38 positions, 13 and 25, and the three it was missing were all ROUTES
@@ -269,8 +269,11 @@ def _finite_at(v, where: str) -> float:
 #     `check_finite_matrix`'s ROW position, because that row goes through `_materialised` too; plus
 #     the SEQUENCE OBJECT `grad_fn` RETURNS, which `_as_flat_items` materialises exactly like a
 #     sequence argument and which therefore comes out as ShapeError.
-#     ESCAPING (27), which the wording before this sentence understated three ways: every
-#     ELEMENT position; every SCALAR position, which is `value`, `expected_len`, `denominator`,
+#     ESCAPING (28), which the wording before this sentence understated three ways: every
+#     ELEMENT position -- including `masked_squared_error_mean`'s `mask` ELEMENT route, which
+#     this class covered in words while the table behind the figure had no row for it, so the
+#     count read 41 and not 42 until this round; every SCALAR position, which is `value`,
+#     `expected_len`, `denominator`,
 #     `step`, `rtol`, `atol`, `zero_tol` and `min_abs_change` and NOT just the two that sentence
 #     used to name; `input_grad` at BOTH its positions, an OUTER argument of a public function
 #     that escapes while the older sentence said outer positions come out in family (its other four
@@ -293,10 +296,22 @@ def _finite_at(v, where: str) -> float:
 #     are all refused in family, so there too the `__class__` channel is the only escape.
 #     So it is NOT absorbed "at the nestedness probe" alone, it is NOT closed,
 #     and the fix is the three owners' joint decision rather than this module's -- which is why
-#     the test that pins this sentence asserts the 14 in family, accounts for all 41 positions AT
-#     ROUTE GRANULARITY so a new one cannot be missing from BOTH halves, and asserts NOTHING about
-#     the 27, because a test that pinned the escape would pin a defect and fail on the eventual
-#     fix.
+#     the test that pins this sentence asserts the 14 in family, accounts for all 42 positions AT
+#     ROUTE GRANULARITY, and asserts NOTHING about the 28, because a test that pinned the escape
+#     would pin a defect and fail on the eventual fix. WHAT THAT ACCOUNTING CLOSES, exactly, and
+#     by which derivation, because the sentence that used to stand here claimed more than its
+#     mechanism: (i) the PARAMETER set is derived from the nine signatures, so a parameter in
+#     neither the table nor its excuse table fails; (ii) a CALLABLE-PLACED position's three
+#     routes -- call, return value, written slot -- are cross-checked against the tests'
+#     `_CALLABLE_PLACED`; (iii) a DATA parameter's OUTER route must have an ELEMENT sibling and
+#     vice versa, or be declined in writing in an excuse table. Nothing else is closed by a
+#     derivation: a route KIND nobody has driven -- a third level of nesting, say -- is held
+#     only by the hand-written enumeration of kinds in the test. That is not a quibble. The
+#     claim this paragraph used to make, that the accounting covers every position at route
+#     granularity "so a new one cannot be missing from BOTH halves", was FALSE FOR DATA
+#     PARAMETERS for exactly that reason -- (ii) existed and (iii) did not -- and
+#     `masked_squared_error_mean`'s `mask` ELEMENT route, a real escape, had no row, no excuse
+#     and no measurement behind the figure for as long as that claim stood.
 _NOT_A_SEQUENCE = (str, bytes, Mapping, set, frozenset)
 
 # Exceptions from a caller's object that are NOT converted into this module's family: they report
