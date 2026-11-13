@@ -12418,3 +12418,105 @@ briefed to assume the orchestrator's figures need checking, and both caught some
 
 **SR-11 unblocks SR-12** (`Depends: SR-03, SR-11`; SR-03 marked). Next: **SR-13**, whose fix is also
 unattested.
+
+## SR-13 fix (round 13): the ITERATION family had one direction, and `or ()` threw away the other
+
+SR-13's eleventh attestation failed half 2 of its clause — *"missing results render as UNKNOWN, not
+0"* — with three findings sharing one cause, and the cause was not any of the nine sites: it was that
+**`_iterated` correctly returned `None` and every caller then wrote `or ()`**, which collapses "this
+container REFUSED to be read" into "this container is EMPTY". The two are different inputs and the
+page may not print one as the other.
+
+**F1 (the clause, verbatim, in SR-13's first named deliverable).** `_render_snapshot`, measured at the
+previous HEAD through the public `render_dashboard(data)` with no `object.__setattr__` — the snapshot
+is caller-supplied JSON — with a `list` subclass holding the honest entries whose `__iter__` raises:
+an **8-file, 914-addition, 138-deletion inventory rendered `total (0 files) | 0 | 0`** with the page's
+alarm state byte-unchanged (UNKNOWN 2 → 2, `warn` 0 → 0, panel still badged SOURCE_OBSERVED). The
+loop ran zero times and `ok_totals`, a loop-body flag with no zero-iteration case, stayed `True`. An
+**empty** `changed_files` renders those same zeros honestly, which is why the refusal may not. After:
+the panel reads `UNKNOWN changed_files refused to be iterated: the file count, the additions and the
+deletions are UNMEASURED, NOT zero`, UNKNOWN 2 → 3; the empty list still prints `total (0 files)`.
+
+**F2 (both renderers down).** A `converged_components` that refuses killed `render_scorecard` *and*
+`render_dashboard` with ZeroDivisionError at `dashboard.py:2371`, and — with an iterator that answers
+once and refuses afterwards, which is the only shape that reaches a site behind a guard that already
+passed — at `:2258` as well. Four further bare `tuple(...)`/`for` iterations of the same two
+containers (`_weaker_than_protocol`, `_n_sources_disagree`, `_interval_sources_disagree`,
+`_eff_hypothesis`) were never individually measured because 2371 fired first; measured individually,
+the three prose walks' `except ...: continue` **deleted one hypothesis's named line** —
+`_weaker_than_protocol` 1 → 0 lines (the whole PROTOCOL PARAMETERS WEAKER paragraph gone from the
+card), `_n_sources_disagree` and `_interval_sources_disagree` 6 → 5, each losing exactly its `H1/S`
+line — while the card kept only the generic "stored verdict(s) disagree" warning. Round 4's lesson
+about those paragraphs is that a cross-check which fires without naming the contradicting numbers
+repeats the defect one lane over; deleting the naming is the same loss.
+
+**N1/N2 (the deferred gates).** A refusing `deferred_gates` printed *"Unimplemented (deferred)
+validity gates: **none listed**."* in the panel that closes *"UNKNOWN means unmeasured, never zero"*,
+and *"CONDITIONAL on **0** unimplemented gate(s)"* on a card whose result defers **six** — so N2 was
+not merely latent: the CONDITIONAL suffix survived (held up by `complete_gate_coverage is not True`)
+and the number it named was zero.
+
+**The fix is one admission plus one refusal, not nine branches.** `_hyp_components(h)` is the single
+admission for both component containers, read once per hypothesis and handed to all four consumers,
+the same rule the card already applied to its two second sources; `_refused_card(why)` is the card's
+one refusal, so a refusal found late renders what the entry check renders. The four `or ()` sites now
+branch on `None`, and `isinstance` — not truthiness — decides refused-vs-absent, because `x or ()`
+reaches `__len__`, which is the *other* member of this lane: a container that refuses **and** claims
+to be empty was read as empty at HEAD. Honest renders are byte-identical (page, card, uncertainty
+panel, and `scripts/demo.py`'s 29,375-byte page) on 3.12.4 and 3.13.5, bare and `-OO`.
+
+**The apparatus cause (F3), and the derivation it was missing.** `container_liar` forged only
+`__len__` while `ITERATION_SITES` *declared* the refusal in words — a third liar factory built from
+`CONVERSION_DUNDERS`' template with the `RAISE` member dropped, after `WORD_DUNDERS` and `key_liar`.
+Its consumer counted call sites and `why`-string lengths and **never rendered a page with a refusing
+container**: a count of a construct, not a measurement of its behaviour. `CONTAINER_DUNDERS` now has
+the member, `container_liar_after` builds the answers-then-refuses shape, and the ITERATION family is
+asserted in **both** directions: `ITERATION_SITES` (11 `_iterated` sites) plus
+`OBJECT_ITERATION_SITES` (17 iterations whose operand is read off an object — attribute, subscript or
+`getattr`/`_attr` — each MODULE, GUARDED or ADMITTED, never OPEN), with the derivation *performed* on
+a probe module rather than trusted. A new bare `tuple(joint.gates)` now fails the suite.
+
+**Two things found that the brief did not name.** (1) `container_sites()`' docstring claimed to be
+"derived by walking the payload" and is a hand-written list of yields — which is why
+`joint.deferred_gates`, a container both renderers iterate, was in **no** container sweep and carried
+two of the three findings. It is in the walk now (10 sites), and the docstring says what it is.
+(2) Once it was, the `__len__` member found that `JointResult.complete_gate_coverage` is
+`not self.deferred_gates` — a truth test on the list the card has just admitted — so a
+`deferred_gates` holding the honest six whose `__len__` answers 0 printed **"Complete gate coverage:
+yes"** beside JOINT_SUPPORTED. The card now shows that flag only where it agrees with the list it is
+derived from, and reports the contradiction as a contract problem, withholding every decisive verdict
+(the treatment a relabelled `subject_kind` already gets). `HypothesisResult.blocking` /
+`supported_blockers` were checked for the same shape and are not in it: they are read by `bool(...)`
+only, never iterated, and a `__len__` → 0 lie on a non-empty `blocking` still fails closed (measured
+on the 29-seed fixture: no JOINT_SUPPORTED, no decisive cell).
+
+**Residual, stated.** An iterator that answers *every* read the card makes and refuses only inside one
+of the three prose walks (which run after the card's admission) can still drop one named line; the
+card alarms generically and withholds, and the walks' `try` keeps the page up. The `k`-answers sweep
+in `test_a_refused_component_list_refuses_the_card_and_keeps_the_page_up` measures the window rather
+than asserting it is empty.
+
+**Mutants.** 13, each on a `git archive`-style copy of the tracked tree (`git init`ed so the test that
+derives its scope from `git ls-files` still has a repo); the harness fails the run on an unapplied
+patch or an unkilled mutant and was watched failing both ways. All 13 killed on 3.12.4, 11 of them by
+a **behavioural** test and 2 by the new derivation (one of which is "a new bare iteration"). Three
+mutants — a refusal read as empty inside `_hyp_components`, `_joint_wellformed` dropping the
+converged-list check, and `_eff_hypothesis`'s vacuous `all()` over an unread list — **survived the
+first pass**, because the first draft of the F2 pin hand-picked two values of `k` and asserted
+card-level invariants on whichever of the two renders happened to move. They die now on the swept `k`
+window, on the uncertainty panel's own refusal, and on the laundering fixture, where `all(... for c in
+[])` is exactly `ok_totals`' zero-iteration case one lane over.
+
+**Commands.** `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -B [-OO] -m unittest
+tests.toy_tests.test_dashboard tests.toy_tests.test_benchmark`, `__pycache__` cleared before each, on
+3.12.4 and 3.13.5, bare and `-OO`: **619 ran / 0 failed / 0 skipped** in all four. `test_dashboard`
+**260 → 265** (five new tests: the RAISE sweep, the three findings in the page's own words, the truth
+test, the F2 refusal, the second-direction derivation); `test_benchmark` **354 unchanged**.
+`scripts/test_baseline.txt` needs `toy_tests.test_dashboard 265 0` — **not edited here**, the
+orchestrator regenerates it. `scripts/lint.sh` OK (3 pre-existing advisory pyflakes findings, none in
+these two files). `scripts/demo.py` run directly: DEMO OK, dashboard byte-identical to HEAD's.
+Subject 2,762 → 2,906 lines; suite 7,599 → 8,094; ratio 2.751 → 2.785 (+1.2%).
+
+**Not touched:** `KEY_LANE_FIGURES["HypothesisResult.verdict"] = (21, 21)` and its comment, as
+briefed. **Not done:** no commit, no blueprint mark; the tree is left dirty. SR-13's fix is again
+unattested, and the fixer is not the attester.

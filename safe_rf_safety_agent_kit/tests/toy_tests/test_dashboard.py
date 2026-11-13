@@ -5360,12 +5360,70 @@ def word_liar(text, shown, dunder):
     return cls(text)
 
 
-def container_liar(items, n):
-    """A `list`/`tuple` SUBCLASS holding `items` whose `__len__` returns `n`. Iteration, indexing and
-    `isinstance` are the base class's, so the ENTRIES are honest and only the size is a lie."""
+# ROUND 13: THE CONTAINER LANE WAS THE THIRD FACTORY BUILT FROM THAT TEMPLATE WITH `RAISE` DROPPED.
+# `container_liar` forged only `__len__`, while `ITERATION_SITES` DECLARED the refusal in words -- "a
+# `list` SUBCLASS passes `isinstance` and may refuse to be iterated", naming "the panel whose printed
+# count is SR-13's first named deliverable" -- and its consumer asserted only that the `_iterated` call
+# sites equalled the table, that each `why` is longer than 50 characters, and that `_iterated` ITSELF
+# answers None on a hostile object. A COUNT OF A CONSTRUCT, NOT A MEASUREMENT OF ITS BEHAVIOUR: no test
+# in this file rendered a page with a container that refuses. Supplying the member to this file's own
+# `container_sites()` walk returned three findings at the previous HEAD:
+#     snapshot[changed_files]    `total (0 files)` with 0 and 0 in the total row over an 8-file,
+#                                914-addition, 138-deletion inventory, the page's alarm state
+#                                BYTE-UNCHANGED (UNKNOWN 2 -> 2, `warn` 0 -> 0): the loop ran zero times
+#                                and `ok_totals`, a loop-body flag with no zero-iteration case, stayed
+#                                True. An EMPTY list renders those same zeros honestly.
+#     joint.deferred_gates       "Unimplemented (deferred) validity gates: none listed." in the panel
+#                                that closes "UNKNOWN means unmeasured, never zero", and "CONDITIONAL on
+#                                0 unimplemented gate(s)" on a card whose result defers SIX.
+#     hypothesis.converged_components  `render_scorecard` AND `render_dashboard` both dead with
+#                                ZeroDivisionError at dashboard.py:2371 -- and at :2258 with an iterator
+#                                that answers once and then refuses, the shape `container_liar_after`
+#                                builds, which is the only one that reaches a site behind an admission
+#                                that has already passed.
+# The second half of the same cause: `joint.deferred_gates` was in no container sweep at all.
+CONTAINER_DUNDERS = ("len", "RAISE")
+
+
+def container_liar(items, n, dunder="len"):
+    """A `list`/`tuple` SUBCLASS holding `items` and lying about them on exactly one protocol: "len"
+    makes `__len__` return `n`; the pseudo-dunder "RAISE" makes `__iter__` REFUSE. Indexing,
+    `isinstance` and (for "len") iteration are the base class's, so the ENTRIES are honest.
+
+    `n` is IGNORED for "RAISE" -- a container that refuses does not also claim a size -- which is
+    `word_liar`'s own rule for its RAISE member and why the sweep below emits it once per site. The two
+    members are NOT combined into one liar: "which protocol lied" is a distinction the page must render
+    differently (a wrong COUNT is not an UNREAD list), and one assertion that accepts either outcome
+    would be the vacuous shape this round is about. The one place they interact is pinned on its own, in
+    `test_a_container_that_refuses_is_not_read_as_empty_by_a_truth_test`."""
     base = list if isinstance(items, list) else tuple
+    if dunder == "RAISE":
+        def boom(self, *a):
+            raise ZeroDivisionError("this container refuses to be iterated")
+        return type("RefusesIteration_" + base.__name__, (base,), {"__iter__": boom})(items)
     cls = type("LiesOnLen_" + base.__name__, (base,), {"__len__": lambda self: n})
     return cls(items)
+
+
+def container_liar_after(items, k):
+    """A container that ANSWERS `__iter__` `k` times and refuses from the (k+1)-th on.
+
+    THE ONLY SHAPE THAT REACHES A SITE BEHIND AN ADMISSION THAT ALREADY PASSED, and not a theoretical
+    one: `dashboard.py`'s own comment at `render_scorecard`'s gate re-read says the caller's `__iter__`
+    "may answer differently each time", and `_component_sets_ok`'s `try` SPENDS the first answer -- so a
+    list that refuses every time never reaches `_eff_hypothesis`'s convergence requirement, and this one
+    does. Measured at the previous HEAD: k=1 on `h3.converged_components` is a page-down at
+    dashboard.py:2258, and k=1 on `joint.gates` reached `render_scorecard`'s `or ()` and alarmed in the
+    WRONG WORDS ("a gate was deleted, duplicated, renamed or swapped" about a list never read)."""
+    base = list if isinstance(items, list) else tuple
+    box = {"answers": 0}
+    def answer_then_refuse(self):
+        box["answers"] += 1
+        if box["answers"] > k:
+            raise ZeroDivisionError("this container now refuses to be iterated")
+        return base.__iter__(self)
+    return type("RefusesIterationAfter_" + base.__name__, (base,),
+                {"__iter__": answer_then_refuse})(items)
 
 
 def is_a_lying_string(v):
@@ -5512,45 +5570,62 @@ def word_sites():
 
 
 def container_sites():
-    """(label, forge(payload, n) -> containers forged) for every CALLER-SUPPLIED container either
-    renderer receives, derived by walking the payload rather than from a list of names.
+    """(label, forge(payload, n, dunder) -> containers forged) for every CALLER-SUPPLIED container
+    either renderer receives, and every member of `CONTAINER_DUNDERS` is swept over all of them.
 
     Every `list`/`tuple` the caller hands in is swept, not only the one whose size is printed today:
     `len(files)` was the eighth conversion precisely because nobody had enumerated the containers, and a
     `len()` added to any of these tomorrow inherits this pin. The ten `len()` this module takes on
-    containers IT built are a different question and are classified in `LEN_SITES`."""
+    containers IT built are a different question and are classified in `LEN_SITES`.
+
+    THIS WALK IS ENUMERATED BY HAND, and round 13 corrected that sentence rather than the yields: this
+    docstring used to say "derived by walking the payload rather than from a list of names", and it IS a
+    list of names -- which is why `joint.deferred_gates`, a container BOTH renderers iterate and the one
+    `ITERATION_SITES` describes as "a class-level constant that `object.__setattr__` can replace", was
+    in no container sweep and carried two of round 13's three findings. A claim of derivation is worth
+    exactly what it enumerates."""
     def snap_keys(p):
         return sorted(k for k, v in p["snapshot"].items() if isinstance(v, (list, tuple)))
 
     for key in snap_keys(render_payload()):
-        def forge(p, n, key=key):
-            p["snapshot"][key] = container_liar(list(p["snapshot"][key]), n)
+        def forge(p, n, dunder="len", key=key):
+            p["snapshot"][key] = container_liar(list(p["snapshot"][key]), n, dunder)
             return 1
         yield f"snapshot[{key}]", forge
 
-    def forge_records(p, n):
-        p["records"] = container_liar(list(p["records"]), n)
+    def forge_records(p, n, dunder="len"):
+        p["records"] = container_liar(list(p["records"]), n, dunder)
         return 1
     yield "records", forge_records
 
-    def forge_history(p, n):
-        object.__setattr__(p["train"], "history", container_liar(list(p["train"].history), n))
+    def forge_history(p, n, dunder="len"):
+        object.__setattr__(p["train"], "history",
+                           container_liar(list(p["train"].history), n, dunder))
         return 1
     yield "train.history", forge_history
 
     for attr in ("gates", "seed_scores", "ineligible"):
-        def forge(p, n, attr=attr):
-            object.__setattr__(p["joint"], attr, container_liar(tuple(getattr(p["joint"], attr)), n))
+        def forge(p, n, dunder="len", attr=attr):
+            object.__setattr__(p["joint"], attr,
+                               container_liar(tuple(getattr(p["joint"], attr)), n, dunder))
             return 1
         yield f"joint.{attr}", forge
 
+    def forge_deferred(p, n, dunder="len"):
+        # A CLASS-LEVEL CONSTANT of `JointResult`, which `object.__setattr__` shadows per instance --
+        # the route `ITERATION_SITES` already declared for it, and a route no sweep took.
+        object.__setattr__(p["joint"], "deferred_gates",
+                           container_liar(tuple(p["joint"].deferred_gates), n, dunder))
+        return 1
+    yield "joint.deferred_gates", forge_deferred
+
     for which in ("components", "converged_components"):
-        def forge(p, n, which=which):
+        def forge(p, n, dunder="len", which=which):
             c = 0
             for h in (p["joint"].h1, p["joint"].h2, p["joint"].h3):
                 v = getattr(h, which, None)
                 if isinstance(v, (list, tuple)) and v:
-                    object.__setattr__(h, which, container_liar(tuple(v), n))
+                    object.__setattr__(h, which, container_liar(tuple(v), n, dunder))
                     c += 1
             return c
         yield f"hypothesis.{which}", forge
@@ -5584,8 +5659,12 @@ LEN_SITES = {
     ("_render_records", "recs"): "`list(records)`, built by `__iter__` in this function.",
     ("_render_train", "hist"): "`_valid_history`'s own list.",
     ("_render_train", "shown"): "a slice of `hist`, itself `_valid_history`'s list.",
-    ("render_scorecard", "deferred"): "`tuple(joint.deferred_gates)`, built by `__iter__`; "
-                                      "`deferred_gates` is a CLASS-level constant, not an init argument.",
+    ("render_scorecard", "deferred"): "`_iterated(dg)`'s OWN list, which is why a `__len__` lie on "
+                                      "`deferred_gates` never moved this count; round 13 replaced "
+                                      "`tuple(_iterated(...) or ())` with the list itself, and the "
+                                      "REFUSED case no longer reaches a `len()` at all -- it prints "
+                                      "'an UNKNOWN number'. `deferred_gates` is a CLASS-level "
+                                      "constant, not an init argument.",
 }
 
 
@@ -6289,9 +6368,212 @@ class EveryPrintedCountIsWhatWasIterated(FailsClosedAssertions, unittest.TestCas
                 if "REFUSED" in card or "vd-supported" not in card:
                     continue
                 findings.append(f"{label} [__len__ -> {n}]: page moved with a decisive verdict standing")
-        self.assertEqual(sites, 9, sites)                    # the derived set's SIZE, not only a floor
+        self.assertEqual(sites, 10, sites)                   # the walk's SIZE, not only a floor
         self.assertGreater(sites, 5, sites)
         self.assertEqual(findings, [], "\n  ".join([""] + findings))
+
+    def test_no_caller_supplied_container_that_refuses_is_read_as_empty(self):
+        """THE CONTAINER LANE'S `RAISE` MEMBER, over the SAME walk the `__len__` member uses, so a
+        container added to `container_sites()` inherits this pin with no edit here. This is the
+        BEHAVIOURAL half of the ITERATION family: before round 13 that family was a table of call sites
+        and a unit test of `_iterated` itself, and no test rendered a page with a refusing container.
+
+        A REFUSAL IS AN INPUT, and it has exactly two correct outcomes. The page must stay UP -- this
+        module's contract, stated in its own docstrings and in this file wherever a conversion that
+        raises is judged ("this module's contract is to refuse a malformed result, never to take the
+        page down"), is to refuse a malformed result and never take the page down -- and it must not be
+        read as EMPTY: whatever moved must be ALARMED (a new UNKNOWN, a new `warn`, or a REFUSED card).
+        The honest page is NOT the reference, because a container that refuses really is a different
+        input and the page SHOULD change; what may not change is the page's alarm state while a figure
+        moves, which is what all three round-13 findings did."""
+        honest_card = db.render_scorecard(render_payload()["joint"])
+        honest_page = db.render_dashboard(render_payload())
+        hu, hw = honest_page.count(">UNKNOWN<"), honest_page.count('class="warn"')
+        cu, cw = honest_card.count(">UNKNOWN<"), honest_card.count('class="warn"')
+        findings, sites = [], 0
+        for label, forge in container_sites():
+            sites += 1
+            p = render_payload()
+            self.assertGreater(forge(p, 0, "RAISE"), 0, f"{label} forged nothing")
+            try:
+                card, page = db.render_scorecard(p["joint"]), db.render_dashboard(p)
+            except BaseException as ex:                      # noqa: BLE001
+                findings.append(f"{label}: RAISED {type(ex).__name__} -- the page went DOWN")
+                continue
+            pu, pw = page.count(">UNKNOWN<"), page.count('class="warn"')
+            if page != honest_page and not (pu > hu or pw > hw):
+                findings.append(f"{label}: the PAGE moved with no new UNKNOWN and no new warn "
+                                f"(UNKNOWN {hu}->{pu}, warn {hw}->{pw})")
+            if card != honest_card and not ("REFUSED" in card
+                                            or card.count(">UNKNOWN<") > cu
+                                            or card.count('class="warn"') > cw):
+                findings.append(f"{label}: the CARD moved with no refusal and no alarm")
+        self.assertEqual(sites, 10, sites)
+        self.assertEqual(findings, [], "\n  ".join([""] + findings))
+
+    def test_a_refusing_container_is_never_printed_as_a_count_or_as_the_word_none(self):
+        """ROUND 13's THREE FINDINGS IN THE PAGE'S OWN WORDS, each beside the HONEST EMPTY input --
+        because the defect was precisely that the two were indistinguishable on the page.
+
+        The sweep above would go green on a page that merely alarmed somewhere; these are the sentences
+        a reader actually gets, and they are what a mutant that re-introduces `or ()` at any one of the
+        four sites fails on."""
+        honest = db.render_dashboard(render_payload())
+        entries = list(SNAP["changed_files"])
+        self.assertGreater(len(entries), 1, "the fixture snapshot must have entries to count")
+        # F1 -- the Source-diff inventory, SR-13's first named deliverable
+        p = render_payload()
+        p["snapshot"]["changed_files"] = container_liar(list(entries), 0, "RAISE")
+        page = db.render_dashboard(p)
+        self.assertNotIn("<th>total (0 files)</th>", page, "a refused inventory printed as zero files")
+        self.assertNotIn("<th>total (", page, "a refused inventory printed any count at all")
+        self.assertIn("changed_files refused to be iterated", page)
+        self.assertGreater(page.count(">UNKNOWN<"), honest.count(">UNKNOWN<"))
+        # N3, the other half: an EMPTY list is NOT a refusal and still renders its honest zeros
+        q = render_payload()
+        q["snapshot"]["changed_files"] = []
+        empty = db.render_dashboard(q)
+        self.assertIn("<th>total (0 files)</th>", empty)
+        self.assertNotIn("refused to be iterated", empty)
+        self.assertEqual(empty.count(">UNKNOWN<"), honest.count(">UNKNOWN<"))
+        self.assertIn(f"<th>total ({len(entries)} files)</th>", honest)
+        # N1/N2 -- the deferred-gate list, in both panels that read it
+        d = render_payload()
+        deferred = tuple(d["joint"].deferred_gates)
+        self.assertGreater(len(deferred), 1, "the fixture result must defer gates to lose")
+        object.__setattr__(d["joint"], "deferred_gates", container_liar(deferred, 0, "RAISE"))
+        dpage, dcard = db.render_dashboard(d), db.render_scorecard(d["joint"])
+        self.assertNotIn("none listed", dpage, "a refused deferred-gate list claimed none are deferred")
+        self.assertIn("the deferred-gate list refused to be iterated", dpage)
+        self.assertGreater(dpage.count(">UNKNOWN<"), honest.count(">UNKNOWN<"))
+        self.assertNotIn("CONDITIONAL on 0 unimplemented", dcard)
+        self.assertIn("CONDITIONAL on an UNKNOWN number of unimplemented", dcard)
+        self.assertIn("Complete gate coverage: UNKNOWN", dcard)   # `complete_gate_coverage` is `not
+        self.assertNotIn("Complete gate coverage: yes", dcard)    # deferred_gates`: a TRUTH TEST on it
+        self.assertIn("REFUSED" if "REFUSED" in dcard else "CONTRACT PROBLEM", dcard)
+        self.assertNotIn("vd-supported", dcard, "an unreadable deferral left a decisive verdict")
+        # and the `__len__` member of the same lane, which is how the flag was moved without a refusal
+        n = render_payload()
+        object.__setattr__(n["joint"], "deferred_gates", container_liar(deferred, 0))
+        ncard = db.render_scorecard(n["joint"])
+        self.assertNotIn("Complete gate coverage: yes", ncard)
+        self.assertIn("CONTRADICTS its complete_gate_coverage flag", ncard)
+        self.assertNotIn("vd-supported", ncard)
+        # and the honest list still reads as the gates it holds, in both panels
+        self.assertIn(f"CONDITIONAL on {len(deferred)} unimplemented gate(s)",
+                      db.render_scorecard(render_payload()["joint"]))
+        self.assertIn(str(deferred[0]), honest)
+
+    def test_a_container_that_refuses_is_not_read_as_empty_by_a_truth_test(self):
+        """WHY THE FIX CONSULTS `isinstance` AND NOT TRUTHINESS, performed rather than asserted.
+
+        `x or ()` and `if not x` reach `__len__`, which is the OTHER member of this lane, so a container
+        that refuses to be iterated AND claims to be empty would be read as empty by a truth test while
+        `_iterated` was never called. Measured at the previous HEAD, that is exactly what defused the
+        refusal at the three prose walks' `getattr(h, 'converged_components', ()) or ()`. `isinstance`
+        reaches only `__class__`, whose raising channel is this kit's declared, deliberately unpinned
+        finding (`ISINSTANCE_SITES` is its scope) -- a strictly narrower surface than `__len__`."""
+        both = type("RefusesAndClaimsEmpty_tuple", (tuple,),
+                    {"__iter__": lambda self: (_ for _ in ()).throw(ZeroDivisionError("refuses")),
+                     "__len__": lambda self: 0})
+        entries = list(SNAP["changed_files"])
+        p = render_payload()
+        p["snapshot"]["changed_files"] = both(entries)
+        page = db.render_dashboard(p)
+        self.assertNotIn("<th>total (", page)
+        self.assertIn("changed_files refused to be iterated", page)
+        d = render_payload()
+        object.__setattr__(d["joint"], "deferred_gates", both(tuple(d["joint"].deferred_gates)))
+        self.assertNotIn("none listed", db.render_dashboard(d))
+        for which in ("components", "converged_components"):
+            j = render_payload()["joint"]
+            object.__setattr__(j.h3, which, both(tuple(getattr(j.h3, which))))
+            self.assertIn("REFUSED", db.render_scorecard(j), which)
+
+    def test_a_refused_component_list_refuses_the_card_and_keeps_the_page_up(self):
+        """F2 BEHAVIOURALLY: a `converged_components` that refuses took BOTH renderers down with
+        ZeroDivisionError at HEAD (dashboard.py:2371, and :2258 through `container_liar_after`), against
+        a contract this module states in its own docstrings -- refuse a malformed result, never take the
+        page down. Two sites, two spellings, and the SAME refusal text, which is what `_refused_card`
+        is for. The inconsistent-iterator half is here because the consistent one is refused by
+        `_joint_wellformed` and so proves nothing about the sites behind it."""
+        honest_page = db.render_dashboard(render_payload())
+        honest_card = db.render_scorecard(render_payload()["joint"])
+        halarm = honest_page.count(">UNKNOWN<") + honest_page.count('class="warn"')
+        late = 0
+        # `k` ANSWERS, THEN REFUSE, SWEPT -- not two hand-picked values. Each site sits behind a
+        # different number of earlier reads (`_joint_wellformed` twice, the card's row loop, then
+        # `_component_sets_ok` and `_eff_hypothesis`), so WHICH site a refusal lands on is exactly `k`,
+        # and three of this round's mutants survived a two-value sweep that missed the window where
+        # `_component_sets_ok` answers and `_eff_hypothesis` does not.
+        for which in ("components", "converged_components"):
+            for how in ("RAISE", *(f"answers {k}x" for k in range(1, 9))):
+                p = render_payload()
+                h3 = p["joint"].h3
+                v = tuple(getattr(h3, which))
+                object.__setattr__(h3, which, container_liar(v, 0, "RAISE") if how == "RAISE"
+                                   else container_liar_after(v, int(how.split()[1][:-1])))
+                card, page = db.render_scorecard(p["joint"]), db.render_dashboard(p)
+                late += "refused to be iterated when this card re-read it" in card
+                # PER RENDER, because the card is rendered FIRST and spends answers: a `k` that lets
+                # the standalone card through honestly leaves the page's own scorecard to be refused,
+                # and an invariant asserted on the wrong one of the two is an invariant about nothing.
+                if page != honest_page:
+                    self.assertGreater(page.count(">UNKNOWN<") + page.count('class="warn"'), halarm,
+                                       (which, how))
+                if card == honest_card:
+                    continue            # every read THIS render made was answered: it never bit
+                if "REFUSED" in card:
+                    self.assertNotIn("vd-supported", card, (which, how))
+                else:
+                    # the inconsistent iterator that gets as far as `_eff_hypothesis` is refused THERE,
+                    # per hypothesis: H3 INCONCLUSIVE with the disagreement alarm, H1 and H2 untouched.
+                    # Fail-closed and proportionate -- the refusal concerns H3's own lists -- so the pin
+                    # is the JOINT cell and the alarm, not a card-wide refusal.
+                    self.assertFailsClosedWithAnAlarm(card, ("H3",), f"{which} {how}")
+            # AND THE UNCERTAINTY PANEL REFUSES THE SAME CARD. `_joint_wellformed` is what both
+            # renderers ask, so a result whose component lists cannot be read must not reach a panel
+            # that prints its margins and its deferred gates as if the result were readable.
+            p = render_payload()
+            object.__setattr__(p["joint"].h3, which, container_liar(tuple(getattr(p["joint"].h3, which)),
+                                                                    0, "RAISE"))
+            self.assertIn("no scorecard supplied", db.render_dashboard(p), which)
+            self.assertFalse(db._joint_wellformed(p["joint"]), which)
+        # AND A RESULT THAT ALREADY FAILS RECOMPUTATION MAY NOT BE LAUNDERED BY AN ITERATOR THAT
+        # REFUSES AT THE RIGHT MOMENT. This is the vacuity shape itself: `all(... for c in [])` is True
+        # and `None in []` is False, so a component list READ AS EMPTY recomputes as SUPPORTED with
+        # nothing checked -- `ok_totals`' zero-iteration case, one lane over. The reference is the
+        # laundering fixture, whose honest card already withholds every decisive verdict.
+        self.assertNotIn("vd-supported", db.render_scorecard(laundered_below_minimum(n=1000)))
+        for which in ("components", "converged_components"):
+            for k in range(0, 9):
+                j = laundered_below_minimum(n=1000)
+                forged = 0
+                for hn in ("h1", "h2", "h3"):
+                    h = getattr(j, hn)
+                    v = tuple(getattr(h, which, ()) or ())
+                    if v:
+                        object.__setattr__(h, which, container_liar_after(v, k))
+                        forged += 1
+                self.assertGreater(forged, 0, which)
+                card = db.render_scorecard(j)
+                self.assertNotIn("vd-supported", card, (which, k))
+                self.assertNotIn("JOINT_SUPPORTED", card, (which, k))
+        # a list that refuses EVERY time is refused by `_joint_wellformed` in its own words; the card's
+        # own late refusal is reached only by an iterator that answers first, which is why that shape
+        # has a factory at all. Both are REFUSED above; at least one must be the LATE one, or the two
+        # sites round 13 added to `render_scorecard` are unreached by this test.
+        self.assertGreater(late, 0, "no case reached the card's own re-read refusal")
+        # the gate list's re-read, whose `or ()` alarmed in the WRONG WORDS at HEAD
+        p = render_payload()
+        object.__setattr__(p["joint"], "gates", container_liar_after(tuple(p["joint"].gates), 1))
+        card = db.render_scorecard(p["joint"])
+        self.assertIn("the validity-gate list refused to be iterated", card)
+        self.assertNotIn("deleted, duplicated, renamed or swapped", card)
+        self.assertNotIn("vd-supported", card)
+        # and the one refusal text, not two implementations of it
+        self.assertEqual(db._refused_card("why.").count("REFUSED:"), 1)
+        self.assertIn("_refused_card(", inspect.getsource(db.render_scorecard))
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -6624,9 +6906,17 @@ def rename(m, target, word, make_key):
 CALLER_STRING_FIGURES = (12, 132)
 # `isinstance` CALL sites in `dashboard.py`, by AST. The raising-`__class__` channel is a known,
 # kit-wide, DELIBERATELY UNPINNED finding; this number is its scope, so it cannot widen unnoticed.
-ISINSTANCE_SITES = 34
+# 34 -> 36 in round 13: `_render_snapshot` tests `changed_files` a second time (the REFUSED branch is
+# not the ABSENT branch) and `_hyp_components` tests `converged_components` before admitting it. The
+# second is a NEW operand for that channel and was chosen deliberately over the `or ()` truthiness it
+# replaces, which reaches `__len__` -- a protocol this very lane forges, and the one that defused the
+# refusal at HEAD (`test_a_container_that_refuses_is_not_read_as_empty_by_a_truth_test`).
+ISINSTANCE_SITES = 36
 # (`_attr` sites outside a try, bare `getattr` sites inside one), as distinct (function, operand) keys.
-ATTR_SITES = (19, 9)
+# The second figure fell 9 -> 6 in round 13: the three prose walks' `getattr(h, "converged_components",
+# ()) or ()` -- one per walk, all three inside a `try` whose `except` SKIPPED the hypothesis -- are now
+# one `_hyp_components` call each.
+ATTR_SITES = (19, 6)
 KEY_SWEEP_FIGURES = (5, 162)
 
 # THE PAYLOAD WALK, counted. `payload_walk_sorted.__doc__` used to state four of these in prose and two
@@ -7402,6 +7692,15 @@ PROTOCOL_SITES = {
 }
 
 ITERATION_SITES = {
+    ("_hyp_components", "_attr(h, 'components', ())"): "THE ADMISSION for the primary component list, "
+                                                       "read once per hypothesis and handed to the "
+                                                       "card's rows, to `_eff_hypothesis` and to the "
+                                                       "three prose walks -- four consumers that each "
+                                                       "iterated it themselves before round 13.",
+    ("_hyp_components", "conv"): "the converged-budget list, the container that took BOTH renderers "
+                                 "down at HEAD (dashboard.py:2371, and :2258 with an iterator that "
+                                 "answers once and then refuses). `isinstance` decides refused-vs-"
+                                 "absent here, so `None` and a non-container stay EMPTY.",
     ("_joint_wellformed", "h.components"): "a `tuple` SUBCLASS satisfies the `isinstance` above and its "
                                            "`__iter__` is still the caller's; a component list that "
                                            "cannot be read is a card this function REFUSES.",
@@ -7420,13 +7719,139 @@ ITERATION_SITES = {
                                                      "`object.__setattr__` can replace.",
     ("_valid_history", "history"): "`train.history`, a caller-supplied sequence. Measured: a `list` "
                                    "subclass whose `__iter__` raises took `render_dashboard` down.",
-    ("render_scorecard", "_attr(joint, 'deferred_gates')"): "the same deferred-gate list, read again "
-                                                            "for the CONDITIONAL note that names how "
-                                                            "many gates are unimplemented.",
+    ("render_scorecard", "dg"): "the same deferred-gate list, read again for the CONDITIONAL note that "
+                                "names how many gates are unimplemented. `or ()` made a REFUSAL print "
+                                "'CONDITIONAL on 0 unimplemented gate(s)' on a result that defers six "
+                                "(measured); the condition now stands with the number UNKNOWN.",
     ("render_scorecard", "joint.gates"): "the gate tuple again, after `_joint_wellformed` has admitted "
                                          "it; re-read here because the card needs it as a sequence and "
                                          "the caller's `__iter__` may answer differently each time.",
 }
+
+
+# THE SECOND DIRECTION OF THE ITERATION FAMILY (round 13). `ITERATION_SITES` above classifies every
+# `_iterated(...)` -- every ADMISSION -- and says nothing whatever about an iteration that never reaches
+# one. That is one direction only, and it is the structural reason five page-down sites in four
+# functions were unclassified while the table DECLARED the hazard in words: a bare `tuple(x)`, `for c in
+# x`, `*x` or `", ".join(x)` is invisible to a table keyed by `_iterated` call sites. `PROTOCOL_SITES`
+# has had both directions since round 12 and this is the same shape: derive every iteration whose
+# operand is READ OFF AN OBJECT (an attribute, a subscript, or a `getattr`/`_attr` call -- the three
+# spellings by which caller data enters this module), and classify each MODULE, GUARDED or ADMITTED.
+# Never OPEN. The five that were open are named in the test below and are gone.
+OBJECT_ITERATION_SITES = {
+    ("_component_sets_ok", "bm.CONVERGED"): "MODULE: the scorer's own converged-component table, read "
+                                            "off `bm` to build the expected metric-name set.",
+    ("_component_sets_ok", "bm.PRIMARY[_word(h.hid)]"): "MODULE: the scorer's protocol table, selected "
+                                                        "by the ADMITTED hypothesis id; not caller "
+                                                        "data, and the lookup key is a plain `str`.",
+    ("_component_sets_ok", "getattr(h, 'converged_components', ()) or ()"):
+        "GUARDED: caller data inside this function's own `try`, which returns False -- a component-set "
+        "alarm, and so fail-closed. This is the `try` that ABSORBS a list refusing every time, which is "
+        "why `_eff_hypothesis`'s convergence site needed an iterator that refuses only later.",
+    ("_component_sets_ok", "h.components"): "GUARDED: caller data in the same `try`, raising the same "
+                                            "component-set alarm; measured fail-closed.",
+    ("_contract_problems", "inspect.signature(bm.interval_verdict).parameters"):
+        "MODULE: the scorer function's own signature, inside the `try` that reports a contract problem "
+        "in its own words; not caller-supplied at all.",
+    ("_gate_set_ok", "bm.GATE_SCOPES"): "MODULE: the scorer's declared gate-name table, inside the "
+                                        "`try` that returns False and raises the gate-set alarm.",
+    ("_inside_repo", "r.parents"): "MODULE: the parents of a `Path` this function resolved itself; the "
+                                   "caller supplies a path STRING and never this object.",
+    ("_interval_sources_disagree", "groups[0]"): "ADMITTED: `_hyp_components`' own primary list, which "
+                                                 "is `_iterated`'s list; the walk no longer iterates "
+                                                 "the caller's container at all.",
+    ("_interval_sources_disagree", "groups[1]"): "ADMITTED: the same for the converged-budget list; a "
+                                                 "refusal is a `None` this walk sees as None, not an "
+                                                 "exception its `except` turns into a skipped line.",
+    ("_measured_seeds", "joint.seed_scores"): "GUARDED: caller data inside the `try` that returns None, "
+                                              "which is the NO SECOND SOURCE alarm -- fail-closed, and "
+                                              "the raise there is the mechanism.",
+    ("_measured_series", "joint.seed_scores"): "GUARDED: the same list in the same shape; the `try` "
+                                               "returns an empty mapping and every cross-check that "
+                                               "needs a series then withholds its verdict.",
+    ("_n_sources_disagree", "groups[0]"): "ADMITTED: `_hyp_components`' own primary list -- see the "
+                                          "interval walk above; the three walks share one admission.",
+    ("_n_sources_disagree", "groups[1]"): "ADMITTED: the converged-budget list from the same "
+                                          "admission, so a refusal cannot delete one hypothesis's "
+                                          "named line while the generic warning survives.",
+    ("_render_records", "recs[:MAX_TABLE_ROWS]"): "ADMITTED: a slice of `_iterated(records)`'s own "
+                                                  "list, built in this function; the caller's "
+                                                  "`__iter__` was consulted once, above, and admitted.",
+    ("_subject_kind", "joint.gates"): "GUARDED: caller data inside the `try` that leaves `exempt` "
+                                      "empty, which withholds the fixture-exemption relabel rather "
+                                      "than asserting it; the gate set itself is checked elsewhere.",
+    ("_weaker_than_protocol", "groups[0]"): "ADMITTED: `_hyp_components`' own primary list; this walk's "
+                                            "`except ...: continue` deleted the whole PROTOCOL "
+                                            "PARAMETERS WEAKER paragraph at HEAD (measured, 1 line -> "
+                                            "0) and now cannot be reached by a refusal.",
+    ("_weaker_than_protocol", "groups[1]"): "ADMITTED: the converged-budget list from the same "
+                                            "admission, on the same terms as the two sibling walks.",
+}
+
+
+def object_iteration_sites_in(src, owner=None, name="<probe>"):
+    """(enclosing function, operand source) -> [(line, inside a `try`)] for every ITERATION in `src`
+    whose operand is READ OFF AN OBJECT, by AST.
+
+    `for`, every comprehension, `*x`, `", ".join(x)` and the builtins that consume an iterable are all
+    iterations; the operand is unwrapped through `or` first, because `x or ()` iterates `x`. An operand
+    that is an `_iterated(...)` call is the ADMISSION and belongs to `ITERATION_SITES`, not here. AST
+    and not a text scan, for `module_code_by_line`'s reason: every docstring in `dashboard.py` discusses
+    these spellings, and the first draft of the sibling TEXT derivation reported the documentation."""
+    tree = ast.parse(src)
+    if owner is None:
+        owner = {}
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for i in range(n.lineno, (n.end_lineno or n.lineno) + 1):
+                    owner[i] = n.name
+    guarded = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Try):
+            for b in n.body:
+                for i in range(b.lineno, (b.end_lineno or b.lineno) + 1):
+                    guarded.add(i)
+    eats = {"tuple", "list", "set", "frozenset", "sorted", "any", "all", "sum", "min", "max", "dict",
+            "zip", "enumerate", "reversed", "iter", "next"}
+
+    def operands(node):
+        if isinstance(node, ast.For):
+            yield node.iter
+        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            for g in node.generators:
+                yield g.iter
+        elif isinstance(node, ast.Starred):
+            yield node.value
+        elif isinstance(node, ast.Call) and node.args \
+                and ((isinstance(node.func, ast.Name) and node.func.id in eats)
+                     or (isinstance(node.func, ast.Attribute) and node.func.attr == "join")):
+            yield node.args[0]
+
+    def unwrap(e):
+        while isinstance(e, ast.BoolOp):
+            e = e.values[0]
+        return e
+
+    out = {}
+    for n in ast.walk(tree):
+        for op in operands(n):
+            e = unwrap(op)
+            if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == "_iterated":
+                continue                                    # the ADMISSION: `ITERATION_SITES`
+            read_off = isinstance(e, (ast.Attribute, ast.Subscript)) or (
+                isinstance(e, ast.Call) and isinstance(e.func, ast.Name)
+                and e.func.id in ("getattr", "_attr"))
+            if not read_off:
+                continue
+            key = (owner.get(n.lineno, name), ast.unparse(op))
+            out.setdefault(key, []).append((n.lineno, n.lineno in guarded))
+    return out
+
+
+def object_iteration_sites(module):
+    """`object_iteration_sites_in` over a module's own source, keyed by its enclosing functions."""
+    src = Path(inspect.getsourcefile(module)).read_text(encoding="utf-8")
+    return object_iteration_sites_in(src, enclosing_functions(module), "<module>")
 
 
 def protocol_call_sites(module):
@@ -7526,7 +7951,7 @@ route it through `db._spoken` (or `db._type_name`) -- `__repr__`, `__str__`, `__
 the `_iterated()` call sites in dashboard.py do not match ITERATION_SITES.
   in the module, unclassified: {sorted(set(derived) - set(ITERATION_SITES))}
   classified but gone:         {sorted(set(ITERATION_SITES) - set(derived))}""")
-        self.assertEqual(len(derived), 9, sorted(derived))
+        self.assertEqual(len(derived), 11, sorted(derived))
         for key, why in ITERATION_SITES.items():
             self.assertGreater(len(why), 50, key)
         # the handler that caught the WRONG exception type is gone
@@ -7534,6 +7959,76 @@ the `_iterated()` call sites in dashboard.py do not match ITERATION_SITES.
         self.assertIsNone(db._iterated(hostile_object("__iter__")))
         self.assertIsNone(db._iterated(object()))
         self.assertEqual(db._iterated((1, 2)), [1, 2])
+        # AND NO CALLER OF `_iterated` MAY DISCARD THE REFUSAL WITH `or ()` (round 13). That spelling
+        # kept the page up and threw away the only thing it had learned, which is how an 8-file
+        # inventory printed `total (0 files)` and a six-gate deferral printed "none listed". The three
+        # panels that already tested `is None` are the shape; `_iterated(...) or ()` is the defect.
+        self.assertNotIn("_iterated(", "".join(
+            l for l in inspect.getsource(db).splitlines()
+            if "_iterated(" in l and " or ()" in l and not l.strip().startswith("#")),
+            "an `_iterated(...) or ()` is back: a refusal is not an empty container")
+
+    def test_no_iteration_of_caller_data_is_unadmitted(self):
+        """THE SECOND DIRECTION, and the half whose absence is round 13's whole diagnosis.
+
+        The table above classifies every ADMISSION. An iteration that never reaches one is invisible to
+        it -- which is why F2's five sites (`_weaker_than_protocol`, `_n_sources_disagree`,
+        `_interval_sources_disagree`, `_eff_hypothesis` and `render_scorecard`, all iterating
+        `converged_components` with a bare `tuple()`) were unclassified while `ITERATION_SITES` DECLARED
+        the hazard in prose. Four of the five were never individually measured as page-downs, because
+        `render_scorecard`'s fired first.
+
+        A new bare `for c in h.components` or `tuple(joint.gates)` fails this test until someone says
+        what built the operand, and may not say OPEN."""
+        derived = object_iteration_sites(db)
+        self.assertEqual(set(derived), set(OBJECT_ITERATION_SITES), f"""
+the ITERATIONS OF AN OBJECT'S OWN DATA in dashboard.py do not match OBJECT_ITERATION_SITES.
+  in the module, unclassified: {sorted(set(derived) - set(OBJECT_ITERATION_SITES))}
+  classified but gone:         {sorted(set(OBJECT_ITERATION_SITES) - set(derived))}
+Say what built each operand. If it is CALLER-SUPPLIED and the iteration is outside a `try` that fails
+closed, route it through `db._iterated` (or `db._hyp_components`) and branch on `None` -- `__iter__` is
+the caller's and is free to RAISE, and `or ()` on the result discards the refusal, which is not the same
+input as an empty container.""")
+        self.assertEqual(len(derived), 17, sorted(derived))
+        for key, why in OBJECT_ITERATION_SITES.items():
+            self.assertRegex(why, r"^(MODULE|GUARDED|ADMITTED): ", key)
+            self.assertGreater(len(why), 50, key)
+            self.assertIn(key[0], set(enclosing_functions(db).values()), key)
+        self.assertEqual([k for k, v in OBJECT_ITERATION_SITES.items() if v.startswith("OPEN")], [])
+        # every GUARDED claim is checked against the AST rather than taken from the sentence
+        for key, why in OBJECT_ITERATION_SITES.items():
+            if why.startswith("GUARDED"):
+                self.assertTrue(all(g for _ln, g in derived[key]), f"{key} is not inside a `try`")
+        # the five bare iterations of a caller container that round 13 closed, gone BY NAME
+        for gone in (("render_scorecard", "_attr(h, 'converged_components', ()) or ()"),
+                     ("_eff_hypothesis", "h.components"),
+                     ("_weaker_than_protocol", "h.components"),
+                     ("_n_sources_disagree", "h.components"),
+                     ("_interval_sources_disagree", "h.components"),
+                     ("_weaker_than_protocol", "tuple(getattr(h, 'converged_components', ()) or ())"),
+                     ("_n_sources_disagree", "tuple(getattr(h, 'converged_components', ()) or ())"),
+                     ("_interval_sources_disagree",
+                      "tuple(getattr(h, 'converged_components', ()) or ())")):
+            self.assertNotIn(gone, derived, f"{gone} iterates a caller container unadmitted again")
+        # AND THE DERIVATION IS PERFORMED, not trusted: it SEES a bare iteration, in each of the four
+        # spellings, and does not report an admitted one or a local name. Without this the table could
+        # match a derivation that finds nothing -- the vacuity this round is named after.
+        probe = ("def f(o, xs):\n"
+                 "    for c in o.items:\n"
+                 "        pass\n"
+                 "    a = tuple(getattr(o, 'conv', ()) or ())\n"
+                 "    b = [x for x in o.rows]\n"
+                 "    c2 = (*o.gates,)\n"
+                 "    d = ', '.join(o.names)\n"
+                 "    e = tuple(_iterated(o.admitted) or ())\n"
+                 "    g = [y for y in xs]\n"
+                 "    return a, b, c2, d, e, g\n")
+        found = object_iteration_sites_in(probe, name="f")
+        for spelling in ("o.items", "getattr(o, 'conv', ()) or ()", "o.rows", "o.gates", "o.names"):
+            self.assertIn(("f", spelling), found, spelling)
+        self.assertNotIn(("f", "_iterated(o.admitted) or ()"), found, "the admission is not a finding")
+        self.assertNotIn(("f", "xs"), found, "a local name is not read off an object")
+        self.assertEqual(len(found), 5, sorted(found))
 
     def test_the_attribute_family_is_a_rule_in_both_directions(self):
         """THE RULE, AND IT COST A RED TEST TO GET THE SECOND HALF RIGHT.

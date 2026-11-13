@@ -1132,8 +1132,22 @@ def _render_snapshot(snap: Any) -> str:
     # measurement of what one of them answering as another did to this panel.
     snap = _word_keyed(snap)
     files = snap.get("changed_files")
+    # A REFUSAL IS NOT AN EMPTY INVENTORY (round 13), and this is SR-13's first named deliverable. It was
+    # `for f in (_iterated(files) or ())`: `_iterated` returned None correctly -- the part that keeps the
+    # page up -- and `or ()` then DISCARDED the distinction between "refused" and "empty", so the loop
+    # ran zero times and `ok_totals`, a loop-body flag with no zero-iteration case, stayed True.
+    # MEASURED at the previous HEAD through the PUBLIC `render_dashboard(data)` API with no
+    # `object.__setattr__` (the snapshot is caller-supplied JSON), with a `list` SUBCLASS holding the
+    # honest entries whose `__iter__` raises: an 8-file, 914-addition, 138-deletion inventory rendered
+    # `total (0 files)` with 0 and 0 in the total row and the page's alarm state BYTE-UNCHANGED --
+    # UNKNOWN 2 -> 2, `warn` 0 -> 0, the panel still badged SOURCE_OBSERVED. An EMPTY `changed_files`
+    # renders those same zeros HONESTLY, which is exactly why the refusal may not: the two inputs are
+    # indistinguishable on the page unless this branch exists. The three sibling panels already made the
+    # distinction -- `_render_records` on `recs is None`, `_valid_history` on a falsy `hist`, and the
+    # `commits` site below on `commit_list is not None`; this one, alone, threw it away.
+    entries = _iterated(files) if isinstance(files, (list, tuple)) else None
     rows = ""
-    if isinstance(files, (list, tuple)):
+    if entries is not None:
         tot_a = tot_d = 0
         ok_totals = True
         # `n_rows`, NOT `len(files)` (round 9; scheme note item 8). THE EIGHTH CONVERSION, and the only
@@ -1149,7 +1163,7 @@ def _render_snapshot(snap: Any) -> str:
         # correct one, because the rows and the total then have ONE source. The malformed-entry branch
         # increments too -- a malformed entry is still an entry, and it renders a row of its own.
         n_rows = 0
-        for f in (_iterated(files) or ()):     # a `list` SUBCLASS may refuse to be iterated
+        for f in entries:                      # `entries` is `_iterated`'s own list, never the caller's
             n_rows += 1
             if not isinstance(f, Mapping):
                 rows += f"<tr><td colspan=3>{_unknown('malformed entry')}</td></tr>"
@@ -1168,6 +1182,9 @@ def _render_snapshot(snap: Any) -> str:
                  if ok_totals else f"<tr><th>total ({_e(n_rows)} files)</th><td colspan=2>"
                  f"{_unknown('some counts missing')}</td></tr>")
         files_html = f"<table><tr><th>file</th><th>additions</th><th>deletions</th></tr>{rows}{total}</table>"
+    elif isinstance(files, (list, tuple)):
+        files_html = ("<p>" + _unknown("changed_files refused to be iterated: the file count, the "
+                                       "additions and the deletions are UNMEASURED, NOT zero") + "</p>")
     else:
         files_html = "<p>" + _unknown("changed_files not present") + "</p>"
     # `_word_text`, NOT `_e(_visible(str(...)))` (round 11). THE LIST'S STRING ELEMENTS AND THE SNAPSHOT'S
@@ -2079,6 +2096,40 @@ def _component_sets_ok(h: Any) -> bool:
         return False
 
 
+def _hyp_components(h: Any) -> Optional[tuple]:
+    """(primary components, converged-budget components) of ONE hypothesis, both ADMITTED; `None` means
+    a component list that REFUSED TO BE ITERATED.
+
+    THE ONE ADMISSION for the two component containers, read once per hypothesis and handed to every
+    consumer -- the same rule `render_scorecard` already applies to its two second sources
+    (`measured_n`, `series`), and for the same reason: four sites read these two containers (this card's
+    rows and the three PROSE walks) and a refusal must mean the same thing at all four.
+
+    `isinstance` BEFORE `_iterated` for the converged list, so an ABSENT, `None` or non-container value
+    is EMPTY -- exactly what the `or ()` it replaces meant -- while a `list`/`tuple` SUBCLASS that
+    refuses is a REFUSAL. The two are different inputs and this page may not print one as the other,
+    which is the whole of round 13. MEASURED at the previous HEAD, a `tuple` subclass holding the honest
+    entries whose `__iter__` raises, installed on H1's `converged_components`: `render_scorecard` and
+    `render_dashboard` BOTH died with ZeroDivisionError (dashboard.py:2371 and, through an iterator that
+    refuses only from its second call, dashboard.py:2258), and in the three prose walks the `except ...:
+    continue` DELETED that hypothesis's line -- `_weaker_than_protocol` 1 line -> 0 (the whole PROTOCOL
+    PARAMETERS WEAKER paragraph gone from the card), `_n_sources_disagree` 6 -> 5 and
+    `_interval_sources_disagree` 6 -> 5, each losing exactly its `H1/S` line while the card kept only
+    the generic "stored verdict(s) disagree" warning. Round 4's lesson about these paragraphs is that a
+    cross-check which fires without NAMING the contradicting numbers repeats the defect one lane over;
+    dropping the naming entirely is the same loss."""
+    prim = _iterated(_attr(h, "components", ()))
+    if prim is None:
+        return None
+    conv = _attr(h, "converged_components", ())
+    items = _iterated(conv)
+    if items is None:
+        if isinstance(conv, (list, tuple)):
+            return None                 # a CONTAINER that refused: not an empty one
+        items = []                      # not a container at all: empty, as `or ()` had it
+    return prim, items
+
+
 def _weaker_than_protocol(joint: Any) -> list:
     """Components whose DECLARED protocol parameters are weaker than the ones the scorer declares.
 
@@ -2106,10 +2157,10 @@ def _weaker_than_protocol(joint: Any) -> list:
     except Exception:  # noqa: BLE001
         return []
     for h in hyps:
-        try:
-            comps = (*h.components, *(tuple(getattr(h, "converged_components", ()) or ())))
-        except Exception:  # noqa: BLE001
-            continue
+        groups = _hyp_components(h)     # ADMITTED, not `tuple(getattr(...) or ())` (round 13)
+        if groups is None:
+            continue                    # a card whose component list refuses is REFUSED by
+        comps = [*groups[0], *groups[1]]    # `_joint_wellformed` and by `render_scorecard`, upstream
         for c in comps:
             mn, wt = _count(_attr(c, "min_n", None)), _finite_number(_attr(c, "width_tol", None))
             if mn is not None and 0 <= mn < mn_declared:
@@ -2143,10 +2194,10 @@ def _n_sources_disagree(joint: Any, measured_n: Optional[int]) -> list:
         return []
     out = []
     for h in hyps:
-        try:
-            comps = (*h.components, *(tuple(getattr(h, "converged_components", ()) or ())))
-        except Exception:  # noqa: BLE001
-            continue
+        groups = _hyp_components(h)     # ADMITTED, not `tuple(getattr(...) or ())` (round 13)
+        if groups is None:
+            continue                    # a card whose component list refuses is REFUSED by
+        comps = [*groups[0], *groups[1]]    # `_joint_wellformed` and by `render_scorecard`, upstream
         for c in comps:
             pair = _attr(c, "pair", None)
             n, mn = _count(_attr(pair, "n", None)), _count(_attr(c, "min_n", None))
@@ -2177,10 +2228,10 @@ def _interval_sources_disagree(joint: Any, series: Mapping) -> list:
         return []
     out = []
     for h in hyps:
-        try:
-            comps = (*h.components, *(tuple(getattr(h, "converged_components", ()) or ())))
-        except Exception:  # noqa: BLE001
-            continue
+        groups = _hyp_components(h)     # ADMITTED, not `tuple(getattr(...) or ())` (round 13)
+        if groups is None:
+            continue                    # a card whose component list refuses is REFUSED by
+        comps = [*groups[0], *groups[1]]    # `_joint_wellformed` and by `render_scorecard`, upstream
         for c in comps:
             nums = _admitted(_attr(c, "pair", None), "IntervalPair")
             if nums is None:
@@ -2237,8 +2288,17 @@ def _eff_hypothesis(h: Any, hid: str, gates: tuple, contract_bad: bool, margins:
     the caller passes that text and nothing here consults an override."""
     if not _component_sets_ok(h):
         return Verdict.INCONCLUSIVE, True
-    rc = [_recompute(c, margins, measured_n, series) for c in h.components]
-    mismatch = any(_eff_component(c, False, False, margins, measured_n, series)[1] for c in h.components)
+    # THE TWO COMPONENT CONTAINERS, ADMITTED ONCE for this function (round 13). `for c in h.components`
+    # twice was a bare iteration of caller data OUTSIDE any guard: `_joint_wellformed` admits the same
+    # list, but the caller's `__iter__` is free to answer once and refuse afterwards, which is exactly
+    # how dashboard.py:2258 below was reached as a PAGE-DOWN (the first answer is spent in
+    # `_component_sets_ok`, whose `try` absorbs a list that refuses every time).
+    groups = _hyp_components(h)
+    if groups is None:
+        return Verdict.INCONCLUSIVE, True
+    comps = groups[0]
+    rc = [_recompute(c, margins, measured_n, series) for c in comps]
+    mismatch = any(_eff_component(c, False, False, margins, measured_n, series)[1] for c in comps)
     if None in rc:
         return Verdict.INCONCLUSIVE, True
     blocked = bool(_attr(h, "blocking", ())) or any(
@@ -2255,9 +2315,15 @@ def _eff_hypothesis(h: Any, hid: str, gates: tuple, contract_bad: bool, margins:
     else:
         rv = Verdict.INCONCLUSIVE
     if rv is Verdict.SUPPORTED and hid == "H3":
-        conv = tuple(_attr(h, "converged_components", ()) or ())
-        if sup_block or not conv or not all(_recompute(c, margins, measured_n, series) is Verdict.SUPPORTED
-                                            for c in conv):
+        # `_hyp_components`, NOT `tuple(_attr(h, "converged_components", ()) or ())` (round 13): the
+        # bare `tuple()` was a PAGE-DOWN, measured at dashboard.py:2258 through the public
+        # `render_scorecard` with an `__iter__` that refuses from its second call (the first is spent in
+        # `_component_sets_ok`, whose own `try` absorbs a list that refuses every time). A convergence
+        # requirement that cannot be READ is not a requirement that was met.
+        conv = groups[1]
+        if sup_block or not conv \
+                or not all(_recompute(c, margins, measured_n, series) is Verdict.SUPPORTED
+                           for c in conv):
             rv = Verdict.INCONCLUSIVE
     stored = _vcoerce(Verdict, _attr(h, "verdict", None))
     if stored is not rv:
@@ -2312,6 +2378,14 @@ def _joint_wellformed(j: Any) -> bool:
         comps = _iterated(h.components)
         if not comps or not all(isinstance(_attr(c, "pair"), IntervalPair) for c in comps):
             return False
+        # AND THE CONVERGED-BUDGET LIST, on the same terms (round 13). It is iterated by this card's
+        # rows, by `_eff_hypothesis`'s H3 convergence requirement and by the three prose walks, and it
+        # was admitted by NONE of them: measured, a `tuple` subclass holding the honest entries whose
+        # `__iter__` raises took `render_scorecard` AND `render_dashboard` down with ZeroDivisionError.
+        # A component list this renderer cannot read is a card it REFUSES -- which is what this function
+        # is for -- and refusing it here is why no later site has to render half a card.
+        if _hyp_components(h) is None:
+            return False
     if not isinstance(_attr(j, "margins"), bm.Margins):   # fail closed: no margins, no cross-check, no figures
         return False
     gates = _iterated(j.gates) if isinstance(j.gates, tuple) else None
@@ -2321,22 +2395,66 @@ def _joint_wellformed(j: Any) -> bool:
 _HNAMES = {"H1": "Suppression (S)", "H2": "Retention (L)", "H3": "Selectivity (delta)"}
 
 
+def _refused_card(why: str) -> str:
+    """The scorecard's ONE refusal, so a refusal found LATE renders exactly what the entry check renders.
+
+    Round 13 added two late ones (a gate list and a component list that refuse on a re-read), and the
+    module's contract -- stated in its own docstrings and asserted at `test_dashboard.py` -- is "refuse a
+    malformed result, never take the page down". A second spelling of REFUSED would be a second
+    implementation of that contract."""
+    return _panel("Benchmark scorecard", EvidenceClass.UNKNOWN,
+                  '<p class="warn">REFUSED: ' + _e(why) + ' No figures shown.</p>')
+
+
 def render_scorecard(joint: Any) -> str:
     """Render a whole JointResult as a panel. There is no API to render H1 alone: suppression and
     retention/selectivity are always in the same table. A malformed object is refused with NO figures.
     Decisive verdicts are shown only where the stored value and an independent recomputation agree; any
     disagreement, recomputation failure or scorer-API change is shown loudly and displays INCONCLUSIVE."""
     if not _joint_wellformed(joint):
-        return _panel("Benchmark scorecard", EvidenceClass.UNKNOWN,
-                      '<p class="warn">REFUSED: not a complete JointResult (H1 suppression, H2 retention and H3 '
-                      'selectivity must be reported together). No figures shown.</p>')
+        return _refused_card("not a complete JointResult (H1 suppression, H2 retention and H3 "
+                             "selectivity must be reported together).")
     problems = _contract_problems()
-    gates = tuple(_iterated(joint.gates) or ())   # `_joint_wellformed` has already refused an empty one
+    # A REFUSAL IS NOT AN EMPTY GATE LIST (round 13). `_joint_wellformed` has already refused a list that
+    # refuses EVERY time, so this re-read -- which exists because the caller's `__iter__` may answer
+    # differently each time -- is reached by an iterator that answers once and then refuses. `or ()` made
+    # that an EMPTY tuple, and measured at the previous HEAD the card then alarmed in the WRONG WORDS:
+    # "validity-gate NAME set does not match benchmark.GATE_SCOPES: a gate was deleted, duplicated,
+    # renamed or swapped", which is an accusation about the CONTENT of a list this page never read.
+    glist = _iterated(joint.gates)
+    if glist is None:
+        return _refused_card("the validity-gate list refused to be iterated when this card re-read it, "
+                             "so no gate state could be established; this is not an empty gate list and "
+                             "not a renamed gate.")
+    gates = tuple(glist)
     gate_set_bad = not _gate_set_ok(gates)
     if gate_set_bad:
         problems = [*problems, "validity-gate NAME set does not match benchmark.GATE_SCOPES: a gate was "
                                "deleted, duplicated, renamed or swapped, so the gate list cannot be read "
                                "as a complete set of protocol checks"]
+    # THE DEFERRED (UNIMPLEMENTED) GATE LIST, ADMITTED HERE because it reaches `problems` (round 13).
+    # A REFUSAL IS NOT ZERO DEFERRED GATES: `or ()` gave `deferred = ()`, and measured at the previous
+    # HEAD on the honest fixture -- whose `deferred_gates` holds SIX -- the card printed "CONDITIONAL on
+    # 0 unimplemented gate(s)" beside JOINT_SUPPORTED, the suffix surviving only because
+    # `complete_gate_coverage is not True` independently held it up.
+    # AND THE COVERAGE FLAG IS A CLAIM DERIVED FROM THIS VERY LIST: the scorer's
+    # `complete_gate_coverage` is `not self.deferred_gates`, a TRUTH TEST, so the caller's `__len__`
+    # decides it -- measured, a `deferred_gates` holding the honest six whose `__len__` answers 0
+    # printed "Complete gate coverage: yes" beside JOINT_SUPPORTED, which is `_render_uncertainty`'s
+    # "none listed" one protocol over. A result that contradicts itself about which gates a SUPPORTED
+    # verdict is conditional on is refused the same way a relabelled `subject_kind` is: the
+    # contradiction is reported and every decisive verdict is withheld. Found by this round's container
+    # sweep, once `joint.deferred_gates` was added to the walk at all.
+    dg = _attr(joint, "deferred_gates")
+    deferred = _iterated(dg) if isinstance(dg, (tuple, list)) else []
+    cover = _attr(joint, "complete_gate_coverage") is True
+    deferred_ok = deferred is not None and cover is not bool(deferred)
+    if not deferred_ok:
+        problems = [*problems, "the deferred (unimplemented) validity-gate list " + (
+            "refused to be iterated, so this card cannot state which gates, or how many, a SUPPORTED "
+            "verdict is conditional on" if deferred is None else
+            "disagrees with this result's own complete_gate_coverage flag, which the scorer derives "
+            "from that list")]
     bad = bool(problems)
     kind_label, kind_caveat, kind_code, kind_problem, relabelled = _subject_kind(joint)  # noqa: E501
     supported_caveat = f"{kind_label}; conditional; not a safety finding"
@@ -2363,12 +2481,23 @@ def render_scorecard(joint: Any) -> str:
         # the labels moved. Three rows all captioned H3 is a page on which a reader cannot tell
         # suppression from retention from selectivity, which is the distinction the whole scorecard is.
         hid = _word(h.hid)
+        # THE TWO COMPONENT CONTAINERS ARE ADMITTED ONCE PER HYPOTHESIS, HERE, and this is the card's
+        # re-read of them (round 13): it was `tuple(_attr(h, "converged_components", ()) or ())`, a bare
+        # `tuple()` on caller data outside any guard, and it was a PAGE-DOWN measured at
+        # dashboard.py:2371 on BOTH renderers, on both interpreters and under `-OO`. It runs BEFORE the
+        # three prose walks below, which is what keeps their `continue` from silently deleting a named
+        # finding from a card this page has already decided to show.
+        hgroups = _hyp_components(h)
+        if hgroups is None:
+            return _refused_card("a component list refused to be iterated when this card re-read it, so "
+                                 "the components of one hypothesis could not be established; this is not "
+                                 "an empty component list.")
         ev, mm = _eff_hypothesis(h, hid, gates, bad, joint.margins, measured_n, series)
         eff[hid] = ev
         if mm or gate_set_bad:
             mismatch.append(hid)
-        groups = [(h.components, "")]
-        conv = tuple(_attr(h, "converged_components", ()) or ()) if hid == "H3" else ()
+        groups = [(hgroups[0], "")]
+        conv = hgroups[1] if hid == "H3" else ()
         if conv:
             groups.append((conv, " (converged-budget)"))
         for comps, suffix in groups:
@@ -2419,9 +2548,15 @@ def render_scorecard(joint: Any) -> str:
         jv = JointVerdict.JOINT_INCONCLUSIVE
     if bad:
         jv = JointVerdict.JOINT_INCONCLUSIVE
-    deferred = tuple(_iterated(_attr(joint, "deferred_gates")) or ()) \
-        if isinstance(_attr(joint, "deferred_gates"), (tuple, list)) else ()
-    cond = f" CONDITIONAL on {len(deferred)} unimplemented gate(s)" if deferred or joint.complete_gate_coverage is not True else ""
+    cond = (" CONDITIONAL on an UNKNOWN number of unimplemented gate(s): the deferred-gate list refused "
+            "to be read, so the number is UNMEASURED, NOT zero" if deferred is None else
+            f" CONDITIONAL on {len(deferred)} unimplemented gate(s)"
+            if deferred or not cover else "")
+    cover_text = ("yes" if cover else "NO") if deferred_ok else (
+        "UNKNOWN (the deferred-gate list refused to be read; unmeasured, NOT complete)"
+        if deferred is None else
+        "NO (the result's own deferred-gate list CONTRADICTS its complete_gate_coverage flag, which the "
+        "scorer derives from that list; the list is what is shown)")
     gate_rows = "".join(
         f"<tr><td>{_untrusted(g.name, 'gate')}</td><td>{'PASS' if g.passed is True else 'FAIL'}</td>"
         # `_spoken(g.reason, str)`: the other DECLARED "bare" residual, routed on the same terms as
@@ -2462,7 +2597,7 @@ def render_scorecard(joint: Any) -> str:
              f"{rows}</table>"
              f"<p><b>Joint verdict:</b> {_verdict_cell(jv, note=cond, kind_caveat=supported_caveat)}</p>"
              f"<p>Attempted {_int_or_unk(joint.n_attempted)}, failed {_int_or_unk(joint.n_failed)}. "
-             f"Complete gate coverage: {'yes' if joint.complete_gate_coverage is True else 'NO'}.</p>"
+             f"Complete gate coverage: {_e(cover_text)}.</p>"
              f"<table><tr><th>validity gate</th><th>result</th><th>detail</th></tr>{gate_rows}</table>")
     if mismatch:
         body += (f'<p class="warn">Stored verdict(s) for {_e(", ".join(mismatch))} disagree with an independent '
@@ -2578,11 +2713,20 @@ def _render_uncertainty(joint: Any) -> str:
         cell = _unknown(f"{k} is absent from the Margins object; NOT zero") if v is _MISSING else \
             _kind_cell(v, f"{k} is not a finite number; unmeasured, NOT zero", "num")
         marg += f"<tr><td>{_e(k)}</td><td>{cell}</td></tr>"
+    # "none listed" IS AN AFFIRMATIVE CLAIM THAT NONE ARE DEFERRED, and `or ()` made a deferred-gate
+    # list that REFUSED to be iterated print exactly that (round 13). MEASURED at the previous HEAD on
+    # both interpreters: a `tuple` subclass holding the honest SIX whose `__iter__` raises rendered
+    # "Unimplemented (deferred) validity gates: none listed." with the page's alarm state unchanged
+    # (UNKNOWN 2 -> 2, `warn` 0 -> 0) -- inside the panel that closes "Any SUPPORTED verdict is
+    # conditional on these. UNKNOWN means unmeasured, never zero." That sentence is this panel's whole
+    # claim, and the list it governs may not read as empty when it was never read.
+    dfr = _iterated(joint.deferred_gates)
+    listed = (_e(", ".join(_visible(_spoken(d, str)) for d in dfr) or "none listed") if dfr is not None
+              else _unknown("the deferred-gate list refused to be iterated; the deferred gates are "
+                            "UNMEASURED, NOT none"))
     body = ("<p>Margins are proposed defaults with no empirical basis (HYPOTHESIS, not findings).</p>"
             f"<table><tr><th>margin</th><th>value</th></tr>{marg}</table>"
-            "<p>Unimplemented (deferred) validity gates: "
-            + _e(", ".join(_visible(_spoken(d, str)) for d in (_iterated(joint.deferred_gates) or ()))
-                 or "none listed") + ".</p>"
+            "<p>Unimplemented (deferred) validity gates: " + listed + ".</p>"
             "<p>Any SUPPORTED verdict is conditional on these. UNKNOWN means unmeasured, never zero.</p>")
     return _panel("Uncertainty and protocol limits", EvidenceClass.HYPOTHESIS, body)
 
