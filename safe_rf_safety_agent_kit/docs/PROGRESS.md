@@ -12093,3 +12093,223 @@ sites" where the census carries 9 rows. Plus the mis-attributed dashboard assert
 figure in this entry was re-derived at the marked tree.**
 
 **SR-10 unblocks SR-11 and SR-13.** Both hold fixes that no independent pass has checked.
+
+## Round 26 — SR-11's attestation FAIL closed: the one certifier with no seed floor
+
+**Date:** 2026-11-12. HEAD at start `96aed7c`, tree clean. Owner: `src/toy/robustness.py`,
+`tests/toy_tests/test_robustness.py`, this entry. **Builder, not attester — the blueprint is NOT
+marked and SR-11 stays `[ ]`.** No other owner was working; every run serial, `__pycache__` cleared
+before each, `PYTHONDONTWRITEBYTECODE=1`, plain `-B`, never `-I`.
+
+**Two numbering schemes, named once so the next reader is not caught by them:** this file numbers
+SESSION rounds, and `robustness.py` / `test_robustness.py` number their OWN review rounds locally —
+their text goes round 5, 6, 7, 8, 11, 12, and what this file calls Round 18 is the module's round 12.
+**Inside the two owned files this round is round 13.** My first draft wrote "round 18" into the
+module, which would have put a second scheme in a file whose whole discipline is that a number is
+derivable; corrected before the final run.
+
+The attestation judged everything else in the verify clause (*immutable scorecards; no claims based on
+single examples*) satisfied — immutability closed on every supported route on both interpreters, the
+single-example floor defended at 8 derived paths with 8 of 8 mutants killed, the round-18 RAISE-lane
+fix firing behaviourally — and failed SR-11 on one narrow defect. That defect, one unpinned copy and
+four notes are closed here. **Nothing else was re-audited, by instruction, and no new axis was opened.**
+
+### The FAIL — `assert_no_silent_default` enforced no seed floor, so SILENCE OVER NOTHING READ AS A CLEAN RUN
+
+Reproduced on a pristine `git archive 96aed7c` copy before anything changed, fully public, one
+argument, no `object.__setattr__`, byte-identical on 3.12.4 and 3.13.5 and under `-OO`:
+
+| call | PRE (`96aed7c`) | POST |
+|---|---|---|
+| `assert_no_silent_default(mse_fsum, ())` | **`None` = CERTIFIED**, loop body never ran | `ValueError: … got 0` |
+| `assert_no_silent_default(mse_fsum, (5,))` | **`None` = CERTIFIED** off ONE fixture | `ValueError: … got 1` |
+| `assert_no_silent_default(mse_fsum, (0, 1))` | **`None` = CERTIFIED** off TWO fixtures | `ValueError: … got 2` |
+| `assert_no_silent_default(mse_fsum, (0, 1, 2))` | `None` (honest three-seed run) | `None`, unchanged |
+
+**`(0, 1)` is a fourth row the brief did not have; the two-seed case certified as well.** Returning
+`None` from this function IS a certification — `test_robustness._claims_a_measurement` says so in its
+own docstring (`if x is None: return True`, *"a public assertion that returned without complaint, which
+IS a certification"*) and the escape sweep treats producing one as forbidden. So the pre-fix function
+could not be told apart, by its caller or by any record, between 45 cases examined and none.
+
+It was the one route out of step: `seed_sensitivity_probe`, `probe_shift`, `probe_missing_inputs`,
+`probe_precision` and `precision_sweep` all answer `(5,)` **and** `()` with INSUFFICIENT_EVIDENCE and
+`summary is None` — re-measured here, 8 of 8 cells. Same shape, same reason, as round 11's uncallable
+`measure` in `_run_cases`.
+
+**Fixed** with the floor immediately after `_check_seeds(seeds)`, refusing **in family** (`ValueError`,
+inside the `(ValueError, TypeError, ArithmeticError)` family every caller of these probes declares, as
+`_run_cases`'s `TypeError` is) and naming the count it was given. Not a card: this function's whole
+contract is raise-or-`None`, so there is no status to downgrade. `seeds=()` and `seeds=(5,)` are decided
+**separately and in writing** in the function's docstring — zero examines nothing, one examines 15 cases
+on a single fixture, both refused by the same comparison, neither special-cased, because a floor that
+exempted the empty list would certify on no evidence at all. The refusal is asserted to precede every
+case, so a partial examination cannot be mistaken for a complete one.
+
+### The two derived counts, RE-DERIVED FROM THE AST, not typed
+
+| census | pre | post |
+|---|---|---|
+| direct `SEED_FLOOR` comparisons | 4 | **5** (`+assert_no_silent_default`) |
+| paths reaching one | 8 | **9** (5 + the same 4 delegations) |
+| diagnostic-construction sites / occurrences | 75 / 79 | **77 / 81** (`{SEED_FLOOR}`, `{len(seeds)}`, both `_D_OWN`) |
+| bare `{x}` sites / of them this module's own data | 60 / 19 | **62 / 21** |
+
+**`FOUR` and `EIGHT` were CORRECT COUNTS OF A SET THAT WAS TOO SMALL**, and that is the failure mode a
+census cannot see: the census was internally consistent, re-derivable, and pinned in two places, while
+the function it omitted declared no floor and claimed no exemption. The module paragraph now says FIVE
+and NINE and carries that sentence; the superseded pair survives only as an attributed correction, with
+`assertNotIn` on the old wording. **Both derived enumerations FAILED CLOSED on the new site before the
+numbers were updated, and were watched doing it** — which is the behaviour they exist for.
+
+One figure in that comment block was **never** re-derived by any test and had rotted unnoticed:
+*"`len()` is taken 40 times"*. The AST counts **49** at `96aed7c` and 51 now. Corrected with the
+discrepancy recorded at the site.
+
+### The gap that let it live: the sweeps lied about the seeds' CONTENT, never their COUNT
+
+Every call site in the repository passes the default `(0, 1, 2)` or a three-seed fixture; the canonical
+registry pinned `{"measure": mse_fsum, "seeds": (0, 1, 2)}` — exactly `SEED_FLOOR`, while every other
+probe's canonical call uses 12 — and the parameter sweeps lie with subclasses, ducks and a lying
+`__str__`, all of which are content. **And the count sweep that did exist,
+`TestMinimumSeedRule.test_every_probe_refuses_one_and_two_seeds`, is a hand-written list of five
+probes with this certifier missing from it** — because its fail-closed outcome is a RAISE and not a
+card, so it did not fit the loop's shape. **An avoided input is a finding, and so is an input that no
+sweep's shape can hold.**
+
+Closed the way this file's other enumerations are: `_seed_floor_complaints` derives its TARGETS from
+the signatures (`"seeds" in inspect.signature(fn).parameters` → 7 public callables, asserted as a set)
+and states the invariant once — below `SEED_FLOOR`, each either **refuses in family** or returns
+something `_claims_a_measurement` says is **not a claim**. A new public callable that binds `seeds` is
+covered by default. It returns complaints rather than asserting, so its own fail-closure is testable:
+injecting the pre-fix behaviour as a target yields 3 complaints (one per count), an out-of-family
+raiser yields 3 of the other kind, and a target with no canonical call is a complaint and not a silent
+skip. The old list-shaped sweep also gained the raise.
+
+### Mutants — 14 + 4 attribution cells, each on a FRESH `git archive HEAD` copy with the two owned files laid over it
+
+**14 cells: 12 KILLED, 1 declared REDUNDANT with its measurement at the site, 1 killed but IGNORED by
+the verdict (S2, run only for attribution); harness exit 0.** Nothing is
+mutated in place — the working tree is never written, and its sha256 is compared before and after — so
+there is no restore path to skip. The harness fails the RUN on an unapplied patch, on an unkilled
+mutant, and on a declared-redundant mutant that becomes killable; **all three failure paths were
+watched firing before any result was trusted** (a bad anchor → `anchor appears 0 times`; a comment-only
+mutant → `UNKILLED`; a correct mutant falsely declared redundant → `DECLARED REDUNDANT but now
+KILLABLE`).
+
+M1 floor removed · M2 floor weakened to `< 1` · M3 floor never fires (`< 0`) · M4 **the empty seed list
+exempted** · M5 the comparison short-circuited · I5a/I5b the `per_seed` copy, both spellings ·
+D1 the module's path count reverted to EIGHT · D2 the diagnostic census reverted to 75/79 · D3 the
+written `seeds=()` decision removed · D4 the zero-variance scope sentence removed · N1 `_check_seeds`'s
+own `int.__int__` line deleted (**declared redundant**).
+
+**Attribution, because a kill by a count is not a kill by a measurement.** M1 removes the floor's own
+AST sites, so the two derived censuses kill it as well as the behavioural sweep — that is a count
+noticing a text change. M2 and M4 leave every enumerated site intact and are killed **by the new class
+ALONE**, targeted, on both interpreters (`test_robustness.ACertifierCannotCertifyWhatItNeverExamined`:
+4 tests, 5 and 4 failures). With that class disabled, M2 and M4 are still killed — by the `SEED_FLOOR`
+path test, which now exercises the new path too. **Every test observed killing a WEAKENED floor is a
+round-26 addition** (the new class, the new limb in the path test); the two censuses react to a site
+being REMOVED and not to its predicate being weakened, which is why both spellings were run. Stated
+that way rather than as "nothing else kills it": a targeted run proves a kill and nothing proves a
+survive.
+
+### `I5` — the `per_seed` defensive copy is now pinned
+
+Relayed as unpinned in two spellings and confirmed: at `96aed7c` there is **no defect** — the copy
+happens, and `build_scorecard` tuples the list one level up, so only the direct constructor and
+`dataclasses.replace` could alias a caller's list. One constructor-level assertion with a LIST (the only
+call shape that can tell a copy from a reference) closes it; both mutants are now KILLED on both
+interpreters, where before they were unkilled by `test_robustness`.
+
+### Notes — three closed, one closed with a measurement that went the other way
+
+1. **The vacuous `n_cases`.** `len(sc.details["case_table"])` held vacuously on an empty table; the
+   count is now derived from `missing_input_cases` and asserted (15). The `assertIs(status,
+   SILENT_DEFAULT_DEFECT)` already killed the emptying mutant, so this was a shape and not a hole.
+2. **`zero_variance_warning`'s scope.** The scope note read as a general property of a constant
+   outcome; **only `seed_sensitivity_probe` adds the flag.** MEASURED: `build_scorecard` with 10
+   distinct seeds and 10 identical values gives `status=MEASURED, n=10, sd=0.0` and `details` holding
+   only `python_version`, and `probe_shift` of an exactly invariant measure is the same. Found a second
+   instance the note did not have. **No status, label or verdict in the module consults the flag** —
+   asserted from the AST, which sees the string in exactly one function — so the sentence was narrowed
+   rather than the flag widened.
+3. **`test_the_raise_member_is_in_every_lane` promises more than it measures.** Its first assertion is
+   a source-text check — a count of a construct — and the name does not say so. The scope is now stated
+   in its own docstring, naming where the behavioural evidence lives. Renaming was not done: the name
+   is quoted in a module comment and in round 18's entry.
+4. **`_check_seeds`'s own `int.__int__` normalisation is NOT independently pinned, and that is the
+   opposite of what its paragraph implied.** Deleting the line outright is **unkilled by
+   `test_robustness` (203 OK) on 3.12.4 and 3.13.5** — the parameter boundary walks CONTAINERS, so a
+   `seeds` tuple of `int` subclasses is collapsed before any public body starts, and the field boundary
+   does the same for `Scorecard.seeds`. The line is KEPT, because a guard that is safe only because of
+   a boundary installed elsewhere in the file is safe by coincidence — this module's own rule — but the
+   docstring now records the measurement instead of reading as though that line were load-bearing. The
+   attester's four-lines-at-once result is recorded as **relayed, not measured here**. The harness
+   carries it as EXPECTED-REDUNDANT and **fails the run if it ever becomes killable**.
+
+### Figure corrections
+
+* **`test_benchmark` is 354 at this HEAD**, not 338 — confirmed; the brief's own correction was right.
+* **`test_dashboard` does NOT import `toy.robustness`** — confirmed, 0 references; `test_benchmark` was
+  run instead. Neither `test_benchmark` nor `scripts/demo.py` calls `assert_no_silent_default` at all
+  (the only references outside the module and its suite are in `docs/`), which is consistent with the
+  input never having been swept.
+* **`test_robustness` 197 at HEAD**: corroborated, not re-run — `scripts/test_baseline.txt` records
+  `toy_tests.test_robustness 197 0`, and every mutant cell runs the HEAD suite plus this round's six
+  new tests at 203 with 0 skips. I did not run the HEAD suite itself in four environments; the brief's
+  figure and the baseline agree and nothing measured here contradicts them.
+* **49 `isinstance` sites by AST** in `robustness.py`: re-derived, 49 at HEAD and 49 now — the brief's
+  figure holds. **Three executable importers of `toy.robustness`**: `test_robustness`,
+  `test_benchmark`, `scripts/demo.py` — re-derived, matches the brief.
+* The brief's `(5,)` and `()` reproduction: confirmed, and extended by the `(0, 1)` row.
+
+### Measurements
+
+| run | environments | result |
+|---|---|---|
+| `test_robustness` | 3.12.4 and 3.13.5 × {bare, `-OO`} | **203 OK** (4/4), was 197 |
+| `test_benchmark` | both × {bare, `-OO`} | **354 OK** (4/4), unchanged |
+| FAIL repro (`96aed7c` vs candidate) | both × {bare, `-OO`} | 4 certifications → 3 in-family refusals + 1 unchanged |
+| mutation harness | 3.13.5 and 3.12.4 | 12 KILLED, 1 EXPECTED-REDUNDANT, 1 ignored, exit 0 |
+| `scripts/lint.sh` | 3.12.4 | `LINT: OK`, **identical 5 warnings** before and after; no new long line (src `>120` unchanged at 5) |
+
+Full suite NOT run (orchestrator's). `test_scripts` not run: its
+`test_no_withdrawn_guarantee_is_restated_in_a_comment` derives scope from `git ls-files` and this entry
+is tracked prose, so that one is the orchestrator's to re-run.
+
+**One concurrency slip, self-reported.** While the second verification pass was in flight I ran a
+four-command status check (`ls`, `date`, `tail`, `ps`) to see how far the log had got, and it overlapped
+the 3.13.5 `-OO` `test_benchmark` cell — the rule says no second thing runs beside a suite, and that
+binds whether or not the second thing is cheap. **That cell was discarded and re-run serially**, and the
+re-run is the figure in the table above; every `test_robustness` cell was also re-measured serially
+afterwards. This is the third time in this session's log that the no-concurrency rule has been broken by
+someone who had just read it.
+
+### Test counts and the baseline
+
+`test_robustness` **197 → 203** (+6: four in the new class, one constructor-copy pin, one
+zero-variance scope pin). `test_benchmark` 354, unchanged. **`scripts/test_baseline.txt` needs
+raising:** `toy_tests.test_robustness 197 0` → `toy_tests.test_robustness 203 0`. **Not edited here**,
+as the rules require it be said rather than done silently.
+
+### Remaining uncertainty, recorded rather than closed
+
+1. **The `vars()` / `__dict__` write route into `Scorecard` stays DECLARED OPEN**, untouched by
+   instruction: `slots=True` closes one spelling of a capability that remains open through
+   `object.__setattr__`, and converts the refusal on every supported path from
+   `FrozenInstanceError`/`AttributeError` into `TypeError`. The declaration's stated reason is true.
+2. **The raising-attribute-lookup channel stays open and pinned as open.** Untouched.
+3. **The raising-`__class__` channel stays open kit-wide** (49 `isinstance` sites by AST here).
+   Three owners' joint decision, not this round's.
+4. **`_check_seeds`'s `int.__int__` is redundant today** (note 4), declared with the measurement at the
+   site and carried by the harness in the direction that fails if the note goes stale.
+5. **The seed-count sweep covers public callables that bind a parameter NAMED `seeds`.** A future
+   callable that takes a seed list under another name is outside the derivation, which is the same
+   class of gap the signature-derived field and parameter boundaries have and is stated for the same
+   reason.
+6. **The floor is a COUNT of distinct seeds, not of independent evidence.** Three distinct seeds of one
+   fixture generator remain three replicates of one procedure, which the module says plainly elsewhere
+   and which this round does not change.
+
+**SR-11 stays `[ ]`** — the fixer is not the attester. **Verified stays 11 of 17.**

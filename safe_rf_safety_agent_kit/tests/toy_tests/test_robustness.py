@@ -240,9 +240,17 @@ class TestMinimumSeedRule(unittest.TestCase):
             dataclasses.replace(sc, status=PS.INSUFFICIENT_EVIDENCE)      # status contradicts summary
 
     def test_every_probe_refuses_one_and_two_seeds(self):
-        """The rule is enforced across the whole API, not only in the seed probe."""
+        """The rule is enforced across the whole API, not only in the seed probe.
+
+        THIS LIST WAS THE GAP (round 13): it names five probes and omitted `assert_no_silent_default`,
+        the one public callable here whose fail-closed outcome is a RAISE rather than a card -- so the
+        count sweep that existed passed while that certifier returned `None` for `()` and `(5,)` alike.
+        It is swept here as a raise, and the invariant is swept once, derived from the signatures, in
+        `ACertifierCannotCertifyWhatItNeverExamined`."""
         for n in (0, 1, 2):
             seeds = SEEDS[:n]
+            with self.assertRaises(ValueError):          # not a card: a certification must be refused
+                rb.assert_no_silent_default(rb.mse_fsum, seeds)
             cards = [rb.seed_sensitivity_probe(lambda s: 1.0, seeds, CFG),
                      rb.probe_missing_inputs(rb.mse_fsum, seeds, CFG)]
             cards += [rb.probe_shift(rb.mse_fsum, sp, seeds, CFG) for sp in rb.standard_shifts()]
@@ -468,6 +476,33 @@ class TestImmutability(unittest.TestCase):
                                  status_if_summarized=PS.MEASURED, details_always={})
         seeds.append(1)
         self.assertEqual(len(sc2.seeds), 12)
+
+    def test_every_container_field_is_copied_by_the_constructor_itself(self):
+        """I5: `Scorecard.__post_init__`'s `tuple(self.per_seed)` copy was UNPINNED -- storing
+        `self.per_seed` in its place was unkilled by `test_robustness` on both interpreters, in two
+        spellings. No defect at HEAD (the copy does happen, and `build_scorecard` tuples the list one
+        level up), so only the DIRECT constructor and `dataclasses.replace` could ever alias a caller's
+        mutable list; the sibling copies (`seeds`, `details`, `does_not_establish`) were already pinned
+        and this one was the odd field out. Asserted at the constructor, with a LIST, which is the only
+        call shape that can tell a copy from a reference."""
+        per_seed = [MetricValue.measured(float(i)) for i in range(12)]
+        seeds = list(SEEDS)
+        card = rb.Scorecard(probe_id="i5", probe_kind="demo", status=PS.MEASURED, min_seeds=10,
+                            seeds=seeds, seed_digest=bm.seed_list_digest(SEEDS), per_seed=per_seed,
+                            summary=rb.SeedSummary.from_values([float(i) for i in range(12)]),
+                            insufficient=None,
+                            evidence_labels=(EvidenceClass.NOT_VALIDATED, EvidenceClass.TOY_RESULT),
+                            details={}, does_not_establish=rb.STANDARD_NON_CLAIMS)
+        for name, given in (("per_seed", per_seed), ("seeds", seeds)):
+            with self.subTest(field=name):
+                self.assertIsInstance(getattr(card, name), tuple, f"{name} was stored uncopied")
+                self.assertIsNot(getattr(card, name), given)
+        h = card.content_hash()
+        per_seed.append(MetricValue.measured(99.0))      # the caller's list, after construction
+        seeds.append(99)
+        self.assertEqual(len(card.per_seed), 12)
+        self.assertEqual(len(card.seeds), 12)
+        self.assertEqual(card.content_hash(), h)
 
     def test_replace_with_invalid_values_raises(self):
         sc = self.sc
@@ -783,6 +818,12 @@ class TestMissingInputs(unittest.TestCase):
         sc = rb.probe_missing_inputs(zero_on_failure, SEEDS, CFG)
         self.assertIs(sc.status, PS.SILENT_DEFAULT_DEFECT)
         n_cases = len(sc.details["case_table"])
+        # the case count is DERIVED from the enumeration, then asserted: `12 * n_cases` and
+        # `float(n_cases)` both hold vacuously on an empty table, so the two assertions below said
+        # nothing about the number of cases until this line was added (the `assertIs` above kills the
+        # mutant that empties the table anyway, which is why this was a note and not a defect).
+        self.assertEqual(n_cases, len(rb.missing_input_cases(rb.make_measure_fixture(SEEDS[0]))))
+        self.assertEqual(n_cases, 15)
         self.assertEqual(sc.details["n_silent_value_total"], 12 * n_cases)
         self.assertEqual(sc.summary.minimum, float(n_cases))
         one = rb.probe_missing_inputs(default_on_all_false, SEEDS, CFG)
@@ -1197,6 +1238,41 @@ class TestQAHardening(unittest.TestCase):
         const = rb.seed_sensitivity_probe(lambda s: 5e-324, seeds, CFG)
         self.assertEqual(const.summary.sd, 0.0)
         self.assertTrue(const.details["zero_variance_warning"])
+
+    def test_the_zero_variance_advisory_is_one_probe_wide_and_says_so(self):
+        """NOTE, closed by narrowing the sentence rather than widening the flag: the scope note read as
+        a general property of a constant outcome, and only `seed_sensitivity_probe` adds the advisory.
+        MEASURED on both interpreters: a `build_scorecard` caller with 10 DISTINCT seeds and 10
+        IDENTICAL values gets `status=MEASURED, n=10, sd=0.0` and no advisory at all, and so does
+        `probe_shift` of an exactly invariant measure. Nothing is lost -- no status, label or verdict in
+        this module consults the flag, which is why this is a scope statement and not a defect -- but
+        the sentence claimed more than the code does, so the sentence moved."""
+        seeds = tuple(range(10))
+        card = rb.build_scorecard(probe_id="p", probe_kind="seed_sensitivity", seeds=seeds,
+                                  per_seed=[MetricValue.measured(2.5) for _ in seeds],
+                                  cfg=rb.ProbeConfig(3), status_if_summarized=PS.MEASURED,
+                                  details_always={}, non_claims=("x",))
+        self.assertIs(card.status, PS.MEASURED)
+        self.assertEqual((card.summary.n, card.summary.sd), (10, 0.0))
+        self.assertNotIn("zero_variance_warning", card.details)
+        shift = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), seeds, rb.ProbeConfig(3))
+        self.assertEqual(shift.summary.sd, 0.0)
+        self.assertNotIn("zero_variance_warning", shift.details)
+        # ... and the one probe that does add it still does
+        self.assertTrue(rb.seed_sensitivity_probe(lambda s: 2.5, seeds, rb.ProbeConfig(3))
+                        .details["zero_variance_warning"])
+        # no status anywhere reads the flag: the module's AST never mentions it outside the one builder
+        tree = ast.parse(Path(rb.__file__).read_text())
+        owners = {fn.name for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef)
+                  for n in ast.walk(fn) if isinstance(n, ast.Constant)
+                  and n.value == "zero_variance_warning"}
+        self.assertEqual(owners, {"seed_sensitivity_probe"},
+                         "the advisory is read or written somewhere else now; re-decide its scope")
+        doc = _flat(rb)
+        if doc is None:
+            return                                          # -OO: see `_doc`
+        self.assertIn("`seed_sensitivity_probe` -- AND ONLY IT -- adds the advisory", doc)
+        self.assertIn("NO STATUS, LABEL OR VERDICT ANYWHERE IN THIS MODULE DEPENDS ON THE FLAG", doc)
 
     def test_negative_outcomes_keep_their_sign(self):
         s = rb.SeedSummary.from_values([-1, -2.5, -3])
@@ -1974,7 +2050,13 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
         counted only `Scorecard.__post_init__`'s two delegations and dropped `_pcfg`'s and
         `summarize_seeds`'s. There are FOUR direct comparisons and EIGHT paths.
         THE REASON THE WRONG NUMBER SURVIVED is the shape of the previous version of this test: it
-        MEASURED the 4 from the AST and merely TEXT-pinned the 6 in a comment. Both are measured now."""
+        MEASURED the 4 from the AST and merely TEXT-pinned the 6 in a comment. Both are measured now.
+        ROUND 13 MOVED BOTH, and not because a number was wrong: FOUR and EIGHT were correct counts of a
+        set that was missing a site. `assert_no_silent_default` enforced no floor at all and certified
+        `(5,)` and `()` with a bare `None`, so SR-11 failed an attestation on a census that was
+        internally consistent. There are now FIVE direct comparisons and NINE paths, and this test
+        FAILED CLOSED on the new site before the numbers were updated -- which is the behaviour that
+        was wanted of it."""
         src = Path(rb.__file__).read_text()
         tree = ast.parse(src)
         # every executable comparison against SEED_FLOOR, with the function that owns it. Deduplicated BY
@@ -1996,10 +2078,11 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
                         for sub in ast.walk(n)
                         if isinstance(sub, ast.Name) and sub.id == "SEED_FLOOR"})
         self.assertEqual([f for _, f in sites],
-                         ["__post_init__", "__post_init__", "from_values", "_recheck_summary"],
+                         ["__post_init__", "__post_init__", "from_values", "_recheck_summary",
+                          "assert_no_silent_default"],
                          f"the SEED_FLOOR comparison sites moved: {sites}")
-        self.assertEqual(len(sites), 4, f"SEED_FLOOR is compared at {len(sites)} sites, not 4: {sites}")
-        self.assertEqual(len({ln for ln, _ in sites}), 4)            # the line-number dedup is the point
+        self.assertEqual(len(sites), 5, f"SEED_FLOOR is compared at {len(sites)} sites, not 5: {sites}")
+        self.assertEqual(len({ln for ln, _ in sites}), 5)            # the line-number dedup is the point
         # and the two "__post_init__" entries really are two DIFFERENT functions. Qualified FROM THE
         # SITES' OWN LINE NUMBERS, not from a census of every `__post_init__` in the module: the census
         # version broke the moment the subclass-normalisation boundary gave `MeasureFixture` and
@@ -2021,11 +2104,12 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
                           ("__post_init__", "_recheck_summary(self.summary)")],
                          f"the SEED_FLOOR delegation sites moved: {delegations}")
         self.assertEqual(len(delegations), 4, f"4 delegations expected, got {delegations}")
-        self.assertEqual(len(sites) + len(delegations), 8,
-                         "the module docstring quotes EIGHT paths; the AST must agree")
+        self.assertEqual(len(sites) + len(delegations), 9,
+                         "the module docstring quotes NINE paths; the AST must agree")
         if _flat(rb) is not None:
-            self.assertIn("EIGHT paths reach", _flat(rb))
+            self.assertIn("NINE paths reach", _flat(rb))
             self.assertNotIn("six paths reach them", _flat(rb))
+            self.assertNotIn("EIGHT paths reach", _flat(rb))
         # Each path is exercised below so the count is not merely syntactic.
         self.assertEqual(len(rb.SeedSummary.from_values([1.0, 2.0, 3.0]).values), 3)
         self.assertEqual(rb._pcfg(None).min_seeds, rb.DEFAULT_MIN_SEEDS)     # delegation 1
@@ -2037,6 +2121,9 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
             rb.SeedSummary.from_values([1.0, 2.0])
         with self.assertRaises(ValueError):                       # SeedSummary.__post_init__
             rb.SeedSummary(2, 1.5, 0.7071067811865476, 1.25, 1.75, 0.5, 1.0, 2.0, (1.0, 2.0))
+        for too_few in ((), (5,), (0, 1)):                        # assert_no_silent_default (round 13)
+            with self.assertRaises(ValueError):
+                rb.assert_no_silent_default(rb.mse_fsum, too_few)
         short = rb.SeedSummary.from_values([1.0, 2.0, 3.0])
         object.__setattr__(short, "values", (1.0, 2.0))
         with self.assertRaises(ValueError):                       # _recheck_summary
@@ -2058,6 +2145,8 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
         if mine is not None:
             self.assertIn("There are FOUR direct comparisons and EIGHT paths", mine)
             self.assertIn("MEASURED the 4 from the AST and merely TEXT-pinned the 6", mine)
+            # ... and the round-13 correction of both, stated where the superseded pair is quoted
+            self.assertIn("There are now FIVE direct comparisons and NINE paths", mine)
         # the stale "three times over" is gone from the docstring that carried it
         stale = _flat(TestQAHardening.test_probe_config_defaults_are_constructed_per_call)
         if stale is None:                                   # -OO: nothing to read, nothing to pin
@@ -2070,9 +2159,12 @@ class ThePolicyParametersAreThemselvesPinned(unittest.TestCase):
         self.assertIn("min_seeds 3, 5, 9, 10, 12 -> SeedSummary n=12", stale)
         self.assertIn("used to pass a **dict** as `per_seed`", stale)
         mod = _flat(rb)
-        self.assertIn("FOUR direct comparisons against `SEED_FLOOR`", mod)
-        self.assertIn("EIGHT paths reach", mod)
+        self.assertIn("FIVE direct comparisons against `SEED_FLOOR`", mod)
+        self.assertIn("NINE paths reach", mod)
         self.assertIn('"SIX" WAS WRONG', mod)
+        # the superseded pair survives ONLY as an attributed correction, never as the module's own count
+        self.assertIn("FOUR AND EIGHT WERE THE RIGHT COUNTS OF A SET THAT WAS TOO SMALL", mod)
+        self.assertNotIn("FOUR direct comparisons against `SEED_FLOOR`", mod)
         self.assertNotIn("six paths reach them", mod)
 
 
@@ -2284,8 +2376,12 @@ class ACardCannotAssertAMinimumItDoesNotMeet(unittest.TestCase):
             return                                          # -OO: see `_doc`
         self.assertIn('THAT SENTENCE NAMES THE ONLY DEFENCE, AND THE DEFENCE WAS DEFEATABLE', doc)
         self.assertIn('THE "COUNTS" HALF OF THAT SENTENCE WAS FALSE', doc)
-        self.assertIn("ONE OF THE EIGHT USED TO DEFEND LESS THAN THE COUNT IMPLIED", doc)
+        # "THE EIGHT" became "THE FIRST EIGHT" in round 13, when a ninth path was added: the sentence
+        # is about the eight that existed when `Scorecard.__post_init__` discarded a return value, and
+        # it is kept as a historical statement rather than renumbered.
+        self.assertIn("ONE OF THE FIRST EIGHT USED TO DEFEND LESS THAN THE COUNT IMPLIED", doc)
         self.assertIn("`SEED_FLOOR = 3` was satisfied by ONE seed", doc)
+        self.assertIn("FOUR AND EIGHT WERE THE RIGHT COUNTS OF A SET THAT WAS TOO SMALL", doc)
 
 
 class AMeasureCannotDecideItsOwnProbe(unittest.TestCase):
@@ -4151,9 +4247,13 @@ _DIAGNOSTIC_SITES = {
         _D_ROUTED,
     ('arm_difference', '{}', 'arms[nm].reason'):
         _D_GATED,
+    ('assert_no_silent_default', '{}', 'SEED_FLOOR'):
+        _D_OWN,
     ('assert_no_silent_default', '{}', 'case'):
         _D_OWN,
     ('assert_no_silent_default', '{}', 'detail'):
+        _D_OWN,
+    ('assert_no_silent_default', '{}', 'len(seeds)'):
         _D_OWN,
     ('assert_no_silent_default', '{}', 's'):
         _D_OWN,
@@ -4914,7 +5014,15 @@ class ADeclaredReasonIsExercisedOnEveryParameterItCovers(unittest.TestCase):
         `src/`, this test file): 17 reason complaints and 30 parameter complaints, byte-identical on
         3.12.4 and 3.13.5, against 0 and 0 on the fixed tree -- and against the 6 the attester got by
         adding the member to ONE lane. The 30 are the parameter boundary's own refusal message at every
-        scalar-annotated parameter it has."""
+        scalar-annotated parameter it has.
+        WHAT THIS TEST ITSELF MEASURES, stated because its NAME promises more: the first assertion is a
+        SOURCE-TEXT check (`inspect.getsource` of each lane must mention one of the seven factories),
+        i.e. a count of a construct and not a measurement of its behaviour -- a lane could name a
+        factory and never call it, and this would pass. The behavioural evidence is separate and does
+        kill: the last two assertions here run both generators and require `[]`, and
+        `test_the_lanes_fail_closed_when_an_admission_is_removed` replaces each admission in-process and
+        asserts the named escapes the pre-fix tree really had. Read the source check as a structural
+        reminder, not as the proof."""
         factories = ("_describe_raises", "_type_name_raises", "_name_attr_raises",
                      "_exception_str_raises", "_raising_measure", "_undescribable_carrier",
                      "undescribable=True")
@@ -5375,6 +5483,150 @@ class AProbeCannotCertifyAMeasureItNeverCalled(unittest.TestCase):
 
 
 
+# ------------------- machine-derived SEED-COUNT sweep (the round-13 fix: SR-11's failed attestation)
+# WHY A DERIVED SWEEP AND NOT A TEST OF THE ONE FUNCTION. The defect was not that a floor was written
+# wrongly; it was that `assert_no_silent_default` was never OFFERED a seed list below the floor. Every
+# call site in the repository passes the default `(0, 1, 2)` or a three-seed fixture, the canonical
+# registry pins `{"measure": mse_fsum, "seeds": (0, 1, 2)}` -- exactly `SEED_FLOOR`, while every other
+# probe's canonical call uses 12 -- and the parameter sweeps all lie about the seeds' CONTENT (a
+# subclass, a duck, a lying `__str__`) and never about their COUNT. RELAYED, NOT MEASURED HERE: an
+# attester reports that a floor spelled with a literal `3`, added to the pre-fix module, was UNKILLED by
+# `test_robustness` + `test_benchmark`, 551 OK on both interpreters -- nothing in either suite exercised
+# the input. What IS measured here is the converse on the fixed tree: a WEAKENED floor (one that keeps
+# every enumerated AST site, so no census can see it) is killed by the class below ALONE, targeted, on
+# 3.12.4 and 3.13.5. `TestMinimumSeedRule
+# .test_every_probe_refuses_one_and_two_seeds` is the count sweep that existed, and it is a list of
+# five probes with this certifier missing from it.
+# So the count is swept the way the field, parameter and diagnostic enumerations are: the TARGETS are
+# derived from the signatures (`"seeds" in inspect.signature(fn).parameters`) and the invariant is
+# stated once -- below `SEED_FLOOR`, a public callable either REFUSES IN FAMILY or returns something
+# that is not a claim, decided by `_claims_a_measurement`, the same predicate the escape sweep uses and
+# the one whose `x is None -> True` branch is why a bare `return None` counts as a certification. A new
+# public callable that takes seeds fails closed here by default.
+def _seed_floor_complaints(targets=None, calls=None, counts=((), (5,), (0, 1))):
+    """Every reason a public callable that binds `seeds` fails to fail closed below `SEED_FLOOR`; [] = all do.
+
+    Returns complaints rather than asserting, so its OWN fail-closure is testable --
+    `test_the_sweep_fails_closed_on_a_certifier_that_examines_nothing` injects the pre-fix behaviour and
+    asserts the complaint appears, which is the only evidence this sweep is not vacuous."""
+    calls = _canonical_calls() if calls is None else calls
+    if targets is None:
+        targets = {n: f for n, f in _public_callables().items()
+                   if "seeds" in inspect.signature(f).parameters}
+    out = []
+    for name, fn in sorted(targets.items()):
+        if name not in calls:
+            out.append(f"{name}: binds `seeds` but has no canonical call, so its count is unswept")
+            continue
+        for seeds in counts:
+            try:
+                got = fn(**dict(calls[name], seeds=seeds))
+            except (ValueError, TypeError, ArithmeticError):
+                continue                                   # refused, inside the declared family
+            except Exception as e:                         # noqa: BLE001 -- the point of the check
+                out.append(f"{name}: {len(seeds)} seed(s) raised {type(e).__name__}, OUTSIDE the "
+                           "(ValueError, TypeError, ArithmeticError) family every probe declares")
+                continue
+            if _claims_a_measurement(got):
+                out.append(f"{name}: {len(seeds)} seed(s) produced a CLEAN claim ({got!r:.60}), which "
+                           "is a claim based on a single example (0 seeds: on no example at all)")
+    return out
+
+
+class ACertifierCannotCertifyWhatItNeverExamined(unittest.TestCase):
+    """ROUND 13 / SR-11's FAILED ATTESTATION: `assert_no_silent_default` enforced no seed floor.
+
+    RETURNING `None` FROM IT IS A CERTIFICATION -- `_claims_a_measurement`'s own docstring says so, and
+    the escape sweep treats producing one as forbidden -- so SILENCE FROM ZERO FIXTURES WAS
+    BYTE-IDENTICAL TO SILENCE FROM A CLEAN THREE-SEED RUN. Measured at the previous HEAD on 3.12.4 and
+    3.13.5, bare and `-OO`, fully public, one argument, no `object.__setattr__`:
+        (5,) -> None     (0, 1) -> None     () -> None     (0, 1, 2) -> None
+    while `seed_sensitivity_probe`, `probe_shift`, `probe_missing_inputs`, `probe_precision` and
+    `precision_sweep` all answer `(5,)` AND `()` with INSUFFICIENT_EVIDENCE and `summary is None`. The
+    same out-of-step shape, with the same reason, as round 11's uncallable `measure` in `_run_cases`."""
+
+    def test_the_certifier_refuses_fewer_seeds_than_the_floor(self):
+        for seeds in ((), (5,), (0, 1)):
+            with self.subTest(seeds=seeds):
+                with self.assertRaises(ValueError) as cm:
+                    rb.assert_no_silent_default(rb.mse_fsum, seeds)
+                msg = str(cm.exception)
+                self.assertIn(f"needs >= {rb.SEED_FLOOR} distinct seeds", msg)
+                self.assertIn(f"got {len(seeds)}", msg)      # the message names the COUNT it was given
+        # the honest control, at exactly the floor and above it, still certifies
+        self.assertIsNone(rb.assert_no_silent_default(rb.mse_fsum, (0, 1, 2)))
+        self.assertIsNone(rb.assert_no_silent_default(rb.mse_fsum, SEEDS))
+        self.assertIsNone(rb.assert_no_silent_default(rb.mse_fsum))          # the default is the floor
+        # and the defect it exists to find is still found, loudly, above the floor
+        with self.assertRaises(rb.SilentDefaultError):
+            rb.assert_no_silent_default(lambda p, t, m: 0.0, (0, 1, 2))
+
+    def test_zero_and_one_fixture_are_decided_separately_and_in_writing(self):
+        """`seeds=()` and `seeds=(5,)` are DIFFERENT inputs and only one of them looks like evidence:
+        zero seeds never enters the loop, so not one of the 15 missing-input cases is tried, while one
+        seed tries 15 cases on a single fixture. Both are refused by the same comparison; neither is
+        special-cased, because a floor exempting the empty list would certify on no evidence at all."""
+        calls = []
+        counting = lambda p, t, m: (calls.append(1), rb.mse_fsum(p, t, m))[1]    # noqa: E731
+        for seeds in ((), (5,)):
+            calls.clear()
+            with self.assertRaises(ValueError):
+                rb.assert_no_silent_default(counting, seeds)
+            self.assertEqual(calls, [], f"{seeds!r}: the refusal must precede every case, so that a "
+                                        "partial examination cannot be mistaken for a complete one")
+        calls.clear()
+        self.assertIsNone(rb.assert_no_silent_default(counting, (0, 1, 2)))
+        self.assertEqual(len(calls), 3 * len(rb.missing_input_cases(rb.make_measure_fixture(5))))
+        # THE DECISION IS IN WRITING, in the function's own docstring, and names both inputs
+        doc = _flat(rb.assert_no_silent_default)
+        if doc is None:
+            return                                           # -OO: nothing to read, nothing to pin
+        self.assertIn("`seeds=()` AND `seeds=(5,)` ARE DECIDED SEPARATELY", doc)
+        self.assertIn("ZERO seeds examines nothing", doc)
+        self.assertIn("ONE seed examines 15 cases on a single fixture", doc)
+        self.assertIn("RETURNING `None` FROM THIS FUNCTION IS A CERTIFICATION", doc)
+
+    def test_every_public_callable_that_takes_seeds_fails_closed_below_the_floor(self):
+        """THE SWEEP THE DEFECT GOT THROUGH, now on the COUNT and not only on the content. Derived from
+        the signatures, so a new public callable taking `seeds` is covered by default."""
+        targets = {n: f for n, f in _public_callables().items()
+                   if "seeds" in inspect.signature(f).parameters}
+        self.assertEqual(sorted(targets),
+                         ["assert_no_silent_default", "build_scorecard", "precision_sweep",
+                          "probe_missing_inputs", "probe_precision", "probe_shift",
+                          "seed_sensitivity_probe"],
+                         "the set of public callables binding `seeds` moved; decide the new one")
+        self.assertEqual(_seed_floor_complaints(), [])
+
+    def test_the_sweep_fails_closed_on_a_certifier_that_examines_nothing(self):
+        """WATCHING THE DERIVATION FAIL, which is the only evidence it is not decorative: the pre-fix
+        behaviour, a public assertion that returns `None` whatever it was given, injected back as a
+        target. Nothing on disk changes."""
+        def certifies_anything(measure, seeds):          # exactly the pre-fix `assert_no_silent_default`
+            return None
+
+        def escapes_the_family(measure, seeds):
+            raise KeyError("not in (ValueError, TypeError, ArithmeticError)")
+
+        calls = {"certifies_anything": {"measure": rb.mse_fsum, "seeds": (0, 1, 2)},
+                 "escapes_the_family": {"measure": rb.mse_fsum, "seeds": (0, 1, 2)}}
+        got = _seed_floor_complaints({"certifies_anything": certifies_anything}, calls)
+        self.assertEqual(len(got), 3, got)                              # one per count: 0, 1, 2 seeds
+        for n in (0, 1, 2):
+            self.assertTrue(any(f"{n} seed(s) produced a CLEAN claim" in c for c in got), (n, got))
+        got = _seed_floor_complaints({"escapes_the_family": escapes_the_family}, calls)
+        self.assertEqual(len(got), 3, got)
+        self.assertTrue(all("OUTSIDE the (ValueError, TypeError, ArithmeticError) family" in c
+                            for c in got), got)
+        # a target with no canonical call is a complaint too, not a silent skip
+        self.assertEqual(_seed_floor_complaints({"certifies_anything": certifies_anything}, {}),
+                         ["certifies_anything: binds `seeds` but has no canonical call, so its count "
+                          "is unswept"])
+        # ... and the real targets still pass when the sweep is run against the real registry
+        self.assertEqual(_seed_floor_complaints(), [])
+
+
+
 class EveryDiagnosticInThisModuleIsDecidedInWriting(unittest.TestCase):
     """FINDING 2, closed as a CLASS: every place `robustness.py` builds a diagnostic out of a value,
     enumerated from its own AST and decided in writing.
@@ -5400,9 +5652,9 @@ class EveryDiagnosticInThisModuleIsDecidedInWriting(unittest.TestCase):
         counts = {}
         for _, proto, _ in derived:
             counts[proto] = counts.get(proto, 0) + 1
-        self.assertEqual(counts, {"{}": 60, "!r": 8, "__name__": 5, "getattr __name__": 1, "repr": 1})
-        self.assertEqual(len(derived), 75)
-        self.assertEqual(sum(len(v) for v in derived.values()), 79)
+        self.assertEqual(counts, {"{}": 62, "!r": 8, "__name__": 5, "getattr __name__": 1, "repr": 1})
+        self.assertEqual(len(derived), 77)
+        self.assertEqual(sum(len(v) for v in derived.values()), 81)
         # THE STRUCTURAL CLAIMS, stated exactly rather than as "all go through the helper"
         self.assertEqual([k for k in derived if k[1] == "__name__"
                           and _DIAGNOSTIC_SITES[k] is _D_HELPER],
@@ -5422,7 +5674,7 @@ class EveryDiagnosticInThisModuleIsDecidedInWriting(unittest.TestCase):
         self.assertEqual({(proto, _D_NAMES[id(why)]): n for (proto, why), n in census.items()},
                          {("!r", "_D_PLAIN"): 6, ("!r", "_D_GATED"): 1, ("!r", "_D_OWN"): 1,
                           ("repr", "_D_STORED"): 1,
-                          ("{}", "_D_ROUTED"): 35, ("{}", "_D_OWN"): 19, ("{}", "_D_PLAIN"): 4,
+                          ("{}", "_D_ROUTED"): 35, ("{}", "_D_OWN"): 21, ("{}", "_D_PLAIN"): 4,
                           ("{}", "_D_GATED"): 2,
                           ("__name__", "_D_HELPER"): 1, ("__name__", "_D_OWN"): 3,
                           ("__name__", "_D_WRITE"): 1,
@@ -5430,8 +5682,8 @@ class EveryDiagnosticInThisModuleIsDecidedInWriting(unittest.TestCase):
         routed = [k for k, why in _DIAGNOSTIC_SITES.items() if why is _D_ROUTED]
         self.assertEqual(len(routed), 35)
         block = inspect.getsource(rb).split("diagnostic construction")[1].split("def _shown")[0]
-        for quoted in ("75 sites in 79 occurrences", "`{x!r}`            -- 8 sites",
-                       "bare `{x}`         -- 60 sites, of which 35", "19 this module's own data",
+        for quoted in ("77 sites in 81 occurrences", "`{x!r}`            -- 8 sites",
+                       "bare `{x}`         -- 62 sites, of which 35", "21 this module's own data",
                        "type(x).__name__   -- 5 sites", "`{x!s}` / `{x!a}`  -- 0"):
             self.assertIn(quoted, block,
                           "the module's comment block quotes a figure this AST does not produce")

@@ -38,16 +38,24 @@ Structural rule against single-example claims (checked at construction, not mere
   numbers have been in circulation here (a test docstring said "three times over", `docs/PROGRESS.md`
   says "five independent points", a previous version of THIS paragraph said "four direct comparisons and
   six paths" -- and the count written to stop the drift introduced the fifth number itself):
-  there are FOUR direct comparisons against `SEED_FLOOR` in this module -- `ProbeConfig.__post_init__`,
-  `SeedSummary.__post_init__`, `SeedSummary.from_values` and `_recheck_summary` -- and EIGHT paths reach
-  them: those four plus FOUR delegations, `_pcfg`'s `ProbeConfig()`, `summarize_seeds`'s
+  there are FIVE direct comparisons against `SEED_FLOOR` in this module -- `ProbeConfig.__post_init__`,
+  `SeedSummary.__post_init__`, `SeedSummary.from_values`, `_recheck_summary` and
+  `assert_no_silent_default` -- and NINE paths reach
+  them: those five plus FOUR delegations, `_pcfg`'s `ProbeConfig()`, `summarize_seeds`'s
   `ProbeConfig(min_seeds)`, and `Scorecard.__post_init__`'s `ProbeConfig(self.min_seeds)` and
-  `_recheck_summary(self.summary)`. ONE OF THE EIGHT USED TO DEFEND LESS THAN THE COUNT IMPLIED, and the
+  `_recheck_summary(self.summary)`. FOUR AND EIGHT WERE THE RIGHT COUNTS OF A SET THAT WAS TOO SMALL,
+  which is the failure mode a census cannot see: SR-11 failed an independent attestation because
+  `assert_no_silent_default` -- a PUBLIC certifier whose `None` return means "no silent defaults" -- was
+  none of the four sites, declared no floor, claimed no exemption, and returned `None` for `(5,)` and
+  for `()` alike, so silence over zero fixtures was byte-identical to silence over a clean three-seed
+  run. It is the fifth comparison now; see its docstring for the measurement and for the separate
+  decision about `seeds=()`. ONE OF THE FIRST EIGHT USED TO DEFEND LESS THAN THE COUNT IMPLIED, and the
   count was right about the PATH while being wrong about what it bought: `Scorecard.__post_init__`'s
   `ProbeConfig(self.min_seeds)` DISCARDED its return value, so it enforced the absolute FLOOR (the
   constructor still raises below 3) but NOT the configured minimum this docstring also claims it checks
   -- the card's own `len(measured) < self.min_seeds` ran on the un-normalised field. The call now binds
-  its result, so all eight paths defend both. "SIX" WAS WRONG: it counted only the two delegations in `Scorecard`
+  its result, so every one of those paths defends both. "SIX" WAS WRONG: it counted only the two
+  delegations in `Scorecard`
   and silently dropped `_pcfg`'s and `summarize_seeds`'s, although `summarize_seeds`'s is the same kind of
   delegation as `Scorecard`'s and is the one
   `test_robustness.test_probe_config_defaults_are_constructed_per_call` relies on for its "absolute
@@ -154,10 +162,16 @@ Scope notes, stated plainly:
   measured datum). They are data, not a finding: no statistic, status other than INSUFFICIENT_EVIDENCE,
   or verdict is derived from them, and `details` is restricted to identification fields. Read them as
   "what was observed", never as a result.
-* A constant outcome across >= min distinct seeds gives status MEASURED with SD 0.0 and the advisory
-  `details.zero_variance_warning`. It is deliberately NOT downgraded: zero variance is the expected,
-  correct reading for an exact invariance probe (all deviations are 0.0). The flag is a prompt to check
-  that the outcome is not ignoring the seed, nothing more.
+* A constant outcome across >= min distinct seeds gives status MEASURED with SD 0.0, and
+  `seed_sensitivity_probe` -- AND ONLY IT -- adds the advisory `details.zero_variance_warning`. THE
+  SCOPE OF THAT FLAG IS ONE PROBE, not a property of every card, and the sentence here used to read as
+  though it were general. MEASURED: `build_scorecard` with 10 distinct seeds and 10 identical values
+  gives `status=MEASURED, n=10, sd=0.0` and NO advisory -- `details` holds only `python_version` -- and
+  `probe_shift` of an exactly invariant measure over 10 seeds is the same, sd 0.0 with no flag. Nothing
+  is lost by that: NO STATUS, LABEL OR VERDICT ANYWHERE IN THIS MODULE DEPENDS ON THE FLAG, which is
+  why this is a scope statement and not a defect. It is deliberately NOT a downgrade either: zero
+  variance is the expected, correct reading for an exact invariance probe (all deviations are 0.0). The
+  flag is a prompt to check that one probe's `outcome` callback is not ignoring the seed, nothing more.
 * Reorder-invariance assertions about `toy.stability` hold on CPython >= 3.12 because `sum()` of floats is
   compensated there. On an older interpreter (QA patched `sum` to a plain loop to confirm) even the default
   random-fixture reorder probe of `mse_naive` flips to INVARIANCE_DEFECT. The reorder result is therefore an
@@ -249,7 +263,7 @@ STANDARD_NON_CLAIMS = (
 # REFUSES in family, because a card's label is not a description and cannot be a placeholder. Every
 # other diagnostic site in this file is decided in writing by `test_robustness._DIAGNOSTIC_SITES`,
 # which re-derives the set from this file's AST -- module body, class bodies, functions AND lambdas --
-# and fails closed on a new one. The counts it re-derives and asserts, 75 sites in 79 occurrences:
+# and fails closed on a new one. The counts it re-derives and asserts, 77 sites in 81 occurrences:
 #   `{x!r}`            -- 8 sites. Every one is a plain `str`/`int`/`float`: SIX by the PARAMETER
 #                         BOUNDARY (measured -- with the boundary off, those six are exactly the
 #                         positions an undescribable value escapes from), ONE by an `isinstance` gate
@@ -258,8 +272,8 @@ STANDARD_NON_CLAIMS = (
 #   repr()             -- 1 call, `_silent_detail`, on the plain double `_plain_number` returned.
 #                         That one is load-bearing and NOT a description: it is what makes the
 #                         `[SILENT ZERO]` tag unforgeable.                                [decided]
-#   bare `{x}`         -- 60 sites, of which 35 interpolate a string one of the three helpers above
-#                         already built, 19 this module's own data (a constant, a `len()`, a literal
+#   bare `{x}`         -- 62 sites, of which 35 interpolate a string one of the three helpers above
+#                         already built, 21 this module's own data (a constant, a `len()`, a literal
 #                         field name), 4 a boundary-plain scalar and 2 a gated one.        [routed]
 #   type(x).__name__   -- 5 sites: ONE read, in `_type_name`; three assignments or reads of this
 #                         module's own function objects; one annotation text from a signature it
@@ -271,7 +285,11 @@ STANDARD_NON_CLAIMS = (
 # `_plain_parameter`-collapsed, or annotated `float`/`int` and so refused by
 # `_annotated_scalar_parameters` when they store no scalar. The one exception,
 # `scorecard_to_record`'s `float(sc.min_seeds)` on a hand-built namespace, is already a `_WHY_CARRIER`
-# note. `len()` is taken 40 times, every one on a tuple or list this module built.
+# note. `len()` is taken 51 times, every one on a tuple, list, dict or `str` this module built. (THAT
+# FIGURE SAID 40 AND WAS NEVER TRUE OF THIS FILE: the AST counts 49 at the previous HEAD and 51 with the
+# two this round's seed floor adds. It is the one number in this block no test re-derived -- the six the
+# test quotes are all diagnostic-site counts -- so it drifted silently, which is the same failure the
+# `SEED_FLOOR` census above was written against. Re-derived, not remembered.)
 # AND WHAT THIS DOES NOT CLOSE, stated with its measurement rather than left for the next round to
 # find: a raising ATTRIBUTE LOOKUP on a caller's object. A duck-typed `ShiftSpec` whose `name` is a
 # `property` that raises `RuntimeError` still takes `probe_shift` outside the declared family --
@@ -729,7 +747,21 @@ def _check_seeds(seeds: Sequence[int]) -> tuple:
     `int.__int__` reads the value the object STORES -- the same value `make_rng` validated and
     `seed_list_digest` hashes -- so the comparison, the fixtures, the stored list and the digest are all
     on one number. `make_rng` is kept as the validator (bool, range, type) and runs FIRST, because
-    `int.__int__` would happily normalise a value this module must refuse outright."""
+    `int.__int__` would happily normalise a value this module must refuse outright.
+    WHAT THIS LINE IS WORTH TODAY, measured rather than implied, because the paragraph above reads as
+    though it were the thing standing between this module and the repeated-seed route: IT IS NOT, ANY
+    MORE. The parameter boundary (`_plain_arguments` -> `_plain_value`) walks CONTAINERS, so a `seeds`
+    tuple holding `int` SUBCLASSES is collapsed before any public callable's body starts, and the field
+    boundary does the same for `Scorecard.seeds`. MEASURED round 13 on a `git archive` copy of the fixed
+    tree: deleting this line outright is UNKILLED by `test_robustness` (203 OK) on 3.12.4 and 3.13.5 --
+    every hostile route in the paragraph above still refuses, because something else already collapsed
+    the value. An attester relayed the same result for four normalisation lines of this module removed
+    AT ONCE (a byte-identical hostile transcript, every route still refusing); that measurement is not
+    mine and is recorded as relayed. The line is KEPT -- it is the admission that makes the comparison,
+    the fixtures, the stored list and the digest provably one number WITHOUT depending on a boundary
+    installed elsewhere in the file, which is this module's own rule about guards that are safe only
+    because of a neighbour -- but it is NOT independently pinned, and saying "defence in depth" without
+    that measurement is the overclaim this module's history is made of."""
     seeds = tuple(seeds)
     for s in seeds:
         make_rng(s)  # public validation: nonnegative int <= 2**64-1, bool rejected
@@ -1782,9 +1814,42 @@ def _silent_detail(v: Any) -> str:
 
 def assert_no_silent_default(measure: Measure, seeds: Sequence[int] = (0, 1, 2)) -> None:
     """Fail LOUDLY (SilentDefaultError) if `measure` returns any value for an input it must reject, and
-    separately name a returned 0.0 (the most dangerous substitution)."""
+    separately name a returned 0.0 (the most dangerous substitution).
+
+    THE SEED FLOOR IS ENFORCED HERE TOO, and SR-11 failed an attestation for its absence: RETURNING
+    `None` FROM THIS FUNCTION IS A CERTIFICATION ("no silent defaults"), and silence from an input that
+    was never examined is byte-identical to silence from a clean run. MEASURED at the previous HEAD on
+    3.12.4 and 3.13.5, bare and `-OO`, fully public, one argument, no `object.__setattr__`:
+        assert_no_silent_default(mse_fsum, (5,))     -> None    # ONE fixture: a single-example claim
+        assert_no_silent_default(mse_fsum, (0, 1))   -> None    # TWO fixtures
+        assert_no_silent_default(mse_fsum, ())       -> None    # ZERO: the loop never runs at all
+        assert_no_silent_default(mse_fsum, (0, 1, 2))-> None    # an honest three-seed run
+    `bad` stayed `[]` in all four, so the certification was identical whether 45 cases were examined or
+    none were. That is SR-11's verify clause ("no claims based on single examples") breached directly,
+    and it was the one route out of step: `seed_sensitivity_probe`, `probe_shift`,
+    `probe_missing_inputs`, `probe_precision` and `precision_sweep` all answer one seed -- and zero
+    seeds -- with INSUFFICIENT_EVIDENCE and `summary is None`. The same out-of-step shape, with the same
+    reason, as the uncallable `measure` that `_run_cases` refused in round 11.
+    HOW IT REFUSES, and why not a card: this function's whole contract is to raise or return `None`, so
+    there is no scorecard to downgrade and the fail-closed spelling available to it is a refusal.
+    `ValueError` is inside the `(ValueError, TypeError, ArithmeticError)` family every caller of this
+    module's probes declares, the same family `_run_cases`'s `TypeError` is inside.
+    `seeds=()` AND `seeds=(5,)` ARE DECIDED SEPARATELY, in writing, because they are different inputs
+    and only one of them LOOKS like evidence: ZERO seeds examines nothing (the `for` body never runs, so
+    not one missing-input case is tried) and ONE seed examines 15 cases on a single fixture. Both are
+    now refused by the same comparison and the message names the count it got, so neither can be read as
+    a clean run; neither is special-cased, because a floor that exempted the empty list would certify on
+    no evidence at all. A caller that genuinely wants to know what one fixture does should call
+    `probe_missing_inputs(measure, (5,), cfg)` and read the INSUFFICIENT_EVIDENCE card's `per_seed`
+    observations, which this module already labels as data and not a finding."""
+    seeds = _check_seeds(seeds)
+    if len(seeds) < SEED_FLOOR:
+        raise ValueError(f"a certification needs >= {SEED_FLOOR} distinct seeds, got {len(seeds)}: "
+                         "returning without complaint here certifies the measure, so silence over "
+                         "fewer fixtures than the floor (or over none at all) would be a claim based "
+                         "on a single example")
     bad = []
-    for s in _check_seeds(seeds):
+    for s in seeds:
         for case, (how, detail) in _run_cases(measure, make_measure_fixture(s)).items():
             if how == "SILENT_VALUE":
                 bad.append(f"seed {s}: {case} -> {detail}" + ("  [SILENT ZERO]" if detail in ("0.0", "-0.0") else ""))
