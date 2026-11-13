@@ -12813,3 +12813,135 @@ Figures re-derived by the reviewer: full suite **1493 / 0** on 3.12.4 (skipped 2
 **1493 / 90 / 0, run1 == run2** — exact; Σ `test_baseline.txt` = **1493**, zero slack; 13 `[x]` of 17
 in scope; no marked task with an unchecked dependency. The one mismatch (3.13.5) is F20, diagnosed
 rather than attributed.
+
+## SR-14 MARKED `[x]` — verified 14 → 15 of 17
+
+**Task** (`docs/BUILD_BLUEPRINT.md:27`): *Implement human review of claims and immutable audit log for
+transitions: DRAFT -> REVIEWED -> SUPPORTED or UNSUPPORTED. Depends: SR-13. Verify: duplicate
+event/idempotency and invalid transition tests.*
+
+**Basis: a targeted independent attestation of the one gap SR-12's reviewer named and declined to
+test.** SR-13 marked. SR-14's prior PASS was re-derived rather than inherited, and the four defect
+classes that unmarked SR-04/06/09/10 and repeatedly failed SR-11 and SR-13 were driven against this
+module for the first time. **The sweep came back clean: six findings, all notes, no FAIL.**
+
+### Provenance, re-derived not quoted
+
+`git diff eef9341 HEAD` over both files **empty**; archive `diff -rq` identical; subject sha256
+`b1db92c9…`. **Importers checked, not assumed**: exactly one outside the subject and suite —
+`scripts/demo.py:93`, exercised by `test_scripts` as a subprocess. `dashboard.py` does **not** import
+it. The prior PASS's evidence reproduces: **500 transition combinations, 5 accepted / 0 illegal / 0
+refused, 0 non-ledger exceptions**, identical on 3.12.4, 3.13.5 and `-OO`.
+
+On the forgery figure: the prior round recorded **738**. Re-derived as 6 events × 14 `_EVENT_KEYS` ×
+9 values = **756 attempted, 15 no-ops, 741 detected, 0 undetected**. 756 − 18 = 738, so the old figure
+is this sweep minus its own 18 no-ops; the value lists differ and were never recorded. **The
+load-bearing number — zero undetected forgeries — reproduces exactly.** Recorded as a figure that
+cannot be reproduced without the prior round's unrecorded inputs, which is F17-R in miniature.
+
+### The four lanes, driven and measured — both interpreters, byte-identical output
+
+- **container/`__len__`: the evidence requirement is immune.** `_refs` materialises a real `tuple`
+  before anything tests truth or length, so a `__len__` lying 0 over a real ref is correctly accepted
+  on its *contents*, and an empty container lying 6 fails closed with `MissingEvidenceError`.
+  **`None` (no registry) and `[]` (empty registry) are DISTINGUISHED** — the exact refused-vs-empty
+  confusion that broke SR-13's inventory, absent here.
+- **element: duplicate detection holds.** A lying-`__eq__` duplicate slips `_refs`' `if r in out` and
+  **dies immediately at `LedgerEvent.from_dict`**, which re-normalises from plain dicts — the module
+  funnels every append through that choke point. The allowlist holds in both directions.
+- **probe:** the clock and ref-element positions are already wrapped. Four positions leak (note D).
+- **parameter: clean.** `bool`, `float`, `nan`, `inf`, negatives all refused; every clock hostility
+  returns `EventFormatError`.
+
+### The vacuity shape — measured directly and pinned
+
+**Ten mutants emptying every sweep the module performs, all KILLED on both interpreters**:
+`VERIFY_LOOP_NEVER_RUNS`, `REINDEX_LOOP_NEVER_RUNS`, `REFS_LOOP_NEVER_RUNS`,
+`KNOWN_EVIDENCE_LOOP_NEVER_RUNS`, `EVENTS_CHECKED_ALWAYS_ZERO`, `TRANS_TABLE_EMPTIED`,
+`EVENT_KEYS_EMPTIED`, `STATE_LABELS_EMPTIED`, `EVIDENCE_KINDS_EMPTIED`, `SUPPORTED_VERSIONS_EMPTIED`.
+**There is no table in this module a mutant can empty while an assertion still passes.** The clause's
+three named tests die to 19 targeted mutants on both interpreters, and idempotency is pinned in **both
+directions** — a replay that wrongly *raises* dies as surely as one that wrongly *merges*.
+
+### A SHAPE GRADED FAIL IN SR-11 AND NOTE HERE — the reasoning, on the record
+
+**Finding B**: `verify_events` returns `ChainVerification(True, len(events))`. Verified by the
+orchestrator: an empty container whose `__len__` answers 6 yields **`ok=True, events_checked=6` with
+the loop body executed zero times** — it reports a *specific false count*, not merely a missing one.
+This is the "clean certification from zero fixtures" shape verbatim, which was a **FAIL** in SR-11.
+
+The distinction, stated so a future reader can disagree with it:
+
+- **SR-11's clause was *"no claims based on single examples"*.** A clean certification from zero
+  fixtures violates that clause **verbatim**. It was the clause, not an analogy to it.
+- **SR-14's clause is *"duplicate event/idempotency and invalid transition tests"*.** Those three are
+  non-vacuous and die to targeted mutants. `verify_events`' count is chain verification, not one of
+  the three named tests, and the ledger's own `verify_chain` reads `self._events` — a real list — so
+  the integrity path is sound. The exposure is a third-party caller passing a hostile container, who
+  is both attacker and victim.
+
+**The fix is one token** (`i` is already in scope). **It was deliberately NOT applied**, because
+changing the subject would make this attestation a PASS against bytes that no longer exist — the F14
+defect this project established one task ago. If it is worth fixing it is a separate change needing
+its own attestation.
+
+### The other five notes
+
+- **A** — `_refs` runs `EvidenceRef(r.kind, r.value)` "to re-validate", **throws the result away**, and
+  appends the caller's object. A subclass whose `to_dict()` returns a different well-formed ref makes
+  the stored record differ from the supplied value, durably. **Only a note because measurement refuted
+  the attester's own expectation**: with `known_evidence` set the substitution *is* caught
+  (`verify_chain` → `ok=False`, `save_ledger` refuses), and without an allowlist the honest API
+  achieves the identical result with no subclass — **the hostile object confers no capability the
+  honest API does not.** The one-line fix is measured free: its mutant survives the suite, so nothing
+  pins the current behaviour either.
+- **C** — `verify_events`' docstring says it "never raises for bad data"; the `try` is *inside* the
+  loop, so a container whose `__iter__` raises propagates. **That sentence is measurably false.** Note
+  because the outcome is a crash — the loudest possible failure, incapable of hiding anything. The
+  project fixed this exact class in `stability.py`'s `_materialised`, so a sibling precedent exists.
+- **D** — `{v!r}` in `_ident`/`_ts`/`_parse_class` leaks `RuntimeError` on a raising `__repr__` from
+  four positions, violating the module's own F1 error contract. Fails closed.
+- **E** — a `__len__`-lying `str` subclass **silently disables three declared caps**; measured
+  consequence is that `append` accepts a record `load_ledger` then **refuses**, which can leave a
+  persisted audit log unreadable. The module's own text insists "a bound must not silently disable".
+- **F** — `summary(verify=False)` raises a bare `IndexError` on a tampered `_states`. The suite builds
+  precisely this fixture and calls `claim_ids(verify=False)` but never `summary(verify=False)` — **one
+  call short of the crash**, an avoided-input-shaped gap.
+
+### Immutability — what it can honestly mean here
+
+Five caller routes measured: `events.append` refused; `to_state =` refused; `object.__setattr__` and
+`vars()` both mutate memory but are **detected** by the hash chain (every accessor refuses);
+`_events.pop()` **not detected** — a valid shorter prefix. SR-11's `vars()` precedent applies, but
+here the chain catches it, so `slots=True` would add nothing. The module already declares the one
+undetected route in terms: *"it cannot detect truncation of the tail"*, *"`head_digest` MUST be pinned
+out of band"*. **The honest claim is detectable-not-preventable, except truncation, which needs an
+out-of-band pin — and that is exactly what was measured. No overclaim.**
+
+### N1 still declared, still accurate — and a structural observation
+
+The normalised-content comparison is live at `claim_ledger.py:567-568`; recorded as surviving at
+`PROGRESS.md:4554` and `:5102`; re-measured **unkilled** by `test_claim_ledger` and `test_scripts` on
+both interpreters. The attester compared *failure sets* rather than pass/fail for `test_scripts`,
+correctly identifying its one failure as the `git ls-files`-scoped test failing closed on a non-repo
+archive tree. **Observation worth acting on: N1 lives only in the journal.** Nothing in the module or
+suite pins it, so the next reader meets it only by reading `PROGRESS.md` — which is F17-R's shape
+again, a finding that exists as a sentence.
+
+### Harness honesty, including a self-caught error
+
+The harness was watched failing both ways before being trusted, and then **caught the attester's own
+mistake mid-run**: its first `TRANS_TABLE_EMPTIED` and `EVENT_KEYS_EMPTIED` patches were `{} or {...}`
+and `() or (...)`, which evaluate to the *real* table — two false survivors the harness failed the run
+on. Corrected rather than reported as findings. A failed reproduction of finding F was also diagnosed
+as a bad fixture rather than a refutation: an earlier verifying call had run `_reindex()` and wiped
+the phantom before the probe saw it.
+
+**Commands.** `test_claim_ledger` and `test_scripts` on both interpreters and `-OO`; mutation on
+`git archive HEAD` copies only. `test_claim_ledger` **100 OK** ×3 environments; `test_scripts`
+**156 OK** in the worktree.
+
+**SR-14 unblocks SR-15** (`Depends: SR-12, SR-14`; both now marked). SR-15's clause is *"complete
+offline regression suite passes"* — **no network-denied run has ever been attested in this project**,
+the measurement is defined and deliberately unrun at `docs/CLEAN_CLONE.md`, and `CLEAN_CLONE.md:1042`
+states plainly that the CI workflow has never been executed. Expect BLOCKED on that leg.
