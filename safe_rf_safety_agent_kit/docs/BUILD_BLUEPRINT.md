@@ -20,7 +20,7 @@ All tasks begin unchecked. An agent may mark `[x]` only after actual commands ra
 - [x] **SR-09** — Design an independent safety/utility benchmark protocol with pre-registered hypotheses, retained-utility criteria and uncertainty. **Depends:** SR-02, SR-04. **Verify:** `docs/EVALUATION_PROTOCOL.md` specifies controls, disconfirming cases, confidence intervals, and evidence thresholds; do not fabricate measured results.
 - [x] **SR-10** — Implement generic synthetic benchmark scoring and confidence interval reporting; avoid actual biological sequence generation or target optimization. **Depends:** SR-06, SR-09. **Verify:** statistical test fixtures and repeatability.
 - [x] **SR-11** — Implement neutral robustness probes (seeds, benign numeric input shifts, missing inputs, numerical stability). **Depends:** SR-10. **Verify:** immutable scorecards; no claims based on single examples.
-- [ ] **SR-12** — Independent QA review of method fidelity, unknowns and risk of incorrect safety claims. **Depends:** SR-03, SR-11. **Verify:** explicit PASS/FAIL/BLOCKED report, reproducible commands.
+- [x] **SR-12** — Independent QA review of method fidelity, unknowns and risk of incorrect safety claims. **Depends:** SR-03, SR-11. **Verify:** explicit PASS/FAIL/BLOCKED report, reproducible commands.
 
 ## Productized research dashboard + release
 - [x] **SR-13** — Build local experiment dashboard showing source-diff inventory, toy training curves, benchmark scorecards and uncertainty labels. No biological design generator/UI. **Depends:** SR-08, SR-10. **Verify:** smoke test; missing results render as UNKNOWN, not 0.

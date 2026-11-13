@@ -12662,3 +12662,154 @@ self-reported it.
 **SR-13 unblocks SR-14.** SR-12 is already eligible (SR-03 ✓, SR-11 ✓) and now carries two routed
 inputs: the producer-side container gap above, and the project-level finding that **no mutation
 tooling is tracked**, so every KILLED/unkilled claim in this journal is unreproducible from a clone.
+
+## SR-12 MARKED `[x]` — verified 13 → 14 of 17. **Its verdict on the kit is FAIL.**
+
+**Task** (`docs/BUILD_BLUEPRINT.md:23`): *Independent QA review of method fidelity, unknowns and risk
+of incorrect safety claims. Depends: SR-03, SR-11. Verify: explicit PASS/FAIL/BLOCKED report,
+reproducible commands.*
+
+### Read this before reading the checkbox
+
+**SR-12 `[x]` means the independent review was produced and meets its acceptance criteria. It does
+NOT mean the kit passed QA. The review's verdict on the kit is FAIL.** The clause asks for an
+explicit PASS/FAIL/BLOCKED report with reproducible commands; an honest FAIL, fully evidenced, with
+every command labelled as reproducing from a clean clone or not — **one is marked as not** — satisfies
+it. The reviewer was asked to answer "is the verdict PASS?" and "is SR-12 complete?" separately, and
+did: **FAIL, and complete.**
+
+**The three areas SR-12 actually names all PASS**: method fidelity, the unknowns register, and risk of
+incorrect safety claims — the last moved FAIL → PASS on fixes verified at HEAD rather than accepted.
+Every High finding of the prior review is closed. **The FAIL rests on one thing, and it is the thing
+this clause points at: the evidentiary base of 13 of 17 marks is not reproducible from a clone.**
+
+### F17-R — the finding that carries the verdict
+
+`git ls-files | grep -iE "mutat|mutant"` → nothing. `scripts/` holds four files. `docs/PROGRESS.md`
+contains **260** lines saying "killed" and **276** mentioning a mutant. Every harness lived in a
+session scratchpad and is gone.
+
+The reviewer's grading, which is more careful than the finding as routed:
+
+1. **It is the decisive evidence in all four marks audited this run, and in SR-04/05/08.** A cloner
+   reproduces every test count, skip, determinism property, demo byte count and lint result — the
+   reviewer did — and **not one** KILLED claim.
+2. **It is not total, and saying so would be the opposite error.** Where the journal names the edit
+   precisely, a reader can re-derive a KILL by hand, since a targeted run is logically sufficient for
+   one. **What is irrecoverable is the SET** — which mutants, by what rule, at which sites — so
+   **every SURVIVE and every equivalence claim is gone**, including SR-06's equivalent mutant.
+3. **It compounds, because this is a provenance kit** whose own central finding is that a sentence
+   describing a mechanism's reach is not the mechanism — and whose strongest evidence is a set of
+   sentences describing mutation runs.
+
+**It does not retroactively invalidate any mark** (each attester built its own harness and re-derived
+figures, which is a real control), **but SR-16's claim-evidence matrix cannot be sound as currently
+conceived: most rows' evidence column would have to read UNREPRODUCED.**
+
+The reviewer graded it here rather than routing it onward a third time, on the grounds that SR-12 is
+the only clause naming reproducible commands and the only task whose subject is the project's claims
+about itself — and that routing it on again would be this project's own recorded defect, *a finding
+described rather than priced.*
+
+### CORRECTION TO THIS JOURNAL — the orchestrator recorded a false reason
+
+The entry above at the SR-13 mark states that the `complete_gate_coverage` forgery *"needs
+post-construction `object.__setattr__`"*. **That is false, and the orchestrator wrote it.** Verified
+at HEAD: `deferred_gates` is **not a dataclass field** (`dataclasses.fields(JointResult)` = 15 names,
+not including it), and the forgery is reachable by a **class-attribute assignment** with no instance
+mutation at all.
+
+The conclusion — **do not unmark SR-10** — stands, on a *stronger* reason than the one recorded:
+**nothing a caller can pass reaches that attribute.** The constructor rejects the kwarg, `replace`
+cannot set it, frozen `__setattr__` refuses it. A caller who can patch the class can equally replace
+`DEFERRED_GATES`, `GATE_SCOPES` or `combine_joint` — which is not the threat model that failed SR-11
+and SR-13, where the hostile object arrived **as an argument to a public function**.
+
+This matters beyond the one sentence: **this project's own rule is that "I needed `object.__setattr__`
+to reproduce it" is a smell that sends you back to the public route.** The orchestrator invoked that
+excuse without going back. The reviewer went back and found the public route genuinely closed.
+
+F21 is confirmed and stays producer-side: `benchmark.py` carries `_plain_number`, `_plain_parameter`,
+`_metric_read`, `_plain_word` and three lane tables for values/attributes/keys, and **the string
+`CONTAINER` does not occur in the file.** `dashboard.py` cross-checks the flag completely and is today
+the **only** reader outside tests; nothing makes the next one cross-check.
+
+### Four further defects, all reproducible, all open
+
+- **F16 (Medium)** — `scripts/demo.py:137-138` prints `verdict JOINT_SUPPORTED` with **no
+  conditionality marker**, while `docs/EVALUATION_PROTOCOL.md:126` requires
+  `JOINT_SUPPORTED (conditional on deferred checks: <list>)` in the same paragraph that says the
+  document and the code must tell the same story. The dashboard complies; the demo — which the README
+  tells a reader to run — does not. Same defect class as the closed F2. Confirmed by the orchestrator.
+- **F18 (Medium)** — **a marked task's deliverable denies its own attestation.**
+  `docs/EVALUATION_PROTOCOL.md:3` states *"r10 has not been independently reviewed"* inside a sentence
+  opening *"Version history, stated exactly"*, while `PROGRESS.md:6362` records the r10 **PASS** that
+  SR-09's `[x]` rests on. True when written, false now. It is **deliberate** — the don't-edit-attested-
+  text rule, which F14 taught this project and which is sound — and the trade still leaves a false
+  sentence in a marked deliverable.
+- **F20 (new)** — **the suite's pass/fail is hostage to third-party `pytest11` plugins.** On 3.13.5
+  the reviewer measured `FAILED (failures=4)` where this journal records OK; all four spawn
+  `run_tests.sh` with pytest enabled and the sub-run carries
+  `OSError: Could not find/load shared object file 'libllvmlite.dylib'`. Reproduced from an empty
+  directory with one trivial passing test, so it is a property of this host's miniconda environment
+  reached through an entry point. With `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, `test_scripts` is
+  **156 OK**. **The orchestrator's matrix script sets that variable, which is why this journal's
+  figure is right — and why the orchestrator's own harness was masking the finding.** `README.md:33`
+  says the commands "need only Python 3.12+": true of a bare interpreter, not of a developer machine.
+- **F19 (Low)** — the attestation ordinals contradict each other and the journal records the series as
+  unresolved. Not cosmetic: the ordinals are the only record of how many independent passes a mark
+  rests on. Still Low: the substance each ordinal labels is intact and datable from `git log`, so the
+  count is recoverable by derivation. **The integrity defect is that a typed figure was relayed as
+  authoritative** — which the orchestrator did, repeatedly, before catching it.
+
+### SR-14: the orchestrator's blocking premise was REFUTED
+
+The orchestrator held that SR-14 could not be marked because `claim_ledger.py` changed after its QA
+PASS — citing `79be9d4` from the stale review. **SR-14 has been independently re-attested twice
+since**, most recently at `eef9341` (500 transition combinations, 5 accepted / 0 illegal / 0 refused;
+738 forgeries, 0 accepted; `N1` recorded as surviving rather than silently fixed), and
+`git diff eef9341 HEAD -- src/toy/claim_ledger.py tests/toy_tests/test_claim_ledger.py` is **empty** —
+confirmed by the orchestrator. `schema.py` did change, so the reviewer AST-compared the only three
+symbols `claim_ledger` imports and found them identical. **Nothing of F14's shape blocks SR-14.**
+
+Two things the reviewer flagged that are **not** byte questions: the PASS is round-4 and **predates
+this project's discovery of the parameter, probe, element and container/`__len__` lanes** — the four
+classes that unmarked SR-04/06/09/10 and failed SR-11 and SR-13 — and `claim_ledger.py` has never been
+swept for any of them. The reviewer recorded explicitly that it **did not drive a lying container into
+the ledger**, and logged that avoided input as a finding per this project's rule.
+
+### Closed an open UNKNOWN of the SR-16 report
+
+That report left *"the bare skip total 90 against the baseline column's 89 … the identity of the
+excluded skip is UNKNOWN."* Measured: `test_scripts` runs 5 skips in a bare venv (4 × pytest absent,
+1 × PyYAML absent) against a baseline column of 4; Σ baseline = 89; the excluded skip is the single
+**PyYAML** skip, dropped by `run_tests.sh`'s `BASE_EXCL` "yaml" rule. 89 + 1 = 90. No longer UNKNOWN.
+
+### An inherited PASS, declared as such
+
+**Section 1 (method fidelity) is inherited, not re-earned.** The prior review verified citations and
+diff arithmetic against saved copies of the fork script and diff held in a session scratchpad; **those
+files are not in this repository and not on this host**, and the reviewer made no network call. This
+is a weaker instance of F17-R — the evidence for the kit's single most load-bearing factual claim
+lives outside the repository — but recoverable, since the URLs and SHAs are recorded and the fetch is
+a documented human step.
+
+### Risk of incorrect safety claims — re-run, clean
+
+`git grep` over every tracked file except the journal for "is safe / proven safe / safer model /
+reduced hazardous capability" returns **27 hits, every one a denial, a guard test, or an unrelated
+technical use** (`"type(v) is safe"` about `__class__` lookups). `METHOD_AUDIT.md:244` lists "the
+method is safe / yields a safer model" as **UNKNOWN; not asserted by this audit**;
+`EVALUATION_PROTOCOL.md:428` lists it among what the protocol cannot establish; the rendered page
+opens and closes with "NOTHING ON THIS PAGE IS EVIDENCE ABOUT RFdiffusion". **`CLAUDE.md`'s absolute
+prohibition is honoured.** The reviewer also **refuted a prior-review claim** here (Q6: the kit does
+not prepend its own label to a user's claim — the old fixture supplied it), and verified that a
+hostile `notes` string is rendered verbatim inside an `UNTRUSTED FREE TEXT — NOT EVIDENCE` box.
+
+**What a PASS would require:** close F17-R, F16, F18, F20, F21.
+
+**Commands.** Full suite both interpreters; bare-venv determinism and baseline via `run_tests.sh`.
+Figures re-derived by the reviewer: full suite **1493 / 0** on 3.12.4 (skipped 2) — exact; bare-venv
+**1493 / 90 / 0, run1 == run2** — exact; Σ `test_baseline.txt` = **1493**, zero slack; 13 `[x]` of 17
+in scope; no marked task with an unchecked dependency. The one mismatch (3.13.5) is F20, diagnosed
+rather than attributed.

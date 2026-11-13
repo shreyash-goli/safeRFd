@@ -1,8 +1,10 @@
 # SR-12 independent review: method fidelity, unknowns and risk of incorrect safety claims
 
-**Reviewer:** `qa` teammate (capstone review). **Date:** 2026-11-09. **Kit HEAD reviewed:** `79be9d48cd0c78a131252026c28e5ed1f7d37dac`. **Working tree:** clean (`git status --short` empty) at the start, between every run, and immediately before this file was written. **Files written by this review:** this file only. No commit, no code edit, no checkbox edit.
+**Reviewer:** independent QA, second capstone pass. **Date:** 2026-11-12. **Kit HEAD reviewed:** `9621e42`. **Working tree:** clean (`git status --porcelain` empty) at the start, between every run, and immediately before this file was written. **Files written by this review:** this file only. No commit, no code edit, no checkbox edit. **This file supersedes the 2026-11-09 review at HEAD `79be9d4`** (commit `853e820`), whose findings are carried forward item by item in section 7 with their status at this HEAD; it is a rewrite in place rather than a new file, because the blueprint, `docs/SR16_AUDIT_REPORT.md` and the journal all reference this path.
 
 Labels: **SOURCE OBSERVED** (read directly from the cited text or produced by a command recorded in section 9), **INFERENCE** (reasoned from observed text, not executed), **UNKNOWN** (not determined). Nothing in this report asserts that the audited method works, fails, is safe, or is unsafe.
+
+The previous reviewer wrote none of the code and neither did I; I wrote none of the previous review. Every figure below was measured at this HEAD by the command named in section 9. Where I carry a figure forward from the prior review or from `docs/PROGRESS.md` without re-measuring it, the row says so.
 
 ---
 
@@ -10,750 +12,485 @@ Labels: **SOURCE OBSERVED** (read directly from the cited text or produced by a 
 
 # FAIL
 
-SR-12 criterion: "method fidelity, unknowns and risk of incorrect safety claims". The verdict is for the kit as a whole, read as a hostile reader would read it. FAIL means "reproducible defects exist that must be fixed before the kit is described as complete". It does not mean the audit documents are wrong about the fork.
+Same definition the prior review used, so the two documents can be read together: **FAIL means "reproducible defects exist that must be fixed before the kit is described as complete."** It does not mean the audit documents are wrong about the fork, and it is a materially milder FAIL than `853e820`'s.
 
-| Area | Result | Basis |
-|---|---|---|
-| 1. Method fidelity (METHOD_AUDIT, ERROR_REGISTER, DIFF_EVIDENCE vs source) | **PASS** | Every spot-checked citation matched; diff arithmetic reproduces; no claim stronger than its evidence found in those three documents. Section 1. |
-| 2. Toy-to-source correspondence | **PASS with 3 defects** (F6, F7, F8) | Each deliberate divergence is disclosed in the toy module; no toy result is framed as a finding about the source in any doc. Three places describe the analogy more strongly than the evidence. Section 2. |
-| 3. Unknowns register | **PASS with 4 defects** (F1, F5, F9, F10) | Nothing material is marked UNKNOWN that is established. Four items are presented as established that are INFERENCE or UNKNOWN. Section 3. |
-| 4. Risk of incorrect safety claims | **FAIL** | Seven ordinary-user paths and several quotable surfaces. Section 4. |
-| 5. Cross-document consistency | **FAIL** | One verdict-bearing rule differs between protocol and code (F2); stale status lines (F3, F11). Section 5. |
-| 6. PROGRESS / BUILD_BLUEPRINT attestation | **FAIL** | Two `[x]` with unchecked dependencies; one `[x]` whose QA record is indirect; one `[x]` whose attested text was later changed. Section 6. |
-| 7. Reproducibility | **PASS** | Commands in section 9, outputs verbatim. |
+**The three areas SR-12 names all PASS.** Method fidelity, the unknowns register, and risk of incorrect safety claims are each clean at this HEAD, the last having moved from FAIL to PASS on fixes I verified rather than accepted. **Every High-severity finding of the prior review is closed.** The kit contains no statement and no implication, anywhere outside a guard test, that RFdiffusion or any real model is safe, or that any reduction in biohazardous capability has been measured.
 
-### Required before this verdict can become PASS
+**The verdict is FAIL on one thing, and it is the thing SR-12's own "reproducible commands" clause points at: the evidentiary base of 13 of the 17 in-scope checkboxes is not reproducible from a clone.** Hundreds of mutation results — the dominant category of evidence behind the marks — were produced by harnesses that were never tracked in this repository and no longer exist. A reader can re-run every suite and reproduce every test count; they cannot reproduce a single mutation claim. Four smaller reproducible defects (F16, F18, F20, F21) accompany it. See 0.2 for why this is not routed away to SR-15.
+
+| Area | Prior (2026-11-09) | **Now (2026-11-12)** | Basis |
+|---|---|---|---|
+| 1. Method fidelity | PASS | **PASS (inherited, limit stated)** | Internal arithmetic and SHA consistency re-derived (C2). The external fork material was **not** re-verified by me; see 1.2. |
+| 2. Toy-to-source correspondence | PASS, 3 defects | **PASS, 2 defects** (F7, F8) | F6 closed at length. Section 2. |
+| 3. Unknowns register | PASS, 4 defects | **PASS, 2 defects** (F9, F10) | F1 and F5 closed. Section 3. |
+| 4. Risk of incorrect safety claims | **FAIL** | **PASS, 1 defect** (F16) | F4 and F15 closed and verified at HEAD, not accepted. Section 4. |
+| 5. Cross-document consistency | **FAIL** | **PASS, 1 defect** (F18, new) | F2, F3, F11 closed. One marked task's deliverable denies its own attestation. Section 5. |
+| 6. PROGRESS / BLUEPRINT attestation | **FAIL** | **PASS, 1 defect** (F19, new) | F12, F13, F14 closed; the four new marks audited. The ordinal series is still self-contradictory. Section 6. |
+| 7. Reproducibility of the evidence | PASS | **FAIL** (F17-R, F20, F21) | Section 8. **This is the verdict.** |
+
+### 0.1 Required before this verdict can become PASS
 
 | ID | Required action | Section |
 |---|---|---|
-| F1 | Correct "silently incompatible" in `src/toy/checkpoint.py:13,45`; upstream source shows a loud failure, and the claim is INFERENCE | 3.2, 4 |
-| F2 | Reconcile `docs/EVALUATION_PROTOCOL.md` (gate 11 scope "H1 and H2 only") with `src/toy/benchmark.py:82-83` (`"control_adequacy": "all"`) | 5 |
-| F3 | Remove or update "nothing here is QA-attested yet" in `docs/ERROR_REGISTER.md:3,193` | 5, 6 |
-| F4 | Make the dashboard scorecard distinguish a scorer-validation oracle result from any other `JointResult` | 4 |
-| F5 | Stop describing `.env.example` flags as governing anything; no code reads them | 3.2, 4 |
-| F6 | Disclose the sign of the normalization analogy (toy inflates; source net 0.42) | 2 |
-| F12 | Resolve `[x]` on SR-11 and SR-14 while SR-10 and SR-13 are unchecked | 6 |
-| F13 | Record a QA verdict section for SR-05, or re-attest it | 6 |
-| F14 | Re-attest SR-09 against v1-DRAFT-r3 (the checkbox attests r2) | 6 |
-| F15 | Make `ClaimLedger.summary()` not emit `is_safety_claim: False` as a literal, or document it as a constant at the field | 4 |
+| **F17-R** | Track a mutation harness, or demote every unreproducible mutation claim in `docs/PROGRESS.md` to **attester-reported, UNREPRODUCED**, and say so wherever a mark cites one. SR-16's claim-evidence matrix cannot be sound while this is open. | 8.1 |
+| **F16** | `scripts/demo.py:137-138` prints `verdict JOINT_SUPPORTED` with no conditionality marker; `EVALUATION_PROTOCOL.md:126` says such a verdict **"must be reported as `JOINT_SUPPORTED (conditional on deferred checks: <list>)`"** and that "the document and the code are required to tell the same story". The dashboard complies; the demo does not. Same defect class as the closed F2. | 4.3 |
+| **F18** | `docs/EVALUATION_PROTOCOL.md:3` states **"r10 has not been independently reviewed"**, inside a sentence opening *"Version history, stated exactly"*, while SR-09's `[x]` rests on `PROGRESS.md:6362` — *"SR-09 r10: PASS … No blocking findings."* A marked task's deliverable denies its own attestation. | 5.1 |
+| **F20** | The suite's pass/fail is hostage to third-party `pytest11` entry-point plugins installed on the host. Measured at this HEAD: 4 failures in `test_scripts` on the ambient 3.13.5 interpreter, caused by a broken `llvmlite` plugin outside this repository; 0 failures with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`. The kit already fixed the **absent**-optional-tool case (`ruff`, README:37); **present-but-broken** is the uncovered sibling. | 8.2 |
+| **F21** | `benchmark.py` carries no admission for **containers**, and `JointResult.complete_gate_coverage` is a truth test (`return not self.deferred_gates`). Record it producer-side. Reproduced at this HEAD: a container holding the honest six whose `__len__` answers 0 makes the property return **True** while `tuple(joint.deferred_gates)` still yields six names — a result that contradicts itself. | 8.3 |
+
+Advisory, not required: F7, F8, F9, F10, F19, M1, M2.
+
+### 0.2 Why F17-R is graded here and not routed to SR-15
+
+SR-11's marking entry routes the mutation-tooling gap to SR-15 and SR-16 and states it "does not block" SR-11's own mark. I agree with both halves and still grade it here, for a reason that belongs to SR-12 and to no other task. SR-12's clause is the only one in the blueprint that names **reproducible commands**, and SR-12 is the only task whose subject is *the project's claims about itself*. SR-15's clause is about the suite; SR-16's is about a matrix. Neither asks whether the evidence behind a checkbox can be re-derived by a stranger. That question is this task's, it is answerable, and the answer at this HEAD is no for the majority of the evidence. Routing it onward a third time would be the project's own recorded defect — a finding described rather than priced.
 
 ---
 
 ## 1. Method fidelity
 
-### 1.1 What was checked, and how
+### 1.1 What reproduces at this HEAD
 
-SOURCE OBSERVED. Fork script `erasure_teacher_student.py`: sha256 `1fef6383548419a1175b1732828d04105e384e7f8fc1759d19c7b6207090f17b`, 691 lines (command C1). `fork_only.diff`: sha256 `fe3753f3037905b0b06a3e6eb0e0de6eed876d6e3701197302a85eedb1fb9e86`, 1342 lines, 8 `diff --git` headers (C1, C2). The 691 added lines of the new-file hunk (diff lines 652-1342, `+` stripped) are byte-identical to the script (`cmp` printed `IDENTICAL`, C1). The fork script was **never executed** and no fragment of it was extracted or imported; the only operations on it were `shasum`, `cmp`, `sed -n` and `grep`.
+SOURCE OBSERVED (C2). `docs/SOURCE_SNAPSHOT.json` parses to `ahead_by 2`, `behind_by_vs_merge_base 0`, `behind_by_vs_upstream_main 36`, **8** changed files, **914** additions, **138** deletions. Those figures agree with `README.md:12-13`, `docs/FORK_AUDIT.md:12-19` and `docs/DIFF_EVIDENCE.md:34-42`. Every 40-hex SHA in `README.md`, `FORK_AUDIT.md`, `DIFF_EVIDENCE.md`, `METHOD_AUDIT.md`, `SOURCE_SNAPSHOT.json` and `CLAUDE.md` has **exactly one spelling**: `12d5426…`, `5cbd18a…`, `e220924…`, plus `86507b6…` in `DIFF_EVIDENCE` and the snapshot. No variant, no drift.
 
-SOURCE OBSERVED. Spot-checked citations (C3, C4). In every case the cited line contains the cited construct:
+### 1.2 What this review did NOT re-verify, and what that costs
 
-- Script lines: 36-39 (class defaults), 58-59, 68, 71-72, 84-85, 90, 92-93, 101-102, 122-124, 140-141, 178-179, 193, 199-203, 211, 218, 224-243, 261-262, 265, 279-280, 286-287, 290-297, 302-313, 322-323, 325, 350, 359-364, 373-376, 384, 438-440, 448, 474, 477-479, 586-593, 609-611, 661-663, 677, 683. All matched.
-- Diff lines: D:27-45 (`g(t)` under `enable_grad`), D:111-134 (`sample_step` change), D:335-337 (NaN restore), D:449-450 (`# This is OK`), D:522-527 (`th_ang_v` branch), D:633-645 (`seq_idx=None`). All matched.
-- Ancestor `e22092420281c644b928e64d490044dfca4f9175` (via `git show`): `diffusion.py:103` (`delta[diffusion_mask, ...] = 0`), `:621` ("True means NOT diffused"); `model_runners.py:282, 335, 426, 428, 465, 533-534, 542-545, 565-566, 603, 613, 646, 662, 676, 682, 706, 721, 742, 777`; `inference/utils.py:360, 447, 501, 508-512`; `util.py:588-589`; `Track_module.py:415-416`; `base.yaml:17, 50, 77, 82, 83, 117`. All matched. `model.load_state_dict(self.ckpt['model_state_dict'], strict=True)` is at `model_runners.py:234`.
-- Arithmetic: the METHOD_AUDIT section 3.2 item 3 worked cases (s = 1.15, 1.19, 1.25, -1, 1.5 for u = (3,0,0); ranges [-0.8, 1.1] and [1.3, 3.2]) were recomputed by hand and agree. The 42 = 14 x 3 factor and net 0.42 = 0.01 x 42 agree between METHOD_AUDIT:123-124, ERROR_REGISTER:95 and the `test_failure_modes.py:63-64` fixtures.
-- Per-file additions/deletions recomputed from the diff text (C2): 1/1, 13/6, 37/8, 67/56, 33/38, 71/28, 1/1, 691/0; totals **914 / 138**. Matches DIFF_EVIDENCE:34-42, FORK_AUDIT:12-19, SOURCE_SNAPSHOT.json and the dashboard.
-- DIFF_EVIDENCE per-commit arithmetic (902/138 + 27/15; 679 + 27 - 15 = 691; 764 + 12 = 776 = 914 - 138) is internally consistent. It was not re-derived from the GitHub API (see 1.4).
+UNKNOWN. The prior review verified the citations and the diff arithmetic against saved copies of `erasure_teacher_student.py` and `fork_only.diff` held in a session scratchpad (its commands C1–C4). **Those files are not in this repository and are not on this host.** I could not re-run C1–C4 and did not attempt a network fetch. Section 1's PASS is therefore **inherited from the prior review**, not re-earned: I confirmed that the numbers derived from that material are internally consistent and have not drifted, which is a weaker property than confirming they match the source.
 
-### 1.2 Agreement between the three documents
+This is itself an instance of F17-R: the evidence for the kit's single most load-bearing factual claim — *what the fork actually changed* — lives outside the repository. Unlike the mutation harnesses it is recoverable (the URLs and SHAs are recorded in `docs/DIFF_EVIDENCE.md` and the fetch is a documented human step), so it is a weaker instance. It is still an instance.
 
-SOURCE OBSERVED. METHOD_AUDIT, ERROR_REGISTER and DIFF_EVIDENCE agree on: the two fork commits, the merge base, the 8 files, the S/D/A citation keys, the classification of each concern, the "no claim the method works/fails/is safe" stance, and the INFERENCE status of the mask-polarity finding (METHOD_AUDIT 3.4 and claim 6; ER-06). ERROR_REGISTER is consistently weaker than or equal to METHOD_AUDIT in every entry: ER-04 and ER-07 retract earlier stronger statements inside the register itself; ER-03 states "no unintended detach identified"; ER-06 says "not a confirmed bug". No entry is stronger than METHOD_AUDIT's evidence.
-
-### 1.3 Method-fidelity findings
-
-| ID | Severity | Finding | Where |
-|---|---|---|---|
-| M1 | Low | FORK_AUDIT (named in CLAUDE.md as source of truth #1) is not updated to the hedges later added to METHOD_AUDIT. It lists under "What has evidence in source": "Teacher models are frozen" and a target "based on differences between teacher conditioned and unconditioned predictions". METHOD_AUDIT claim 2 labels the freezing "static reading only; not tested", and claim 5 labels the "unconditional" branch **UNKNOWN (INFERENCE against)** because both teachers share one contig and the sampler's internal motif masks. FORK_AUDIT:14 also names the new file's content "Frozen teacher conditional/unconditional outputs". The words are the script's own naming, but FORK_AUDIT does not say so. | `docs/FORK_AUDIT.md:14,22-26` vs `docs/METHOD_AUDIT.md:225,228` |
-| M2 | Low | `FORK_AUDIT.md:9` and `README.md:13` give "36" without the time-variance caveat that DIFF_EVIDENCE:27 and the dashboard carry. README says "The present upstream `main` is 36 commits beyond the merge base" under a "2026-11-09" verification date. | `README.md:13`, `docs/FORK_AUDIT.md:9` |
-| M3 | Informational | DIFF_EVIDENCE:62 marks "whether the repository contains such material outside the fork-only diff" as UNKNOWN. By construction anything outside the diff is identical to the ancestor, so the question is about upstream, not the fork. Slightly over-hedged; harmless. | `docs/DIFF_EVIDENCE.md:62` |
-| M4 | Informational | METHOD_AUDIT section 9 describes the `g(t)` dtype effect as "Previously forced `float32`-less default dtype", which is garbled; the same row's INFERENCE sentence that follows is correct and labelled. No factual consequence. | `docs/METHOD_AUDIT.md:210` |
-
-No fidelity error was found in METHOD_AUDIT's SOURCE OBSERVED claims. The INFERENCE claims were not executed (by design) and remain INFERENCE.
-
-### 1.4 What this review did not verify
-
-UNKNOWN / not re-verified: the live GitHub API state (the 36-commit upstream gap, the fork head still being `5cbd18a`). This review used the saved diff (hash matches DIFF_EVIDENCE:14) and the ancestor object in the local checkout only, and made no network call. Verdicts for the live-API figures rest on SR-01's recorded QA pass.
+Carried forward unchanged, both advisory: **M1** (`FORK_AUDIT.md`, named in `CLAUDE.md` as source of truth #1, is not updated to the hedges METHOD_AUDIT later added) and **M2** (the "36 commits beyond the merge base" figure is time-varying; `DIFF_EVIDENCE.md:27` says so outright — *"UNKNOWN: the 36 figure is time-dependent"* — while `README.md:13` carries only a verification date and `FORK_AUDIT.md:9` only "as of audit"). Neither is wrong; both are weaker than the register they derive from.
 
 ---
 
 ## 2. Toy-to-source correspondence
 
-The toy modules are structural analogues. The table states each correspondence, whether it is described accurately where it is described, and where the description is stronger than the evidence.
+**F6 — CLOSED, and closed well.** `src/toy/teacher_student.py:244-256` now carries an explicit paragraph headed **"THE SIGN DOES NOT CARRY OVER, and the analogy is misleading if read without this paragraph."** It states that the toy inflates by the row width, that the source's same mismatch is a factor of 42 sitting beside a `0.01` multiplier, that the net is **0.42 — a DEFLATION**, that "the toy's gradient goes up where the source's net goes down", and that the toy reproduces the *shape* and "not its magnitude and not its direction". It then declines the further claim: "Nothing here says the source's net 0.42 is harmful, or that it explains the author's 'gradient is high' note; METHOD_AUDIT records that cause as UNKNOWN." This is more than the finding asked for.
 
-| Element | Source (SOURCE OBSERVED) | Toy | Described accurately? |
-|---|---|---|---|
-| Erasure target algebra | `target = u - eta*(c - u)` (S:286-287) | `erasure_target`: `uv - eta*(cv - uv)` (`teacher_student.py:172-174`); `erasure_demo.toy_target` | **Yes.** Same algebra; applied to affine-map outputs, not diffusion x0 predictions, and the module says "not a model of the audited method's behaviour" (`teacher_student.py:3-5`). |
-| Magnitude rescale | **Per-atom** norm over `dim=-1`, **elementwise** clamp [0.1, 2.0] (S:290-297) | **One Frobenius norm** over the whole matrix, one scalar clamp (`teacher_student.py:16-18, 176-182`) | **Divergence disclosed** (`:16-18`). **Not disclosed:** a single positive scalar cannot reproduce the properties METHOD_AUDIT 3.2 derives for the source (direction kept from the origin, sign flip through the origin when k < 0, atom-dependent factors breaking intra-residue geometry, origin dependence). The toy rescale is a uniform dilation. ERROR_REGISTER:173 correctly lists claim 7 as "not catalogued ... no demonstration". No doc claims otherwise. Result: **accurate by omission of any claim**; see F8 for the one docstring that implies more. |
-| Loss normalization | Sum over 14 x 3 elements per motif residue, divisor = residue count (factor 42), times constant `0.01` (net 0.42 x element-mean MSE) (S:306-311) | `per_mask_entry`: divisor = masked rows (factor = row width, default 3); no `0.01` | **Partly.** Disclaimer present: "TOY reproduction of an audited numerical concern, not a claim about the real code's impact" (`teacher_student.py:239-241`). **Sign not disclosed:** the toy docstring says the mismatch "inflates the loss, and the gradient" (`:242`). In the source the mismatch is more than cancelled by `0.01`, giving a net **deflation** (0.42 x) relative to an element-mean MSE (METHOD_AUDIT:124, ER-05). See F6. |
-| "Correct" normalization | METHOD_AUDIT:131 and ER-05:98 say the choice "may be intentional" / "at most a unit choice" | `per_masked_element` docstring: "The correct element count" (`:238`); commit `d87b48f`: "the audited bug analogue" | **Stronger than the audit.** See F7. |
-| Empty mask | Bare `RuntimeError` expression; `loss` unbound; `UnboundLocalError` at S:325 (INFERENCE) | Raises `ValueError`/`EmptyMaskError`; fails closed | **Yes**, and stated: the toy "FAILS CLOSED" (`erasure_demo.py:6`). The source *pattern* is reproduced separately in `failure_modes.py` and labelled PATTERN-DEMONSTRATED. |
-| Non-finite handling | `NaN * 0` propagates **if NaN is present**; presence UNKNOWN (ER-02; METHOD_AUDIT 3.2 item 5) | Rejects non-finite in all elements | **Yes**, except `stability.py:27-30`: "a lenient toy would be more permissive than the thing it mimics". See F9. |
-| Frozen teacher | `requires_grad=False`, `eval()`, fresh copy per step (S:68-72, 183-193) | Immutable `MappingProxyType` params, frozen dataclass, runtime tripwire | **Different mechanism, not claimed equal.** |
-| Student | Full sampler, AdamW, warmup, clip (S:101-127, 373-376) | Per-column affine map, plain gradient descent, analytic gradient, no autograd, no clip | **Yes.** |
-| Mask polarity, re-diffusion, dropout/eval mismatch, gradient truncation by `Track_module` detaches | METHOD_AUDIT 3.3, 3.4, claim 17, section 6 | Not modelled | ER-06 is a generic pattern demonstration with "applicability INFERENCE only". Claim 17 and re-diffusion are explicitly "not catalogued here" (`ERROR_REGISTER.md:173`). **Yes.** |
-| Checkpoint format | `torch.save` pickle dict, `student_model_state_dict` key (S:458-475) | Canonical JSON, sha256 digest, strict key set | Format contrast is accurate. The description of the *source's* incompatibility is not: see F1. |
-| Evaluation design | None exists in the fork (DIFF_EVIDENCE:56-63) | Level A benchmark with oracle/degrader fixtures | **Yes.** EVALUATION_PROTOCOL section 11 states that no toy result transfers "not partly, not suggestively". |
+**F7 — STILL OPEN** (Low, advisory, unchanged). `teacher_student.py:238` still calls `per_masked_element` "The correct element count", a judgement the audit declines to make: `ERROR_REGISTER.md:98` says the register **"does not establish … that any particular loss scale is wrong for the method's purpose (the choice may be intentional)"**, and `METHOD_AUDIT.md:131` concludes only that the mismatch "by itself does **not** explain a *high* gradient".
 
-### 2.1 Is any toy result framed as telling us something about the source?
+**F8 — STILL OPEN** (Low, advisory, unchanged). `teacher_student.py:176-179`: "this rescale partially counteracts the displacement it is applied to" is true of the toy's single positive scalar; the source's per-atom map can also flip sign and is origin-dependent. The docstring does not say the toy property fails to carry over — which is exactly the omission F6's new paragraph repairs one function away. The fix is the same shape and three lines long.
 
-SOURCE OBSERVED, by search (C8, C9). I searched README, docs, module docstrings, tests, scripts and the demo for "mirror", "mimic", "faithful", "analogue", "replicat", "reproduce": no document says a toy outcome predicts, confirms or illustrates the behaviour of the fork's script. The strongest bridging language is:
-
-- `stability.py:29`: "the thing it mimics" (F9).
-- `d87b48f` commit message: SR-03 "direct evidence that the fork's commented-out assertions could not have proven parameter-level gradient flow". The ER-04 text itself is more careful ("does not establish that the real student has the severed or zeroed topology"). The commit message is stronger than the register (F10; commit messages are immutable, so this can only be noted).
-- Naming: README title "safety-replication agent kit", README purpose "Reproduce and independently audit", BLUEPRINT "Safe computational-method replication", ORCHESTRATOR_PROMPT "toy-method replication", BLUEPRINT definition of done "audit/toy-replication system". The kit does **not** replicate the fork's method or results; it audits it and builds analogues. See quotable item Q9.
-
-### 2.2 Correspondence defects
-
-| ID | Severity | Defect | Where |
-|---|---|---|---|
-| F6 | Medium | Toy normalization analogy: sign not disclosed (toy inflates by row width; source nets a 0.42 deflation). A reader comparing "factor 3 inflation" in the toy to "factor 42" in the audit would not learn that the source's constant `0.01` reverses the direction. | `src/toy/teacher_student.py:239-243`; `docs/METHOD_AUDIT.md:124`; `docs/ERROR_REGISTER.md:95` |
-| F7 | Low | "The correct element count" / "audited bug analogue" are judgements the audit declines to make. | `src/toy/teacher_student.py:238`; commit `d87b48f`; vs `docs/METHOD_AUDIT.md:131`, `docs/ERROR_REGISTER.md:98` |
-| F8 | Low | `rescale` docstring "partially counteracts the displacement it is applied to" is true of the toy's single positive scalar only. The source's per-atom map can also flip sign and is origin-dependent (METHOD_AUDIT 3.2). The docstring does not say the toy statement does not carry over. EVALUATION_PROTOCOL H5 already notes the net direction is "not derived". | `src/toy/teacher_student.py:176-181` |
+Everything else in the prior review's correspondence table was re-read and still holds: each deliberate divergence is disclosed in the toy module, and no document frames a toy outcome as telling the reader anything about the fork.
 
 ---
 
-## 3. Unknowns register (consolidated)
+## 3. Unknowns register
 
-Built by reading every UNKNOWN / NEEDS-EXECUTION / UNMEASURED / "not verified" statement in the docs and module docstrings (C7). IDs are this review's.
+The 49-item register (U01–U49) in the prior review was re-read; nothing in it has been established since, and nothing established has been re-hedged into it. Two of its four defects are closed.
 
-### 3.1 Register
+**F1 — CLOSED, verified at source.** `src/toy/checkpoint.py:13-18` now splits the claim in two: *"**SOURCE OBSERVED:** the keys differ, so a checkpoint written by the script would not load into the unmodified upstream sampler. **INFERENCE, not executed:** because upstream indexes the dict directly (and loads with `strict=True`), the expected failure is a loud `KeyError`, not a silent one."* The word "silently" is gone from both sites; the second site (`checkpoint.py:47-51`, the key-set guard) now reads "that failure is inferred, not executed, to be a loud KeyError". `git grep -n silent` over `src/` returns no occurrence attaching silence to the audited script.
 
-**A. The fork's script and edits (METHOD_AUDIT, FORK_AUDIT, ERROR_REGISTER)**
+**F5 — CLOSED.** `docs/CLEAN_CLONE.md:813-816` now states of the five `.env.example` flags: **"No code reads any of them"** and "`BIOLOGICAL_TRAINING_ENABLED=false` does not constrain anything." `README.md:30` carries an explicit, signed correction naming F5 and describing the real, structural protections. Verified independently (C6): `grep -rn "getenv\|os.environ" src/` returns **nothing**. Residual, not a defect in the required action: `.env.example` is itself a bare five-line file with no inert marker, so the quotable surface Q4 stands (section 4.2).
 
-| ID | Item | Source |
-|---|---|---|
-| U01 | Runtime behaviour of everything: no code was executed | METHOD_AUDIT:253 |
-| U02 | Whether per-step samplers are freed promptly | METHOD_AUDIT:35 |
-| U03 | Effective `p_drop` in the checkpoint config (student train mode vs teacher eval mode) | METHOD_AUDIT:40, claim 17 |
-| U04 | Config values actually in effect after checkpoint override (`T`, `partial_T`, `fix_motif`, `symmetry`) | METHOD_AUDIT:254 |
-| U05 | How often the rescale clamp binds | METHOD_AUDIT:82, claim 8 |
-| U06 | Whether `px0` contains NaN at absent-atom slots | METHOD_AUDIT:84, ER-02 |
-| U07 | Rationale for the [0.1, 2.0] clamp bounds | METHOD_AUDIT:86 |
-| U08 | Whether "unconditional" branch isolates any "concept" | METHOD_AUDIT 3.3, claim 5 |
-| U09 | Noise level of the twice-noised `x_t` relative to `t` | METHOD_AUDIT:94 |
-| U10 | Author intent for mask polarity and re-diffusion | METHOD_AUDIT:255, claim 6 |
-| U11 | Author intent for the "scaffold mask" label | METHOD_AUDIT:144 |
-| U12 | Whether gradient reaches student parameters; coverage; magnitude | METHOD_AUDIT claim 14, ER-03/04 |
-| U13 | Cause of the author's "gradient is high" note | METHOD_AUDIT claim 10 |
-| U14 | Which fork commit introduced the `0.01` constant | METHOD_AUDIT:131 |
-| U15 | Value of `M` (contig `1/A80-90` parse) | METHOD_AUDIT:126 |
-| U16 | Whether training reduces the loss | METHOD_AUDIT claim 18 |
-| U17 | Selective unlearning, utility retention, safety | METHOD_AUDIT claims 19-21 |
-| U18 | Source of any behavioural difference vs upstream (confound) | METHOD_AUDIT claim 22, ER-10 |
-| U19 | Whether `torch.load` of checkpoints is safe under the fork's PyTorch | METHOD_AUDIT claim 25, ER-08 |
-| U20 | Whether the runner switch was a methodological choice; whether it changes outputs materially | METHOD_AUDIT:192, 194 |
-| U21 | Size of effect of `util.py` `th_ang_v`/`th_dih_v` semantic change on `alpha_mask` | METHOD_AUDIT:214 |
-| U22 | Effect of the unused-looking `seq_idx=None` parameter | METHOD_AUDIT:215 |
-| U23 | Whether `gumbel_softmax_sample` has a call site elsewhere in the ancestor tree | METHOD_AUDIT:211 |
-| U24 | Whether `xyz_t` in `_preprocess` is the same tensor as the grad-requiring `x_t` | METHOD_AUDIT:167 |
-| U25 | Results of the fork's own `requires_grad` prints | METHOD_AUDIT:165 |
-| U26 | Whether the `main()` example is sensitive in any way | METHOD_AUDIT claim 26 |
-| U27 | Whether an empty mask is ever reached | ER-01 |
-| U28 | Whether clipping engages at `max_grad_norm=10` | ER-07 |
-| U29 | CUDA behaviour; GPU SVD/Kabsch behaviour | ER-09 |
-| U30 | In-place hazards in the real graph | ER-11 |
+**F9 — STILL OPEN** (Low, advisory). `src/toy/stability.py:52` (was `:29`) still reads "a lenient toy would be more permissive than **the thing it mimics**", treating a conditional NaN hazard as a property of the source when ER-02 records the presence of NaN there as UNKNOWN.
 
-**B. Source provenance (DIFF_EVIDENCE, SOURCE_SNAPSHOT)**
-
-| ID | Item | Source |
-|---|---|---|
-| U31 | The 36-commit gap is time-varying | DIFF_EVIDENCE:27 |
-| U32 | Whether fork `main` stays at `5cbd18a` | DIFF_EVIDENCE:99 |
-| U33 | Unauthenticated API responses; later force-push | DIFF_EVIDENCE:98 |
-| U34 | Whether the script's loss plot counts as an "evaluation" | DIFF_EVIDENCE:62 |
-
-**C. Evaluation methodology (EVALUATION_PROTOCOL, benchmark.py, dashboard)**
-
-| ID | Item | Source |
-|---|---|---|
-| U35 | Deferred checks D1-D6 (config-shift arm, ER cross-check, V-set probes, pilot and `n_cap` rule, exchangeability, amendment-log hash) | `EVALUATION_PROTOCOL.md:251-258`; `benchmark.py:79-81` |
-| U36 | Whether the seed list was frozen before data (producer-asserted only) | `benchmark.py:980`; protocol:243 |
-| U37 | "Chosen a priori, not tuned" for six thresholds (no tuning log; unverifiable) | `EVALUATION_PROTOCOL.md:266` |
-| U38 | Whether `steps_conv = 1000` reaches `tau_conv` | `EVALUATION_PROTOCOL.md:270` |
-| U39 | Pilot SDs and `n_planned` | `EVALUATION_PROTOCOL.md:150` |
-| U40 | Amendment log (empty) | `EVALUATION_PROTOCOL.md:390` |
-| U41 | Coverage of bootstrap and t-intervals at n = 30 for skewed data | `EVALUATION_PROTOCOL.md:163` |
-| U42 | Whether any threshold is appropriate for a real system | protocol section 11 |
-| U43 | All results slots in the protocol (every cell UNKNOWN) | protocol:10, 319-328 |
-
-**D. Tooling, CI and environment (CLEAN_CLONE, PROGRESS, module docstrings)**
-
-| ID | Item | Source |
-|---|---|---|
-| U44 | The CI workflow has never been executed; the numpy 1.26.4 + torch 2.7.1 pin combination has not been exercised locally; actions are pinned by tag, not SHA | PROGRESS SR-15 entry; `constraints.txt` comments |
-| U45 | Skip count on Linux CPU ("roughly 2-8"): an estimate, not observed | `CLEAN_CLONE.md:35` |
-| U46 | Behaviour on Python < 3.12 (`mse_naive` order invariance) | `CLEAN_CLONE.md:5`; `robustness.py` docstring |
-| U47 | Ledger reviewer identity is unauthenticated; evidence refs are shape-checked only; tail truncation with a corrected `head_digest` accepted | `claim_ledger.py` docstring |
-| U48 | Checkpoint digest is not a signature; whole-file rewrite accepted | `checkpoint.py` docstring |
-| U49 | The CPU-vs-MPS "around 1e-7" figure is a point-in-time measurement no test pins | PROGRESS SR-03 QA entry (line 1421 onward) |
-
-### 3.2 Is anything marked UNKNOWN that is actually established?
-
-INFERENCE. No material case. Two harmless over-hedges: M3 above (U34's sibling), and U19, which is correctly UNKNOWN for the fork's own environment (not recorded anywhere) although the kit's pinned torch is known (`weights_only` in the installed 2.7.1 signature shows `Optional[bool] = None`, C10; the resolved default depends on release notes and was not tested here, so it is left UNKNOWN).
-
-### 3.3 Is anything presented as established that is actually INFERENCE or UNKNOWN?
-
-This is the high-value half. Four items, in descending seriousness:
-
-| ID | Severity | Statement presented as fact | Why it is not established | Where |
-|---|---|---|---|---|
-| **F1** | **Medium-High** | "those checkpoints are **silently** incompatible with the unmodified sampler" and "the audited **silent** key incompatibility" | SOURCE OBSERVED: upstream reads `self.ckpt['model_state_dict']` then `load_state_dict(..., strict=True)` (ancestor `model_runners.py:234`). Reading a missing key from a dict raises `KeyError`, which is loud, not silent. The incompatibility itself is INFERENCE (not executed); METHOD_AUDIT claim 24 and section 7 say only "not directly loadable ... an adapter is needed" and never use "silent". The toy module contradicts the audit and the source it cites, and attaches the word to the audited script. Commit `e436d93` (and `PROGRESS.md`) repeat the milder "not loadable". | `src/toy/checkpoint.py:13, 45` vs `docs/METHOD_AUDIT.md:179, 247` |
-| **F5** | **Medium** | `.env.example` flags `MODEL_WEIGHTS_ENABLED=false`, `BIOLOGICAL_TRAINING_ENABLED=false`, `RUN_MODE=TOY_OFFLINE`, `TOY_SEED=42`; CLEAN_CLONE says "These flags govern the **toy application**" | SOURCE OBSERVED (C6): no file under `src/`, `scripts/` or `tests/` reads any of these variables (`ALLOW_EXTERNAL_NETWORK` is exported by `run_tests.sh:48` and `ci.yml:14` but also never read). They are inert. A reader can present "BIOLOGICAL_TRAINING_ENABLED=false" as a safety control. The actual protections are structural (no weights, no network imports, a socket guard in tests). | `.env.example:2-5`; `docs/CLEAN_CLONE.md:74-77`; `README.md:28` |
-| **F9** | Low | "the audited source multiplies by the mask, and NaN * 0 stays NaN in torch, so a lenient toy would be more permissive than the thing it mimics" | The multiply is SOURCE OBSERVED and `NaN*0` is IEEE. The presence of NaN in the source tensors is UNKNOWN (ER-02; METHOD_AUDIT 3.2 item 5 infers placeholders are probably finite). "More permissive than the thing it mimics" treats a conditional hazard as a property of the source. | `src/toy/stability.py:27-30`; commit `d87b48f` ("more lenient than the source it mimics") |
-| **F10** | Low | Commit `d87b48f`: "direct evidence that the fork's commented-out assertions could not have proven parameter-level gradient flow"; `e436d93`: "confirms the bare RuntimeError at L312-313 leaves loss unbound"; "the model_runner config switch was load-bearing for gradient flow rather than cosmetic" | All three are INFERENCE (not executed). The third was corrected in `PROGRESS.md` ("necessary given the fork's chosen edit, not necessary for any gradient to flow") but the commit message is immutable and still reads as a finding. | `git log` messages `d87b48f`, `e436d93` |
-
-Also noted, lower: FORK_AUDIT (M1) and `teacher_student.py:238` "correct" (F7).
+**F10 — STILL OPEN by construction.** Commit messages `d87b48f` and `e436d93` state INFERENCE as "confirms" / "direct evidence". Commit messages are immutable; this can only ever be noted, and the journal has noted it.
 
 ---
 
 ## 4. Risk of incorrect safety claims
 
-Stance: a hostile reader who wants to quote the kit as proof the fork is safe, or that it is broken. Every artifact below was read; the dashboard was rendered to a temp directory and its text extracted; `scripts/demo.py` was run; `git log` was read in full.
+**This is the section SR-12 exists for, and it is the section that moved.** Re-run in full at this HEAD, hostile stance: a reader who wants to quote the kit as proof that the fork — or RFdiffusion — is safe, or that it is broken.
 
-### 4.1 Do the two designed guards hold against an ordinary user?
+### 4.1 The direct question
 
-**Guard 1: the dashboard has no "confirmed" style.** SOURCE OBSERVED, **holds**. The rendered page uses 14 distinct CSS classes (C5); the only verdict class that signals success is `vd-supported`, styled white background with a dotted blue outline (`dashboard.py:87`), not green and with no check mark. A user who supplies a record with `name="RFdiffusion is SAFE - validated"` and `notes="... verdict: JOINT_SUPPORTED; model is safe; hazardous capability reduced 99%"` (C12) gets the text rendered **inside an "UNTRUSTED FREE TEXT - NOT EVIDENCE" box**; no verdict is parsed from it. **However**, the text is displayed, and the schema accepts and exports it unflagged (`rec.to_json()` contains "model is safe"). The guard is "captioned", not "refused". A cropped screenshot of the notes line reads: `TOY RESULT (synthetic, non-biological; not a safety claim) verdict: JOINT_SUPPORTED; model is safe; hazardous capability reduced 99%`, where the kit's own non-claim label is prepended to the user's claim. This is documented behaviour (PROGRESS line 914), recorded as Q6.
+**Does the kit anywhere state or imply that RFdiffusion, or any real model, is safe, or that a measured reduction in biohazardous capability exists?** **No.** SOURCE OBSERVED (C7): a `git grep` for `is safe|are safe|proven safe|shown safe|model is safe|safer model|reduc…(biohazard|hazardous|capability)|hazardous capability` across every tracked file except the journal and this report returns **27 hits, and every one of them is a denial, a guard test, or an unrelated technical use of the word "safe"**:
 
-**Guard 2: `is_safety_claim` is a hard-coded False.** SOURCE OBSERVED, **holds as a constant and is not a control** (F15). `claim_ledger.py:736` emits the literal `False` for every claim regardless of its statement. Reproduction (C11): a single reviewer `alice` opens a claim with the statement "safeRFdiffusion is safe and removes hazardous capability.", reviews it, supports it citing `sha256(b"nothing at all")`, under evidence class `TOY_RESULT`, `SOURCE_OBSERVED` and `HYPOTHESIS` alike. All three reach `SUPPORTED`. The summary then reads `"state": "SUPPORTED"`, `"evidence_class": "SOURCE_OBSERVED"`, `"is_safety_claim": false`, with caveat "Not a safety claim". The module docstring discloses the route ("That is the main route to a hollow SUPPORTED"), and the dashboard does not render the ledger (grep: no ledger import in `dashboard.py`), so this does not reach the page. But the `is_safety_claim: false` field next to a statement that is, in plain language, a safety claim is a false-by-construction value that a downstream consumer could treat as a classification.
+- Denials: `ERROR_REGISTER.md:8, 213`; `EVALUATION_PROTOCOL.md:4, 428` (*"It cannot establish … that any real checkpoint is safer; that RFdiffusion or the fork is safe or unsafe; that a real capability is reduced"*); `METHOD_AUDIT.md:3, 244` (claim 21, "The method is safe / yields a safer model" → **UNKNOWN; not asserted by this audit**); `FORK_AUDIT.md:33`; `claim_ledger.py:3`; `robustness.py:14`; `SR16_AUDIT_REPORT.md:138`.
+- Guard tests, i.e. the string exists so that a test can assert the kit refuses to vouch for it: `test_benchmark.py:2593`, `test_claim_ledger.py:418, 1304`, `test_dashboard.py:290`, `test_failure_modes.py:310`, `claim_ledger.py:140`, `schema.py:59`.
+- Unrelated: `"type(v) is safe"` in four modules, about `__class__` lookups.
 
-**Guard 3 (not in the brief, found): the dashboard cannot tell an oracle fixture from any other result.** See Q1 / F4.
+The rendered dashboard opens and closes with **"NOTHING ON THIS PAGE IS EVIDENCE ABOUT RFdiffusion, THE FORK, OR ANY REAL BIOLOGICAL CAPABILITY. No result here bears on real-world safety."** (C5). `CLAUDE.md`'s absolute prohibition is honoured.
 
-### 4.2 Ranked list of quotable-out-of-context risks
+### 4.2 The two designed guards, and the one the prior review found broken
 
-Ranked by how easily the exact text lifts out of context and how much it would mislead. "Direction" is which hostile reader benefits.
+**Guard 1 (dashboard has no "confirmed" style) — holds**, unchanged.
 
-| Rank | Direction | Exact text | Location | Why it lifts |
-|---|---|---|---|---|
-| **Q1** | "safe" | Rendered table: `H1 Suppression (S) ... SUPPORTED`, `H2 Retention (L) ... SUPPORTED`, `H3 Selectivity (delta) ... SUPPORTED`, `Joint verdict: JOINT_SUPPORTED`, with `mean 1.1257536612773082` and 98.75% intervals | Dashboard HTML produced by `render_dashboard` (C5); label cell `dashboard.py:366-369` | The only qualifier is a 12 px grey span: `(toy fixture; conditional; not a safety finding)`. The page says "toy fixture", not "scorer-validation oracle whose answer is known by construction" (`benchmark.py` docstring: "a JOINT_SUPPORTED verdict on a scorer-validation fixture means only 'the scorer can say yes when the answer is yes by construction'"). `JointResult` (`benchmark.py:1036-1047`) has **no field recording fixture kind**, so the renderer cannot distinguish an oracle from a trained-student outcome; the same label would appear on both. The row names are "Suppression", "Retention", "Selectivity". The protocol says the actual affine toy is **expected to fail H3** (protocol:86), yet the page shows H3 SUPPORTED, on the oracle. |
-| **Q2** | "safe" | `[3] scorer-validation fixture (ORACLE_GATED) scored on 30 seeds: verdict JOINT_SUPPORTED  [tests the scorer; says nothing about any method]` | `scripts/demo.py:116-117`, printed by `python3 scripts/demo.py` (C4) | The bracket is good, but the demo omits the mandated "(conditional on deferred checks: <list>)". Protocol:124 and :258 say "no JOINT_SUPPORTED may be described without the 'conditional' qualifier". The demo line and `CLEAN_CLONE.md:66` lack it. Followed by `DEMO OK ... All checks passed.` |
-| **Q3** | "safe" | `INVARIANCE_HOLDS`, `status=INVARIANCE_HOLDS` | demo `[4]`; dashboard notes; `robustness.py:107` | The enum's own comment says "not refuted on these seeds"; the docstring says passes are "not refuted on these n synthetic fixtures". The name reads as "holds". |
-| **Q4** | "safe" | `.env.example`: `MODEL_WEIGHTS_ENABLED=false`, `BIOLOGICAL_TRAINING_ENABLED=false` | `.env.example:3-4` | Reads as a safety interlock (F5). Inert. |
-| **Q5** | "safe" | `SUPPORTED (human review verdict, conditional on the referenced evidence)`; `"is_safety_claim": false` | `claim_ledger.py:248, 736`; commit `12bc490`: "SUPPORTED structurally unreachable without evidence references" | Evidence is shape-checked only. A hollow SUPPORTED is one hash away (C11). The commit sentence omits "shape". |
-| **Q6** | "safe" | `TOY RESULT (synthetic, non-biological; not a safety claim) verdict: JOINT_SUPPORTED; model is safe ...` | produced by any user note field (C12); accepted by schema (PROGRESS:914) | Own label prepended to the user's claim, inside a box that says UNTRUSTED. |
-| **Q7** | "safe" | `The default fixture still reaches a **genuine** JOINT_SUPPORTED` | `docs/PROGRESS.md:1384` | "genuine" refers to a non-false-alarm in the renderer test. Out of context it reads as a genuine joint support. |
-| **Q8** | "broken" | `INFERENCE ... the conditional branch holds scaffold residues fixed and noises the motif residues ... This is contrary to the script's own comments`; "appears inverted" | `docs/METHOD_AUDIT.md:102, 229` | Labelled INFERENCE with "Not verified by execution" in the same paragraph, and "intent is UNKNOWN". The strongest sentence in the kit about the fork. |
-| **Q9** | "broken" | ER summary: `ER-08 ... Medium-High on untrusted files` | `docs/ERROR_REGISTER.md:34` | The table row has no reach note; the entry (`:125`) says the fork's `load_checkpoint` has **no call site** and the pattern "is not fork-specific". The QA record notes ER-08 is "the only entry above Medium yet its own reach note says the fork's load path is unexercised". |
-| **Q10** | both | Titles and purpose: `SafeRFdiffusion safety-replication agent kit`; "Reproduce and independently audit the safety research methods and claims"; "toy-method replication"; completion promise `SAFETY_AUDIT_KIT_COMPLETE` | `README.md:1,3`; `docs/ORCHESTRATOR_PROMPT.md:1,9`; `docs/RALPH_COMMAND.txt` | "Replication" and "Reproduce" suggest results were reproduced. None were. The promise token, if emitted, reads as an all-clear for the kit. Today `docs/PROGRESS.md:1774-1777` records "Verified: 11 of 17". |
-| **Q11** | "broken" | `ER-04: input-leaf requires_grad does not prove parameter-level gradient (most important)`; commit `d87b48f` "direct evidence that the fork's commented-out assertions could not have proven ..." | `docs/ERROR_REGISTER.md:73`; git log | The register is carefully hedged; the heading plus "most important" is a short quotable. |
-| **Q12** | both | `A training run is not evidence of selective unlearning or safety.` | dashboard notes; `CLAUDE.md` | A non-claim, quoted safely. Listed because it is the model sentence the others should resemble. |
-| **Q13** | "safe" | CI/clean-clone: "Read-only permissions, no secrets, no publishing"; `core-no-deps ... clean-clone proof` | `docs/CLEAN_CLONE.md:83-84`; PROGRESS SR-15 entry | The workflow **has never been executed** (builder's own note, PROGRESS). `CLEAN_CLONE.md` "What CI does" and README do not say so. |
-| **Q14** | "safe" | `control_adequacy PASS ... A, F ok; E-loss check exempt (declared scorer-validation fixture)` | dashboard gate table (C5) | PASS beside a skipped sub-check; the exemption reason appears, but only here. |
+**Guard 2 (`is_safety_claim`) — F15 CLOSED, verified not accepted.** C11 reproduced: three claims whose statement is *"safeRFdiffusion is safe and removes hazardous capability."* still reach `SUPPORTED` on one self-attesting reviewer and a hollow hash — that route is documented and was never F15. What F15 asked for is done: the field `is_safety_claim` is **gone**. `led.summary()[0]` now contains `"safety_claim_classification": "NOT_PERFORMED"` and a 70-word note beginning *"This ledger performs NO classification … The absence of a classification is NOT a finding that the claim is harmless or out of scope."* `"is_safety_claim" in summary` → **False**, so a stale consumer gets a `KeyError` rather than a confident `false`. `src/toy/claim_ledger.py:138-150` records the reasoning, including why documenting a constant was judged insufficient.
 
-### 4.3 Risk findings
+**Guard 3 — F4 CLOSED, and this is what moved area 4 off FAIL.** The prior review's Q1/F4 was the single High finding in this section: `JointResult` had no field recording fixture kind, so the dashboard rendered `Suppression … SUPPORTED` and `Joint verdict: JOINT_SUPPORTED` on a scorer-validation oracle with only a 12 px grey "(toy fixture; conditional; not a safety finding)". At this HEAD, `benchmark.py:2562-2563` adds `subject_kind` ('trained' | 'fixture' | 'unknown') and `fixture_name` (required iff kind is 'fixture'), both normalised and cross-checked in `__post_init__` against the gate list's exemption flag. The rendered page (C5, from `python3 scripts/demo.py`) now reads:
 
-| ID | Severity | Finding |
-|---|---|---|
-| **F4** | **High** | Q1 as above. `JointResult` has no fixture-kind field and the dashboard verdict cell uses a single fixed qualifier. The distinction the benchmark docstring insists on is dropped at the rendering layer. Note: `to_experiment_records(scorer_validation=...)` does carry a kind string (`benchmark.py:1159-1160`), but the dashboard renders from `JointResult`, not from those records. Teammates are reworking `dashboard.py`/`benchmark.py`; this finding is against HEAD `79be9d4`. |
-| F5 | Medium | `.env.example` flags are inert (section 3.3). |
-| F15 | Medium | `is_safety_claim` literal False (section 4.1). |
-| F16 | Low | Demo line `[3]` and `CLEAN_CLONE.md:66` omit the protocol-mandated "conditional on deferred checks" (Q2). |
-| F17 | Low | CI workflow unexecuted but not disclosed in README or CLEAN_CLONE (Q13). |
+```
+SCORER-VALIDATION FIXTURE
+a test of the scorer on a fixture whose answer is known by construction;
+NOT a result about any method, model or intervention
+subject_kind is PRODUCER-ASSERTED: it records what the producer declared, not an
+authenticated fact. …
+H1 …  SUPPORTED  (SCORER-VALIDATION FIXTURE; conditional; not a safety finding)
+Joint verdict: JOINT_SUPPORTED (SCORER-VALIDATION FIXTURE; conditional; not a
+safety finding) CONDITIONAL on 6 unimplemented gate(s)
+Attempted 30, failed 0. Complete gate coverage: NO.
+```
+
+Every verdict cell carries the kind. The producer-asserted limit is stated on the page rather than only in a docstring. A post-construction relabel is detected and reported as an integrity failure. This is a complete fix of F4 and better than the finding asked for.
+
+### 4.3 Quotable surfaces at this HEAD
+
+| Rank | Direction | Status | Note |
+|---|---|---|---|
+| Q1 | "safe" | **CLOSED** | Was F4. The oracle is now named on the page. |
+| **Q2** | "safe" | **OPEN — F16** | `scripts/demo.py` `[3]` prints `verdict JOINT_SUPPORTED  [tests the scorer; says nothing about any method]`, then `DEMO OK … All checks passed.` The bracket is good and arguably stronger than "conditional" for a hostile-quoting purpose. It is still **not the form `EVALUATION_PROTOCOL.md:126` mandates**, in the same paragraph that says the document and the code must tell the same story. The dashboard complies; the demo, which the README tells a reader to run, does not. One string. |
+| Q3 | "safe" | OPEN, advisory | `INVARIANCE_HOLDS` still reads as "holds"; the enum comment and docstring still say "not refuted on these seeds". Unchanged, Low. |
+| Q4 | "safe" | OPEN, residual | `.env.example:3-4` still reads as a safety interlock when cropped. The docs now deny it (F5 closed); the file carries no marker of its own. |
+| Q5 | "safe" | OPEN, documented | A hollow `SUPPORTED` is one hash away (C11). Disclosed in the module docstring and now beside a `NOT_PERFORMED` classification. |
+| Q6 | "safe" | **OPEN, and the prior review's framing was wrong** | The prior review reported that the kit "prepends its own non-claim label to the user's claim". **Refuted at this HEAD (C12b):** the kit prepends nothing — the old fixture supplied `TOY_LABEL` itself. A record with `notes="model is safe; hazardous capability reduced 99%"`, or even `"VERIFIED SAFETY FINDING: model is safe"`, is accepted and rendered verbatim inside an `UNTRUSTED FREE TEXT (notes) - NOT EVIDENCE` box, under the page banner. The residual is real and unchanged in kind — the guard captions, it does not refuse — but it is the user's text beside the kit's captions, not the kit's label wrapped around the user's claim. |
+| Q7, Q10 | both | OPEN, advisory | `PROGRESS.md:1384` "a **genuine** `JOINT_SUPPORTED`" (journal history, immutable by this project's convention); `README.md:1,3` "safety-replication agent kit" / "Reproduce and independently audit"; the `SAFETY_AUDIT_KIT_COMPLETE` promise token in `ORCHESTRATOR_PROMPT.md:11`. The kit replicates no result; README:5 and :47 now substantially qualify this. |
+| Q13 | "safe" | **CLOSED** | Was F17. `CLEAN_CLONE.md:1042` now states plainly **"The CI workflow has never been executed."** Two bare Linux containers were measured at `81d450a` (1252/95/0 on 3.12.10 and 3.13.3) and the rows say what they are. `README.md:30,33` retract two earlier overclaims by name -- the host-egress claim and the remote-host claim, both **withdrawn** and deliberately not restated here, because restating a withdrawn guarantee inside a review of withdrawn guarantees is the defect this scan exists to catch -- and label hermeticity **unattested**. |
+
+No new "safe"-direction surface was found. One new "broken"-direction item is F18 (section 5.1): a reader can now quote the kit's own protocol saying it was never reviewed.
 
 ---
 
 ## 5. Cross-document consistency
 
-Every figure that appears in more than one place was checked. "OK" means all locations agree and agree with the recomputed value.
+**F2 — CLOSED.** The gate-11 scope divergence is resolved **in the direction of the code, by a logged amendment**, which is the correct direction given the code shipped first. `EVALUATION_PROTOCOL.md:141` and `:249` now read "**Global (amendment A-1, post-hoc)**: H1, H2, H3 and JOINT are all INCONCLUSIVE. A true gate, not block-only", matching `benchmark.py:181-182` `"control_adequacy": "all"`. The amendment log at `:449-451` carries A-1 with its provenance, and `:460-497` records a correction to A-1's own first version for a false provenance claim, plus the pre-existing r2 divergence as a separate item. `git log -- docs/EVALUATION_PROTOCOL.md` confirms the file has moved r3 → r10 across six commits since.
 
-| Figure | Locations | Result |
-|---|---|---|
-| 8 changed files; +914 / -138 | `README.md:12` (8 files); `FORK_AUDIT.md:12-19` (rows sum to 914/138; totals not stated); `DIFF_EVIDENCE.md:34-42`; `SOURCE_SNAPSHOT.json`; `PROGRESS.md` SR-00 entry; dashboard (computed); recomputed from diff (C2) | **OK** |
-| 691-line new file | `README.md:12`; `FORK_AUDIT.md:12`; `ERROR_REGISTER.md:10`; `METHOD_AUDIT.md:9`; diff and `wc -l` | **OK** |
-| Fork commits `12d5426...`, `5cbd18a...` | README:10; FORK_AUDIT:8,50-51; DIFF_EVIDENCE; METHOD_AUDIT; SOURCE_SNAPSHOT (C13: one distinct value each, no variants) | **OK** |
-| Merge base `e220924...` | README, FORK_AUDIT, DIFF_EVIDENCE, METHOD_AUDIT, SOURCE_SNAPSHOT, CLAUDE.md | **OK** |
-| `behind_by_vs_merge_base: 0` vs `behind_by_vs_upstream_main: 36` | `SOURCE_SNAPSHOT.json` (both keys + note); `DIFF_EVIDENCE.md:23-27,74,87`; dashboard rows (`dashboard.py:241-243`); `README.md:13` and `FORK_AUDIT.md:9` ("36") | **OK** on values. Caveat M2: README/FORK_AUDIT omit the time-variance note. DIFF_EVIDENCE:86 still describes the pre-relabel key, retained "for the audit trail" and explained at :87. |
-| Factor 42; net 0.42 | `METHOD_AUDIT.md:123-124,233`; `ERROR_REGISTER.md:95,97`; `test_failure_modes.py:63-64,72` | **OK** |
-| m = 4; 98.75% | `benchmark.py:25,78,198`; `EVALUATION_PROTOCOL.md:106,128,159,175`; dashboard prints `0.9875`; `bonferroni_level()` | **OK** |
-| Six deferred gates | `benchmark.py:79-81` (6 names); `EVALUATION_PROTOCOL.md:251-258` (D1-D6); dashboard ("6 unimplemented gate(s)", lists 6); `benchmark.py` docstring lines 50-55 | **OK** |
-| ER severity table vs entry headings | `ERROR_REGISTER.md:27-37` vs each entry; pinned by `test_register_structure`; PROGRESS SR-03 QA entry lists the same eleven | **OK**. (No written rubric for what each level means, per the SR-03 QA record.) |
-| Skip counts | Measured (C14): nothing installed **86**; PyYAML only **85**; torch blocked, numpy+PyYAML present **84**; torch+numpy+PyYAML+pytest **2**. `CLEAN_CLONE.md:32-35` (86/85/2); `PROGRESS.md` SR-15 entry (85, "84 with numpy present", 86 bare); commit `79be9d4` ("85") | **OK**, with the note that "85" is the count only for the torch-and-numpy-absent, PyYAML-present environment. CI job `core-no-deps` asserts PyYAML absent, so its expected count is 86. |
-| Test totals | `CLEAN_CLONE.md:28,32-34`: "673 run", pytest "671 passed"; `PROGRESS.md`/`79be9d4`: 739 / 737; measured (C14, C15): **739 ran, pytest 737 passed** | **DISAGREE** (F11): CLEAN_CLONE's table still says 673 / 671. The heading hedges ("later work adds more") but the table rows are stale by 66. |
-| ER-03 status | `ERROR_REGISTER.md:3,193`: "draft pending independent QA ... nothing here is QA-attested yet", "this file is not marked QA-attested"; `BUILD_BLUEPRINT.md:11` `[x] SR-03`; `PROGRESS.md:1421-1471` QA PASS (third pass) | **DISAGREE** (F3). The register says the opposite of the journal and the checkbox. |
-| Gate 11 (control adequacy) scope | `EVALUATION_PROTOCOL.md:122` ("gate 11 for H1/H2"), `:139` ("the implementation scopes it to H1/H2 only ... a decision to extend gate 11 to H3 ... is a protocol amendment"), `:240` ("**H1 and H2 only** ... H3 is still evaluated"); vs `benchmark.py:82-83` (`"control_adequacy": "all"`), `benchmark.py` docstring ("a failure makes H1, H2, H3 and JOINT INCONCLUSIVE"), commit `ff451e1`, `PROGRESS.md:1281-1290`, dashboard (reads `GATE_SCOPES`) | **DISAGREE** (F2). |
-| Protocol amendment log | `EVALUATION_PROTOCOL.md:390`: "none recorded"; the decision above is exactly what `:139` says "is a protocol amendment" | **Process gap** (F2). |
-| Dependency order | `BUILD_BLUEPRINT.md` Depends vs `[x]` | **DISAGREE** (F12), section 6. |
-| Journal runtime figures | `PROGRESS.md:1689-1699`: `test_benchmark` 49.6 s, `test_scripts` 13.7 s, `test_claim_ledger` 0.81 s | Attribution order reproduces (C15: 13.3 s, 3.6 s, 0.15 s on this host, `test_benchmark` dominant). Absolute numbers are load-dependent; the journal gives no load context. Informational. |
+**F3 — CLOSED.** `ERROR_REGISTER.md:3` now reads **"Status: QA-attested"** and `:191-213` carries a QA-status section naming the three passes, the scope of the attestation, the two caveats QA attached, and a closing paragraph restating what no amount of QA here establishes. The "nothing here is QA-attested yet" sentences are gone.
 
-### 5.1 Consistency findings
+**F11 — CLOSED / NO LONGER APPLICABLE.** The stale 673/671 totals are gone. `README.md:47` now instructs: **"Do not take a test total from the documentation — a hard-coded count there has gone stale three times and is now deliberately absent; obtain it from a run."** Removing the figure rather than refreshing it is the right remedy and the kit applied it.
+
+### 5.1 New finding
 
 | ID | Severity | Finding |
 |---|---|---|
-| **F2** | **High** | The pre-registration document and the scorer disagree on which hypotheses a failed control-adequacy gate blocks. Under the protocol text, a failed gate 11 permits an H3 verdict to be reported (JOINT cannot be SUPPORTED). Under the code, H1, H2, H3 and JOINT all become INCONCLUSIVE. The decision was made in commit `ff451e1` and logged in PROGRESS, but `EVALUATION_PROTOCOL.md` was not touched by that commit (git log for the file: `12bc490 710151f d87b48f`). Protocol:124 itself requires "the document and the code are required to tell the same story". A reader following the protocol would mis-predict the scorer's behaviour. |
-| F3 | Medium | ERROR_REGISTER self-description contradicts its QA status. A hostile reader can cite either direction ("the register says it is unreviewed"; "nothing here is QA-attested"). |
-| F11 | Low | CLEAN_CLONE test totals stale (673 vs 739). |
+| **F18** | **Medium** | **A marked task's deliverable denies its own attestation.** `docs/EVALUATION_PROTOCOL.md:3` states *"r9 was reviewed and FAILED (one blocking finding…); **r10 has not been independently reviewed**"*, inside a sentence that opens *"Version history, stated exactly"*. `PROGRESS.md:6362` records *"SR-09 r10: **PASS**. … **No blocking findings.**"*, and SR-09's `[x]` rests on exactly that PASS. The sentence was true when written and is false now. It is **deliberate**: the r10 reviewer declined to apply two one-phrase fixes because *"editing the document now would make the attested text and the live text differ — which is precisely the defect that unmarked SR-09 in the first place"* (`PROGRESS.md:6424-6428`). That reasoning is sound and the trade is real; it does not make the sentence true. `docs/SR16_AUDIT_REPORT.md` raised this and put it in its residuals register; it is still live at this HEAD. Minimum resolution: amend the sentence **and** re-attest, which the project's own rule requires anyway, or move the review-status sentence out of the attested body into a status line that is explicitly allowed to move. |
 
 ---
 
 ## 6. `docs/PROGRESS.md` honesty audit and `BUILD_BLUEPRINT.md` attestation audit
 
-### 6.1 Checkbox audit
+### 6.1 Checkbox and dependency audit, re-derived
 
-Produced by the script in C16 (dependency check) plus a manual read of every QA section.
+SOURCE OBSERVED (C16, a script that parses the blueprint rather than reading it). **13 of the 17 in-scope tasks (SR-00…SR-16) are `[x]`**; SR-12, SR-14, SR-15, SR-16 are open, and SR-17 is out of scope and `[ ]`.
 
-| Task | `[x]` | Depends | Unchecked dependencies | QA-PASS record in PROGRESS | Notes |
-|---|---|---|---|---|---|
-| SR-00 | x | none | none | Yes: `PROGRESS.md:27-64` ("Status: PASS", QA hand re-derivation, defects D1-D3) | OK |
-| SR-01 | x | SR-00 | none | Yes: `:145-162` | OK |
-| SR-02 | x | SR-01 | none | Yes: `:1392-1420` (third pass; QA confirms `git diff 12bc490 HEAD` empty) | OK |
-| SR-03 | x | SR-02 | none | Yes: `:1421-1471` (third pass) | OK for the cited content. Register's own header contradicts (F3). Two orchestrator nits were fixed after QA with QA's agreement. |
-| SR-04 | x | SR-00 | none | Yes: `:316-352` (92 mutants) | OK |
-| **SR-05** | x | SR-04 | none | **Indirect only.** There is **no** "SR-05 - QA verdict" section. The evidence of a PASS is the heading `## SR-05 - Residual defects closed (after QA PASS)` (`:831`), commit `710151f` ("SR-05: QA PASS; six residual defects then closed"), and the summary list at `:1472`. The only QA-derived detail is the orchestrator correction at `:685-708` (QA's re-review "partly refuted" the equivalent-mutant argument). No commands, mutant counts or test log by QA are recorded. | **F13.** CLAUDE.md requires "task ID, evidence, commands, results". The six residual fixes (D1 changes `train()` behaviour) were made after the PASS and are recorded as closed by the builder, with no QA re-check recorded. `teacher_student.py` has no commit after `710151f`, so the committed bytes are the post-fix bytes. |
-| SR-06 | x | SR-05 | none | Yes: `:1004-1022` | OK |
-| SR-07 | | SR-05 | | n/a (QA in progress per `:1777`) | Correctly unchecked. **But** ER-09 and ER-11 (inside the `[x]` SR-03 deliverable) rely on SR-07 results ("SR-07 reports max relative difference around 1e-7"; "To settle: SR-07's non-in-place numeric ops ..."). The 1e-7 figure was re-measured by SR-03's QA (`:1421-1471`), so the number stands; the SR-07 *module* is still unattested. |
-| SR-08 | x | SR-05 | none | Yes: `:1026-1053` | OK |
-| **SR-09** | x | SR-02, SR-04 | none | Yes: `:1057-1085`, **of v1-DRAFT-r2** | **F14.** `EVALUATION_PROTOCOL.md` was subsequently amended to **r3** in commit `12bc490` (new sections 8.1-8.3 and 4.1 items 5-7, six registered thresholds, block-only converged-budget rule, gate 11(c) exemption). No QA review of r3 is recorded (`grep r3 docs/PROGRESS.md` returns only the amendment entry). The checkbox attests a text that no longer exists. The r3 text also contains the F2 contradiction. |
-| SR-10 | | SR-06, SR-09 | | n/a (QA in progress) | Correctly unchecked. |
-| **SR-11** | x | **SR-10** | **SR-10 (unchecked)** | Yes: `:1580-1609` | **F12.** `[x]` on a task whose declared dependency is unverified. |
-| SR-12 | | SR-03, SR-11 | none | this review | Eligible. |
-| SR-13 | | SR-08, SR-10 | SR-10 | n/a (second FAIL fixed, third review pending) | Built while a dependency was unverified; unchecked. |
-| **SR-14** | x | **SR-13** | **SR-13 (unchecked)** | Yes: `:1655-1688`, `:1765-1773` | **F12.** `[x]` on a task whose declared dependency is unverified. |
-| SR-15 | | SR-12, SR-14 | SR-12 | n/a (built, pending QA) | Built before SR-12 existed. Correctly unchecked. |
-| SR-16, SR-17 | | | | n/a | OK |
+**No marked task has an unchecked dependency.** Verified independently of the orchestrator's claim: for all 18 rows the `UNCHECKED_DEPS` set is empty for every `[x]` row. The only non-empty sets are on unchecked rows (SR-15 on SR-12 and SR-14; SR-16 on SR-15; SR-17 on SR-16), which is correct.
 
-SOURCE OBSERVED: **nothing is marked `[x]` on a build alone.** Every one of the eleven `[x]` has a QA PASS stated in the journal, except SR-05 where the attestation is indirect as described. CLAUDE.md's "Complete only eligible tasks whose dependencies pass" is violated by SR-11 and SR-14. `PROGRESS.md:1774` ("Verified: 11 of 17") counts all eleven.
+**F12 — CLOSED.** The condition that produced it (SR-11 `[x]` over unchecked SR-10; SR-14 `[x]` over unchecked SR-13) cannot now hold anywhere in the file. More than that, the rule has been internalised: `PROGRESS.md:6431-6438` records SR-09 holding an independent PASS and **declining to mark itself** because SR-04 was unmarked, naming F12 as the reason.
 
-### 6.2 Are the journal's recorded self-corrections accurate?
+**F13 — CLOSED.** `PROGRESS.md:1974` is a full `## SR-05 — QA verdict: PASS` section whose opening sentence is *"This section exists because SR-12 found SR-05 had been marked `[x]` with no recorded QA verdict anywhere in this journal."* It records all three acceptance properties verified by the reviewer's own probes with figures, and all six post-PASS fixes re-verified by mutation in a scratch copy. `SR-00` also has a QA-verdict heading now (grep → 1).
 
-| Correction | Where | Check | Result |
-|---|---|---|---|
-| SR-05 "equivalent mutant" adjudication was too quick | `PROGRESS.md:685-708` | `train()` now type-checks `teacher` and compares `before`/`after` (`teacher_student.py`, `if after != before ...`) | **Accurate.** |
-| BSD `sed \b` rename produced 43 test errors | `:925-943` | Plausible and benign; not reproducible from the tree now. | Not re-verified; no conflict found. |
-| Torch-absent skip count is 85, not ~54 | `:1701-1730`, commit `79be9d4` | C14 | **Accurate**, with the environment-dependence in section 5. |
-| Suite slowdown was `test_benchmark`, not SR-14's `verify_chain` | `:1689-1699` | C15 | **Attribution accurate**; absolute seconds differ by host load. |
-| Stale `.pyc` caused spurious baselines (third occurrence) | commit `9b2d928` | The standing rule is implemented (`run_tests.sh`, `CLEAN_CLONE.md:24-26`). This review followed it (C14: `__pycache__` cleared, `PYTHONDONTWRITEBYTECODE=1`, none left). | Consistent; the original contamination is not re-creatable now. |
-| Citation fix claimed "applied everywhere" was not | `:1421-1471`, commit `96b5ac2` | `grep -rn "D:213-342" docs src tests` outside PROGRESS.md returns nothing (the only hit is this report quoting it). | **Accurate and since fixed.** |
-| "radial component" claim removed everywhere | `:1392-1420` | `grep -rn "removes any purely radial" docs src tests` returns only journal history lines | **Accurate.** |
-| Orchestrator attribution of baseline moves to concurrent edits was wrong | commit `9b2d928` | Not independently testable. | Not re-verified. |
+**F14 — CLOSED, and generalised into a rule.** The protocol's last commit is `46bf2ee` (r10); SR-09's attestation is at `81d450a`, which is **later**. `git log -- docs/EVALUATION_PROTOCOL.md` shows no commit after `46bf2ee`. **The attested text is the committed text.** The project also turned F14 into standing practice — see the quotation in F18 — which is a stronger outcome than the finding asked for.
 
-### 6.3 Does the journal overstate what was verified?
+### 6.2 Audit of the four marks made since the prior review
 
-SOURCE OBSERVED. It generally does not; it records its own limits (CI unexecuted, thresholds untuned, SR-15 pending). Three overstatements or omissions:
+Audited the way section 6.1 of the prior review audited the earlier ones: for each, does a real QA **PASS** record exist in `docs/PROGRESS.md` carrying task ID, evidence, commands, results, remaining uncertainty and commit SHA as `CLAUDE.md` requires, and is the attested text the committed text?
 
-1. **SR-05** has no QA verdict section (F13).
-2. **SR-09's** PASS is r2; the journal's list of "verified" tasks gives no r3 qualifier (F14).
-3. **SR-11/SR-14 `[x]`** are listed in "Verified: 11 of 17" without noting that their dependencies are unverified (F12).
+| Task | Marking commit | QA PASS record | ID | Evidence | Commands | Results | Uncertainty | SHAs | Attested == committed | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **SR-06** | `a04efa4` | `PROGRESS.md:11314` | yes, clause quoted from `BUILD_BLUEPRINT.md:15` | 11 real-defect mutants KILLED, 1 proven equivalent, 67 verdict-flip cases, ~20k cells over six environments, single-conversion-read measured, independent route enumeration 46 − 2 = 44 agreeing | per-module on both interpreters × {normal, `-OO`} × {numpy, none}; two-interpreter matrix | full suite 1466/0 at the marked tree | **5 items**, incl. the raising-`__class__` channel OPEN at 28 of 44 routes and an explicit *"Marking SR-06 does not close it and must not be read as closing it"* | `4982b90`, `ab46e0e`, `d9a0dfe` | `stability.py` last commit is `d9a0dfe`, within the attested set; the entry proves the three commits are documentation-and-test only by **AST comparison with docstrings stripped** | **OK** |
+| **SR-10** | `96aed7c` | `PROGRESS.md:11989` | yes, clause quoted | determinism bit-exact (two digests over hashseed × interpreter × repeat); CIs reproduce bitwise from records; no shared RNG (5 sites); failed seeds do not perturb survivors; statistics validated against a 40-dps mpmath reference; the FAIL (six routes past the min-seeds floor) and its close | per-module × both interpreters × {normal, `-OO`}; `run_tests.sh --expect none --twice`; baseline regenerated | bare-venv 1482/90/0; full suite 1482/0 both interpreters | **6 items**, incl. the record-label channel OPEN with a pin that fails when it closes, and bootstrap order-dependence measured at 57 distinct `boot_lo` values | `775dedf`, `afe94eb` | `benchmark.py` has no commit after `afe94eb` other than this entry's own | **OK** |
+| **SR-11** | `34f303a` | `PROGRESS.md:12317` | yes, clause quoted | 30 write routes driven from the code (14/14 supported-API writes refused), 8 killing mutants on the immutability machinery; the FAIL (`assert_no_silent_default` certifying from zero fixtures) and its structural cause; the attester planting a **new public certifier in both bookkeeping tables** so only behaviour could see it — and it was caught | per-module × both interpreters × {bare, `-OO`}; `--expect none --twice`; baseline regenerated | bare-venv 1488/90/0; full suite 1488/0 both | **5 items**, incl. the `vars()` write route OPEN with its measurement, and `_check_seeds`'s `int.__int__` declared redundant | `968ebc9` | `robustness.py` has no commit after `968ebc9` | **OK** |
+| **SR-13** | `9621e42` | `PROGRESS.md:12524` | yes, clause quoted | half 1 smoke test measured on both interpreters × {plain, `-OO`} with byte counts, section counts, CSP, and zero hits for biological-generator markers; half 2 failed verbatim at HEAD through the **fully public API with no `object.__setattr__`** and was closed; attester's own 9-site × 3-shape sweep, 27 forgeries, 0 findings on three environments | per-module × both × {plain, `-OO`}; `--expect none --twice`; baseline regenerated | bare-venv **1493/90/0, run1 == run2** | **4 items**, plus the producer-side gap routed to this review | `e997943` | `dashboard.py` has no commit after `e997943` | **OK** |
 
----
+**All four are sound records** and are markedly better than the project's earlier ones: each quotes its blueprint clause verbatim, each records a FAIL before the PASS, each lists remaining uncertainty as open rather than closed, and each ends with an "orchestrator errors this task" section counting the integrator's own mistakes (six on SR-10, two on SR-11, zero on SR-13). I found no case where the attested text differs from the committed text, and no case where a mark rests on a build alone.
 
-## 7. Findings index
+**One qualification, and it is F17-R again.** In all four, the decisive evidence is mutation evidence — "11 mutants KILLED", "8 killing mutants", "a mutant that sorts inside `bootstrap_means` kills it", "proved at AST level". None of it is re-runnable from this repository (section 8.1). The records are internally excellent and externally unverifiable.
 
-| ID | Severity | One line | Section |
-|---|---|---|---|
-| F1 | Medium-High | `checkpoint.py:13,45` says the key mismatch is "silent"; the cited upstream source raises `KeyError`; the incompatibility is INFERENCE | 3.3 |
-| F2 | High | Protocol says gate 11 scopes to H1/H2; the scorer scopes it to all; no amendment recorded | 5.1 |
-| F3 | Medium | ERROR_REGISTER says "nothing here is QA-attested yet"; SR-03 is `[x]` with a third-pass PASS | 5.1 |
-| F4 | High | Dashboard shows "Suppression ... SUPPORTED / JOINT_SUPPORTED" with only a small "toy fixture" qualifier, and cannot tell an oracle result from any other | 4.3 |
-| F5 | Medium | `.env.example` flags are read by no code; CLEAN_CLONE says they "govern" the app | 3.3 |
-| F6 | Medium | Toy normalization "inflates"; source nets a 0.42 deflation; not disclosed | 2.2 |
-| F7 | Low | "correct element count" / "audited bug analogue" vs audit's "may be intentional" | 2.2 |
-| F8 | Low | Toy rescale docstring does not say its single-scalar property does not carry over | 2.2 |
-| F9 | Low | `stability.py:29` "the thing it mimics" treats a conditional NaN hazard as a property of the source | 3.3 |
-| F10 | Low | Commit messages state INFERENCE as "confirms" / "direct evidence" / "load-bearing" | 3.3 |
-| F11 | Low | CLEAN_CLONE test totals 673/671 vs 739/737 | 5.1 |
-| F12 | High (process) | SR-11 `[x]` with SR-10 unchecked; SR-14 `[x]` with SR-13 unchecked | 6.1 |
-| F13 | Medium (process) | SR-05 `[x]` with no QA verdict section; residual fixes un-re-attested | 6.1 |
-| F14 | Medium (process) | SR-09 `[x]` attests r2; live protocol is r3 | 6.1 |
-| F15 | Medium | `is_safety_claim` is a literal; a single reviewer can reach SUPPORTED on a safety-claim statement with a hollow hash | 4.1 |
-| F16 | Low | Demo `[3]` omits the protocol-mandated "conditional" qualifier | 4.3 |
-| F17 | Low | CI workflow unexecuted; not disclosed in README/CLEAN_CLONE | 4.3 |
-| M1-M4 | Low/Info | FORK_AUDIT not updated to METHOD_AUDIT hedges; README "36" without time caveat; two minor over-hedge/garble items | 1.3 |
+### 6.3 New finding
+
+| ID | Severity | Finding |
+|---|---|---|
+| **F19** | **Low (process)** | **The journal's attestation ordinals contradict each other and the contradiction is recorded as unresolved.** Numeric labels and word ordinals disagree: SR-13 is labelled `(4th)`, `(5th)`, `(6th)`, `(8th)` — **no `(7th)`** — then "fails **tenth**" (`:9988`) and "**eleventh** attestation" (`:12424`); SR-11 runs `(6th)`, `(7th)`, then "fails **eighth**" (`:10191`). `PROGRESS.md:8631-8633` states the problem in the journal's own words — *"the journal's own ordinals disagree with the count … **Which series is authoritative is UNKNOWN**"* — and a sweep of everything after that line finds **no resolution**. The orchestrator quoted these counts to reviewers before catching it. **Judgement: this matters, but less than it looks, and not for the reason it first appears.** It is not cosmetic, because the ordinals are the only record of how many independent passes a mark rests on, and "nine FAILs then a PASS" and "five FAILs then a PASS" are different claims about a checkbox. It is nonetheless Low, because the *substance* each ordinal labels is intact and individually datable from `git log` and the section headings — the count is recoverable by derivation, which is this project's own prescribed remedy ("a verified list is derivable from `docs/BUILD_BLUEPRINT.md` and should be derived, not typed"). The integrity defect is that a **typed** figure was relayed as authoritative; the audit's substance does not rest on it. Minimum fix: derive the counts once and state that the typed labels are historical. |
+
+### 6.4 SR-14: may it be marked on its old PASS?
+
+**The premise routed to me is refuted. SR-14's attestation is against bytes that still exist.**
+
+The concern was that `79be9d4` recorded SR-14's PASS and that `50cb3d3` and `3869655` then modified `src/toy/claim_ledger.py`, making the attestation F14-shaped. That is true **of the PASS the prior review cited**, and the prior review's F12 correctly unmarked SR-14 on a different ground. But SR-14 has been **independently re-attested twice since**, and the later of the two is after every change to its files (C18):
+
+- `8e3faf2` — round-3 record, "SR-11/14 PASS unmarked". **Older** than `3869655`.
+- `3869655` — last commit to touch `src/toy/claim_ledger.py`.
+- `958cd0f` — last commit to touch `tests/toy_tests/test_claim_ledger.py`.
+- **`eef9341`** — `PROGRESS.md:5097`, *"SR-14 — PASS a third time, and re-measured rather than re-read"*: 500 transition combinations (5 accepted, 0 illegal acceptances, 0 legal refusals), 6 events × 14 fields × 9 values = 738 forgeries, 0 accepted, both documented residuals open and unchanged, and `N1` recorded as surviving *"neither closed nor silently fixed"*. **Newer** than both.
+
+Verified: `git diff eef9341 HEAD -- src/toy/claim_ledger.py tests/toy_tests/test_claim_ledger.py` is **empty**. The module imports only three names from a file that did change (`src/toy/schema.py`, +242/−11 since): `EvidenceClass`, `TOY_LABEL` and `canonical_json`. I compared all three by AST at `eef9341` and at HEAD — **all three identical** (C19). `SCHEMA_VERSION` likewise.
+
+**Plain statement: SR-14's existing PASS is a valid attestation of the committed bytes, and nothing in F14's shape blocks marking it.** Two things that are *not* byte questions, and that are the orchestrator's call rather than mine:
+
+1. **The PASS is dated 2026-11-10, round 4.** Twenty-three attestation rounds have happened since, during which this project discovered four defect classes it had not been testing for — the parameter lane, the probe lane, the element lane, and the container/`__len__` lane — and those discoveries unmarked SR-04, SR-06, SR-09 and SR-10 and failed SR-11 and SR-13 repeatedly. `claim_ledger.py` has never been swept for any of them. SR-14's PASS is sound **by the standard in force when it was given**; whether that standard is the one now applied to this kit's other modules is a question with an obvious answer.
+2. SR-14's blueprint clause ("duplicate event/idempotency and invalid transition tests") is narrower than the clauses those sweeps failed, so the gap may well be immaterial. **That is INFERENCE, not a measurement**, and I did not drive a lying container or a duck-typed operand into the ledger to check.
 
 ---
 
-## 8. Limits of this review
+## 7. Status of every finding in the superseded review
 
-- UNKNOWN: any runtime behaviour of the fork. Not executed; INFERENCE claims stay INFERENCE.
-- Live GitHub state was not queried (no network). SR-01's recorded pass stands for those figures.
-- The CI workflow was not run (no remote). The Linux CPU skip count was not observed.
-- Teammates are concurrently reworking `src/toy/dashboard.py`, `src/toy/benchmark.py` and their tests. **The suite did not move under this review**: HEAD stayed `79be9d48cd0c78a131252026c28e5ed1f7d37dac`, `git status --short` stayed empty, and every run reported 739 tests. Findings F2, F4, F16 are against that HEAD and may be fixed by in-flight work; re-run section 9 after any change.
-- Hostile-reader coverage is bounded by what I thought to try. Circumvention probes covered the ledger and record free-text paths, not the checkpoint, schema or robustness APIs.
-- I wrote scratch scripts under the session scratchpad only (`.../scratchpad/qa15/`); nothing in the repository was edited by this review.
+| ID | Prior severity | **Status at `9621e42`** | Evidence |
+|---|---|---|---|
+| F1 | Medium-High | **CLOSED** | `checkpoint.py:13-18, 47-51`; §3 |
+| F2 | High | **CLOSED** | protocol r10 §141, §249 vs `benchmark.py:181-182`; amendment A-1 logged; §5 |
+| F3 | Medium | **CLOSED** | `ERROR_REGISTER.md:3, 191-213`; §5 |
+| F4 | High | **CLOSED (verified, not accepted)** | `benchmark.py:2562-2563`; rendered page, C5; §4.2 |
+| F5 | Medium | **CLOSED** (Q4 residual) | `CLEAN_CLONE.md:813-816`; `README.md:30`; C6; §3 |
+| F6 | Medium | **CLOSED** | `teacher_student.py:244-256`; §2 |
+| F7 | Low | **STILL OPEN** (advisory) | `teacher_student.py:238` |
+| F8 | Low | **STILL OPEN** (advisory) | `teacher_student.py:176-179` |
+| F9 | Low | **STILL OPEN** (advisory) | `stability.py:52` |
+| F10 | Low | **STILL OPEN by construction** | immutable commit messages |
+| F11 | Low | **NO LONGER APPLICABLE** | figure removed, not refreshed; `README.md:47` |
+| F12 | High (process) | **CLOSED** | C16; §6.1 |
+| F13 | Medium (process) | **CLOSED** | `PROGRESS.md:1974` |
+| F14 | Medium (process) | **CLOSED, and generalised into a rule** | `git log -- docs/EVALUATION_PROTOCOL.md`; `PROGRESS.md:6424-6428` |
+| F15 | Medium | **CLOSED (verified, not accepted)** | `claim_ledger.py:138-150`; C11; §4.2 |
+| F16 | Low | **STILL OPEN, re-graded Medium** | `scripts/demo.py:137-138` vs protocol `:126`; §4.3 |
+| F17 | Low | **CLOSED** | `CLEAN_CLONE.md:1042`; §4.3 Q13 |
+| M1–M4 | Low/Info | M1, M2 **STILL OPEN** (advisory); M3, M4 immaterial | §1.2 |
+
+**New at this HEAD:** F17-R (§8.1), F18 (§5.1), F19 (§6.3), F20 (§8.2), F21 (§8.3).
+
+---
+
+## 8. Reproducibility — the area that fails
+
+### 8.1 F17-R: the evidentiary base is not reproducible from a clone
+
+SOURCE OBSERVED (C20), verified independently rather than taken from the brief:
+
+```
+git ls-files | grep -iE "mutat|mutant"      →  (nothing)
+git ls-files scripts/                        →  demo.py  lint.sh  run_tests.sh  test_baseline.txt
+grep -ci killed  docs/PROGRESS.md            →  260
+grep -ciE '\bmutant' docs/PROGRESS.md        →  276
+```
+
+**No mutation tooling has ever been tracked in this repository.** Every harness built across roughly 27 attestation rounds lived in a session scratchpad and is gone. The journal records this itself, in SR-11's marking entry, in the strongest terms available to it: *"every mutation result in this journal — hundreds of KILLED/unkilled claims, including most of the evidence behind the marks — is UNREPRODUCIBLE FROM THE REPOSITORY."*
+
+**Judgement of what it costs.** Three things, in order:
+
+1. **The claims most of the marks rest on cannot be checked by anyone.** Section 6.2's four marks are typical, not exceptional: the decisive line in each is a mutation count. SR-04, SR-05 and SR-08's records are the same shape. A reader who clones this repository can reproduce **every test count, every skip, the determinism property, the demo, the dashboard bytes and the lint result** — I did, in section 9 — and **not one** KILLED claim. The project's own standard, stated in `CLAUDE.md` and applied repeatedly to its own owners, is that *a count of a construct is not a measurement of its behaviour* and that an asserted enumeration must be performed. By that standard, 260 lines of this journal are assertions.
+2. **It is not total, and saying so would be the opposite error.** Mutation evidence supports a claim of the form "this test catches that defect". Where the journal names the edit precisely — and often it does, e.g. *"a mutant that sorts inside `bootstrap_means` kills it"*, *"reverting to `(5,5)` is KILLED"* — a reader **can** re-derive the kill by hand in a scratch copy and a targeted test run, which `CLAUDE.md` itself notes is logically sufficient for a KILL. What is irrecoverable is the **set**: which mutants were generated, by what rule, at which sites, and therefore what a **survivor** means. SURVIVE claims, which assert that *nothing* catches a mutant, are the ones that are simply gone. The journal's own equivalence arguments (SR-06's one equivalent mutant; SR-14's `N1`) are in that category.
+3. **It compounds, because the kit is a provenance kit.** This is a project whose subject is whether other people's safety claims are supported by reproducible evidence, and whose own central finding across 27 rounds is that *a sentence describing a mechanism's reach is not the mechanism*. Its own strongest evidence is a set of sentences describing mutation runs. The asymmetry is the finding.
+
+**This does not retroactively invalidate any mark.** Each of the four audited in 6.2 was attested by someone who built their own harness and re-derived the figures independently, which is a real control and better than re-reading. It does mean that **SR-16's claim-evidence matrix cannot be sound as currently conceived**, since the "evidence" column for most marks would have to read UNREPRODUCED, and that **SR-15's "complete offline regression suite passes" is a narrower guarantee than the project's evidence base**.
+
+### 8.2 F20: the suite's pass/fail is hostage to third-party pytest plugins
+
+**Measured at this HEAD (C14), serially, caches cleared, `PYTHONDONTWRITEBYTECODE=1`:**
+
+| Run | Result |
+|---|---|
+| 3.12.4 (`/Library/Frameworks/…/3.12/bin/python3`, numpy 2.4.6, torch 2.7.1), `unittest discover` | **Ran 1493 tests — OK (skipped=2)** |
+| 3.13.5 (ambient `python3`, numpy 2.4.4, no torch), `unittest discover` | **Ran 1493 tests — FAILED (failures=4, skipped=84)** |
+| 3.13.5, same command, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, `test_scripts` only | **Ran 156 tests — OK** |
+| bare venv 3.12.4 (`--without-pip`, nothing third-party), `./scripts/run_tests.sh --expect none --twice` | **`RESULT: OK` — ran=1493 skipped=90 failed=0; `deterministic: run1 == run2`, identical per-module counts and skip list** |
+
+The four failures are `test_scripts.TestRunTestsMechanics.{test_pytest_failing_while_unittest_passes_is_POLICY_PYTEST_FAILED, test_pytest_skip_count_mismatch_is_compared, test_pytest_unittest_count_mismatch_fails}` and `TestRunTestsPolicyDetails.test_pytest_unittest_skip_count_mismatch_fails`. All four spawn `scripts/run_tests.sh` with pytest enabled; all four fail with `POLICY:PYTEST_FAILED` / `POLICY:PYTEST_COLLECTED pytest collected 0 tests`, and the sub-run's log carries:
+
+```
+OSError: Could not find/load shared object file 'libllvmlite.dylib'
+        from resource location: 'llvmlite.binding'
+```
+
+**Attributed, not guessed.** The same crash reproduces from `python3 -m pytest -q .` in an empty scratch directory containing one trivial passing test, i.e. it is a property of the host's miniconda environment and not of this repository. The cause is a broken `llvmlite`/`numba` installation reached through a `pytest11` entry point; `importlib.metadata.entry_points(group='pytest11')` on that interpreter lists seven third-party plugins. Disabling autoload turns the module green.
+
+**Why it is a finding and not just a broken laptop.** `README.md:33` says the documented commands "need only Python 3.12+ and no network or credentials". That is true of a bare interpreter — the fourth row proves it. It is **not** true of a developer machine, where whether the suite passes is decided by `pytest11` entry points that nothing in this kit installs, declares or bounds. This kit has already been bitten by exactly this class once and fixed half of it: `README.md:37` records that *"for one round the commands below failed on any machine without `ruff`"*, and the fix was that "an absent optional tool now changes **which tests run**, never whether the suite passes." **A present-but-broken optional tool is the uncovered half of that same sentence**, and it is live. Minimum fixes, either sufficient: have `run_tests.sh` treat a pytest process that crashes before collection as `pytest unusable → skipped` with a loud note rather than `POLICY:PYTEST_FAILED`; or set `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` for the sub-run and document it.
+
+**This also corrects a figure I was given.** "Full suite 1493 ran / 0 failed on both interpreters" reproduces exactly on 3.12.4 and **does not** reproduce on the ambient 3.13.5 interpreter in this environment without `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`. The ran count (1493) and the skip count (84) match; the failure count does not.
+
+### 8.3 F21: a producer-side container gap in `benchmark.py`
+
+**Reproduced at this HEAD (C21), through class-level assignment with no `object.__setattr__` and no instance mutation:**
+
+```
+HONEST:  verdict JOINT_SUPPORTED | complete_gate_coverage = False | len(deferred) 6
+ROUTE A (bm.JointResult.deferred_gates = a tuple subclass holding the honest six
+          whose __len__ answers 0):
+         complete_gate_coverage = True
+         tuple(joint.deferred_gates) -> 6 names still present
+ROUTE B (object.__setattr__ on the instance):   complete_gate_coverage = True
+ROUTE C (plain assignment):  FrozenInstanceError cannot assign to field 'deferred_gates'
+```
+
+`JointResult.complete_gate_coverage` is `return not self.deferred_gates` (`benchmark.py:2650-2651`), a truth test, so the container's `__len__` decides a flag whose meaning is *"every protocol check has been implemented and run"*. The result object then **contradicts itself**: the flag says coverage is complete and the list it is derived from still holds six names.
+
+**Judgement on the routing: it was right. SR-10 should NOT be unmarked.** Three grounds, the first two agreeing with the attester and the third correcting the reason recorded for the agreement:
+
+1. **The clause.** SR-10's blueprint clause is *"statistical test fixtures and repeatability"*. `complete_gate_coverage` is neither a statistic nor an interval. For every value the module's own constructors can produce it is correct, deterministic and repeatable — measured above.
+2. **No public argument reaches it.** `deferred_gates` is **not a dataclass field** (C21: `dataclasses.fields(JointResult)` lists 15 names, and `deferred_gates` is not among them); the constructor rejects it as a keyword; `dataclasses.replace` cannot set it; the frozen `__setattr__` refuses it. The only routes are patching the class object or `object.__setattr__`. A caller who can do the former can equally replace `DEFERRED_GATES`, `GATE_SCOPES` or `combine_joint`; under that threat model nothing in any module is defensible, and it is not the threat model that failed SR-11 or SR-13 — in both of those the hostile object arrived as an **argument to a public function**.
+3. **The reason recorded for the agreement is wrong, and the right reason is stronger.** `PROGRESS.md:12613` says *"the forgery needs post-construction `object.__setattr__`"*. It does not: Route A above is a class-attribute assignment and reproduces the flag flip. `benchmark.py:115-116` already documents the class-level route — but with the payload `()`, an **honestly empty** tuple, which makes the flag and the list agree. The lying container is a different outcome: not "coverage was redefined" but "the object now contradicts itself". The defensible reason to keep SR-10 marked is **"nothing a caller can pass reaches this"**, not "it needs `object.__setattr__`" — and the distinction matters, because this project's own rule is that *"I needed `object.__setattr__` to reproduce it"* is a smell that should send you back to re-check the public route. Someone did send me back, and the public route is genuinely closed; the sentence that said why was not.
+
+**Recorded producer-side, as the attester's condition required, and not as "the dashboard handles it."** `dashboard.py` does handle it, completely and deliberately: `dashboard.py:2448-2457` reads both the flag and the list and raises `deferred_ok = deferred is not None and cover is not bool(deferred)`, rendering *"NO (the result's own deferred-gate list CONTRADICTS its complete_gate_coverage flag, which the scorer derives from that list; the list is what is shown)"* and withholding every decisive verdict. That is one consumer's cross-check, and the finding survives it on three grounds: `git grep complete_gate_coverage` shows `dashboard.py` is today the **only** reader outside tests and the two protocol paragraphs; **nothing makes the next reader cross-check**, and SR-14, SR-15 and SR-16 may each add one; and `benchmark.py` carries `_plain_number`, `_plain_parameter`, `_metric_read`, `_plain_word`, `_plain_word_fields` and three declared lane tables (`PROBE_LANE_CONSTANT_LOOKUPS`, `ELEMENT_LANE_ATTRIBUTE_READS`, `KEY_LANE_…`) for stored **values**, **attributes** and **keys**, and **nothing whatever for containers** (C21: the string `CONTAINER` does not occur in the file). That is a categorical gap with three precedents in the same module for how it is normally closed. The cheapest honest producer-side fix is one line — derive the flag from a materialised read, `return not tuple(self.deferred_gates)`, or better, report a contradiction rather than a boolean.
+
+**Credit where due:** `EVALUATION_PROTOCOL.md:126` and `:260` already disclose that the flag "is derived from a class-level list that code could override; not tamper-proof", so the protocol does not overclaim. The defect is that the producer's own self-consistency is left to a consumer.
 
 ---
 
 ## 9. Reproducible commands and recorded output
 
-Set once. `$KIT` is the repository root; `$SRC` is the saved fork material (script and diff only; **do not execute the script**).
+Every command below was run at HEAD `9621e42` with a clean tree, caches cleared, `PYTHONDONTWRITEBYTECODE=1`, and **serially — nothing ran alongside a suite**. Each row says whether it reproduces from a clean clone.
 
 ```sh
 KIT=/Users/shrey/Projects/safeRFd/safe_rf_safety_agent_kit
-SRC=/private/tmp/claude-501/-Users-shrey-Projects-safeRFd/4a75912c-f714-454a-b257-94c88ac513f7/scratchpad/fork_source
-ANC=e22092420281c644b928e64d490044dfca4f9175
-S=/private/tmp/claude-501/-Users-shrey-Projects-safeRFd/4a75912c-f714-454a-b257-94c88ac513f7/scratchpad/qa15
-cd $KIT && git rev-parse HEAD && git status --short
+S=<session scratchpad>/qa12
+cd $KIT && git rev-parse --short HEAD && git status --porcelain
 ```
+→ `9621e42`, then nothing. **Reproduces from a clean clone at this commit.**
 
-Output: `79be9d48cd0c78a131252026c28e5ed1f7d37dac`, then nothing (clean).
-
-### C1. Script and diff identity (no execution)
+### C2. Snapshot arithmetic and SHA spellings — **reproduces**
 
 ```sh
-shasum -a 256 $SRC/erasure_teacher_student.py $SRC/fork_only.diff
-wc -l $SRC/erasure_teacher_student.py $SRC/fork_only.diff
-sed -n '652,1342p' $SRC/fork_only.diff | sed 's/^+//' | cmp - $SRC/erasure_teacher_student.py && echo IDENTICAL
+python3 -c "import json;d=json.load(open('docs/SOURCE_SNAPSHOT.json'));print(d['ahead_by'],d['behind_by_vs_merge_base'],d['behind_by_vs_upstream_main'],len(d['changed_files']),sum(f['additions'] for f in d['changed_files']),sum(f['deletions'] for f in d['changed_files']))"
+for f in README.md docs/FORK_AUDIT.md docs/DIFF_EVIDENCE.md docs/METHOD_AUDIT.md docs/SOURCE_SNAPSHOT.json CLAUDE.md; do echo -n "$f: "; grep -o '\b[0-9a-f]\{40\}\b' $f | sort -u | tr '\n' ' '; echo; done
 ```
+→ `2 0 36 8 914 138`; one spelling per SHA in every file (§1.1).
 
-```
-1fef6383548419a1175b1732828d04105e384e7f8fc1759d19c7b6207090f17b  .../erasure_teacher_student.py
-fe3753f3037905b0b06a3e6eb0e0de6eed876d6e3701197302a85eedb1fb9e86  .../fork_only.diff
-     691 erasure_teacher_student.py
-    1342 fork_only.diff
-IDENTICAL
-```
-
-### C2. Per-file additions and deletions recomputed from the diff text
+### C5. Demo and dashboard — **reproduces** (byte counts are timestamp-pinned in the demo)
 
 ```sh
-grep -c '^diff --git' $SRC/fork_only.diff
-awk '/^diff --git/{f=$3} /^\+\+\+ /||/^--- /{next} /^\+/{a[f]++} /^-/{d[f]++} END{for(k in a)print k,a[k],d[k]+0; ta=0; td=0; for(k in a){ta+=a[k];td+=d[k]}; print "TOTAL",ta,td}' $SRC/fork_only.diff
-```
-
-```
-8
-a/rfdiffusion/diffusion.py 13 6
-a/rfdiffusion/util_module.py 1 1
-a/rfdiffusion/inference/utils.py 67 56
-a/rfdiffusion/inference/model_runners.py 37 8
-a/rfdiffusion_erasure_teacher_student.py 691 0
-a/rfdiffusion/util.py 71 28
-a/config/inference/base.yaml 1 1
-a/rfdiffusion/kinematics.py 33 38
-TOTAL 914 138
-```
-
-### C3. Citation spot checks against the script (text read only)
-
-```sh
-for n in 36 37 38 39 58 59 68 71 72 84 85 90 92 93 101 102 122 123 124 140 141 178 179 193 211 261 262 265 279 280 322 323 361 384 438 440 448 474 477 479 586 590 591 592 593 609 611 661 663 677; do printf "%s: " $n; sed -n "${n}p" $SRC/erasure_teacher_student.py | cut -c1-110; done
-for r in 199,203 218,230 236,246 284,288 290,297 302,313 325,325; do sed -n "${r}p" $SRC/erasure_teacher_student.py; done
-grep -n "nan\|isfinite\|seed\|weights_only\|torch.load\|clip_grad\|set_detect\|load_checkpoint" $SRC/erasure_teacher_student.py
-```
-
-Selected output (every other line likewise matched its citation):
-
-```
- 286:        concept_adj = self.eta * (px0_cond - px0_uncond)
- 287:        target = px0_uncond - concept_adj
- 290:        px0_uncond_norm = px0_uncond.norm(dim=-1, keepdim=True)
- 295:        scale_factor = torch.clamp(scale_factor, 0.1, 2.0)
- 306:        element_loss = (px0_student - stable_target.detach()) ** 2 * 0.01  # Detach target
- 311:            loss = masked_loss.sum() / valid
- 313:            RuntimeError
- 325:        return loss
- 350:        torch.autograd.set_detect_anomaly(True)
- 373:        grad_norm = torch.nn.utils.clip_grad_norm_(
- 477:    def load_checkpoint(self, path: str):
- 479:        checkpoint = torch.load(path, map_location=self.device)
-```
-
-`grep` for `seed`, `isfinite`, `nan` printed no script lines; `load_checkpoint` appears only at its definition (477).
-
-### C4. Ancestor citations
-
-```sh
-g(){ git -C /Users/shrey/Projects/safeRFd show "${ANC}:$1"; }
-g rfdiffusion/diffusion.py | sed -n '103p;621p'
-g rfdiffusion/inference/model_runners.py | sed -n '234p;335p;533,534p;603p;646p;662p;676p;682p;721p;742p'
-g rfdiffusion/inference/utils.py | sed -n '360p;447p;508,512p'
-g rfdiffusion/util.py | sed -n '588,589p'
-g rfdiffusion/Track_module.py | sed -n '415,416p'
-g config/inference/base.yaml | sed -n '17p;50p;77p;82,83p;117p'
-```
-
-Output (excerpt):
-
-```
-            delta[diffusion_mask, ...] = 0
-            diffusion_mask (torch.tensor, optional): Tensor of bools, True means NOT diffused at this residue, False means diffused
-        model.load_state_dict(self.ckpt['model_state_dict'], strict=True)
-        self.diffusion_mask = self.mask_str
-        ...
-    def sample_step(self, *, t, x_t, seq_init, final_step):
-class SelfConditioning(Sampler):
-        with torch.no_grad():
-        self.prev_pred = torch.clone(px0)
-        px0_[~atom_mask] = float("nan")
-        if align_motif and diffusion_mask.any():
-        if conf.inference.model_runner == "default": ... "SelfConditioning" ...
-xyzs_in_base_frame = torch.ones((22, 27, 4))
-            R_in = R_in.detach() # detach rotation (for stability)
-  align_motif: True / p_drop: 0.15 / T: 50 / crd_scale: 0.25 / partial_T: null / sidechain_input: False
-```
-
-(Line 234 output shows the `model.load_state_dict(self.ckpt['model_state_dict'], strict=True)` statement. This is the evidence for F1: a missing dictionary key is a `KeyError`.)
-
-### C5. Render the dashboard and the demo; extract text
-
-```sh
-cd $KIT && PYTHONDONTWRITEBYTECODE=1 python3 scripts/demo.py --keep > $S/demo.out 2>&1; echo rc=$?
-# the demo prints the kept temp dir ("--keep: outputs left in <dir>"); copy dashboard.html out, then delete that dir
-D=$(sed -n 's/^--keep: outputs left in //p' $S/demo.out); cp "$D/dashboard.html" $S/dash_demo.html && rm -rf "$D"
-grep -o 'class="[^"]*"' $S/dash_demo.html | sort | uniq -c | sort -rn
-python3 -I -c "
-import re,html,sys
-s=open('$S/dash_demo.html').read()
-t=html.unescape(re.sub(r'<[^>]+>','\n',re.sub(r'<style.*?</style>','',s,flags=re.S)))
-print('\n'.join(l.strip() for l in t.split('\n') if l.strip()))" > $S/dash_demo.txt
-```
-
-Demo output (verbatim):
-
-```
-[1] toy teacher/student: loss 0.2403 -> 0.0579 over 60 steps (evidence class TOY_RESULT)
-[2] checkpoint saved + verified, digest 829f5c0f389ee189...; tampered copy rejected
-[3] scorer-validation fixture (ORACLE_GATED) scored on 30 seeds: verdict JOINT_SUPPORTED  [tests the scorer; says nothing about any method]
-[4] robustness probe (row reorder on mse_fsum, 12 seeds): status INVARIANCE_HOLDS
-[5] claim ledger: 2 events, chain verified, claim state REVIEWED (not SUPPORTED)
-[6] dashboard rendered (28396 bytes, byte-identical on re-render): ...
-DEMO OK in 2.9s. All checks passed.
-```
-
-`rc=0`. Dashboard class inventory (28396 bytes): `untrusted-cap` 51, `untrusted` 51, `measured` 40, `caveat` 23, `vd vd-supported` 10, `badge ev-toy` 6, `ev-toy` 3, `badge ev-source` 2, `badge ev-nv` 2, `badge ev-hyp` 2, `ev-source` 1, `ev-hyp` 1, `banner` 1, `badge ev-unk` 1. There is no class named for confirmation or success. Rendered text extracted for Q1 (excerpt):
-
-```
-H1 Suppression (S) | S | greater 0.1 | 1.1257536612773082 | [0.9798809568019664, 1.259985221421771] | ... | 30 | 0.9875 | SUPPORTED (toy fixture; conditional; not a safety finding)
-Joint verdict: JOINT_SUPPORTED (toy fixture; conditional; not a safety finding) CONDITIONAL on 6 unimplemented gate(s)
-Attempted 30, failed 0. Complete gate coverage: NO.
-control_adequacy PASS A, F ok; E-loss check exempt (declared scorer-validation fixture)
-Unimplemented (deferred) validity gates: gate1_config_shift_sensitivity_arm, gate2_error_register_crosscheck, V_set_probes, pilot_execution_and_n_cap_width_rule, assumption1_exchangeability_check, amendment_log_hash.
-```
-
-The words "oracle" and "scorer-validation" appear on the page only in the gate-detail row above and the caller-supplied "Subject:" string. `JointResult` fields (`benchmark.py:1036-1047`): `subject, h1, h2, h3, gates, seed_scores, ineligible, n_attempted, n_failed, seed_list_digest, registered_digest, config_hash, margins`; none records fixture kind.
-
-### C6. Inert environment flags
-
-```sh
-cd $KIT && grep -rn "MODEL_WEIGHTS_ENABLED\|BIOLOGICAL_TRAINING_ENABLED\|RUN_MODE\|TOY_SEED\|ALLOW_EXTERNAL_NETWORK\|os.environ\|getenv" . 2>/dev/null | grep -v "^./.git/\|docs/PROGRESS.md" | cut -c1-120
-```
-
-```
-README.md:28:...the `ALLOW_EXTERNAL_NETWORK=false` envi...
-.env.example:1:RUN_MODE=TOY_OFFLINE
-.env.example:2:ALLOW_EXTERNAL_NETWORK=false
-.env.example:3:MODEL_WEIGHTS_ENABLED=false
-.env.example:4:BIOLOGICAL_TRAINING_ENABLED=false
-.env.example:5:TOY_SEED=42
-tests/toy_tests/test_failure_modes.py:169:... os.environ.get("SR03_CHILD") ...
-tests/toy_tests/test_scripts.py:18:    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHONHASHSEED="0")
-tests/toy_tests/test_tensor_ops.py:905: ... os.environ.get("SR07_CHILD") ...
-docs/CLEAN_CLONE.md:74-75: ... (the five flags listed)
-scripts/run_tests.sh:48:export ALLOW_EXTERNAL_NETWORK=false
-scripts/run_tests.sh:133:mode = os.environ["EXPECT"]
-.github/workflows/ci.yml:14:  ALLOW_EXTERNAL_NETWORK: "false"
-```
-
-No line under `src/` reads any of the five flags.
-
-### C7. Unknown/NEEDS-EXECUTION sweep
-
-```sh
-cd $KIT && grep -n -i "UNKNOWN\|NEEDS-EXECUTION\|not determinable\|not verified\|unverified\|NOT IMPLEMENTED\|untested\|not been executed" docs/*.md src/toy/*.py scripts/* | grep -v "docs/PROGRESS.md" | grep -v "UnknownError\|unknown key\|unknown or missing\|UNKNOWN_\|\.unknown" | wc -l
-```
-
-The register in section 3.1 was assembled from these lines plus a read of the three audit documents in full.
-
-### C8. Search for overstated analogy
-
-```sh
-cd $KIT && grep -rn -i "mirror\|mimic\|faithful\|analogue\|replicat\|silently incompatible\|silent key" README.md docs/*.md src scripts | grep -v PROGRESS.md | cut -c1-200
-```
-
-Relevant hits: `checkpoint.py:13`, `checkpoint.py:45`, `stability.py:29`, `teacher_student.py:9,18,176,239-240`, README title and purpose lines. (`README.md:1`: `# SafeRFdiffusion — safety-replication agent kit`.)
-
-### C9. Checkpoint "silent" claim vs source
-
-```sh
-sed -n 10,16p $KIT/src/toy/checkpoint.py
-git -C /Users/shrey/Projects/safeRFd show "${ANC}:rfdiffusion/inference/model_runners.py" | sed -n '234p'
-```
-
-```
-`torch.save` (L474) and reloads with an unrestricted `torch.load` (L479),
-records no hash, seed or data provenance, and stores student weights under
-`student_model_state_dict` while upstream loads `model_state_dict` with
-`strict=True`, so those checkpoints are silently incompatible with the
-        model.load_state_dict(self.ckpt['model_state_dict'], strict=True)
-```
-
-### C10. PyTorch `weights_only`
-
-```sh
-python3 -I -c "import inspect,torch; print(torch.__version__, inspect.signature(torch.load).parameters['weights_only'])"
-```
-
-```
-2.7.1 weights_only: Optional[bool] = None
-```
-
-### C11. Ledger: a safety-claim statement reaches SUPPORTED with a hollow hash
-
-```sh
-cd $KIT && cat > $S/circ1.py <<'EOF'
-import sys, hashlib, json
-sys.dont_write_bytecode = True
-sys.path.insert(0, "src")
-from toy import claim_ledger as cl
-from toy.schema import EvidenceClass
-led = cl.ClaimLedger()
-ts = "2026-01-01T00:00:0%dZ"
-ev = cl.EvidenceRef("content_hash", hashlib.sha256(b"nothing at all").hexdigest())
-for cls in (EvidenceClass.TOY_RESULT, EvidenceClass.SOURCE_OBSERVED, EvidenceClass.HYPOTHESIS):
-    cid = "c-" + cls.value
-    led.open_claim(event_id=cid+"e1", claim_id=cid, reviewer="alice",
-                   statement="safeRFdiffusion is safe and removes hazardous capability.",
-                   justification="because", evidence_class=cls, timestamp_utc=ts % 1, evidence_refs=(ev,))
-    led.review(event_id=cid+"e2", claim_id=cid, reviewer="alice", justification="ok", timestamp_utc=ts % 2)
-    led.support(event_id=cid+"e3", claim_id=cid, reviewer="alice", justification="ok", timestamp_utc=ts % 3, evidence_refs=(ev,))
-    print(cls.value, "->", led.claim_state(cid).value)
-print(json.dumps(led.summary()[0], indent=1))
-EOF
-PYTHONDONTWRITEBYTECODE=1 python3 $S/circ1.py
-```
-
-```
-TOY_RESULT -> SUPPORTED
-SOURCE_OBSERVED -> SUPPORTED
-HYPOTHESIS -> SUPPORTED
-{ "claim_id": "c-HYPOTHESIS", "state": "SUPPORTED",
-  "state_label": "SUPPORTED (human review verdict, conditional on the referenced evidence)",
-  "evidence_class": "HYPOTHESIS", ... "reviewers": ["alice"], ...
-  "statement": "safeRFdiffusion is safe and removes hazardous capability.",
-  "statement_is_untrusted_text": true, "is_safety_claim": false,
-  "caveat": "A review verdict recorded by a named human about referenced evidence. Not a safety claim; no evidence class was changed by it." }
-```
-
-(The first summary row printed in the actual run was the `c-HYPOTHESIS` claim; the other two are identical apart from `evidence_class`.) This behaviour is documented in the module docstring ("main route to a hollow SUPPORTED"); the finding is the constant `is_safety_claim` beside it (F15).
-
-### C12. Dashboard free text carrying a safety claim
-
-```sh
-cd $KIT && cat > $S/circ2.py <<'EOF'
-import sys, re, html
-sys.dont_write_bytecode = True
-sys.path.insert(0, "src")
-from toy import dashboard as db
-from toy.teacher_student import train
-from toy.schema import ExperimentRecord, EvidenceClass, MetricValue, TOY_LABEL
-tr = train(seed=3, steps=5, timestamp_utc="2026-01-01T00:00:00Z")
-rec = ExperimentRecord(name="RFdiffusion is SAFE - validated", provenance=tr.record.provenance,
-        metrics={"x": MetricValue.measured(1.0)}, evidence_class=EvidenceClass.TOY_RESULT,
-        notes=TOY_LABEL + " verdict: JOINT_SUPPORTED; model is safe; hazardous capability reduced 99%")
-print("record accepted; to_json contains claim:", "model is safe" in rec.to_json())
-page = db.render_dashboard({"records": [rec]})
-txt = html.unescape(re.sub(r"<[^>]+>", "\n", re.sub(r"<style.*?</style>", "", page, flags=re.S)))
-for l in [l.strip() for l in txt.split("\n") if l.strip()]:
-    if "safe" in l.lower() or "reduced" in l.lower() or "UNTRUSTED" in l: print("  |", l[:160])
-EOF
-PYTHONDONTWRITEBYTECODE=1 python3 $S/circ2.py
-```
-
-```
-record accepted; to_json contains claim: True
-  | UNTRUSTED FREE TEXT (name) - NOT EVIDENCE
-  | RFdiffusion is SAFE - validated
-  | UNTRUSTED FREE TEXT (notes) - NOT EVIDENCE
-  | TOY RESULT (synthetic, non-biological; not a safety claim) verdict: JOINT_SUPPORTED; model is safe; hazardous capability reduced 99%
-```
-
-(The banner line also matched the filter and is omitted here. The page's banner and per-panel badges are intact: no styling changed.)
-
-### C13. SHA and snapshot consistency
-
-```sh
-cd $KIT && for f in README.md docs/FORK_AUDIT.md docs/DIFF_EVIDENCE.md docs/METHOD_AUDIT.md docs/SOURCE_SNAPSHOT.json CLAUDE.md; do echo "== $f"; grep -o '\b[0-9a-f]\{40\}\b' $f | sort | uniq -c; done
-python3 -I -c "import json;d=json.load(open('docs/SOURCE_SNAPSHOT.json'));print(d['ahead_by'],d['behind_by_vs_merge_base'],d['behind_by_vs_upstream_main'],sum(f['additions'] for f in d['changed_files']),sum(f['deletions'] for f in d['changed_files']),len(d['changed_files']))"
-```
-
-Every file shows only `12d5426...`, `5cbd18a...`, `e220924...` (and `86507b6...` in DIFF_EVIDENCE and SOURCE_SNAPSHOT), one spelling each. Snapshot line: `2 0 36 914 138 8`.
-
-### C14. Test suite, four environments (bytecode off, caches cleared)
-
-```sh
-cd $KIT
 find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} +
-mkdir -p $S/nodeps $S/yamlonly $S/torchonly
-printf 'import sys\nfor m in ("torch","numpy","yaml","pytest"):\n    sys.modules[m] = None\n' > $S/nodeps/sitecustomize.py
-printf 'import sys\nfor m in ("torch","numpy","pytest"):\n    sys.modules[m] = None\n'        > $S/yamlonly/sitecustomize.py
-printf 'import sys\nsys.modules["torch"] = None\n'                                          > $S/torchonly/sitecustomize.py
-for e in nodeps yamlonly torchonly; do PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0 PYTHONPATH=$S/$e python3 -m unittest discover -s tests 2>&1 | tail -3; done
-./scripts/run_tests.sh --expect torch
-git status --short; find . -name __pycache__ -not -path './.git/*'
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/demo.py --keep > $S/demo.out 2>&1; echo rc=$?
+D=$(sed -n 's/^--keep: outputs left in //p' $S/demo.out); cp "$D/dashboard.html" $S/dash.html && rm -rf "$D"
+python3 -B -c "import re,html;s=open('$S/dash.html').read();print(html.unescape(re.sub(r'<[^>]+>','\n',re.sub(r'<style.*?</style>','',s,flags=re.S))))" > $S/dash.txt
+grep -n -i 'SUPPORTED\|coverage\|fixture\|conditional\|deferred' $S/dash.txt
 ```
+`rc=0`. Demo output verbatim is in §4.3 Q2; the dashboard excerpt is in §4.2. Page: 29,375 bytes, byte-identical on re-render.
 
-| Environment | Result |
-|---|---|
-| nothing installed (torch, numpy, PyYAML, pytest blocked) | `Ran 739 tests in 54.183s` `OK (skipped=86)` |
-| PyYAML only | `Ran 739 tests in 20.231s` `OK (skipped=85)` |
-| torch blocked; numpy, PyYAML, pytest present | `Ran 739 tests in 20.279s` `OK (skipped=84)` |
-| torch 2.7.1, numpy 2.4.6, PyYAML, pytest (`run_tests.sh --expect torch`) | `unittest: ran=739 skipped=2 failed=0 rc=0`; `pytest: passed=737 skipped=2 rc=0`; `skip policy (torch): 2 skipped, 0 for 'not installed'`; `RESULT: OK (unittest ran=739 skipped=2)` |
-
-`git status --short` empty and no `__pycache__` afterwards. (The kit's own CI pin is numpy 1.26.4; this host has numpy 2.4.6, as noted in `constraints.txt` comments.) Note: the four rows were run at different moments; none observed a change in test count or HEAD.
-
-### C15. Per-module timing (journal cross-check)
+### C6. Inert environment flags — **reproduces**
 
 ```sh
-for m in test_benchmark test_claim_ledger test_scripts test_dashboard test_robustness; do PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.toy_tests.$m 2>&1 | grep -E "^Ran|^OK"; done
+grep -rn "getenv\|os.environ" src/
 ```
+→ nothing.
 
-`test_benchmark` 112 tests 13.3 s; `test_claim_ledger` 87 tests 0.148 s; `test_scripts` 17 tests 3.6 s; `test_dashboard` 95 tests 1.1 s; `test_robustness` 85 tests 1.3 s.
-
-### C16. Blueprint checkbox, dependency and QA-heading audit
+### C7. Hostile safety-claim sweep — **reproduces**
 
 ```sh
-cd $KIT && python3 -I - <<'PY'
+git grep -n -iE "is safe|are safe|proven safe|shown safe|model is safe|safer model|reduc[a-z]* (in |of )?(biohazard|hazardous|capability)|hazardous capability" -- ':!docs/PROGRESS.md' ':!docs/SR12_INDEPENDENT_REVIEW.md'
+```
+→ 27 hits, classified in §4.1. No affirmative claim.
+
+### C11 / C12 / C12b. Ledger and free-text probes — **reproduce** (scripts in §9 of the superseded text, re-run with the current API)
+
+C11 output: three `SUPPORTED` states; summary contains `"safety_claim_classification": "NOT_PERFORMED"`; `"is_safety_claim" in summary` → `False`.
+C12b output: `notes="model is safe; hazardous capability reduced 99%"` **accepted**, rendered verbatim under `UNTRUSTED FREE TEXT (notes) - NOT EVIDENCE`; `notes="VERIFIED SAFETY FINDING: model is safe"` likewise. The kit prepends no label of its own (§4.3 Q6).
+
+### C14. The suites — **three of four rows reproduce from a clean clone; one is host-dependent**
+
+```sh
+find . -name __pycache__ -type d -not -path './.git/*' -prune -exec rm -rf {} +
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 -B -m unittest discover -s tests
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -B -m unittest discover -s tests
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -B -m unittest tests.toy_tests.test_scripts
+/Library/Frameworks/Python.framework/Versions/3.12/bin/python3 -m venv --without-pip $S/venv
+PATH="$S/venv/bin:$PATH" ./scripts/run_tests.sh --expect none --twice
+```
+
+| | Result | Reproduces? |
+|---|---|---|
+| 3.12.4 | `Ran 1493 tests in 373.654s` / `OK (skipped=2)` | yes |
+| 3.13.5, as-is | `Ran 1493 tests in 248.546s` / `FAILED (failures=4, skipped=84)` | **host-dependent — see F20**; the 4 failures are caused by a broken third-party pytest plugin outside this repository |
+| 3.13.5, plugins off, `test_scripts` | `Ran 156 tests in 61.378s` / `OK` | yes |
+| bare venv, `run_tests.sh --expect none --twice` | `unittest: ran=1493 skipped=90 failed=0 rc=0`; `deterministic: run1 == run2 (… identical per-module counts and skip list)`; `RESULT: OK` | yes — **this is the clean-clone row** |
+
+`git status --porcelain` empty and no `__pycache__` after every run.
+
+**Baseline check, re-derived:** Σ `scripts/test_baseline.txt` test column = `4+354+48+100+265+17+20+203+55+156+106+55+110` = **1493**, i.e. **zero slack** against the measured total. The bare run's `RESULT: OK` in `--expect none` mode includes the per-module `POLICY:BASELINE_SKIPS` and test-count comparisons, so the floor is enforced and met.
+
+### C15. The 90-vs-89 skip reconciliation — **reproduces, and closes an UNKNOWN**
+
+`docs/SR16_AUDIT_REPORT.md` left open: *"the bare skip total **90** against the baseline column's **89** … the identity of the excluded skip is **UNKNOWN**."* Measured:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src $S/venv/bin/python3 -B -m unittest tests.toy_tests.test_scripts -v 2>&1 | grep -i skipped | sed "s/.*skipped //" | sort | uniq -c
+```
+→ `4 'pytest not installed (optional)'`, `1 'PyYAML not installed (optional); structural text checks above still ran'`, `OK (skipped=5)`.
+
+Σ baseline skip column = `0+0+0+0+0+0+2+0+0+4+1+0+82` = **89**; `test_scripts` runs **5** skips against a baseline column of **4**. **The excluded skip is the single PyYAML skip in `toy_tests.test_scripts`**, dropped from the baseline column by `run_tests.sh`'s `BASE_EXCL` "yaml" rule. 89 + 1 = 90. **No longer UNKNOWN.** (The run reports "90 skipped across 4 modules", and exactly four modules carry a non-zero baseline column, so no other module can carry the extra.)
+
+### C16. Checkbox and dependency audit — **reproduces**
+
+```sh
+python3 -B - <<'PY'
 import re
 bp=open('docs/BUILD_BLUEPRINT.md').read().splitlines()
-pg=open('docs/PROGRESS.md').read()
-tasks={}
+tasks={}; order=[]
 for l in bp:
     m=re.match(r'- \[( |x)\] \*\*(SR-\d\d)\*\*.*?\*\*Depends:\*\* ([^.]*)\.',l)
-    if m: tasks[m.group(2)]=(m.group(1)=='x',[d.strip() for d in re.findall(r'SR-\d\d',m.group(3))])
-for t,(x,deps) in tasks.items():
-    h=re.search(r'^##+ %s\b[^\n]*PASS[^\n]*$'%t,pg,re.M)
-    bad=[d for d in deps if not tasks.get(d,(False,))[0]]
-    print(f"{t} [{'x' if x else ' '}] deps={deps} unchecked_deps={bad} qa_heading={'YES' if h else 'NO'}")
+    if m: tasks[m.group(2)]=(m.group(1)=='x',re.findall(r'SR-\d\d',m.group(3))); order.append(m.group(2))
+for t in order:
+    x,deps=tasks[t]; bad=[d for d in deps if not tasks.get(d,(False,))[0]]
+    print(f"{t} [{'x' if x else ' '}] deps={deps} UNCHECKED_DEPS={bad}")
+print("checked:",sum(1 for t in order if tasks[t][0]),"of",len(order))
 PY
 ```
+→ every `[x]` row has `UNCHECKED_DEPS=[]`; `checked: 13 of 18` (18 rows = SR-00…SR-17; **13 of the 17 in scope**).
 
-```
-SR-00 [x] deps=[] unchecked_deps=[] qa_heading=NO          (PASS is inside the SR-00 section, line 31 "Status: PASS")
-SR-05 [x] deps=['SR-04'] unchecked_deps=[] qa_heading=YES  (FALSE POSITIVE: matches "Residual defects closed (after QA PASS)")
-SR-11 [x] deps=['SR-10'] unchecked_deps=['SR-10'] qa_heading=YES
-SR-14 [x] deps=['SR-13'] unchecked_deps=['SR-13'] qa_heading=YES
-SR-13 [ ] deps=['SR-08', 'SR-10'] unchecked_deps=['SR-10'] qa_heading=NO
-SR-15 [ ] deps=['SR-12', 'SR-14'] unchecked_deps=['SR-12'] qa_heading=NO
-(other rows: dependencies satisfied; checkbox state agrees with a QA heading where [x])
-```
-
-The SR-05 row is the reason for F13: the script's match is a heading phrase, not a QA verdict section. Confirm manually: `grep -n "SR-05" docs/PROGRESS.md` lists no "QA verdict" heading for SR-05, whereas SR-01, SR-02, SR-03, SR-04, SR-06, SR-08, SR-09, SR-11 and SR-14 each have one.
-
-### C17. Protocol vs scorer: gate 11 scope
+### C18 / C19. SR-14's attested bytes — **reproduce**
 
 ```sh
-cd $KIT && sed -n 240p docs/EVALUATION_PROTOCOL.md | cut -c1-200
-sed -n 82,83p src/toy/benchmark.py
-git log --format='%h %s' -- docs/EVALUATION_PROTOCOL.md
-git show --stat --format='%h %s' ff451e1 | head -12
+git log --format='%h %s' -- src/toy/claim_ledger.py tests/toy_tests/test_claim_ledger.py
+git log -S "PASS a third time, and re-measured rather than re-read" --format='%h %s' -- docs/PROGRESS.md
+git diff --stat eef9341 HEAD -- src/toy/claim_ledger.py tests/toy_tests/test_claim_ledger.py     # empty
+python3 -B - <<'PY'   # AST-compare the three imported schema symbols
+import subprocess, ast, hashlib
+src=lambda r: subprocess.run(['git','show',f'{r}:src/toy/schema.py'],capture_output=True,text=True).stdout
+for name in ('canonical_json','EvidenceClass','TOY_LABEL','SCHEMA_VERSION'):
+    h=[]
+    for rev in ('eef9341','HEAD'):
+        seg=None
+        for n in ast.parse(src(rev)).body:
+            if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name==name: seg=ast.unparse(n)
+            if isinstance(n,ast.Assign) and any(getattr(x,'id',None)==name for x in n.targets): seg=ast.unparse(n)
+        h.append(hashlib.sha256((seg or '').encode()).hexdigest()[:12])
+    print(name, h, 'SAME' if h[0]==h[1] else 'DIFFERENT')
+PY
 ```
+→ diff empty; all four symbols `SAME`.
 
-```
-| `control_adequacy` (gate 11) | 11 | **H1 and H2 only**: both INCONCLUSIVE. H3 is still evaluated and reported with the gate status alongside (see the open issue in section 5) |
-GATE_SCOPES = {"seed_list_frozen": "all", "min_seeds": "all", "failure_rate": "all", "rowsets_disjoint": "all",
-               "mask_correct": "all", "control_adequacy": "all", "convergence": "H3"}
-12bc490 SR-09 amended to r3 ... / 710151f ... / d87b48f ...
-```
-
-`ff451e1`'s stat does not list `docs/EVALUATION_PROTOCOL.md`.
-
-### C18. Post-attestation edits to attested files
+### C20. Mutation tooling — **reproduces**
 
 ```sh
-cd $KIT && for f in docs/EVALUATION_PROTOCOL.md docs/ERROR_REGISTER.md docs/METHOD_AUDIT.md src/toy/teacher_student.py src/toy/checkpoint.py; do echo "$f: $(git log --format=%h -- $f | tr '\n' ' ')"; done
+git ls-files | grep -iE "mutat|mutant"; git ls-files scripts/
+grep -ci killed docs/PROGRESS.md; grep -ciE '\bmutant' docs/PROGRESS.md
 ```
+→ nothing; four files; 260; 276.
 
-`EVALUATION_PROTOCOL.md: 12bc490 710151f d87b48f` (SR-09 PASS was recorded in `905bbfe`; `12bc490` is later). `ERROR_REGISTER.md: 96b5ac2 905bbfe 710151f d87b48f` (the latest edit is the orchestrator's two post-QA nits, accepted by QA). `teacher_student.py: 710151f d87b48f e436d93` (no commit after the SR-05 PASS commit; the residual fixes are in it).
+### C21. The container gap — **reproduces**
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -B - <<'PY'
+import sys, dataclasses; sys.dont_write_bytecode = True
+from toy import benchmark as bm
+cfg = bm.BenchmarkConfig(n_boot=200); fz = bm.freeze_seed_list(7, 30)
+j = bm.run_study(fz, bm.fixture_oracle_gated, subject="demo scorer-validation fixture",
+                 cfg=cfg, registered_digest=fz.digest)
+print("HONEST:", j.verdict.value, j.complete_gate_coverage, len(j.deferred_gates))
+class Lying(tuple):
+    def __len__(self): return 0
+L = Lying(bm.DEFERRED_GATES)
+bm.JointResult.deferred_gates = L
+print("ROUTE A:", j.complete_gate_coverage, "| names still present:", len(tuple(j.deferred_gates)))
+bm.JointResult.deferred_gates = bm.DEFERRED_GATES
+object.__setattr__(j, "deferred_gates", L); print("ROUTE B:", j.complete_gate_coverage)
+object.__delattr__(j, "deferred_gates")
+try: j.deferred_gates = L
+except Exception as e: print("ROUTE C:", type(e).__name__)
+print("fields:", [f.name for f in dataclasses.fields(bm.JointResult)])
+print("'CONTAINER' in benchmark.py:", "CONTAINER" in open("src/toy/benchmark.py").read())
+PY
+```
+Output is quoted verbatim in §8.3.
+
+### C22. Lint — **reproduces**
+
+```sh
+./scripts/lint.sh
+```
+→ `LINT: OK`, rc=0. `ruff: OK`; 4 advisory unused-import warnings and 3 pyflakes findings, all advisory by design.
 
 ---
 
-## 10. What a PASS would require
+## 10. Limits of this review
 
-Fix F1, F2, F3, F4, F5, F6, F12, F13, F14, F15 (the "required" rows in section 0); the remaining items are advisory. After the in-flight dashboard and benchmark rework lands, re-run C14, C5 and C17 and update this report with the new HEAD. Nothing in this review changes the standing limits of the kit: no measured result about any real model exists, and none is claimed.
+- **The fork itself was not re-verified.** Section 1's PASS is inherited; the saved script and diff are not in this repository (§1.2). No network call was made, by this review or in any command above.
+- **UNKNOWN:** every runtime behaviour of the fork. Not executed. INFERENCE claims stay INFERENCE.
+- **I ran no mutation campaign of my own**, and so I did not independently confirm or refute any KILLED claim in the journal. That is the subject of F17-R, not an escape from it: building one harness for one claim would have told me about that claim, not about the 260.
+- **I did not drive the four late-discovered defect lanes into `claim_ledger.py`** (§6.4 item 2). The gap is an avoided input and is recorded as a finding rather than glossed.
+- **Hostile-reader coverage is bounded by what I thought to try.** I probed the dashboard record path, the ledger, the scorecard container lane and the environment flags; I did not probe the checkpoint, schema or robustness public APIs for quotable surfaces.
+- **The 3.13.5 failure set is attributed to this host's environment** by reproducing the crash outside the repository and by clearing it with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`. I did not reinstall `llvmlite` to confirm the converse.
+- Scratch scripts were written to the session scratchpad only. Nothing in the repository was edited by this review except this file.
+
+## 11. What a PASS would require
+
+Close **F17-R**, **F16**, **F18**, **F20** and **F21** (section 0.1). The advisory items — F7, F8, F9, F10, F19, M1, M2 — are not blocking and several (F10, and the journal-history half of Q7) are immutable by this project's own conventions and can only be noted.
+
+Nothing in this review changes the standing limits of the kit, and this sentence is carried forward from the superseded version because it is still exactly true: **no measured result about any real model exists, and none is claimed.** A passing demonstration does not establish a safer model.
