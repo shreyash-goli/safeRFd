@@ -672,6 +672,38 @@ class TestDemo(unittest.TestCase):
                         f"the qualifier's denial is weakened, truncated or reworded: {line!r}")
         self.assertIn(qual, line, f"the qualifier is not intact on the verdict line: {line!r}")
 
+    def test_demo_claim_state_line_carries_its_not_supported_qualifier_on_that_same_line(self):
+        """The F23/F24 sibling class, item `Z-demo5` -- F23 for the step-[5] line instead of the step-[3]
+        one. (No new F-number is coined here: `F25` is already SR-16's checkpoint-digest advisory.)
+        `scripts/demo.py:159` prints `claim state REVIEWED (not SUPPORTED)`, and deleting the parenthetical
+        left `Ran 157 ... OK`. Without it the line reads `claim state REVIEWED`, which a reader -- or a
+        quote of the demo's output -- takes for a positive finding about the claim, when `REVIEWED` in this
+        kit means only that a human looked at it and issued NO verdict (`claim_ledger.py`:
+        `REVIEWED (inspected by a human; no verdict yet)`).
+
+        Pinned ON THE CLAIM-STATE LINE, not merely somewhere in stdout, for the reason F23 established: an
+        `assertIn("(not SUPPORTED)", r.stdout)` passes when the qualifier is relocated to its own `print`,
+        and relocation is the exact failure the qualifier exists to prevent -- no crop of this line may omit
+        it. The line is LOCATED rather than assumed: the lines matching `claim state <TOKEN>` are collected
+        and the count asserted to be exactly 1, so deleting the print (or the state from it) fails on the
+        count instead of leaving a sweep with nothing to sweep. The qualifier is then required to follow the
+        state ON THAT LINE, so `(SUPPORTED)`, `(reviewed)`, `(not SUPPORTED yet)` and an empty parenthetical
+        all fail, and so does a second `print` carrying it.
+        """
+        r = subprocess.run([sys.executable, str(SCRIPTS / "demo.py")], capture_output=True, text=True,
+                           env=_env(), cwd=ROOT, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        state_lines = [ln for ln in r.stdout.splitlines() if re.search(r"\bclaim state [A-Z][A-Z_]+", ln)]
+        self.assertEqual(len(state_lines), 1,
+                         f"expected exactly one `claim state <TOKEN>` line in demo stdout, got {state_lines!r}")
+        line = state_lines[0]
+        state = re.search(r"\bclaim state ([A-Z][A-Z_]+)", line).group(1)
+        before_qual, qual, _rest = line.partition("(not SUPPORTED)")
+        self.assertTrue(qual, f"the claim-state line carries no `(not SUPPORTED)` qualifier -- it has been "
+                              f"deleted, weakened, re-polarised, or moved off this line: {line!r}")
+        self.assertIn(f"claim state {state}", before_qual,
+                      f"the qualifier no longer follows the claim state on its own line: {line!r}")
+
     def test_demo_fails_nonzero_when_toy_package_missing(self):
         r = subprocess.run([sys.executable, str(SCRIPTS / "demo.py"), "--src", str(ROOT / "docs")],
                            capture_output=True, text=True, env=_env(), cwd=ROOT, timeout=60)

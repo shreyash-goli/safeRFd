@@ -1228,6 +1228,162 @@ class TestQAHardening(unittest.TestCase):
         self.assertIn("any real system", denied, entry)
         self.assertIn(entry, sc_simple().does_not_establish)
 
+    def test_subject_non_claim_denies_all_three_named_subjects(self):
+        """The F23/F24 sibling class, item `Z-nc0`. (No new F-number is coined here: `F25` is already
+        SR-16's checkpoint-digest advisory. These four entries and the demo's step-[5] line are the five
+        sites the F23/F24 round probed, measured unkilled, and left.)
+
+        `STANDARD_NON_CLAIMS[0]` -- "Nothing about RFdiffusion, the audited fork, or any real model." --
+        was pinned by NOTHING: narrowing it to "Nothing about RFdiffusion." left `Ran 204 ... OK`. That
+        mutant keeps the denial and drops two thirds of its SCOPE, so the kit's broadest disclaimer would
+        stop denying that a card is about the audited fork, or about any real model, while still reading
+        like a disclaimer.
+
+        What is asserted is the DENIAL AND ITS SCOPE, not the sentence's length or the presence of one
+        word: the entry must OPEN with `Nothing about`, and all THREE subjects must sit on the far side of
+        it. So all of these die -- `""`; `"Nothing about RFdiffusion."` (the measured mutant); `"Nothing
+        about RFdiffusion or the audited fork."`; `"Something about RFdiffusion, the audited fork, or any
+        real model."` (polarity flipped); and `"Nothing about RFdiffusion, the audited fork, or a specific
+        real model."` (`any` dropped, so a universal denial becomes an existential one). An
+        `assertIn("RFdiffusion", entry)` or a `len(entry) > 50` passes on four of those five.
+
+        The subject list is ITERATED, so the number of subjects ACTUALLY CHECKED is asserted rather than
+        `len()` of the list: a sweep whose table a mutant can empty while the assertion still passes is
+        this project's recurring defect (five sites, one of them in a subject). The last line pins that
+        the bytes asserted here are the bytes a real scorecard carries, so the pin cannot go green on a
+        dead constant.
+        """
+        entry = rb.STANDARD_NON_CLAIMS[0]
+        head, denial, denied = entry.partition("Nothing about")
+        self.assertEqual((head, denial), ("", "Nothing about"),
+                         f"the denial is absent, re-polarised, or no longer opens the entry: {entry!r}")
+        checked = 0
+        for subject in ("RFdiffusion", "the audited fork", "any real model"):
+            self.assertIn(subject, denied, f"{subject!r} is no longer denied by {entry!r}")
+            checked += 1
+        self.assertEqual(checked, 3, "the subject table was emptied; the sweep above asserted nothing")
+        self.assertIn(entry, sc_simple().does_not_establish)
+
+    def test_protocol_non_claim_denies_the_experiment_and_states_what_it_is_instead(self):
+        """The F23/F24 sibling class, item `Z-nc2`. `STANDARD_NON_CLAIMS[2]` -- "Not an experiment of
+        EVALUATION_PROTOCOL: a probe of a measurement procedure on synthetic fixtures." -- was pinned by
+        NOTHING: re-polarising it to "An experiment of EVALUATION_PROTOCOL." left `Ran 204 ... OK`, i.e.
+        the entry would ASSERT the one thing it exists to deny, and every card in the kit would serialize
+        that assertion among its disclaimers.
+
+        BOTH HALVES do work, so both are pinned WHERE THEY STAND. Before the colon the entry must deny
+        being an experiment OF THE PROTOCOL (`Not an experiment of` must open it, and `EVALUATION_PROTOCOL`
+        must be what is denied); after the colon it must say what the card IS instead -- a `probe` of a
+        `measurement procedure` on `synthetic fixtures`. So all of these die -- `""`; `"An experiment of
+        EVALUATION_PROTOCOL: a probe of a measurement procedure on synthetic fixtures."` (polarity
+        flipped); `"Not an experiment of EVALUATION_PROTOCOL."` (the positive half deleted, so the entry no
+        longer says what it is); `"Not an experiment: a probe."` (shape kept, both halves gutted); and
+        `"Not an experiment of EVALUATION_PROTOCOL: a probe of a measurement procedure on real data."`
+        (the fixtures stop being synthetic). An `assertIn("EVALUATION_PROTOCOL", entry)` passes on three of
+        those five, and an equality test on the whole string would fail on any legitimate rewording and so
+        invite being loosened instead of kept.
+
+        The three parts of the positive half are ITERATED and the count ACTUALLY CHECKED is asserted, not
+        `len()` of the table. The last line pins the asserted bytes into a real scorecard.
+        """
+        entry = rb.STANDARD_NON_CLAIMS[2]
+        denial, colon, instead = entry.partition(":")
+        self.assertEqual(colon, ":", f"the entry no longer says what the card IS, only what it is not, or "
+                                     f"the two halves have been merged: {entry!r}")
+        self.assertTrue(denial.startswith("Not an experiment of"),
+                        f"the denial is absent, re-polarised, or no longer opens the entry: {entry!r}")
+        self.assertIn("EVALUATION_PROTOCOL", denial,
+                      f"what is denied is no longer an experiment OF THE PROTOCOL: {entry!r}")
+        checked = 0
+        for part in ("probe", "measurement procedure", "synthetic fixtures"):
+            self.assertIn(part, instead, f"{part!r} is no longer what the entry says the card is: {entry!r}")
+            checked += 1
+        self.assertEqual(checked, 3, "the part table was emptied; the sweep above asserted nothing")
+        self.assertIn(entry, sc_simple().does_not_establish)
+
+    def test_seed_non_claim_denies_real_population_sampling_on_the_side_that_denies_it(self):
+        """The F23/F24 sibling class, item `Z-nc3`, and ONE OF THE TWO THAT CAN BE INVERTED RATHER THAN
+        MERELY WEAKENED. `STANDARD_NON_CLAIMS[3]` -- "Seeds are replicates of a synthetic fixture
+        generator, not independent samples of any real population." -- was pinned by NOTHING: replacing it
+        with "Seeds are independent samples of any real population." left `Ran 204 ... OK`. That is not a
+        weakened denial, it is a SAMPLING CLAIM ABOUT REALITY, carried as a disclaimer by a kit whose
+        fixtures are synthetic.
+
+        A pin that catches deletion but passes on a polarity flip is the defect, not the fix, so WHICH SIDE
+        OF THE DENIAL EACH HALF SITS ON is what is asserted. `partition(", not ")` must return exactly that
+        separator; `replicates` and `synthetic fixture generator` must be on the ASSERTED side; `independent
+        samples` and `any real population` must be on the DENIED side. So all of these die -- `""`;
+        `"Seeds are independent samples of any real population."` (the inversion); `"Seeds are replicates of
+        a generator."` (separator gone, denial gone); `"Seeds are replicates of a synthetic fixture
+        generator, not independent samples."` (`any real population` dropped, shape kept); and -- the one a
+        side-blind pin would miss -- `"Seeds are independent samples of any real population, not replicates
+        of a synthetic fixture generator."`, which contains every word of the original, in the original
+        shape, with the two halves SWAPPED. An `assertIn("synthetic", entry)` or any assertion that reads
+        the entry as a bag of words passes on that last one.
+
+        Both halves are ITERATED and the counts ACTUALLY CHECKED are asserted, not `len()` of either table.
+        The last line pins the asserted bytes into a real scorecard.
+        """
+        entry = rb.STANDARD_NON_CLAIMS[3]
+        asserted, denial, denied = entry.partition(", not ")
+        self.assertEqual(denial, ", not ",
+                         f"the denial itself is absent, hedged or re-polarised: {entry!r}")
+        self.assertTrue(asserted.startswith("Seeds are "),
+                        f"the entry no longer states what the seeds ARE: {entry!r}")
+        n_asserted = 0
+        for prop in ("replicates", "synthetic fixture generator"):
+            self.assertIn(prop, asserted, f"{prop!r} is no longer what the seeds are said to be: {entry!r}")
+            n_asserted += 1
+        n_denied = 0
+        for prop in ("independent samples", "any real population"):
+            self.assertIn(prop, denied, f"{prop!r} is no longer denied by {entry!r}")
+            n_denied += 1
+        self.assertEqual((n_asserted, n_denied), (2, 2),
+                         "a property table was emptied; the sweeps above asserted nothing")
+        self.assertNotIn("independent samples", asserted,
+                         f"the halves are swapped: the entry now ASSERTS real-population sampling: {entry!r}")
+        self.assertIn(entry, sc_simple().does_not_establish)
+
+    def test_pass_meaning_non_claim_denies_both_the_seed_floor_and_the_positive_reading(self):
+        """The F23/F24 sibling class, item `Z-nc4`, and THE WORSE OF THE TWO INVERTIBLE ONES.
+        `STANDARD_NON_CLAIMS[4]` -- "No claim from fewer seeds than the stated minimum; passes mean 'not
+        refuted on these n fixtures'." -- was pinned by NOTHING: replacing it with "Passes mean the property
+        holds." left `Ran 204 ... OK`. That mutant converts EVERY GREEN TEST IN THIS PROJECT into a positive
+        finding, by way of the disclaimer block that is supposed to prevent exactly that reading.
+
+        The entry carries TWO denials and each is pinned on its own side of the semicolon. Before it: no
+        claim below the seed floor (`No claim from fewer seeds than` must open the entry, and the floor must
+        be the `stated minimum`). After it: what a pass MEANS, reached through the words `passes mean`, must
+        be `not refuted` on `these n fixtures` -- the limited reading, not the property. So all of these die
+        -- `""`; `"Passes mean the property holds."` (the inversion); `"No claim from fewer seeds than the
+        stated minimum; passes mean the property holds."` (the second denial alone inverted, first denial
+        and shape intact -- the mutant a pin on the first half would miss); `"No claim from fewer seeds;
+        passes mean something weaker."` (both halves gutted, shape kept); and `"No claim from fewer seeds
+        than the stated minimum."` (the pass-meaning half deleted outright). An `assertIn("passes mean",
+        entry)` passes on three of those five.
+
+        The meaning half is reached by PARTITION rather than by containment, because `not refuted` appearing
+        ANYWHERE in the entry is not the claim -- the claim is that it is what a pass MEANS. The parts are
+        iterated and the count ACTUALLY CHECKED is asserted. The last line pins the asserted bytes into a
+        real scorecard.
+        """
+        entry = rb.STANDARD_NON_CLAIMS[4]
+        floor, semicolon, pass_half = entry.partition(";")
+        self.assertEqual(semicolon, ";", f"the entry no longer carries both denials: {entry!r}")
+        self.assertTrue(floor.startswith("No claim from fewer seeds than"),
+                        f"the seed-floor denial is absent, re-polarised, or no longer opens the entry: {entry!r}")
+        self.assertIn("stated minimum", floor,
+                      f"the seed floor the entry refuses to claim below is no longer the stated minimum: {entry!r}")
+        _lead, says, meaning = pass_half.partition("passes mean")
+        self.assertEqual(says, "passes mean",
+                         f"the entry no longer says what a PASS means, so nothing bounds how one is read: {entry!r}")
+        checked = 0
+        for part in ("not refuted", "these n fixtures"):
+            self.assertIn(part, meaning, f"{part!r} is no longer what a pass is said to mean: {entry!r}")
+            checked += 1
+        self.assertEqual(checked, 2, "the meaning table was emptied; the sweep above asserted nothing")
+        self.assertIn(entry, sc_simple().does_not_establish)
+
     def test_extreme_mixed_sign_input_raises_valueerror_family(self):
         big = ((1.7e308,), (1.7e308,), (-1.7e308,))
         for m in (rb.abs_bias_fsum, rb.abs_bias_naive, rb.mse_fsum, rb.mse_naive):
