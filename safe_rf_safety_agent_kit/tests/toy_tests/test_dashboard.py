@@ -7080,15 +7080,22 @@ own docstring rules exactly that for a raising `__float__`.""")
     def test_the_isinstance_channel_is_still_open_and_counted(self):
         """A KNOWN, KIT-WIDE, DELIBERATELY UNPINNED FINDING, stated with its measured scope so round 12
         cannot be read as having closed it. A raising `__class__` defeats `isinstance`, and
-        `dashboard.py` has 31 `isinstance` sites of which 19 are reachable from caller data and outside
-        any `try`. THE BEHAVIOUR IS NOT PINNED -- pinning it would pin a defect. What is pinned is the
-        COUNT, so the channel cannot quietly widen, and the fact that `_spoken`/`_iterated`/`_attr` did
-        NOT close it: they admit a value once `isinstance` has decided what it is."""
+        `dashboard.py`'s site count is `ISINSTANCE_SITES`, DERIVED BY THE ASSERTION BELOW AND NAMED
+        NOWHERE IN THIS PROSE. THE BEHAVIOUR IS NOT PINNED -- pinning it would pin a defect. What is
+        pinned is the COUNT, so the channel cannot quietly widen, and the fact that
+        `_spoken`/`_iterated`/`_attr` did NOT close it: they admit a value once `isinstance` has
+        decided what it is.
+
+        ROUND 13 -- WHY NO FIGURE APPEARS IN THIS DOCSTRING. It used to say "31 sites of which 19 are
+        reachable", and the comment four lines below it ALREADY RECORDED that 31 was unreproducible and
+        corrected it -- while the claim itself stood uncorrected, and a later round moved the constant
+        to 34 and then to 36 without either sentence following. Three stale figures in the one test
+        whose entire purpose is to stop a figure drifting, which is the fifth named instance of this
+        file's own lesson: A FIGURE IN PROSE IS A FIGURE NOTHING GOES RED ABOUT. The remedy is not a
+        fresher number, it is no number: the count lives in the constant and in the assertion, and the
+        "of which N are reachable" half is withdrawn because nothing derived it."""
         # BY AST, not by text: every docstring in `dashboard.py` discusses `isinstance` and a text
-        # count reports the documentation -- `module_code_by_line`'s own reason. Measured 34 CALL sites
-        # at the previous HEAD and 34 now, so round 12 neither widened nor closed the channel. (The
-        # brief this round worked from said 31; 31 is not reproducible by any spelling measured here,
-        # and the figure is corrected to the derived one rather than restated.)
+        # count reports the documentation -- `module_code_by_line`'s own reason.
         n = len([x for x in ast.walk(ast.parse(inspect.getsource(db)))
                  if isinstance(x, ast.Call) and isinstance(x.func, ast.Name)
                  and x.func.id == "isinstance"])

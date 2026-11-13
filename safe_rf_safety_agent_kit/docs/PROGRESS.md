@@ -12520,3 +12520,145 @@ Subject 2,762 → 2,906 lines; suite 7,599 → 8,094; ratio 2.751 → 2.785 (+1.
 **Not touched:** `KEY_LANE_FIGURES["HypothesisResult.verdict"] = (21, 21)` and its comment, as
 briefed. **Not done:** no commit, no blueprint mark; the tree is left dirty. SR-13's fix is again
 unattested, and the fixer is not the attester.
+
+## SR-13 MARKED `[x]` — verified 12 → 13 of 17
+
+**Task** (`docs/BUILD_BLUEPRINT.md:26`): *Build local experiment dashboard showing source-diff
+inventory, toy training curves, benchmark scorecards and uncertainty labels. No biological design
+generator/UI. Depends: SR-08, SR-10. Verify: smoke test; missing results render as UNKNOWN, not 0.*
+
+**Basis: independent attestation, FAIL then PASS**, at `34f303a` then `e997943`. SR-08 and SR-10 both
+marked. The attester wrote none of the code.
+
+### Half 1 — smoke test: PASS
+
+Measured independently, both interpreters, plain and `-OO`: `render_dashboard(full)` → 20,642 bytes,
+5 labelled sections; `render_dashboard({})` and `(None)` → 5 sections; `write_dashboard` round-trips
+byte-identical, lands outside the repo at mode `0600`, and refuses a repo path. Complete standalone
+document, CSP `default-src 'none'`, no `<script>`, no `http(s)://`, no external asset. Four named
+panels present. **No biological design generator or UI**: zero hits for pdb/protein/fasta/residue/
+amino-acid/`generate_`/`design_` in the subject, and zero for `<form>`/`<input>`/`<button>`/`onclick`/
+`<script>`/`fetch(` in subject *and* rendered page.
+
+### Half 2 — "missing results render as UNKNOWN, not 0": failed at HEAD, now holds
+
+**The clause failed verbatim in SR-13's first named deliverable.** Reproduced by the orchestrator
+through the fully public API with a `list` subclass whose `__iter__` raises, no `object.__setattr__`:
+an 8-file / 914-addition / 138-deletion inventory rendered as `total (0 files) | 0 | 0` with
+`class="warn"` **unchanged at zero**. Pre-fix, refused and empty were **byte-identical** — which is
+exactly why it was invisible.
+
+Cause: `_iterated` correctly returns `None`, and then `or ()` **discards the distinction between
+refused and empty**, so the loop runs zero times and `ok_totals` — a loop-body flag with no
+zero-iteration case — stays `True`. **The fourth appearance of that vacuity shape in this project and
+the first inside a SUBJECT rather than a test.** Three sibling panels handled it correctly, which is
+what made it a defect rather than a design choice.
+
+Two page-downs, not one: `_eff_hypothesis` (2258) at k=1 and `render_scorecard` (2371) at k≥2, both
+through the public API with an iterator that answers **per call**. `2334`'s `or ()` produced a
+**misattributed alarm** — accusing the result of a deleted/duplicated/renamed/swapped gate, about a
+list the page never read. `2422` printed **"CONDITIONAL on 0 unimplemented gate(s)" beside
+JOINT_SUPPORTED** on a result deferring six. All closed and re-verified by the attester's own
+9-site × 3-shape sweep (27 non-empty forgeries, site list hand-derived rather than reused): **0
+findings** on 3.12.4, 3.12.4 `-OO`, and 3.13.5.
+
+### The apparatus cause, and a derivation that was never one
+
+`container_liar` forged only `__len__` and had **no `RAISE` member**, while its sibling gained one in
+an earlier round — **a liar factory built from another lane's template with the `RAISE` member
+dropped, the third module to fail on that identical cause in this session.** Its consumer declared the
+hazard in words, naming *"the panel whose printed count is SR-13's first named deliverable"*, and only
+asserted that call sites matched a table and that each `why` string exceeded 50 characters.
+
+**And `container_sites()` was never a derivation.** Its docstring said it walked the payload; it was a
+hand-written list of yields. That is why `joint.deferred_gates` — a container **both** renderers
+iterate, and which `ITERATION_SITES` itself describes — was in no container sweep, and it carried two
+of the three findings. The same defect class as SR-11's hand-written list of five probes.
+
+The replacement was given the scepticism that caught the original and **survived it**: a real AST walk
+over `for`, all four comprehension types, `*x`, `.join` and 15 iterable-consuming builtins, which
+**unwraps `BoolOp`** so `x or ()` is caught; every `why` must match `^(MODULE|GUARDED|ADMITTED): `; no
+`OPEN` permitted; **every GUARDED claim re-checked against the AST** rather than taken from its
+sentence; the eight closed sites asserted gone by name; and the derivation **performed on a probe**
+with an anti-vacuity guard. A mutant making it find nothing is killed, and a new bare
+`tuple(joint.gates)` is killed.
+
+### Two costs, recorded rather than waved through
+
+1. **The suite grew**: 7,599 → 8,094 lines, ratio 2.751 → 2.785. The brief said the ratio should not
+   move and it moved 1.2%. The attester was asked to weigh rather than excuse it and judged it
+   justified: the 495 lines are one performed derivation, one liar member, one liar factory for the
+   only shape that reaches a site behind a passed admission, and five behavioural tests — and they
+   moved the verdict from FAIL to PASS. **That is the opposite of SR-06's pattern**, where the
+   apparatus grew while the verdict never moved. The ratio was always a proxy for "don't audit the
+   apparatus for its own sake"; this was not that.
+2. **`ISINSTANCE_SITES` 34 → 36**: a fix for one declared-open channel **widened another by two
+   sites**, deliberately. The attester argued this is the correct choice rather than a tolerable one,
+   and the argument is sound: the channels are not symmetric. A lying `__len__` is a **silent wrong
+   answer** and is *demonstrably exploited here* — it is the mechanism of both the container lane and
+   the SR-10 flag defect below — whereas a raising `__class__` fails toward an exception. The clause
+   is about silent wrong answers specifically. The alternatives are worse: `type(x) in (list, tuple)`
+   rejects the subclasses that are the whole threat model, and a `try: iter(x)` probe **spends an
+   answer**, reintroducing the answers-once bug. It is counted by AST so it cannot widen unnoticed.
+
+### ROUTED TO SR-12 — a PRODUCER-SIDE gap in already-marked SR-10's module
+
+Verified by the orchestrator: `JointResult.complete_gate_coverage` is `return not
+self.deferred_gates`, a **truth test** on the list the card has just admitted. Six genuinely deferred
+gates whose `__len__` answers 0 make the container falsy, so the property returns **True** and a page
+can claim *"Complete gate coverage: yes"* beside JOINT_SUPPORTED.
+
+**SR-10 is NOT unmarked**, and the attester independently agreed: SR-10's clause is statistical
+fixtures and repeatability, and `not self.deferred_gates` is correct, deterministic and repeatable for
+every value the module's own constructor can produce — the forgery needs post-construction
+`object.__setattr__`. The incorrect *safety claim* is manufactured at the consumer.
+
+**The attester's condition on that agreement, honoured here verbatim: this must be recorded as a
+PRODUCER-SIDE item, not as "the dashboard handles it."** `dashboard.py` is today the **only** reader of
+that flag (checked across all tracked files), so the risk is latent — but **nothing makes the next
+reader cross-check**, and SR-14/15/16 could add one. `benchmark.py` already carries `_plain_number`,
+`_plain_parameter` and `_metric_read` as admissions for stored **values** and **none for containers**:
+a categorical gap with an obvious precedent. SR-12 should treat it as such.
+
+### A figure fixed by the orchestrator as integrator, and why it is the fifth instance
+
+`test_the_isinstance_channel_is_still_open_and_counted` carried **three** stale prose figures — a
+docstring claiming "31 `isinstance` sites of which 19 are reachable" and a comment claiming "34 at the
+previous HEAD and 34 now" — while the constant and the AST both read 36. **The comment four lines
+below the claim already recorded that 31 was unreproducible and corrected it, while the claim itself
+stood uncorrected**, and two later rounds moved the constant without either sentence following.
+
+Three stale figures in the one test whose entire purpose is to stop a figure drifting. **The remedy
+applied is not a fresher number but no number**: the count now lives only in the constant and the
+assertion, the undeiived "of which N are reachable" half is withdrawn, and the history is kept as
+quoted history — which by this project's own convention must stay stale. The test class is green.
+
+### Remaining uncertainty
+
+1. **The producer-side `deferred_gates` admission** above — routed to SR-12, not closed.
+2. **The raising-`__class__` channel**, now 36 sites in `dashboard.py`, declared and counted,
+   deliberately unpinned because pinning it would pin a defect.
+3. **The raising-attribute-lookup channel**, unchanged and not claimed closed.
+4. **A residual the owner stated rather than implied**: an iterator that answers *every* read the card
+   makes and refuses only inside one of the three prose walks can still drop one named line; the card
+   alarms generically and withholds, and the walks' `try` keeps the page up. The `k`-answers sweep
+   **measures that window** rather than asserting it is empty.
+
+**Commands.** Per-module on both interpreters × {plain, `-OO`}; bare-venv determinism
+`./scripts/run_tests.sh --expect none --twice`; baseline by `--expect none --update-baseline`.
+
+**Commits.** `e997943` and this entry. `test_dashboard` 260 → 265; `test_benchmark` 354 unchanged;
+subject 2,762 → 2,906 lines. Bare-venv determinism **1493 / 90 / 0, run1 == run2**.
+
+### Orchestrator record this task
+
+**Zero figure errors, for the second consecutive round** — both the owner and the attester re-derived
+all eight figures given them and found none wrong. The difference from the eight errors on SR-10 and
+SR-11 is simply that every figure in these briefs was measured at the tree rather than quoted from the
+journal. Both the owner and the attester were also caught by the **same avoided-input trap** in their
+own probes (an *empty* refusing container, defused by `or ()`'s `__len__` short-circuit) and both
+self-reported it.
+
+**SR-13 unblocks SR-14.** SR-12 is already eligible (SR-03 ✓, SR-11 ✓) and now carries two routed
+inputs: the producer-side container gap above, and the project-level finding that **no mutation
+tooling is tracked**, so every KILLED/unkilled claim in this journal is unreproducible from a clone.
