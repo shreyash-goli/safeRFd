@@ -12313,3 +12313,108 @@ as the rules require it be said rather than done silently.
    and which this round does not change.
 
 **SR-11 stays `[ ]`** — the fixer is not the attester. **Verified stays 11 of 17.**
+
+## SR-11 MARKED `[x]` — verified 11 → 12 of 17
+
+**Task** (`docs/BUILD_BLUEPRINT.md:22`): *Implement neutral robustness probes (seeds, benign numeric
+input shifts, missing inputs, numerical stability). Depends: SR-10. Verify: immutable scorecards; no
+claims based on single examples.*
+
+**Basis: independent attestation, FAIL then PASS**, at `96aed7c` then `968ebc9`. SR-10 marked. The
+attester wrote none of the code.
+
+### Half 1 — "immutable scorecards": SATISFIED, including with the `vars()` route open
+
+The attester enumerated write routes **from the code** rather than from the declared list and drove
+all 30: **14 of 14 supported-API writes REFUSED**, `to_dict()` is a true defensive copy at top level
+and one deep, `replace()` returns a new object and re-validates. Byte-identical on both interpreters.
+
+The decisive measurement, which the journal asserted but never spelled out — `slots=True` closes
+**one spelling** of a capability that stays fully open through `object.__setattr__`, which CPython
+cannot be made to refuse, **and** converts the refusal on every supported path from
+`FrozenInstanceError`/`AttributeError` into `TypeError`, which is what breaks
+`TestImmutability.test_direct_assignment_and_deletion_raise`. So the declared limit is honest *and*
+its stated reason is true: trading a legible refusal on 14 supported routes to close one spelling of
+an unclosable bypass is the wrong trade. Backed by 8 killing mutants on the immutability machinery.
+
+### Half 2 — "no claims based on single examples": BREACHED, then closed
+
+`assert_no_silent_default(measure, seeds)` returned a clean certification from one fixture, from two,
+**and from zero** — where the loop body never runs. Public, one argument, no `object.__setattr__`.
+The apparatus itself defines this as a claim: `_claims_a_measurement` has `if x is None: return True`,
+documented as *"a public assertion that returned without complaint, which IS a certification."*
+
+**The structural cause mattered more than the line.** The sweep meant to catch it,
+`test_every_probe_refuses_one_and_two_seeds`, was **a hand-written list of five probes with this
+certifier missing** — it did not fit the loop because its fail-closed outcome is a *raise* rather than
+a card. The replacement derives its targets from the **signatures** (7 public callables binding
+`seeds`, asserted as a set). The attester tested that harder than the owner did: it added a **new
+public certifier and registered it in both bookkeeping tables**, so only behaviour could see it — and
+it was caught, three complaints, one per count, naming it.
+
+**Attribution, because a kill by a count is not a kill by a measurement.** `M4` (empty seed list
+*exempted*) leaves every AST site intact, so no census can see it, and it dies anyway on all four
+behavioural tests. The fix is pinned by what the code does.
+
+### The lesson this task actually taught
+
+**When a count is the defect, sweep the count, not the examples.** The attester's finding named the
+two rows it had constructed (0 and 1). The owner found a third — `(0, 1)`, two seeds — by sweeping the
+*dimension* rather than the instances it was handed. The orchestrator's brief carried only the two
+relayed rows. This is the same generalisation as deriving targets from signatures instead of listing
+them, arriving twice in one round.
+
+### PROJECT-LEVEL LIMITATION, recorded here because this round surfaced it
+
+**No mutation tooling is tracked in the repository.** Verified: `git ls-files | grep -iE "mutat|mutant"`
+returns nothing, and `scripts/` holds only `demo.py`, `lint.sh`, `run_tests.sh`, `test_baseline.txt`.
+Every harness built across 26 rounds lived in a session scratchpad and is gone with the session.
+
+**Consequence: every mutation result in this journal — hundreds of KILLED/unkilled claims, including
+most of the evidence behind the marks — is UNREPRODUCIBLE FROM THE REPOSITORY.** The attester hit this
+on the one claim it was asked to verify (that the harness holds `int.__int__` as expected-redundant
+and fails the run if it becomes killable) and correctly refused to take it on trust, reporting that it
+had verified the measurement but not the guard. The same is true of every other such claim.
+
+This is not a defect in SR-11 and does not block its mark: SR-11's own evidence was re-derived
+independently by an attester that built its own harness. But it **bears directly on SR-15**
+(deterministic CI, clean-clone) and **SR-16** (claim-evidence matrix), and those tasks should treat it
+as a known gap rather than discover it. A reader cloning this repository can re-run the suites and
+reproduce every test count; they **cannot** reproduce a single mutation claim.
+
+### Remaining uncertainty, recorded rather than closed
+
+1. **The `vars()` write route into `Scorecard` is OPEN**, declared with its measurement, and the
+   clause is satisfied with it open for the reason derived above. 8 spellings change `content_hash()`,
+   3 leave the card unserialisable.
+2. **The raising-attribute-lookup channel is OPEN and not closable by a check** — reading any attribute
+   of a caller's object runs the caller's code. Pinned as OPEN: the pin asserts the escape *happens*
+   plus three declaration phrases, so it fails if anyone closes the channel without removing the
+   declaration, and fails if the declaration goes stale.
+3. **The raising-`__class__` channel**, 49 `isinstance` sites by AST (re-derived; note `len()` is 51,
+   so the two 49s at the previous HEAD were a coincidence worth not confusing). Three-owner decision.
+4. **`_check_seeds`'s `int.__int__` is redundant** — deleting it is unkilled on both interpreters,
+   because the parameter boundary collapses containers before any public body starts. Kept, because a
+   guard safe only through a boundary elsewhere is safe by coincidence; its docstring now carries the
+   measurement rather than implying the line is load-bearing. **The claim that private tooling guards
+   it against becoming killable is not checkable from the repo** — see the limitation above.
+5. `zero_variance_warning` scope narrowed after measurement found a second instance
+   (`probe_shift` of an exactly invariant measure) the note did not have. No status consults the flag.
+
+**Commands.** Per-module on both interpreters × {bare, `-OO`}; bare-venv determinism
+`./scripts/run_tests.sh --expect none --twice`; baseline by `--expect none --update-baseline`.
+
+**Commits.** `968ebc9` and this entry. `test_robustness` 197 → 203, `test_benchmark` 354 unchanged.
+Bare-venv determinism **1488 / 90 / 0, run1 == run2**; full suite **1488 ran / 0 failed** on 3.12.4
+(skipped 2) and 3.13.5 (skipped 84).
+
+### Orchestrator errors on this task
+
+Two, both verified and corrected: `test_dashboard` does not import `toy.robustness` (0 references),
+and `test_benchmark` is 354 at this HEAD, not the 338 quoted from before SR-10 grew it twice. That is
+**eight figure errors across SR-10 and SR-11**, every one from quoting the journal or an earlier round
+rather than measuring; nothing measured directly has been wrong. Both the owner and the attester were
+briefed to assume the orchestrator's figures need checking, and both caught some.
+
+**SR-11 unblocks SR-12** (`Depends: SR-03, SR-11`; SR-03 marked). Next: **SR-13**, whose fix is also
+unattested.
