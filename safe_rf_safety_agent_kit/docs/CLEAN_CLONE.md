@@ -10,9 +10,15 @@ bind, or an AF_UNIX socket. The loopback property is asserted by
 makes" below. This used to say "no network access at test
 time" while four of those attempts went to a routable
 address on every run, and it then said **"nothing the suite does leaves this host"**, which is one claim too
-strong for what has been measured: **no run of this kit has ever been observed in a network-denied environment**,
-so hermeticity is asserted by construction and not attested. See "Hermeticity is unattested" under "Known limits
-of this documentation", which defines the measurement that would attest it.
+strong for what had been measured at the time. **This passage used to continue "no run of this kit has ever been
+observed in a network-denied environment", and that is now false**: at `18107f8` the whole suite, the demo and
+the lint script were run on this host under `/usr/bin/sandbox-exec` with `(deny network-outbound)` and
+`(deny network-inbound)`, on CPython 3.12.4 and on CPython 3.13.5, with a control inside the same sandbox that
+proved the denial was live. **The scope of that attestation is one host, one OS, one mechanism, and two egress
+paths (`connect()` and name resolution).** It says nothing about Linux, it does not execute the CI workflow, and
+it does not make the runner's Python-level socket guard a sandbox. See "First observation in a network-denied
+environment" below for the profile text, the control and the commands, and "Hermeticity is attested on one host
+and one mechanism only" under "Known limits of this documentation" for what is still open.
 `mse_naive` order-invariance in the robustness tests depends on CPython >= 3.12 compensated `sum()`; do not use
 an older interpreter (some assertions would go red; pre-3.12 is unsupported).
 "The standard library is enough" is a claim about whether the suite **passes**, and it was false for one round:
@@ -36,6 +42,7 @@ they did not, and the documented sequence therefore failed as written.
 git clone <this repository>   # the only network step, and only to obtain the source
 cd safe_rf_safety_agent_kit   # the kit root (contains src/, tests/, scripts/)
 python3 --version             # 3.12.x or newer
+export PYTEST_DISABLE_PLUGIN_AUTOLOAD=1   # inert on a bare interpreter; REQUIRED on one that has pytest
 ./scripts/lint.sh             # compileall + AST checks; works with nothing installed
 
 # Is this interpreter bare? (no output = bare = use `--expect none` directly)
@@ -68,6 +75,19 @@ python3 scripts/demo.py       # works in every case above
 
 Pick exactly one of (a)-(d). CI uses (a) in `core-no-deps` (the runner installs nothing) and (d) in
 `optional-deps`. `README.md` carries the same precondition in one line.
+
+**Second precondition, and it is not optional on a developer machine: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`.** It is
+above in the steps now, because it was not, and the documented sequence is not interpreter-only without it.
+`run_tests.sh` runs a pytest stage whenever pytest is importable, and that stage autoloads every third-party
+`pytest11` plugin the environment provides — none of which this kit declares, pins or installs. Measured at
+`18107f8` on the conda CPython 3.13.5 used throughout this project: `./scripts/run_tests.sh --expect any` ends
+**`RESULT: FAIL`** with the variable unset and **`RESULT: OK`** with it set. With it unset the run reports
+`POLICY:PYTEST_FAILED`, `POLICY:PYTEST_COLLECTED pytest collected 0 tests` and `POLICY:MIN_TESTS`, because a
+numba/llvmlite plugin dies at *collection* with `OSError: Could not find/load shared object file
+'libllvmlite.dylib'`, and four of the pytest-stage tests in `tests/toy_tests/test_scripts.py` fail with it
+(`FAILED (failures=4, skipped=84)` out of `Ran 1493`). **The failure is loud, never a silent pass** — see the
+Known-limits bullet on the pytest stage for the full account. The variable is inert on a bare interpreter, which
+has no pytest at all, so putting it in the documented steps costs the clean-clone case nothing.
 
 `run_tests.sh` removes `__pycache__`, disables bytecode (`PYTHONDONTWRITEBYTECODE=1`), fixes `PYTHONHASHSEED=0`,
 installs the socket guard described under "What the network guard does and does not do" (patched names, not
@@ -119,9 +139,12 @@ measured: the **4** filesystem-case skips (see the next section — exactly 4, n
 **90** locally, because `ruff` is installed on the local machine and so does not skip there. The
 **macOS-generated `scripts/test_baseline.txt` was compared against the Linux run and passed**, which is the
 first evidence that the committed per-module floor is not macOS-specific.
-**What this does NOT establish: hermeticity.** The container **had network**. The socket guard was observed
-*present* on that run, not *load-bearing*; see "Hermeticity is unattested" under "Known limits of this
-documentation" for the measurement that would attest it.
+**What this does NOT establish: hermeticity, on Linux or anywhere else.** The container **had network**. The
+socket guard was observed *present* on that run, not *load-bearing*. **This paragraph used to send the reader to
+a bullet headed "Hermeticity is unattested" for a measurement that had not been run; the measurement has since
+been run, but on macOS and not here** — see "First observation in a network-denied environment" below. **Nothing
+has been observed network-denied on Linux**, so for the Linux rows above hermeticity remains exactly as
+unattested as this paragraph originally said.
 
 ### SR-15 re-measurement (what was actually run, and on what)
 
@@ -934,6 +957,136 @@ The structural checks in `scripts/lint.sh` and `tests/toy_tests/test_scripts.py`
 runtime guard is a second, partial one. **Neither is complete**; see "Lint scope" immediately below for what the
 static checks actually are.
 
+## First observation in a network-denied environment
+
+For twenty-seven rounds this document defined a network-denied run and recorded it as not performed. **It has now
+been performed, on one host, and this section is the record.** Everything below was measured at `18107f8` with a
+clean tree; re-derive it rather than quoting it.
+
+### Mechanism, and the profile in full
+
+macOS `/usr/bin/sandbox-exec`, which applies a Seatbelt profile to a process and its children. The profile is
+three lines plus a version header, and this is the whole of it:
+
+```scheme
+(version 1)
+(allow default)
+(deny network-outbound)
+(deny network-inbound)
+```
+
+`(allow default)` is deliberate: the aim is to change exactly one variable, egress, and leave file, process and
+everything else alone, so that a failure can only be about the network. Invocation shape:
+
+```sh
+cat > nonet.sb <<'EOF'
+(version 1)
+(allow default)
+(deny network-outbound)
+(deny network-inbound)
+EOF
+/usr/bin/sandbox-exec -f nonet.sb <command>
+```
+
+**`sandbox-exec` is macOS-only and is marked deprecated by Apple.** It is what was available on this host; it is
+not a recommendation, and a reader on Linux should use an empty network namespace or a deny-all egress policy
+instead (which is the measurement the Linux rows above still lack).
+
+### The control, which is the reason the pass means anything
+
+**A sandbox that silently fails to apply gives a clean suite pass that proves nothing.** So a control ran inside
+the same sandbox, with the same invocation shape and the same environment, immediately before and immediately
+after every suite run. It is three calls:
+
+```python
+import socket
+socket.create_connection(("127.0.0.1", 1), timeout=5)   # closed LOOPBACK port
+socket.getaddrinfo("example.com", 80)                   # name resolution
+socket.create_connection(("93.184.216.34", 80), timeout=5)  # a routable address
+```
+
+Measured, identically on CPython 3.12.4 and 3.13.5, before and after each run:
+
+| call | outside the sandbox | inside the sandbox |
+|---|---|---|
+| `create_connection(("127.0.0.1", 1))` | `ConnectionRefusedError`, errno 61 `ECONNREFUSED` | **`PermissionError`, errno 1 `EPERM`** |
+| `getaddrinfo("example.com", 80)` | resolved | **`socket.gaierror`, `[Errno 8]` nodename nor servname provided, or not known** |
+| `create_connection(("93.184.216.34", 80))` | `TimeoutError` (3.12.4) / `OSError` errno 51 `ENETUNREACH` (3.13.5) | **`PermissionError`, errno 1 `EPERM`** |
+
+**The load-bearing row is the first one.** Loopback is reachable on this host, so an unsandboxed connect to a
+closed loopback port is refused by the local stack with `ECONNREFUSED`; inside the sandbox the same call is
+denied with `EPERM` before it reaches the stack. `EPERM` where `ECONNREFUSED` is the ambient answer is what
+shows the profile was really applied. A control that only tried a routable address would have been worthless
+here, for a reason worth writing down: **on this host, outside any sandbox, `getaddrinfo("example.com", 80)`
+resolves to `127.0.0.1` and a connect to a routable address times out or returns `ENETUNREACH`** — the ambient
+environment already has no usable egress. A network-denied run that produced no control would therefore have
+been indistinguishable from a run in which the profile was ignored.
+
+### What was run, and the results
+
+Environment for every run: `PYTHONDONTWRITEBYTECODE=1`, `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`, `PYTHONPATH=src`,
+`python3 -B`, `__pycache__` cleared from the whole tree beforehand, and nothing else running (serial).
+Interpreters: **CPython 3.12.4** (`/Library/Frameworks/Python.framework/Versions/3.12/bin/python3`, which has
+torch, numpy and pytest importable) and **CPython 3.13.5** (a conda interpreter, which has numpy and pytest but
+not torch). Neither is bare, so `--expect none` is not applicable to either and `--expect any` was used where the
+runner was driven.
+
+```sh
+# the suite, network-denied, once per interpreter
+env PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src \
+  /usr/bin/sandbox-exec -f nonet.sb "$PY" -B -m unittest discover -s tests
+
+# the runner's own documented step, network-denied
+env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+  /usr/bin/sandbox-exec -f nonet.sb /bin/bash ./scripts/run_tests.sh --expect any --twice
+
+# the demo and the lint script, network-denied
+/usr/bin/sandbox-exec -f nonet.sb "$PY" -B scripts/demo.py
+/usr/bin/sandbox-exec -f nonet.sb /bin/bash ./scripts/lint.sh
+```
+
+| what | interpreter | egress | result |
+|---|---|---|---|
+| `unittest discover -s tests` | 3.12.4 | **denied** | `Ran 1493 tests` / `OK (skipped=2)` / rc=0 (354 s) |
+| `unittest discover -s tests` | 3.12.4 | allowed | `Ran 1493 tests` / `OK (skipped=2)` / rc=0 (356 s) |
+| `unittest discover -s tests` | 3.13.5 | **denied** | `Ran 1493 tests` / `OK (skipped=84)` / rc=0 (243 s) |
+| `unittest discover -s tests` | 3.13.5 | allowed | `Ran 1493 tests` / `OK (skipped=84)` / rc=0 (242 s) |
+| `run_tests.sh --expect any --twice` | 3.13.5 | **denied** | `RESULT: OK`, `unittest ran=1493 skipped=84 failed=0 rc=0`; pytest `1409 passed, 84 skipped, 3624 subtests passed`; `deterministic: run1 == run2`; rc=0 |
+| `scripts/demo.py` | 3.13.5 | **denied** | `DEMO OK`, banner intact, rc=0 |
+| `scripts/lint.sh` | 3.13.5 | **denied** | `LINT: OK`, rc=0 |
+
+**The denied and allowed runs were compared, not just counted.** Each pair above was re-run with `-v` and the
+skipped-test lines extracted and sorted: for both interpreters the denied and the allowed skip lists are
+**byte-identical**, not merely equal in length (2 lines on 3.12.4, 84 on 3.13.5). That is the leg that matters,
+because the failure mode this measurement exists to exclude is a test that passes *because* a connection failed
+and a test that skips *because* a connection failed; neither happened. The two skips on 3.12.4 are the CUDA
+comparison and the torch-present wiring test, i.e. the ordinary torch-installed skips, with no network reason
+among them.
+
+The runner's canary printed `network guard: active, python-level only (canary connect attempt was blocked)`
+inside the sandbox, as it does outside it: the Python-level guard raises before the system call, so the sandbox
+does not change that line.
+
+### What this does NOT establish
+
+- **One host, one OS, one mechanism.** `sandbox-exec` is macOS-only and deprecated. Nothing here is a statement
+  about any other machine.
+- **Two egress paths, not an enumeration.** The control shows the profile blocks `connect()` and name
+  resolution. **No attempt was made to enumerate every egress path the profile may or may not cover** — raw
+  sockets, `sendto` on an unconnected socket, local IPC that a helper daemon might forward, a pre-existing file
+  descriptor, and anything else were not probed. "Egress was denied" here means "these two paths were denied,
+  and they are the two the kit's own guard patches".
+- **Nothing on Linux.** No network-denied run has been observed on Linux; the two bare Linux containers recorded
+  above **had network**.
+- **The CI workflow is still unexecuted.** A local sandbox cannot settle it, and `optional-deps` remains
+  unverifiable here. See the first bullet under "Known limits of this documentation".
+- **The runner's socket guard is still a Python-level tripwire on names.** This measurement is evidence of a
+  different kind, from a different layer, and it does not retroactively make that guard a sandbox. The guard was
+  active during these runs, so the runs do not show what the suite would do with the guard removed and egress
+  denied.
+- **Neither interpreter was bare**, so this is not a clean-clone measurement: it does not re-measure the
+  `--expect none` assertions, and the 1493/2 and 1493/84 figures are host-interpreter figures.
+
 ## First observation on a case-sensitive filesystem: the script FAILED, and was fixed
 
 The first stand-in for Linux (a case-sensitive APFS volume; **a stand-in, not Linux**) showed that
@@ -1060,20 +1213,31 @@ This is hygiene, not a sandbox; the runtime socket guard is a second, partial la
   configuration does not establish:** `optional-deps` on Linux, any non-`ubuntu` distribution, a hosted GitHub
   runner (see the first bullet — the workflow itself still has never been executed), the pinned
   torch/numpy combination, or hermeticity (next bullet).
-- **Hermeticity is unattested: a network-denied environment has never been observed.** Every statement in this
-  document about nothing leaving the host rests on (a) the loopback-only targets of the connections the suite
-  really makes, asserted by `test_no_executed_connection_target_in_the_suite_is_non_loopback`, and (b) the
-  runtime socket guard, which is a tripwire on names and not a sandbox. The Linux containers above **had
-  network**, so the guard was observed *present*, not *load-bearing*: a guard observed running is not a guard
-  observed working. **The measurement that would attest it, defined here and NOT run:** take the same bare
-  container, remove egress (no default route, or a deny-all egress policy, or an empty network namespace with
-  only `lo` up), and record three things in one session — (1) `./scripts/run_tests.sh --expect none --twice`
-  ends `RESULT: OK` with the same 1252/95/0 and the same skip list as the networked run, so no test is silently
-  passing *because* a connection failed; (2) a positive control in that same environment shows egress really is
-  denied (an outbound TCP connect to a routable address fails with `ENETUNREACH`/`EHOSTUNREACH` rather than
-  `ECONNREFUSED`); (3) `python3 scripts/demo.py` and `./scripts/lint.sh` also pass there. Until all three are
-  recorded, "offline" in the title of this document is a statement about what the kit *asks for*, not an
-  attested property of a run.
+- **Hermeticity is attested on one host and one mechanism only.** **This bullet was headed "Hermeticity is
+  unattested: a network-denied environment has never been observed" for twenty-seven rounds, and that heading is
+  now false**: the measurement it defined was run at `18107f8` and is recorded under "First observation in a
+  network-denied environment" above. What was run, in one session on one macOS host: the full suite under
+  `/usr/bin/sandbox-exec` with `(deny network-outbound)` and `(deny network-inbound)` on CPython 3.12.4
+  (`Ran 1493` / `OK (skipped=2)`) and 3.13.5 (`Ran 1493` / `OK (skipped=84)`), each with a **byte-identical skip
+  list** to the same command run with egress allowed, so no test passed or skipped *because* a connection
+  failed; `./scripts/run_tests.sh --expect any --twice` ending `RESULT: OK` with `run1 == run2` in the same
+  sandbox; `python3 scripts/demo.py` and `./scripts/lint.sh` passing there; and, immediately before and after
+  each run, a control in that same sandbox showing the denial was live — `create_connection(("127.0.0.1", 1))`
+  raising `PermissionError`/`EPERM` where the ambient host answers `ECONNREFUSED`, and `getaddrinfo` raising
+  `gaierror`. **Three things that attestation does NOT cover, each still open.** (1) **Linux**: no
+  network-denied run has been observed there, and the Linux containers above **had network**, so for those rows
+  the guard was observed *present*, not *load-bearing* — a guard observed running is not a guard observed
+  working. (2) **Every other egress path**: the control probed `connect()` and name resolution, and no attempt
+  was made to enumerate what else a Seatbelt profile does or does not cover; `sandbox-exec` is macOS-only and
+  deprecated by Apple. (3) **A bare interpreter**: both interpreters measured had packages, so the
+  network-denied runs were `--expect any`, not the `--expect none` clean-clone assertion, and the original
+  definition of this measurement (the same bare container as the Linux rows, `--expect none --twice`, the same
+  1252/95/0) is still the thing nobody has done. The two older supports stand unchanged underneath all of it:
+  (a) the loopback-only targets of the connections the suite really makes, asserted by
+  `test_no_executed_connection_target_in_the_suite_is_non_loopback`, and (b) the runtime socket guard, which is
+  a tripwire on names and not a sandbox. So "offline" in the title of this document is now an attested property
+  of a run **on one host, one OS and one mechanism**, and remains a statement about what the kit *asks for*
+  everywhere else.
 - **The torch/numpy pin is untested as a combination.** `constraints.txt` pins torch 2.7.1 + numpy 1.26.4 on Python
   3.12. Locally the suite passes on torch 2.7.1 + numpy 2.4.6 (framework Python 3.12) and torch 2.11.0 + numpy 2.4.4
   (miniconda Python 3.13), so local runs do not test the pinned combination. The pin is kept for reproducibility.
@@ -1108,13 +1272,51 @@ This is hygiene, not a sandbox; the runtime socket guard is a second, partial la
   bullet the flag was written in the commands without its reason, so a reader had no way to know whether it
   was load-bearing or habit. It is load-bearing on any environment with a broken pytest plugin, and inert on
   one without.
+  **Two corrections to this bullet, both made at `18107f8`.** (1) **It said the flag "appears in the commands
+  above" while the documented Steps did not carry it** — the only command in this document that had it was a
+  quoted lint transcript far below the Steps, so a reader following the Steps verbatim on a machine with pytest
+  got the failure this bullet describes and no warning. The flag is now in the Steps and in `README.md`'s command
+  block, and the Steps state the precondition in their own words. (2) **The figure was a module figure, and the
+  whole-run figure is worse.** `Ran 156, FAILED (failures=4)` was `tests/toy_tests/test_scripts.py` alone;
+  re-measured at `18107f8` on the same conda CPython 3.13.5, the documented command `./scripts/run_tests.sh
+  --expect any` ends **`RESULT: FAIL`, rc=1** with the flag unset — `Ran 1493`, `FAILED (failures=4, skipped=84)`,
+  then `POLICY:UNITTEST_FAILED`, `POLICY:PYTEST_FAILED`, `POLICY:PYTEST_COLLECTED pytest collected 0 tests`,
+  `POLICY:PYTEST_SKIPPED` and `POLICY:MIN_TESTS` — and **`RESULT: OK`, rc=0** with the flag set. So the limit is
+  not "four tests are fragile"; it is that the documented step's verdict is decided by a package this kit does
+  not declare.
+- **The runner's `summarize()` takes the FIRST `Ran N tests` line in the log, and in a red run that can be a
+  captured transcript rather than the suite's own total.** Found at `18107f8` while measuring the bullet above,
+  and **not fixed this round** (it is a change to runner logic, outside the clause this round was recording, and
+  fixing it would have invalidated the figures measured around it). In the `RESULT: FAIL` run just described the
+  script printed `unittest: ran=3 skipped=84 failed=1 rc=1` and then `POLICY:MIN_TESTS only 3 tests ran (floor
+  MIN_TESTS=650)`, two lines after its own `tail` showed `Ran 1493 tests`: the failing tests drive synthetic
+  suites and their captured output contains `Ran 3 tests`, which `re.search(r"^Ran (\d+) tests?", t, re.M)` finds
+  first. **Which direction this can go, stated rather than guessed:** captured output is printed only inside a
+  failure message, so the misparse can only occur in a run that is already red, and it can only *understate*
+  `$RAN`, which makes `POLICY:MIN_TESTS` fire rather than hide — it adds a spurious failure to a failing run, it
+  does not mask a real one. `failed=1` in that line is not a miscount: `$BAD` is a flag (`1` if the summary line
+  begins `FAILED`), not a failure count. The fix is to take the last match rather than the first; until someone
+  does, **do not read `ran=` or the `MIN_TESTS` figure off a red run** — read the `Ran N tests` line the script
+  tails immediately above it.
 - **The 1/3/4 variable-by-variable table comes from the stand-in; the Linux TOTAL does not, any more.** The
   table under "Filesystem-case skips" is from a real case-sensitive APFS disk image, which is still a stand-in:
   it shows which *variable* drives each skip. The **4** it predicts for the Linux configuration is now measured
   on Linux (`81d450a`, two bare containers, `note: 4 skip(s) for a case-sensitive filesystem (expected on
   Linux)`); what the stand-in still cannot show is that Linux behaves identically in any other respect.
-- **Step (b), `--expect any` on a machine that has the packages, has not been run against the full suite here.**
-  It is correct by construction rather than by measurement: in `scripts/run_tests.sh` every policy that the
+- **Step (b), `--expect any`, HAS now been run against the full suite on a machine that has the packages.**
+  **This bullet used to open "Step (b) ... has not been run against the full suite here", and that is no longer
+  true**: at `18107f8` `./scripts/run_tests.sh --expect any --twice` was run end-to-end on the conda CPython
+  3.13.5 (numpy and pytest importable, torch absent) and ended `RESULT: OK` — `unittest ran=1493 skipped=84
+  failed=0 rc=0`, pytest `1409 passed, 84 skipped, 3624 subtests passed`, `deterministic: run1 == run2` with
+  identical per-module counts and skip list, no `POLICY:` token. It was run inside the network-denied sandbox
+  (see "First observation in a network-denied environment"), which is a *stronger* environment than step (b)
+  asks for, not a weaker one. **What that still does not establish:** it was not run on an interpreter with
+  **torch** present, so the one package whose absence drives **all 84** of those skips was absent (measured:
+  every one of the 84 skip reasons begins "torch not installed"), and step (b)'s
+  behaviour with every optional package installed is still unmeasured — that is step (d)'s territory, and the
+  `--expect torch` row in the table above is `pre-SR-15`. The construction argument below therefore still
+  carries the parts a single `--expect any` run cannot:
+  in `scripts/run_tests.sh` every policy that the
   host-interpreter run tripped (`NONE_REASON`, `TORCH_PRESENT`, `MIN_NONE_SKIPS`, `NO_NUMPY_REASON`, and the
   baseline *skip* comparison) sits inside `if mode == "none":` / `elif mode == "none":`, with no `else` branch, so
   `any` cannot reach them; the baseline *test-count* comparison, which does apply in every mode, compares counts

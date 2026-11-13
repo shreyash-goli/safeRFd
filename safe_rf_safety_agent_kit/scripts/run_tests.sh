@@ -298,9 +298,16 @@ if [ "$GUARD" = 1 ]; then
   # refused" from this host's own stack, over the loopback device.
   # THE RETRACTION, kept where the claim was made (round 8's F3): this comment used to end that sentence "and
   # nothing leaves the host", which is the phrase README.md retracted, and for the same reason -- aiming at
-  # loopback is a property of the ADDRESS THIS SCRIPT ASKS FOR, which is tested, and not of the host's egress,
-  # which has never been observed. Hermeticity is UNATTESTED; docs/CLEAN_CLONE.md's Known-limits bullet defines
-  # the network-denied measurement that would attest it, and that measurement has not been run.
+  # loopback is a property of the ADDRESS THIS SCRIPT ASKS FOR, which is tested, and not of the host's egress.
+  # THE SECOND HALF IS NO LONGER UNOBSERVED: this comment used to end "which has never been observed.
+  # Hermeticity is UNATTESTED; docs/CLEAN_CLONE.md's Known-limits bullet defines the network-denied measurement
+  # that would attest it, and that measurement has not been run", and at 18107f8 the measurement was run --
+  # macOS sandbox-exec, (deny network-outbound) plus (deny network-inbound), CPython 3.12.4 and 3.13.5, this
+  # script included (--expect any --twice, RESULT: OK), with a control in the same sandbox showing a connect to
+  # a closed loopback port raising EPERM where the ambient host answers ECONNREFUSED. Scope: one host, one OS,
+  # one mechanism, connect() and name resolution only -- nothing on Linux, no CI job, and the guard below is
+  # still a Python-level tripwire on names rather than a sandbox. See docs/CLEAN_CLONE.md, "First observation in
+  # a network-denied environment".
   # The TARGET used to be 192.0.2.1:9, which is unroutable only by convention -- the kernel still sent the SYN,
   # on every run where the guard was absent.
   CANARY="$(python3 -c "import socket; socket.create_connection(('127.0.0.1', 1), timeout=1)" 2>&1 || true)"

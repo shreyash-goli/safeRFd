@@ -12,8 +12,14 @@
 # (PyPI plus download.pytorch.org). README.md retracted the wording "reaches a remote host", and the clause
 # above used to be worded with it, rescued only by the sentence that followed: a reader who stopped at the
 # colon got exactly the claim README.md withdrew, and until SR-15's tenth round no needle covered that
-# rephrasing. What the suite tests is the address asked for; no job has ever run network-denied,
-# so hermeticity is UNATTESTED here exactly as it is in docs/CLEAN_CLONE.md.
+# rephrasing. What the suite tests is the address asked for, and no CI job has ever run network-denied, for the
+# plainer reason that this workflow has never been executed at all: hermeticity is UNATTESTED FOR CI. This
+# clause used to add that it was unattested "exactly as it is in docs/CLEAN_CLONE.md", and that cross-reference
+# is now wrong -- at 18107f8 a macOS sandbox-exec profile denying network in and out attested it for the suite,
+# the demo and the lint script on ONE developer host, on CPython 3.12.4 and 3.13.5, with a control in the same
+# sandbox proving the denial was live. That is one host, one OS, one mechanism and two egress paths: no runner,
+# no Linux, and nothing about this file. See docs/CLEAN_CLONE.md, "First observation in a network-denied
+# environment".
 # Every test step runs the suite through scripts/run_tests.sh, whose socket guard makes the
 # patched socket entry points raise (the patched and deliberately-unpatched names are tuples in that script).
 # But the suite does attempt connections, and this comment used to deny it: the guard's own negative controls

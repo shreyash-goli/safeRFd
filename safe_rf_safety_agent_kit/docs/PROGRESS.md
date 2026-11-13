@@ -12945,3 +12945,98 @@ the phantom before the probe saw it.
 offline regression suite passes"* — **no network-denied run has ever been attested in this project**,
 the measurement is defined and deliberately unrun at `docs/CLEAN_CLONE.md`, and `CLEAN_CLONE.md:1042`
 states plainly that the CI workflow has never been executed. Expect BLOCKED on that leg.
+
+---
+
+## SR-15 build — the network-denied measurement, RUN (owner: docs/CLEAN_CLONE.md, README.md, ci.yml, scripts/)
+
+**At `18107f8`, tree clean at start. BUILD ONLY — the blueprint is not marked and nothing is committed.**
+
+### What was measured
+
+**Mechanism.** macOS `/usr/bin/sandbox-exec`, profile re-derived rather than quoted:
+`(version 1)` / `(allow default)` / `(deny network-outbound)` / `(deny network-inbound)`. `(allow default)`
+is deliberate — one variable changed, so a failure can only be about the network.
+
+**Control, run inside the same sandbox immediately before AND after every suite run.** Three calls; results
+identical on both interpreters:
+
+| call | outside sandbox | inside sandbox |
+|---|---|---|
+| `create_connection(("127.0.0.1", 1))` | `ConnectionRefusedError` errno 61 `ECONNREFUSED` | `PermissionError` errno 1 `EPERM` |
+| `getaddrinfo("example.com", 80)` | **resolved, to `127.0.0.1`** | `socket.gaierror` `[Errno 8]` |
+| `create_connection(("93.184.216.34", 80))` | `TimeoutError` (3.12.4) / errno 51 `ENETUNREACH` (3.13.5) | `PermissionError` errno 1 `EPERM` |
+
+**The loopback row is the one that carries the control**, and the middle row is why. On this host, with no
+sandbox at all, `example.com` already resolves to `127.0.0.1` and a routable connect already fails. A control
+built only on a routable address would have been satisfied by a sandbox that never applied. `EPERM` where the
+ambient host answers `ECONNREFUSED` is the only one of the three that distinguishes them.
+
+**Results, network-denied** (`PYTHONDONTWRITEBYTECODE=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src`,
+`-B`, `__pycache__` cleared, serial, never `-I`):
+
+- 3.12.4 `unittest discover -s tests`: `Ran 1493` / `OK (skipped=2)` / rc=0 (354 s)
+- 3.13.5 `unittest discover -s tests`: `Ran 1493` / `OK (skipped=84)` / rc=0 (243 s)
+- 3.13.5 `./scripts/run_tests.sh --expect any --twice`: `RESULT: OK`, `ran=1493 skipped=84 failed=0 rc=0`,
+  pytest `1409 passed, 84 skipped, 3624 subtests passed`, `deterministic: run1 == run2`, no `POLICY:` token
+- `python3 scripts/demo.py` rc=0, banner intact, `DEMO OK`; `./scripts/lint.sh` rc=0, `LINT: OK`
+
+**Networked comparison, same HEAD, same session** — the leg that excludes "a test passed/skipped *because* a
+connection failed": 3.12.4 `1493`/`skipped=2`, 3.13.5 `1493`/`skipped=84`, and the denied and allowed runs were
+re-run with `-v` and their **sorted skip lines diffed byte-for-byte: identical on both interpreters**. All 84
+skips on 3.13.5 begin `torch not installed`; the 2 on 3.12.4 are the CUDA comparison and the torch-present
+wiring test.
+
+**Every figure the brief supplied reproduced exactly.** No figure error found.
+
+### What it does NOT establish
+
+One host, one OS, one mechanism; `connect()` and name resolution only, with **no enumeration of other egress
+paths** attempted; nothing on Linux; the CI workflow **still has never been executed** and `optional-deps`
+remains unverifiable here; the runner's guard is still a Python-level tripwire on names, was active throughout,
+and is not retroactively a sandbox; and **neither interpreter was bare**, so this is not a clean-clone
+`--expect none` measurement.
+
+### Sentences corrected (superseded claim kept as quoted history, marker before the claim in its own sentence)
+
+`docs/CLEAN_CLONE.md` intro (ex-`:13`), its Linux "does NOT establish: hermeticity" paragraph, the Known-limits
+hermeticity bullet (ex-`:1063`, re-headed *"Hermeticity is attested on one host and one mechanism only"*);
+`README.md` lines 30 and 33; `scripts/run_tests.sh`'s canary comment; `.github/workflows/ci.yml`'s header.
+`test_no_withdrawn_guarantee_is_restated_in_a_comment` green afterwards (`test_scripts` **156 OK**), and the
+phrase `has never been observed` is deliberately still present in the document because
+`test_docs_carry_the_honest_ci_caveats` requires it.
+
+### Three things found that were not in the brief
+
+1. **`CLEAN_CLONE.md`'s step-(b) bullet was also false.** It opened *"Step (b), `--expect any` on a machine
+   that has the packages, has not been run against the full suite here"* — it has now, end-to-end, `RESULT: OK`.
+   Corrected, with the part that remains true (no torch-present `--expect any` run) stated.
+2. **F20 is live at HEAD and worse than a module figure.** The documented step `./scripts/run_tests.sh
+   --expect any` ends **`RESULT: FAIL` rc=1** on the conda 3.13.5 with `PYTEST_DISABLE_PLUGIN_AUTOLOAD` unset
+   (`Ran 1493`, `FAILED (failures=4, skipped=84)`, `POLICY:UNITTEST_FAILED`, `POLICY:PYTEST_FAILED`,
+   `POLICY:PYTEST_COLLECTED pytest collected 0 tests`, `POLICY:PYTEST_SKIPPED`, `POLICY:MIN_TESTS`) and
+   `RESULT: OK` rc=0 with it set. The Known-limits bullet claimed the flag "appears in the commands above"
+   while the **documented Steps did not carry it**. The flag is now in the Steps, in `README.md`'s command
+   block, and stated as a precondition in both.
+3. **`summarize()` in `scripts/run_tests.sh` takes the FIRST `^Ran N tests` in the log.** In the red run above
+   that was a synthetic suite's captured `Ran 3 tests`, so the script printed `unittest: ran=3` and
+   `POLICY:MIN_TESTS only 3 tests ran` two lines after its own tail showed `Ran 1493`. Direction checked:
+   captured output is printed only inside a failure message, so it can only misfire in an already-red run and
+   can only **understate** `$RAN` — it adds a spurious failure, it cannot mask one. `failed=1` is not a
+   miscount (`$BAD` is a flag). **Declared in `CLEAN_CLONE.md`, deliberately NOT fixed**: it is runner logic,
+   outside the clause this round recorded, and the fix (last match, not first) would have invalidated every
+   figure measured around it.
+
+### SR-15 clause, limb by limb
+
+| limb | status |
+|---|---|
+| deterministic CI | **partial.** `--twice` + `PYTHONHASHSEED=0` + bytecode clearing are implemented and the determinism check passed network-denied. The workflow itself **has never been executed**; `optional-deps` is unverifiable here. |
+| lint/test scripts | **done.** `scripts/lint.sh` and `scripts/run_tests.sh` exist, pass, and pass network-denied. |
+| dependency pinning | **partial, and honestly declared.** `constraints.txt` pins torch 2.7.1 + numpy 1.26.4; the combination is untested, transitive deps are unpinned, no hashes, no lock file, actions pinned by tag not SHA. Unverifiable without a runner — not fixed. |
+| offline demo | **done, and now attested.** `scripts/demo.py` rc=0 network-denied, banner intact. |
+| clean-clone instructions | **done for content; the 'bare interpreter' half remains unmeasured this round** — both interpreters here had packages. |
+| *"complete offline regression suite passes"* | **met on one host, one OS, one mechanism.** 1493 tests, both interpreters, rc=0, with a live-denial control and an identical networked skip list. Not met on Linux, not through CI. |
+
+`scripts/test_baseline.txt` **does not need regenerating**: it records `toy_tests.test_scripts 156 4` and its
+13 module rows sum to exactly 1493. Not edited.
