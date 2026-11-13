@@ -5742,9 +5742,15 @@ KEY_LANE_FIGURES = {
 # below prescribes: SR-10 closed `combine_joint`'s bare `Verdict(...)` coercion (benchmark.py N3), which
 # had been documented as a no-op in two places, so forged verdict cells that used to escape the sweep
 # through that coercion now reach the page and alarm. REACH, not regression: every cell that moved
-# still FAILED CLOSED and STANDING stayed 0 -- the assertion two below this one is the one that would
-# go red if that had changed, and it is asserted separately for exactly that reason. The figure is not
-# restated here, because a figure in a comment is a figure no test can read.
+# still FAILED CLOSED and STANDING stayed 0. WHICH ASSERTION CATCHES A STANDING CELL, corrected after
+# the orchestrator wrote this comment and SR-10's confirming attestation measured it: NOT the STANDING
+# assertion below. The `if closed: continue` branch that increments STANDING falls through to
+# `findings.append(... " WITH A DECISIVE JOINT VERDICT STANDING")`, so `assertEqual(findings, [])`
+# fires FIRST and the STANDING assertion is a REDUNDANT SECOND guard that cannot fire alone. Coverage
+# is therefore stronger than the first version of this comment claimed -- which is still a wrong
+# sentence, and the reason it is corrected here rather than left as a harmless overstatement. Measured:
+# a mutant forcing every moved cell to count as standing is killed, by the findings assertion. The
+# figure is not restated here, because a figure in a comment is a figure no test can read.
 
 
 class EveryDecisiveWordRendersTheAdmittedText(FailsClosedAssertions, unittest.TestCase):

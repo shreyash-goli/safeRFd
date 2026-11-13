@@ -11985,3 +11985,111 @@ R21 a raw `__doc__` read outside `_doc` (same four) · R22 the reached-and-close
 6. **`_decided_number` refuses rather than coerces**, so a caller passing `2.0` for a count now gets a
    `ValueError` where it previously got a verdict. That is a deliberate narrowing of what the public
    API accepts, it is asserted, and it is the kind of change an attester should look at directly.
+
+## SR-10 MARKED `[x]` — verified 10 → 11 of 17
+
+**Task** (`docs/BUILD_BLUEPRINT.md:21`): *Implement generic synthetic benchmark scoring and confidence
+interval reporting; avoid actual biological sequence generation or target optimization. Depends: SR-06,
+SR-09. Verify: statistical test fixtures and repeatability.*
+
+**Basis: independent attestation, FAIL then PASS.** SR-06 and SR-09 both marked. The attester wrote
+none of the code, failed the task once, and confirmed the fix at `afe94eb`.
+
+### The verify clause, on the attester's own measurements
+
+- **Determinism bit-exact.** Canonical dump of a full study plus all statistics over
+  `PYTHONHASHSEED` ∈ {0,1,7,random} × 2 interpreters × 2 repeats = **two digests, one per
+  interpreter** (`1d206309aa27e765`, `330d6aa79bcd6638`), and both **unchanged by the fix round** — so
+  the fix altered no computed value for any honest input.
+- **Stored CIs reproduce BITWISE from the records** for all four primary components, bootstrap and t.
+- **No shared RNG exists**: 5 construction sites, all `make_rng(derive_seed(...))` at point of use, so
+  no reordering can consume one out of order. Verified by audit and by measurement.
+- **Failed seeds do not perturb survivors** (bootstrap bounds bitwise identical with and without two
+  added failures); `n_failed` faithful; all-30-failed gives `unmeasured` with reason `"no data"`,
+  never 0.0. `IneligibleSeed` routes only on outcome-INDEPENDENT criteria.
+- **Statistics validated against an independent 40-dps mpmath reference**: `t_ppf` max rel err 1e-12
+  worst case and ~1e-15 in the operating range; coverage 98.85%/99.15% at n=100/30 against a nominal
+  98.75%; degenerate inputs (n=0, n=1, zero variance) all fail closed with reasons, never 0.0.
+- No biological content: fixtures are synthetic numeric row sets, `in_region` is `row[0] > 0.0`.
+
+### The FAIL, and why it mattered
+
+`_plain_parameter` is a **normaliser, not a validator** — "anything that is not an int/float subclass
+instance is returned unchanged" — so a **non-numeric** object with lying comparisons walked past the
+protocol's minimum-seeds floor and the width-tolerance rule. **Six routes**, each turning
+`(INCONCLUSIVE, 'n=2 below protocol minimum 30')` into `(SUPPORTED, 'whole interval above margin')`
+off a **two-value series**. Closed as 5 refusals + 1 correct normalisation (route A, the control).
+
+Three facts about this worth keeping:
+
+1. **The orchestrator's brief would have been a half-fix.** It named the two `__post_init__` sites;
+   `interval_verdict(..., min_n=...)` and `(..., width_tol=...)` are **public parameters** that pass
+   through neither. The mutant implementing the briefed version is **KILLED (5 failures × 2
+   interpreters)**. The signature defect of this project, committed inside a brief written to fix an
+   instance of it.
+2. **The fixture is load-bearing.** Tied values reach SUPPORTED; untied values bypass the floor but
+   the bootstrap/t disagreement absorbs it and the verdict stays INCONCLUSIVE. The orchestrator's
+   first reproduction used untied values and would have under-reported a verdict-changing defect as
+   reason-changing. The contrast is now measured in-process, patching `_decided_number` back to the
+   normaliser, rather than asserted from memory.
+3. **A DERIVED MEMBERSHIP CHECK DOES NOT DERIVE THE DECISIONS.** Round 24 built a census that fails
+   closed on an *undecided* site, then wrote 127 decisions by hand — two of them false, both citing
+   `_plain_parameter`, a normaliser, as "an admission that already ran" — with every set-equality
+   assertion passing. So the round's "17 → 0" was really **17 → 2**.
+
+### Cross-owner change made by the orchestrator as integrator
+
+The builder correctly declined to edit `tests/toy_tests/test_dashboard.py`, which it does not own.
+Closing N3 widened that suite's `"key"`-lane sweep, so
+`KEY_LANE_FIGURES["HypothesisResult.verdict"]` moved **5 → 21**. **Reach, not regression**, and
+independently confirmed: reverting to `(5,5)` is KILLED, and forcing every moved cell to count as
+STANDING is KILLED, so the lane's promise is still enforced and the 21 cells are real rather than a
+vacuous zero. Changed by the procedure that assertion itself prescribes, with no figure written into
+the comment. **The orchestrator's comment then mis-attributed which assertion catches a standing
+cell** — the `findings` assertion fires first, because the STANDING-incrementing branch falls through
+to it, making the STANDING assertion a redundant second guard. Coverage is stronger than claimed and
+the sentence was still wrong; corrected at the site.
+
+### Remaining uncertainty, recorded rather than closed
+
+1. **The record-label channel is OPEN** — 9 `_D_LABEL` rows across three public record-building
+   functions. A `str` subclass with a raising `__format__` as `study_id`, `subject`, an arm or a seed
+   takes all three out. Left open deliberately: a record's `name` is the key a recompute looks it up
+   **by**, so a placeholder would file a real study under `<undescribable str: ...>`. Pinned to fail
+   when it closes — proved by a mutant that closes it at source and fails the pin.
+2. **The percentile bootstrap depends on input ORDER, not only content.** Permuting 30 values leaves
+   `mean`/`sd`/`t_lo` at one value each and `boot_lo` at **57 distinct values**, spread 8.2% of the
+   interval width; end-to-end with every gate passing, 59/60 orderings gave JOINT_SUPPORTED and 1 gave
+   JOINT_INCONCLUSIVE, with a permutation-dependent margin window 0.404% of the interval width and
+   direction never reversing. Stated, not fixed, because sorting would change published interval
+   values. The `seed_list_frozen` gate tests membership as a **set**, so a caller assembling
+   `analyze_scores` itself can present any order and the gate passes. Pin non-vacuous: a mutant that
+   sorts inside `bootstrap_means` kills it.
+3. **`ComponentResult.__post_init__`'s refusal is redundant today and NOT independently pinned** — a
+   mutant degrading it is unkilled by the whole suite on both interpreters, declared in advance at the
+   site with that measurement rather than claimed as defence in depth.
+4. **The public API is deliberately narrowed**: `interval_verdict(..., min_n=30.0)` now raises. Safe
+   for the recompute path, which reads `n_seeds` back through `_metric_count` to a real `int` —
+   measured, `reasons=()`, round-trip verdict matches the producer.
+5. **Raising-`__class__` and raising-attribute-lookup remain open kit-wide**, unexamined this round.
+6. **Cross-owner, against SR-11's suite, not this one**: `test_robustness._derive_diagnostic_sites`
+   knows four protocols and is blind to format specs, `"%s" %` and `.format`. Measured by the
+   orchestrator at this HEAD: `robustness.py` contains **0** of all three, so the gap is real but
+   **currently vacuous** — and `benchmark.py` has **3** format-spec sites, two of which were open
+   through exactly that blindness. Luck, not method. A note for SR-11, not a FAIL.
+
+**Commands.** Per-module on both interpreters × {normal, `-OO`}; bare-venv determinism
+`./scripts/run_tests.sh --expect none --twice`; baseline by `--expect none --update-baseline`.
+
+**Commits.** `775dedf` (the channel: declared at one site, open at seventeen), `afe94eb` (the floor
+defeated through six routes), and this entry. Bare-venv determinism **1482 / 90 / 0, run1 == run2**;
+full suite **1482 ran / 0 failed** on 3.12.4 (skipped 2) and 3.13.5 (skipped 84).
+
+### Orchestrator errors this task
+
+Six. The briefed half-fix; the untied-value reproduction; a diffstat read before committing a fifth
+file; three-vs-four importing suites (`test_schema.py:646`); pre-fix record-label line numbers; "5
+sites" where the census carries 9 rows. Plus the mis-attributed dashboard assertion above. **Every
+figure in this entry was re-derived at the marked tree.**
+
+**SR-10 unblocks SR-11 and SR-13.** Both hold fixes that no independent pass has checked.
