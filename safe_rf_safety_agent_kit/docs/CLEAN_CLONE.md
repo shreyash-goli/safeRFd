@@ -1293,8 +1293,16 @@ This is hygiene, not a sandbox; the runtime socket guard is a second, partial la
   suites and their captured output contains `Ran 3 tests`, which `re.search(r"^Ran (\d+) tests?", t, re.M)` finds
   first. **Which direction this can go, stated rather than guessed:** captured output is printed only inside a
   failure message, so the misparse can only occur in a run that is already red, and it can only *understate*
-  `$RAN`, which makes `POLICY:MIN_TESTS` fire rather than hide — it adds a spurious failure to a failing run, it
-  does not mask a real one. `failed=1` in that line is not a miscount: `$BAD` is a flag (`1` if the summary line
+  `$RAN`, which makes `POLICY:MIN_TESTS` fire rather than hide — it adds a spurious failure to a failing run.
+  **This bullet used to end "it does not mask a real one", and SR-15's attester measured that clause FALSE.** The
+  same first-match regex sits at a SECOND site this bullet did not name, `policy()` at `scripts/run_tests.sh:355`,
+  where it feeds `ran_log` and the `POLICY:RECORDER` check `if len(starts) < ran_log`; understating `ran_log`
+  DISABLES that check. Measured by driving `policy()` verbatim with two crafted logs, recorder seeing 700 of 1493
+  in both: with the real total first, `POLICY:RECORDER recorder saw 700 tests but unittest ran 1493`, rc=1; with a
+  captured `Ran 3 tests` earlier in the log, rc=0 and RECORDER silent. **So it does mask a real check — just never
+  one that could change a verdict**, because the captured transcript exists only because a test already failed, so
+  `POLICY:UNITTEST_FAILED` fires and the run is red with rc=1 either way. What degrades is the diagnosis, not the
+  gate. The fix must therefore touch BOTH sites, not only `summarize()`. `failed=1` in that line is not a miscount: `$BAD` is a flag (`1` if the summary line
   begins `FAILED`), not a failure count. The fix is to take the last match rather than the first; until someone
   does, **do not read `ran=` or the `MIN_TESTS` figure off a red run** — read the `Ran N tests` line the script
   tails immediately above it.

@@ -13040,3 +13040,125 @@ phrase `has never been observed` is deliberately still present in the document b
 
 `scripts/test_baseline.txt` **does not need regenerating**: it records `toy_tests.test_scripts 156 4` and its
 13 module rows sum to exactly 1493. Not edited.
+
+## SR-15 MARKED `[x]` — verified 15 → 16 of 17
+
+**Task** (`docs/BUILD_BLUEPRINT.md:28`): *Add deterministic CI, lint/test scripts, dependency pinning,
+offline demo and clean-clone instructions. Depends: SR-12, SR-14. Verify: complete offline regression
+suite passes.*
+
+**Basis: independent attestation, PASS, conditional on one correction now applied.** Both dependencies
+marked. The attester re-derived every measurement, ran its own controls, and explicitly rejected
+BLOCKED as the honest answer: *"the clause is 'complete offline regression suite passes', not
+'hermeticity is established on all platforms'."*
+
+### The verify clause: MET, on evidence that did not exist 24 hours ago
+
+Network-denied via `sandbox-exec` `(deny network-outbound) (deny network-inbound)`, re-derived
+independently by the attester: 3.12.4 and 3.13.5 each **1493 / 0 failed**, denied *and* allowed;
+`run_tests.sh --expect any --twice` inside the sandbox → `RESULT: OK`, `deterministic: run1 == run2`,
+pytest 1409 passed / 84 skipped / 3624 subtests; `demo.py` rc=0; `lint.sh` `LINT: OK`.
+
+**Three controls, each of which the measurement would be worthless without:**
+
+1. **Denial live** — loopback gives `PermissionError`/EPERM inside, `ConnectionRefusedError`/errno 61
+   outside.
+2. **Not vacuous** — skip lists compared as full `id :: reason` pairs via the attester's own recorder
+   (not `-v` text, which loses ids for docstring'd tests): **byte-identical denied vs allowed, md5
+   equal, both interpreters.** All 84 skips on 3.13.5 are torch-driven, 84/84. No skip reason anywhere
+   mentions network, connect, dns, socket, offline, unreachable or resolve.
+3. **Sandbox inheritance — a leg NOBODY briefed or checked**, and load-bearing because most of
+   `test_scripts` works through subprocesses: `sandbox-exec → python → subprocess python` gives EPERM
+   at the grandchild, and so does `sandbox-exec → bash → python`. Inheritance holds through two
+   process generations and through `bash`.
+
+**And the attester closed the gap the document called undone.** `CLEAN_CLONE.md` said the clean-clone
+`--expect none` measurement was blocked because neither interpreter was bare — **true but pointing at
+the wrong blocker**: the same document's Steps option (c), `python3 -m venv --without-pip`, needs no
+network, which the attester confirmed by creating one *inside the sandbox*. It then ran the
+measurement: **`RESULT: OK`, 1493 / 90 skipped / 0 failed, `deterministic: run1 == run2`, rc=0,
+`expect=none`, torch absent, numpy absent — network-denied on a genuinely bare interpreter.** An
+avoided input, found and closed, reachable all along at zero network cost.
+
+### THE ORCHESTRATOR INTRODUCED AN ERROR WHILE CORRECTING SOMEONE ELSE
+
+Commit `17265e9`'s message "corrected" the owner's claim that loopback is the only discriminating
+control row, to "two of three discriminate". **No consistent reading supports two-of-three.** Weak
+reading (did the call fail?): only DNS discriminates, since loopback fails both ways. Errno-identity
+reading: all three do. **Robustness reading — the one that matters for a control, because a control
+must discriminate without depending on ambient state the measurer does not control: loopback alone**,
+since DNS discrimination evaporates on a host with no DNS and the routable row's ambient outcome is
+not stable even across hours here. **The owner was right and the document's "the load-bearing row is
+the first one" is right.** The error lives only in that commit message, which is immutable; it is
+corrected here and must not be propagated.
+
+Relatedly, a recorded figure that **did not reproduce**: the document's control table says the routable
+row gives `TimeoutError` on 3.12.4 and `ENETUNREACH` on 3.13.5; the attester measured **ENETUNREACH on
+both**, four times. Ambient-dependent and legitimately variable — and itself the best argument for the
+owner's position.
+
+### The required correction, applied before marking
+
+The `summarize()` Known-limits bullet ended *"it adds a spurious failure to a failing run, it does not
+mask a real one."* **Measured FALSE.** The same first-match `^Ran (\d+)` regex sits at a second site
+the bullet did not name — `policy()` at `scripts/run_tests.sh:355`, feeding `ran_log` and the
+`POLICY:RECORDER` check — and understating `ran_log` **disables** it. Driven verbatim with two crafted
+logs, recorder seeing 700 of 1493 in both: real total first → `POLICY:RECORDER … rc=1`; captured
+`Ran 3 tests` first → **rc=0, RECORDER silent**.
+
+It cannot change a verdict — the captured transcript exists only because a test already failed, so
+`POLICY:UNITTEST_FAILED` fires and the run is red either way — so **what degrades is the diagnosis,
+not the gate.** But it was a document asserting a safety property of the gate that measurement
+contradicts, inside the task whose clause is about exactly that. Corrected, with both sites named.
+
+### The attester verified the direction argument rather than accepting it
+
+**Can `summarize()` misfire on a green run? No** — structurally (a captured transcript reaches column
+0 only via `assertEqual`'s raw msg argument at `test_scripts.py:1377`; transcripts embedded by
+`assertIn` have escaped newlines and cannot match `^Ran`), empirically (exactly one `^Ran` match in
+each of four green logs), and exhaustively (an AST scan found **zero** `subprocess` calls in `tests/`
+without captured output, so no inherited-stdout path exists). **Can it overstate? No, with a bound** —
+the largest synthetic suite anywhere in the tests is **60**, below both the real 1493 and the
+`MIN_TESTS` floor of 650, so a misparse can only push under the floor.
+
+### The five limbs, judged separately
+
+| limb | verdict |
+|---|---|
+| Deterministic CI | **PARTIAL, declared** — deterministic by construction, but **never executed and cannot have been: `git remote -v` is EMPTY**, so no hosted runner ever ran it. `optional-deps` unverifiable here. Both declared. |
+| Lint/test scripts | **DONE** — both pass under denial, and are themselves covered by 156 tests. |
+| Dependency pinning | **PARTIAL, fully declared** — torch 2.7.1 + numpy 1.26.4 pinned, **combination untested**; transitive deps unpinned; **no lock file, no `--require-hashes`**; actions pinned by tag not SHA. All four declared explicitly, none hidden. |
+| Offline demo | **DONE** — rc=0, `DEMO OK`, banner intact, under denial on both interpreters. |
+| Clean-clone instructions | **DONE** — Steps now executable as written, the F20 precondition supplied rather than merely asserted. |
+
+### Scope: no overclaim found, one UNDERCLAIM
+
+The attester checked all six "what this does NOT establish" bullets against measurement and found
+**no overclaim**. Bullet 2 is **conservative**: the profile also denies UDP `sendto` on an unconnected
+socket (routable *and* loopback), **AF_UNIX** connect, and TCP `bind`/`listen` — all EPERM. (Raw ICMP
+socket creation is EPERM inside *and* outside: ordinary macOS privilege, not the profile — do not
+credit it.) **Inherited file descriptors remain genuinely unprobed** and are correctly listed as open.
+
+### Two notes recorded, neither gating
+
+- **`test_socket_guard_blocks_connections` is vacuous** — it survives total guard removal, networked
+  *and* denied, because its harness prints the literal word `BLOCKED` for any `OSError` and the test
+  asserts only `assertIn("BLOCKED", r.stdout)`. Its docstring claims it would detect a broken patch; it
+  cannot. Stated reach exceeds mechanism — a **note** only because the strong test
+  `test_network_guard_blocks_every_patched_entry_point` carries the property and killed both real
+  mutants, including one (`sendto` unblocked) that the **sandbox itself would have satisfied** had the
+  assertion been on the exception type rather than on the message `NETWORK BLOCKED`. That message
+  assertion is what makes the guard's coverage sandbox-proof, and it is deliberate.
+- One mutant was correctly reported as an **equivalent mutant** rather than a hole
+  (`create_connection` delegates to the still-patched `connect`).
+
+### Does SR-12's F17-R block SR-15? No — and the reason matters
+
+SR-15's clause is a property of **the suite**, re-derived from a `git archive HEAD` copy using only the
+standard library and `sandbox-exec`. F17-R is about the **journal's** mutation claims. The shared word
+"reproducible" does not make them the same object. **SR-12's kit-level FAIL stands, and SR-16 inherits
+it** — that is where F17-R must be settled. The attester noted its own mutation work is reproducible
+only because it wrote the commands down, which is F17-R's point and the discipline SR-16 needs.
+
+**Commands.** All in the attester's report and reproducible from a clean clone; the profile, control,
+suite, runner, bare-venv and F20 invocations are recorded verbatim.
