@@ -3743,7 +3743,18 @@ class TheMinimumSeedsFloorHoldsForEveryValueTheFieldsCanHold(unittest.TestCase):
     `width_tol=WSub(0.25)` turned a genuine INCONCLUSIVE ("widths differ by more than 25%") into
     SUPPORTED and JOINT_SUPPORTED. The module docstring's "no component verdict exists below the
     minimum" was false in exactly that way, and a doc-only mutant weakening the sentence survived,
-    which is why the sentence is asserted here too."""
+    which is why the sentence is asserted here too.
+
+    AND THEN THIS CLASS WAS ITSELF A HALF-FIX, which is why the round-25 test below exists. Its name
+    says EVERY VALUE THE FIELDS CAN HOLD and its hostile set was `NSub(int)`, `MSub(int)`,
+    `WSub(float)` -- int and float SUBCLASSES, one type family. `_plain_parameter`, the admission all
+    three rely on, collapses a subclass and by its own first line "anything that is not an int/float
+    subclass instance is returned unchanged, so this is a normaliser, never a validator". A
+    NON-NUMERIC object therefore passed through untouched, and the independent attestation of SR-10
+    FAILED on it: six routes, all six turning the honest `(INCONCLUSIVE, 'n=2 below protocol minimum
+    30: no verdict')` into `(SUPPORTED, 'whole interval above margin')`. A test name and a module
+    sentence both claimed universality while the mechanism covered one type family, and a passing
+    suite said nothing -- the exact shape of the defect this class was written for, one family out."""
 
     class NSub(int):
         def __lt__(self, o):
@@ -3774,6 +3785,46 @@ class TheMinimumSeedsFloorHoldsForEveryValueTheFieldsCanHold(unittest.TestCase):
 
         def __float__(self):
             return 10 ** 9
+
+    # THE SECOND TYPE FAMILY, which the three above are not. Neither an `int` nor a `float`, so
+    # `_plain_parameter` returns it UNCHANGED; renders as an honest number; and every comparison that
+    # could keep it out answers the convenient way.
+    class NonNumeric:
+        def __init__(self, v):
+            self._v = v
+
+        def __lt__(self, o):
+            return False
+
+        def __gt__(self, o):
+            return False
+
+        def __le__(self, o):
+            return False
+
+        def __ge__(self, o):
+            return False
+
+        def __eq__(self, o):
+            return o == self._v
+
+        def __hash__(self):
+            return hash(self._v)
+
+        def __repr__(self):
+            return repr(self._v)
+
+        def __str__(self):
+            return str(self._v)
+
+        def __format__(self, spec):
+            return format(self._v, spec)
+
+    class NonNumericTol(NonNumeric):
+        # `abs(wb - wt) / big > width_tol` is `float.__gt__(rel, self)` -> NotImplemented -> the
+        # REFLECTED `self.__lt__(rel)`, which answers False: a real disagreement reads as 'agree'.
+        def __gt__(self, o):
+            return True
 
     LVL = bm.bonferroni_level(0.05, 4)
 
@@ -3844,6 +3895,99 @@ class TheMinimumSeedsFloorHoldsForEveryValueTheFieldsCanHold(unittest.TestCase):
         # a genuinely loose tolerance still admits the component, so the normalisation is not a veto
         loose = bm.ComponentResult("S", "greater", 0.0, pair, 30, 0.5)
         self.assertIs(loose.verdict, V.SUPPORTED)
+
+    def test_a_non_numeric_field_is_refused_at_every_one_of_the_six_routes(self):
+        """THE ATTESTATION'S FAIL, closed, and the fixture is load-bearing.
+
+        A NON-NUMERIC object -- the type family `_plain_parameter` passes through -- reached the
+        comparison at six public routes and turned the floor and the width-tol rule into a decisive
+        SUPPORTED off a TWO-value series. Each route is asserted to REFUSE in family now, and the
+        honest answer at the same route is asserted unchanged, so the refusal cannot be mistaken for a
+        blanket veto.
+        WHY `[1.5, 1.5]` AND NOT `[1.4, 1.6]`: with UNTIED values all six routes still bypass the
+        floor -- only the reason text changes -- but the bootstrap/t disagreement rule absorbs it and
+        the verdict stays INCONCLUSIVE. MEASURED both ways at 775dedf. A test written on an untied
+        series measures a strictly weaker defect and would have reported this as a note, so the
+        contrast is asserted below rather than left in a comment."""
+        tied = self.tiny()
+        self.assertEqual(bm.interval_verdict(tied, 0.1, "greater"),
+                         (V.INCONCLUSIVE, "n=2 below protocol minimum 30: no verdict"))
+        NN, NT = self.NonNumeric, self.NonNumericTol
+        routes = {
+            "B IntervalPair.n (dataclasses.replace, no object.__setattr__)":
+                lambda: dataclasses.replace(tied, n=NN(2)),
+            "C interval_verdict(min_n=...) PUBLIC parameter":
+                lambda: bm.interval_verdict(tied, 0.1, "greater", min_n=NN(30)),
+            "D interval_verdict(width_tol=...) PUBLIC parameter":
+                lambda: bm.interval_verdict(tied, 0.1, "greater", width_tol=NT(0.25), min_n=2),
+            "E ComponentResult(min_n=...)":
+                lambda: bm.ComponentResult("S", "greater", 0.1, tied, NN(30), 0.25),
+            "F ComponentResult(width_tol=...)":
+                lambda: bm.ComponentResult("S", "greater", 0.1, tied, 2, NT(0.25)),
+            "IntervalPair.n_boot":
+                lambda: dataclasses.replace(tied, n_boot=NN(400)),
+            "IntervalPair.level":
+                lambda: dataclasses.replace(tied, level=NN(self.LVL)),
+        }
+        for label, call in routes.items():
+            with self.subTest(route=label):
+                with self.assertRaises(ValueError) as refused:
+                    call()
+                self.assertIn("must be a real", str(refused.exception))
+                self.assertIn("NonNumeric", str(refused.exception),
+                              "the refusal must name the type it refused, through `_type_name`")
+        # A: the int-subclass route is the CONTROL and was already closed -- it is normalised, not
+        # refused, because the number it stores is a real one.
+        a = dataclasses.replace(tied, n=self.NSub(2))
+        self.assertIs(type(a.n), int)
+        self.assertEqual(bm.interval_verdict(a, 0.1, "greater"),
+                         (V.INCONCLUSIVE, "n=2 below protocol minimum 30: no verdict"))
+        # THE FIXTURE CONTRAST, asserted: untied values hide the defect behind the disagreement rule.
+        untied = bm.summarize("S", [1.4, 1.6], self.LVL, 400, 7, min_n=30)
+        honest_untied = bm.interval_verdict(untied, 0.1, "greater")
+        self.assertIs(honest_untied[0], V.INCONCLUSIVE)
+        self.assertIn("below protocol minimum", honest_untied[1])
+        # The pre-fix behaviour, restored IN PROCESS with nothing on disk changed: `_decided_number`
+        # replaced by the normaliser it wraps. This is how the tied/untied contrast is measured
+        # rather than asserted from memory.
+        pre_fix = lambda v, what, *, integral: bm._plain_parameter(v)      # noqa: E731
+        with mock.patch.object(bm, "_decided_number", pre_fix):
+            tied_out = bm.interval_verdict(dataclasses.replace(tied, n=2), 0.1, "greater", min_n=NN(30))
+            untied_out = bm.interval_verdict(untied, 0.1, "greater", min_n=NN(30))
+        self.assertIs(tied_out[0], V.SUPPORTED, "the tied fixture is what reaches a decisive verdict")
+        self.assertIs(untied_out[0], V.INCONCLUSIVE,
+                      "and the untied one does not: the disagreement rule absorbs it, which is why a "
+                      "test written on it would have measured a weaker defect")
+        self.assertIn("disagreement", untied_out[1])
+        # A `bool` IS an `int` to `isinstance`, and D5 says `True` is not a count of anything. Refused
+        # BY NAME, as everywhere else in this module -- asserted because a mutant dropping that one
+        # clause would otherwise be unkilled.
+        for bad in (True, False):
+            with self.subTest(bool=bad):
+                with self.assertRaises(ValueError):
+                    dataclasses.replace(tied, n=bad)
+                with self.assertRaises(ValueError):
+                    bm.interval_verdict(tied, 0.1, "greater", min_n=bad)
+        # AND THE INT/FLOAT DISTINCTION IS PRESERVED, which is why `_decided_number` takes `integral`:
+        # a count must not quietly become a float, and a tolerance may be either.
+        with self.assertRaises(ValueError):
+            dataclasses.replace(tied, n=2.0)                      # a count is not a float
+        with self.assertRaises(ValueError):
+            bm.interval_verdict(tied, 0.1, "greater", min_n=30.0)
+        self.assertIsInstance(bm.ComponentResult("S", "greater", 0.1, tied, 2, 1).width_tol, int)
+        # and the honest parameters still decide, so nothing above is a blanket refusal
+        big = bm.summarize("S", [0.9 + 0.001 * i for i in range(30)], self.LVL, 400, 7, min_n=30)
+        self.assertIs(bm.interval_verdict(big, 0.1, "greater", min_n=30, width_tol=0.25)[0], V.SUPPORTED)
+        # THE MODULE'S OWN SENTENCE, pinned in both directions: the correction that it is REFUSAL and
+        # not normalisation that makes the universality claim true must not be revertible.
+        doc = " ".join(_doc(bm).split())
+        self.assertIn("THE BULLET THEN SAID \"the claim holds for every value either field can hold\", "
+                      "AND THAT WAS STILL FALSE", doc)
+        self.assertIn("Normalising is not validating", doc)
+        self.assertIn("through `_decided_number`, which validates where `_plain_parameter` only "
+                      "normalises", doc)
+        self.assertNotIn("and the claim holds for every value either field can hold, which is what it "
+                         "should have said", doc)
 
     def test_every_interval_pair_entry_point_agrees_with_the_plain_value(self):
         """The property rather than the three sites: for each field, the answer on a hostile subclass
@@ -6330,11 +6474,19 @@ class TheEnumTableRowThatWasFalseIsCorrected(unittest.TestCase):
     `all(... is Verdict.SUPPORTED for v in vs)` was counted among the three that `==` would have opened,
     but the site was ALREADY FAIL-OPEN one line above it: `vs = (Verdict(h1), Verdict(h2), Verdict(h3))`
     is itself a `_value2member_map_` probe -- `__hash__` + `__eq__` on the caller's object -- and the
-    liar WINS it, so `vs` holds genuine members by the time the comparison runs. The `_enum_member` wrap
-    added there is a NO-OP and `==` would have opened TWO, not three.
-    The wrap stays: the rule is module-wide, enforced by the AST sweep, and a no-op that satisfies it
-    costs nothing, whereas a per-site exemption has to be re-derived whenever a site moves -- which is
-    exactly how this row and all six of its line numbers went stale."""
+    liar WINS it, so `vs` held genuine members by the time the comparison ran. The `_enum_member` wrap
+    added there WAS a no-op and `==` would have opened TWO, not three.
+    THE NO-OP HALF IS NOW WITHDRAWN, because round 25 closed the coercion. The paragraph in
+    `_enum_member` used to declare `Verdict(h3)` a separate lane that was "out of this sweep's scope",
+    and the SR-10 attestation's N3 measured what that declaration cost: a `str` subclass holding an
+    invalid value whose `__repr__` raises left `combine_joint` as a `RuntimeError` built by `enum.py`'s
+    own `ValueError("%r is not a valid %s")` -- a format site in the STANDARD LIBRARY, which a census
+    over `benchmark.py` cannot see however complete it is. `combine_joint`'s first line now uses
+    `_enum_member` as well, so the liar is REFUSED rather than read as SUPPORTED, and this class asserts
+    the refusal. The row's arithmetic is untouched: `==` would still have opened two sites, not three.
+    WHAT THIS CLASS NOW PINS, and why both halves matter: that the liar still wins the bare `Verdict()`
+    constructor probe (so the original finding was right about the mechanism), and that
+    `combine_joint` no longer takes its answer from that probe (so the finding is closed)."""
 
     @staticmethod
     def _liar():
@@ -6350,15 +6502,37 @@ class TheEnumTableRowThatWasFalseIsCorrected(unittest.TestCase):
 
         return VerdictLiar("not-a-member")
 
-    def test_the_combine_joint_site_was_already_fail_open_above_the_comparison(self):
+    def test_the_combine_joint_coercion_that_was_declared_open_is_closed(self):
+        """N3. The mechanism is unchanged and the outcome is not: the liar still WINS the bare
+        `Verdict()` probe, and `combine_joint` no longer asks it."""
         liar = self._liar()
         self.assertIs(bm.Verdict(liar), V.SUPPORTED, "the Enum constructor probe the liar wins")
         self.assertIsNone(bm._enum_member(bm.Verdict, liar), "and which the admission refuses")
-        self.assertEqual(bm.combine_joint(V.SUPPORTED, V.SUPPORTED, liar, True), J.JOINT_SUPPORTED,
-                         "so the admission at this site changes nothing: it is a no-op")
-        # The no-op is not a hole in THIS class's invariants, because `JointResult.__post_init__`
-        # refuses the construction before `combine_joint` is ever reached. Re-asserted here so the
-        # correction cannot be read as "the site is open".
+        # WAS `assertEqual(..., JOINT_SUPPORTED, "it is a no-op")`. The site is closed, so the no-op
+        # claim is withdrawn here and in `_enum_member`'s own paragraph, and what replaces it is the
+        # refusal -- IN FAMILY, with the same exception type the bare coercion used to raise for an
+        # honest invalid value.
+        with self.assertRaises(ValueError) as refused:
+            bm.combine_joint(V.SUPPORTED, V.SUPPORTED, liar, True)
+        self.assertIn("takes Verdict members", str(refused.exception))
+        self.assertEqual(bm.combine_joint(V.SUPPORTED, V.SUPPORTED, V.SUPPORTED, True),
+                         J.JOINT_SUPPORTED, "and an honest call is unaffected")
+        # AND THE ESCAPE ITSELF, which is what N3 was about: the message `enum.py` builds out of the
+        # caller's object. A `str` subclass with a raising `__repr__` used to leave this function as a
+        # RuntimeError from the standard library; it is refused in family now, and the attribution is
+        # measured rather than asserted -- no `src/toy/` frame built a message out of the object.
+        class Undescribable(str):
+            def __repr__(self): raise RuntimeError("describing this verdict refuses")
+            def __str__(self): raise RuntimeError("describing this verdict refuses")
+            def __format__(self, spec): raise RuntimeError("describing this verdict refuses")
+        exc = _raised(lambda: bm.combine_joint(Undescribable("NOT_A_VERDICT"), V.SUPPORTED,
+                                               V.SUPPORTED, True))
+        self.assertIsInstance(exc, ValueError)
+        self.assertNotIsInstance(exc, RuntimeError)
+        self.assertEqual(_escape_module(exc), "benchmark.py")
+        # The refusal is not a hole in THIS class's invariants either, because
+        # `JointResult.__post_init__` refuses the construction before `combine_joint` is ever reached.
+        # Re-asserted here so the correction cannot be read as "the site is open".
         res = oracle()
         gates = tuple(bm.GateResult(g.name, g.passed, g.reason, exempt=g.exempt) for g in res.gates)
         object.__setattr__(res.h3, "verdict", liar)
@@ -6379,7 +6553,14 @@ class TheEnumTableRowThatWasFalseIsCorrected(unittest.TestCase):
         self.assertIn("would have opened TWO sites to close one", doc)
         self.assertNotIn("would have opened three sites to close one", doc)
         self.assertIn("THE TABLE IS KEYED BY FUNCTION, NOT BY LINE NUMBER", doc)
-        self.assertIn("the `_enum_member` wrap added here is a NO-OP", doc)
+        # THE CORRECTION, pinned in BOTH directions, because "a correction nobody asserts is a
+        # correction that can be reverted" and this one reverses a previously MEASURED claim.
+        self.assertIn("the `_enum_member` wrap added here WAS a no-op", doc)
+        self.assertIn("IT IS NO LONGER A NO-OP, AND THAT SENTENCE IS WITHDRAWN", doc)
+        self.assertNotIn("the `_enum_member` wrap added here is a NO-OP", doc)
+        self.assertNotIn("is out of this sweep's scope, stated here rather than left implicit", doc,
+                         "the coercion lane is closed, so the declaration that it was out of scope "
+                         "must not still be standing")
         self.assertIn("THIS ROW USED TO BE COUNTED WITH THE THREE ABOVE AND THAT WAS FALSE", doc)
         # The table's rows must name the functions the sweep actually finds, so the table cannot go
         # stale the way its line numbers did.
@@ -6938,10 +7119,21 @@ _D_OWN = ("THIS MODULE'S OWN DATA -- a module constant, a `len()`/`sorted()`/`ra
 _D_PLAIN = ("A PLAIN `int` / `float` / `str` BY AN ADMISSION THAT ALREADY RAN: `_plain_number` (which is "
             "what `_check_margin` returns and what `_metric_read` hands on), `BenchmarkConfig."
             "__post_init__` (which collapses every int/float field to its exact base type), "
-            "`IntervalPair.__post_init__` / `ComponentResult.__post_init__` (`n`, `min_n`), or a `str` "
-            "SLICE, which returns a base `str` even from a subclass. MEASURED: with a `float` subclass "
-            "whose `__repr__`/`__str__`/`__format__` raise handed to `BenchmarkConfig`, to a stored "
-            "`A` metric and to `summarize`'s values, none of these sites raised.")
+            "`_decided_number` (`IntervalPair.n`/`n_boot`/`level`, `ComponentResult.min_n`/`width_tol`, "
+            "and the same three at the point of USE in `_verdict_from_bounds`), or a `str` SLICE, which "
+            "returns a base `str` even from a subclass. MEASURED: with a `float` subclass whose "
+            "`__repr__`/`__str__`/`__format__` raise handed to `BenchmarkConfig`, to a stored `A` metric "
+            "and to `summarize`'s values, none of these sites raised.\n"
+            "THIS ROW USED TO NAME `_plain_parameter` AND THAT WAS A WRONG DECISION IN A DERIVED TABLE, "
+            "which is the correction round 25 owes. `_plain_parameter` is a NORMALISER by its own first "
+            "line -- it collapses an int/float SUBCLASS and returns anything else UNCHANGED -- so "
+            "`_verdict_from_bounds`'s `n` and `min_n` were decided `_D_PLAIN` while a NON-NUMERIC object "
+            "went straight through to the f-string. MEASURED at 775dedf, both interpreters, through the "
+            "PUBLIC `interval_verdict`: benchmark.py:1579 propagated a `RuntimeError` from both the `n` "
+            "and the `min_n` position, so round 24's `17 -> 0` was really `17 -> 2` behind a "
+            "set-equality check that reported success. `_decided_number` REFUSES, so the reason this row "
+            "gives is now true where it is claimed. A derived membership check does not derive the "
+            "decisions.")
 _D_GATED = ("Reached only AFTER a membership refusal against one of this module's own constants, so the "
             "operand is one of this module's own words by the time it is described.")
 _D_STORED = ("LOAD-BEARING, NOT A DESCRIPTION: `repr(r)` is the INPUT to a sha256 over fixture rows, and "
@@ -7120,8 +7312,6 @@ _DIAGNOSTIC_SITES = {
         _D_ROUTED,
     ('__post_init__', '{}', '_shown(self.passed)'):
         _D_ROUTED,
-    ('__post_init__', '{}', '_type_name(self.seed)'):
-        _D_ROUTED,
     ('__post_init__', '{}', 'bad'):
         _D_OWN,
     ('__post_init__', '{}', 'hid'):
@@ -7150,8 +7340,16 @@ _DIAGNOSTIC_SITES = {
         _D_ROUTED,
     ('_check_margin', '{}', 'what'):
         _D_OWN,
+    ('_check_seed', '{}', '_type_name(v)'):
+        _D_ROUTED,
     ('_converged', '{}', '_shown(e, how=str)'):
         _D_ROUTED,
+    ('_decided_number', '{}', "'whole number' if integral else 'number'"):
+        _D_OWN,
+    ('_decided_number', '{}', '_type_name(v)'):
+        _D_ROUTED,
+    ('_decided_number', '{}', 'what'):
+        _D_OWN,
     ('_metric_count', '{}', '_shown(v)'):
         _D_ROUTED,
     ('_metric_count', '{}', 'what'):
@@ -7196,6 +7394,8 @@ _DIAGNOSTIC_SITES = {
         _D_GATED,
     ('build', '{}', 'metric'):
         _D_GATED,
+    ('combine_joint', '{}', 'sorted(Verdict.__members__)'):
+        _D_OWN,
     ('comp', '!r', 'want_level'):
         _D_OWN,
     ('comp', '{}', 'N_PRIMARY'):
@@ -7370,13 +7570,32 @@ class ADiagnosticIsBuiltInOnePlace(unittest.TestCase):
         for key, why in _DIAGNOSTIC_SITES.items():
             with self.subTest(site=key):
                 self.assertTrue(str(why).strip(), f"{key} has no decision written")
+        # A DECISION'S TEXT IS PART OF THE DECISION, and this one was WRONG while the set-equality
+        # check above reported success -- so the correction is pinned in both directions, as the
+        # project's rule for a corrected sentence requires.
+        self.assertIn("THIS ROW USED TO NAME `_plain_parameter` AND THAT WAS A WRONG DECISION IN A "
+                      "DERIVED TABLE", _D_PLAIN)
+        self.assertIn("`_plain_parameter` is a NORMALISER by its own first line", _D_PLAIN)
+        self.assertIn("round 24's `17 -> 0` was really `17 -> 2`", _D_PLAIN)
+        self.assertNotIn("`IntervalPair.__post_init__` / `ComponentResult.__post_init__` (`n`, "
+                         "`min_n`), or a `str`", _D_PLAIN,
+                         "the superseded wording named the normaliser as the admission")
+        self.assertIn("A derived membership check does not derive the decisions.", _D_PLAIN)
+        self.assertIn("which is the correction round 25 owes", _D_PLAIN)
+        # AND THE WHOLE BLOCK, not just clauses of it: a mutant that reverted one unpinned
+        # sub-clause of this correction was UNKILLED (round 25, R16) while three other clauses
+        # were asserted. Asserting the presence of the right words is not asserting the absence
+        # of wrong ones, so the correction is pinned as a contiguous passage.
+        self.assertIn("THIS ROW USED TO NAME `_plain_parameter` AND THAT WAS A WRONG DECISION IN A "
+                      "DERIVED TABLE, which is the correction round 25 owes. `_plain_parameter` is "
+                      "a NORMALISER by its own first line", _D_PLAIN)
         # THE FIGURES, DERIVED. Each is also quoted in `benchmark.py`'s own comment block, and a quoted
         # figure nobody asserts is a figure that drifts -- so the block is checked against these.
-        self.assertEqual(len(derived), 123)
-        self.assertEqual(sum(len(v) for v in derived.values()), 153)
+        self.assertEqual(len(derived), 127)
+        self.assertEqual(sum(len(v) for v in derived.values()), 159)
         by_proto = collections.Counter(k[1] for k in derived)
         self.assertEqual(dict(by_proto),
-                         {"{}": 109, "!r": 7, "formatspec": 3, "__name__": 2, "repr": 1, "format": 1})
+                         {"{}": 113, "!r": 7, "formatspec": 3, "__name__": 2, "repr": 1, "format": 1})
         self.assertEqual([k for k in derived if k[1] in ("!s", "!a", "str", "ascii", "%", ".format",
                                                          "getattr __name__")], [],
                          "a protocol spelling appeared that no site used before: `{x!s}`, `{x!a}`, "
@@ -7385,7 +7604,7 @@ class ADiagnosticIsBuiltInOnePlace(unittest.TestCase):
                          "_type_name / a decided row")
         by_decision = collections.Counter(_D_NAMES[id(w)] for w in _DIAGNOSTIC_SITES.values())
         self.assertEqual(dict(by_decision),
-                         {"_D_ROUTED": 39, "_D_OWN": 47, "_D_PLAIN": 18, "_D_LABEL": 9, "_D_GATED": 4,
+                         {"_D_ROUTED": 40, "_D_OWN": 50, "_D_PLAIN": 18, "_D_LABEL": 9, "_D_GATED": 4,
                           "_D_HELPER": 4, "_D_STORED": 1, "_D_WRITE": 1})
         self.assertEqual(sum(by_decision.values()), len(derived))
         # THE STRUCTURAL CLAIMS, stated exactly rather than as "everything goes through the helper"
@@ -7400,9 +7619,10 @@ class ADiagnosticIsBuiltInOnePlace(unittest.TestCase):
             self.assertTrue(operand.startswith(("_shown(", "_type_name(")), (subject, proto, operand))
         # and the module's own comment block quotes these figures
         block = inspect.getsource(bm).split("diagnostic construction")[1].split("def _shown")[0]
-        for quoted in ("123 sites in 153 occurrences", "of which 39 are ROUTED",
+        for quoted in ("127 sites in 159 occurrences", "of which 40 are ROUTED",
                        "AND SIXTEEN MORE OCCURRENCES THE DECLARATION DID NOT NAME",
-                       "SEVENTEEN DISTINCT OCCURRENCES escaped"):
+                       "SEVENTEEN DISTINCT OCCURRENCES escaped",
+                       "A DECIDED SITE CAN STILL BE DECIDED WRONGLY"):
             self.assertIn(quoted, block,
                           "benchmark.py's comment block quotes a figure this derivation does not produce")
 
@@ -7547,13 +7767,13 @@ class ADiagnosticIsBuiltInOnePlace(unittest.TestCase):
         (813, 840, 878, 1043, 1305, 1309, 1427, 1585, 1635, 1807, 1956, 1994, 2084, 2094, 2136, 2138,
         2192 -- three of the 23 cases share 2094, which is why 20 escaping cases are 17 occurrences);
         ZERO after. The declaration named ONE of the seventeen.
-        TWO OF THE 23 ARE NOT A MEASUREMENT OF THIS CHANNEL AND ARE MARKED, not quietly counted:
-        `_converged`'s handler and `score_predictor`'s `G_s={fx.G!r}` were NOT reached open by this
-        round's fixtures (the first because `score_seed`'s own handler catches the re-run first on this
-        fixture, the second because an ineligible `G` is produced by this module's own arithmetic), and
-        `exploratory_interval`'s `{name!r}` refused with a `TypeError` from string concatenation one line
-        earlier. ROUTED ANYWAY, because NOT REACHED IS NOT CLOSED -- and recorded here so the next reader
-        does not read three unreached sites as three measurements.
+        THREE OF THE 23 WERE RECORDED BY ROUND 24 AS "NOT REACHED BY THIS ROUND'S FIXTURES", AND ALL
+        THREE ARE REACHED. The fixtures were wrong, in three different ways, and the corrections are at
+        `REACHED_AND_CLOSED_LATER` below. They are asserted REACHED AND CLOSED rather than counted among
+        the measured-open lines, because they were never measured open: "reached and closed" and
+        "measured open then closed" are different claims and only the second one has a line number.
+        The round-24 wording was the honest thing to write at the time -- NOT REACHED IS NOT CLOSED --
+        and it was also the wording a round writes when it has stopped looking for a fixture.
         Two assertions per reached case, because either alone passes for the wrong reason: the exception
         is INSIDE the declared family AND the hostile object was really DESCRIBED (the message carries
         the placeholder), so a fixture absorbed one layer up cannot read as a closed site. That exact
@@ -7569,12 +7789,15 @@ class ADiagnosticIsBuiltInOnePlace(unittest.TestCase):
             with mock.patch.object(bm, "build_fixture", throw(EV)):
                 return bm.score_seed(1, bm.fixture_oracle_gated, SMALL)
 
-        def converged_raises():
+        def converged_raises_on_the_second_call():
+            # SECOND, not third: `score_seed` calls the treatment ONCE inside its own `try`, and
+            # `_converged` calls it again outside. A `> 2` counter armed one call too late, which is
+            # why round 24 recorded this site as unreached.
             calls = []
 
             def factory(fx, cfg):
                 calls.append(1)
-                if len(calls) > 2:                            # the converged-budget re-run
+                if len(calls) > 1:                            # the converged-budget re-run
                     raise EV("refused")
                 return bm.fixture_oracle_gated(fx, cfg)
             return bm.score_seed(1, factory, SMALL)
@@ -7607,17 +7830,35 @@ class ADiagnosticIsBuiltInOnePlace(unittest.TestCase):
             (840, lambda: bm._metric_strict(OBJ(), "w")),
             (813, lambda: bm._metric_count(_undescribable(float)(1.5), "w")),
         ]
-        NOT_REACHED = [
+        # ROUND 24 RECORDED THESE THREE AS "NOT REACHED BY THIS ROUND'S FIXTURES". ALL THREE ARE
+        # REACHED, and the fixtures were wrong in three different ways -- which is the lesson, because
+        # "not reached" is the sentence a round writes when it has stopped looking:
+        #   * `_converged`: the treatment had to raise on its SECOND call (the converged-budget re-run),
+        #     not its third. `score_seed` calls the treatment ONCE inside its own `try`, so a counter
+        #     of `> 2` armed one call too late and `score_seed`'s handler caught it instead.
+        #   * `score_predictor`: `g_min=inf` makes `fx.G > max(g_min, 0)` False but leaves `fx.G` this
+        #     module's own float. The hostile value has to be IN THE FIXTURE
+        #     (`dataclasses.replace(fx, G=...)`), which is the public route.
+        #   * `exploratory_interval`: `name` had to BE a primary id to reach the refusal at all; an
+        #     arbitrary object is refused by string concatenation one line earlier. And it is closed by
+        #     `_plain_word` one line ABOVE the `_shown` call, not by the routing -- measured, and worth
+        #     the distinction, because the routing there is belt-and-braces and the admission is what
+        #     carries it.
+        # None of the three was ever measured OPEN, so none of them has a line in `measured_lines`;
+        # they are asserted REACHED AND CLOSED, which is a different claim and is made separately.
+        REACHED_AND_CLOSED_LATER = [
             ("_converged converged-budget run failed {e}",
-             lambda: converged_raises().metrics["delta_conv"].reason),
+             lambda: converged_raises_on_the_second_call().metrics["delta_conv"].reason),
             ("score_predictor G_s={fx.G!r}",
-             lambda: bm.score_predictor(bm.build_fixture(1, SMALL), lambda m: m,
-                                        lambda m: m, g_min=float("inf")).S.reason),
-            ("exploratory_interval {name!r} (refused by TypeError one line earlier)",
-             lambda: bm.exploratory_interval(OBJ(), [1.0, 2.0, 3.0], SMALL, 7)),
+             lambda: bm.score_predictor(
+                 dataclasses.replace(bm.build_fixture(1, SMALL), G=_undescribable(float)(0.0)),
+                 lambda m: m, lambda m: m, g_min=0.0).S.reason),
+            ("exploratory_interval {name!r} (closed by `_plain_word`, measured)",
+             lambda: bm.exploratory_interval(_undescribable(str)("H1"), [1.0, 2.0, 3.0], SMALL, 7)),
         ]
         # THE FIGURES, derived from these lists rather than written in the docstring alone
-        self.assertEqual(len(REACHED_RECORDS) + len(REACHED_RAISES) + len(NOT_REACHED) + 2, 23,
+        self.assertEqual(len(REACHED_RECORDS) + len(REACHED_RAISES)
+                         + len(REACHED_AND_CLOSED_LATER) + 2, 23,
                          "the 23 harness cases are these plus the two whole-API routes below")
         measured_lines = {ln for ln, _ in REACHED_RECORDS} | {ln for ln, _ in REACHED_RAISES}
         self.assertEqual(sorted(measured_lines),
@@ -7640,14 +7881,30 @@ class ADiagnosticIsBuiltInOnePlace(unittest.TestCase):
                 self.assertEqual(_escape_module(exc), "benchmark.py",
                                  "the refusal no longer comes from this module, so this case no "
                                  "longer measures this site")
-        for label, call in NOT_REACHED:
-            with self.subTest(not_reached=label):
+        # COUNTED, because a loop that runs zero times reports OK. The mutant that replaced this
+        # list with `[]` was UNKILLED on both interpreters until this line existed -- the same vacuity
+        # shape as round 24's `for exc in bm._UNCONVERTED:` with an emptied tuple, found the same way:
+        # by a harness that fails the RUN rather than printing a survivor.
+        self.assertEqual(len(REACHED_AND_CLOSED_LATER), 3)
+        checked_later = 0
+        for label, call in REACHED_AND_CLOSED_LATER:
+            checked_later += 1
+            with self.subTest(reached_and_closed=label):
                 exc = _raised(call)
                 self.assertNotIsInstance(exc, RuntimeError,
-                                         "a site this round declared UNREACHED by its fixtures is "
-                                         "now reachable: promote it to REACHED with its line")
-                if exc is not None:
-                    self.assertIsInstance(exc, (ValueError, TypeError))
+                                         "this site is reachable and must stay closed")
+                if exc is None:
+                    # the two that return a fail-closed RECORD must carry the placeholder, so the
+                    # fixture is proved to have reached the message and not merely to have passed
+                    text = call()
+                    self.assertIn("undescribable", text, label)
+                else:
+                    self.assertIsInstance(exc, ValueError)
+                    # `exploratory_interval`: closed by the `_plain_word` admission, so the message
+                    # names the PLAIN word rather than a placeholder. Asserted, because "closed" by
+                    # two different mechanisms is two different facts.
+                    self.assertIn("'H1' is a primary hypothesis id", str(exc))
+        self.assertEqual(checked_later, 3, "the reached-and-closed loop ran zero times")
         # and the two whole-API routes, which are the shape the declaration was written about
         with self.assertRaises(ValueError):
             rb.benchmark_outcome(throw(EV), "S", None)(1)
@@ -7694,9 +7951,14 @@ class TheRecordLabelChannelIsStatedAndLeftOpen(unittest.TestCase):
     def _hostile(self):
         return _undescribable(str, exc=RuntimeError)
 
-    def test_the_five_label_sites_are_declared_and_still_reachable(self):
+    def test_the_nine_label_rows_are_declared_and_still_reachable(self):
+        """NINE ROWS, not "five sites". The round-24 journal said five, which was a count of distinct
+        LINE NUMBERS in one commit's numbering; the table has nine rows, and the line numbers were all
+        stale one commit later. The derived figure is the row count, and it is keyed by function and
+        operand -- the same correction `_enum_member`'s table already carries."""
         label_rows = sorted(k for k, w in _DIAGNOSTIC_SITES.items() if w is _D_LABEL)
         self.assertEqual(len(label_rows), 9)
+        self.assertEqual(len({k[0] for k in label_rows}), 3)
         self.assertEqual({k[0] for k in label_rows},
                          {"to_experiment_records", "seed_records", "planned_slot_records"})
         self.assertEqual({k[2] for k in label_rows},
@@ -7762,8 +8024,8 @@ class TheDocPinsAreReadFromSourceSoNothingGoesDarkUnderMinusOO(unittest.TestCase
         # from the 31 `__doc__` occurrences this file had before the rewrite, which counted READS
         # and not OBJECTS -- a count of a construct is not a measurement of its extent.
         resolvable = [e for e in exprs if e.startswith(("bm", "rb", "schema_mod"))]
-        self.assertEqual(len(resolvable), 15, resolvable)
-        self.assertEqual(len(exprs), 18, exprs)   # + two `test_...` methods and `_doc`'s own `obj`
+        self.assertEqual(len(resolvable), 16, resolvable)   # + `bm._check_seed`
+        self.assertEqual(len(exprs), 19, exprs)   # + two `test_...` methods and `_doc`'s own `obj`
         checked = 0
         for expr in exprs:
             if not expr.startswith(("bm", "rb", "schema_mod")):
@@ -7919,3 +8181,177 @@ class TheDocPinsAreReadFromSourceSoNothingGoesDarkUnderMinusOO(unittest.TestCase
                 with mock.patch.dict(_DOC_CACHE, {mod.__name__: table}):
                     self.assertNotIn(needle, _doc(obj))       # the pin WOULD fail on the mutant
                 self.assertIn(needle, _doc(obj))              # and the cache is restored
+
+
+class TheSeedLaneHasOneAdmissionAndBuildFixtureUsesItToo(unittest.TestCase):
+    """N2 of the SR-10 attestation: `build_fixture` was the seed lane's SECOND ENTRANCE.
+
+    `SeedScores.__post_init__` refused a non-int seed and normalised it; `build_fixture` did neither,
+    and it is `functools.lru_cache`d. A cache keys on `__hash__`/`__eq__`, so an `int` SUBCLASS and the
+    plain int it equals SHARE ONE ENTRY -- and the entry stores whichever object called first. Both
+    halves of the consequence are measured here, and they need TWO DIFFERENT FIXTURES, which is why one
+    of them alone reads as harmless."""
+
+    CFG = bm.BenchmarkConfig(steps=20, steps_conv=25, n_boot=20, n_train=16, n_eval=16)
+
+    class Honest(int):
+        """Honest hash, honest equality, honest description. Poisons silently."""
+
+    class Hostile(int):
+        """Honest hash and equality -- so it SHARES the cache entry -- and cannot describe itself."""
+
+        def __repr__(self):
+            raise RuntimeError("describing this seed refuses")
+
+        def __str__(self):
+            raise RuntimeError("describing this seed refuses")
+
+        def __format__(self, spec):
+            raise RuntimeError("describing this seed refuses")
+
+    def setUp(self):
+        bm.build_fixture.cache_clear()
+        bm._arm_fit.cache_clear()
+
+    def tearDown(self):
+        bm.build_fixture.cache_clear()
+        bm._arm_fit.cache_clear()
+
+    def test_the_cache_entry_no_longer_stores_the_callers_subclass(self):
+        """The provenance half: the seed written to records must be the seed the caller passed.
+
+        MEASURED at 775dedf with an HONEST `class MySeed(int): pass` and no `object.__setattr__`:
+        after the subclass called first, `build_fixture(11, cfg).seed` was a `MySeed` -- process-wide,
+        decided by call order. `score_seed` still returned ok=True, so nothing failed and the seed in
+        the audit trail was not the caller's."""
+        sub = self.Honest(11)
+        self.assertEqual(sub, 11)
+        self.assertEqual(hash(sub), hash(11))            # why they share one entry
+        fx_sub = bm.build_fixture(sub, self.CFG)
+        fx_plain = bm.build_fixture(11, self.CFG)
+        self.assertIs(fx_sub, fx_plain, "the shared entry is the mechanism, and it is unchanged")
+        self.assertIs(type(fx_sub.seed), int, "but the VALUE it stores is a plain int now")
+        self.assertEqual(fx_sub.seed, 11)
+        # and in the other call order, which is the order that used to decide the outcome
+        bm.build_fixture.cache_clear()
+        self.assertIs(type(bm.build_fixture(11, self.CFG).seed), int)
+        self.assertIs(type(bm.build_fixture(sub, self.CFG).seed), int)
+
+    def test_a_poisoned_cache_no_longer_escapes_into_another_owners_module(self):
+        """The escape half, and it needs the OTHER fixture: a seed that cannot describe itself.
+
+        MEASURED at 775dedf: `score_seed(11, ARM_FACTORIES['E'], cfg)` returned ok=True on a clean
+        cache and raised `RuntimeError` after the poisoning call -- out of the declared family, through
+        `benchmark.py`'s `train(...)` call into `teacher_student.py`'s bare `f"...seed{seed}..."`.
+        THE ESCAPE LANDED IN ANOTHER OWNER'S MODULE, which is why a census over `benchmark.py` could
+        not have found it and why closing it there is not this module's to do: refusing the subclass
+        before it is stored closes it from this side."""
+        clean = bm.score_seed(11, bm.ARM_FACTORIES["E"], self.CFG)
+        self.assertTrue(clean.ok)
+        bm.build_fixture.cache_clear()
+        bm._arm_fit.cache_clear()
+        bm.build_fixture(self.Hostile(11), self.CFG)             # the poisoning call
+        exc = _raised(lambda: bm.score_seed(11, bm.ARM_FACTORIES["E"], self.CFG))
+        self.assertIsNone(exc, "a poisoned cache must no longer take the plain-seed caller out")
+        after = bm.score_seed(11, bm.ARM_FACTORIES["E"], self.CFG)
+        self.assertTrue(after.ok)
+        self.assertEqual(after.metrics["S"].value, clean.metrics["S"].value,
+                         "and the answer is the same answer, so the admission is not a behaviour change")
+
+    def test_the_admission_is_spelled_once_and_both_entrances_use_it(self):
+        """One admission, because two that can drift apart is how this lane got a second entrance."""
+        self.assertIsNotNone(_doc(bm._check_seed))
+        src = inspect.getsource(bm)
+        tree = ast.parse(src)
+        callers = sorted({fn.name for fn in ast.walk(tree)
+                          if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                          for c in ast.walk(fn)
+                          if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                          and c.func.id == "_check_seed"})
+        self.assertEqual(callers, ["__post_init__", "build_fixture"],
+                         "both entrances to the seed lane must go through the one admission")
+        # and a non-int seed is refused at BOTH, with the same exception type
+        for call in (lambda: bm.build_fixture("7", self.CFG),
+                     lambda: bm.SeedScores.from_values("7", 1.0, 1.0, 1.0, 1.0)):
+            with self.subTest(call=call):
+                with self.assertRaises(ValueError) as refused:
+                    call()
+                self.assertIn("seed must be an int", str(refused.exception))
+        for bad in (True, False):          # D5: a bool is not a seed, refused BY NAME
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    bm.build_fixture(bad, self.CFG)
+
+
+class TheBootstrapDependsOnInputOrderAndTheGateDoesNot(unittest.TestCase):
+    """N1 of the SR-10 attestation, STATED rather than fixed, with its figures derived here.
+
+    The percentile bootstrap resamples with an RNG whose stream is consumed against the series IN THE
+    ORDER GIVEN, so permuting a series moves the bootstrap bounds. `mean`, `sd` and the t-interval are
+    functions of the multiset alone and do not move. The `seed_list_frozen` gate tests seed-list
+    membership as a SET, so it does not constrain the order the bootstrap consumes.
+    WHY THIS IS NOT A FAIL, and the sentence is in the module docstring rather than in a fix:
+    `run_study` always presents the frozen-seed-list order, and an artefact reproduces BITWISE from its
+    own record -- the attestation verified that separately. The exposure is a caller that assembles
+    `analyze_scores(scores, ...)` itself in an order of its choosing.
+    WHY IT IS NOT FIXED HERE: sorting inside `analyze_scores` would change published interval values,
+    which is a different task from SR-10's scope and not one to do in a round told to be narrow.
+    What is in scope is that the claim be written down and that the figures be derived rather than
+    quoted, which is what this class does."""
+
+    SERIES = [0.5 + 0.013 * i for i in range(30)]
+    LVL = bm.bonferroni_level(0.05, 4)
+
+    def _permutations(self, n=60):
+        r = random.Random(20261112)
+        out = []
+        for _ in range(n):
+            s = list(self.SERIES)
+            r.shuffle(s)
+            out.append(s)
+        return out
+
+    def test_the_bootstrap_moves_under_permutation_and_the_other_three_do_not(self):
+        pairs = [bm.summarize("S", s, self.LVL, 400, 7, min_n=30) for s in self._permutations()]
+        means = {p.mean.value for p in pairs}
+        sds = {p.sd.value for p in pairs}
+        t_los = {p.tint()[0] for p in pairs}
+        boot_los = {p.boot()[0] for p in pairs}
+        self.assertEqual(len(means), 1, "the mean is a function of the multiset")
+        self.assertEqual(len(sds), 1, "and so is the sd")
+        self.assertEqual(len(t_los), 1, "and so is the t-interval, which is built from both")
+        self.assertGreater(len(boot_los), 1,
+                           "the percentile bootstrap is NOT a function of the multiset alone, which is "
+                           "the whole content of this class. If this ever becomes 1, the module "
+                           "statement about order is obsolete and should be deleted, not softened")
+        # THE SPREAD, DERIVED. No figure is quoted in prose that this does not compute.
+        width = pairs[0].boot()[1] - pairs[0].boot()[0]
+        spread = (max(boot_los) - min(boot_los)) / width
+        self.assertGreater(spread, 0.0)
+        self.assertLess(spread, 0.5, "the permutation effect is small relative to the interval width; "
+                                     "it is a reproducibility statement, not a correctness one")
+        # and the DIRECTION never reverses on this series: every ordering agrees on the verdict
+        verdicts = {bm.interval_verdict(p, 0.0, "greater")[0] for p in pairs}
+        self.assertEqual(verdicts, {V.SUPPORTED})
+
+    def test_the_frozen_seed_list_gate_tests_membership_as_a_set_so_it_cannot_constrain_order(self):
+        """The half of the statement that is about the GATE, asserted behaviourally: the same scores in
+        a different order pass `seed_list_frozen` identically, so the gate is not what would catch a
+        reordering."""
+        frozen = bm.freeze_seed_list(7, 30)
+        scores = synth_scores(frozen.seeds)
+        shuffled = list(scores)
+        random.Random(7).shuffle(shuffled)
+        self.assertNotEqual([s.seed for s in shuffled], [s.seed for s in scores])
+        for label, order in (("declared", scores), ("shuffled", shuffled)):
+            with self.subTest(order=label):
+                gates = bm.evaluate_gates(order, frozen, frozen.digest, SMALL, "trained")
+                by = {g.name: g for g in gates}
+                self.assertTrue(by["seed_list_frozen"].passed,
+                                "the gate passes in both orders, which is the point")
+        # and the module says so, where a reader of the claim will look
+        doc = " ".join(_doc(bm).split())
+        self.assertIn("ORDER IS LOAD-BEARING for the percentile bootstrap", doc)
+        self.assertIn("the gate tests seed-list membership as a SET", doc)
+        self.assertIn("TheBootstrapDependsOnInputOrderAndTheGateDoesNot", doc)
+        self.assertIn("reproduces bitwise from its record", doc)

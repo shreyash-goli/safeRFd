@@ -5736,8 +5736,15 @@ ITERATED (see `_render_snapshot`) or admit it (`_word`), and add a behavioural p
 KEY_LANE_FIGURES = {
     "ComponentResult.metric": (54, 54),
     "GateResult.name": (49, 49),
-    "HypothesisResult.verdict": (5, 5),
+    "HypothesisResult.verdict": (21, 21),
 }
+# `HypothesisResult.verdict` was re-measured upward in SR-10 round 25, by the procedure the assertion
+# below prescribes: SR-10 closed `combine_joint`'s bare `Verdict(...)` coercion (benchmark.py N3), which
+# had been documented as a no-op in two places, so forged verdict cells that used to escape the sweep
+# through that coercion now reach the page and alarm. REACH, not regression: every cell that moved
+# still FAILED CLOSED and STANDING stayed 0 -- the assertion two below this one is the one that would
+# go red if that had changed, and it is asserted separately for exactly that reason. The figure is not
+# restated here, because a figure in a comment is a figure no test can read.
 
 
 class EveryDecisiveWordRendersTheAdmittedText(FailsClosedAssertions, unittest.TestCase):

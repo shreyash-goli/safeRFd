@@ -50,10 +50,36 @@ Design points (each traceable to the protocol):
   rendered as honest numbers -- and `IntervalPair` had no `__post_init__` at all,
   so the sweep that fixed every other entry point had no place to look. Both are
   normalised at construction now (see `IntervalPair.__post_init__` and
-  `ComponentResult.__post_init__`) and the claim holds for every value either
-  field can hold, which is what it should have said. A doc-only mutant weakening
-  this sentence used to survive the whole suite; it is now asserted by
+  `ComponentResult.__post_init__`). THE BULLET THEN SAID "the claim holds for
+  every value either field can hold", AND THAT WAS STILL FALSE -- one type-family
+  out, which is this module's own half-fix pattern recurring inside the fix for
+  it. Normalising is not validating: `_plain_parameter` collapses an int/float
+  SUBCLASS and, by its own first line, returns anything else UNCHANGED, so a
+  NON-NUMERIC object answering False to `__lt__`/`__gt__` and rendering as an
+  honest `2` still produced SUPPORTED off a two-value series. MEASURED at 775dedf
+  on both interpreters over SIX routes -- the two dataclass fields, the two
+  PUBLIC `interval_verdict` parameters (which pass through neither
+  `__post_init__`) and the two `ComponentResult` parameters -- and the independent
+  attestation of SR-10 failed on exactly this. Every one of the six now REFUSES,
+  through `_decided_number`, which validates where `_plain_parameter` only
+  normalises; and because a value that is not a real number can no longer BE
+  held, the claim holds for every value either field can hold. The hostile set of
+  the test that asserts it was `int`/`float` subclasses only, which is how a
+  sentence claiming universality passed for three rounds against one type family;
+  it now includes a non-numeric. Asserted by
   `test_benchmark.TheMinimumSeedsFloorHoldsForEveryValueTheFieldsCanHold`.
+* ORDER IS LOAD-BEARING for the percentile bootstrap and the `seed_list_frozen`
+  gate does NOT constrain it. `bootstrap_means` resamples with an RNG whose
+  stream is consumed against the series IN THE ORDER GIVEN, so permuting a series
+  moves the bootstrap bounds while `mean`, `sd` and the t-interval are invariant
+  (measured; see `test_benchmark.TheBootstrapDependsOnInputOrderAndTheGateDoesNot`,
+  which derives the figures). `run_study` always presents the frozen-seed-list
+  order and an artefact reproduces bitwise from its record, so this is not a
+  reproducibility defect -- but the gate tests seed-list membership as a SET, so
+  a caller assembling `analyze_scores(scores, ...)` itself can present any order
+  and the gate will pass. Stated rather than fixed: sorting inside
+  `analyze_scores` would change published interval values, which is a different
+  task from SR-10's scope.
 * `JointResult` refuses to be constructed if any in-scope gate failed while a
   hypothesis it holds is decisive, however the hypotheses were built.
 
@@ -203,17 +229,34 @@ Predictor = Callable[[Sequence[Sequence[float]]], Matrix]
 # EVERY REMAINING SITE IN THIS FILE IS DECIDED IN WRITING, by provenance of its operand, in
 # `test_benchmark._DIAGNOSTIC_SITES`, which RE-DERIVES the set from this file's AST -- module body, class
 # bodies, functions AND lambdas, over seven protocol spellings -- and fails closed on a site it does not
-# decide. The figures it asserts: 123 sites in 153 occurrences, of which 39 are ROUTED through the two
-# helpers below, 47 are this module's own data, 18 are plain by an admission that already ran, 9 are
+# decide. The figures it asserts: 127 sites in 159 occurrences, of which 40 are ROUTED through the two
+# helpers below, 50 are this module's own data, 18 are plain by an admission that already ran, 9 are
 # the declared-open record-label channel, 4 are gated, 4 are the helpers, 1 is load-bearing and 1 is a
 # write. AFTER the fix the same harness measures ZERO open diagnostic occurrences on both
-# interpreters, and the five record-label ones unchanged.
+# interpreters, and the record-label ones unchanged.
+# A DECIDED SITE CAN STILL BE DECIDED WRONGLY, and that is the correction round 25 owes this block.
+# Two rows -- `_verdict_from_bounds`'s `n` and `min_n` -- were decided `_D_PLAIN`, "plain by an
+# admission that already ran". The admission named was `_plain_parameter`, which is a NORMALISER and
+# says so in its own first line, so the decision was true for an `int` SUBCLASS and false for a
+# NON-NUMERIC object. MEASURED at 775dedf on 3.12.4 and 3.13.5 through the PUBLIC `interval_verdict`:
+# benchmark.py:1579 propagated a `RuntimeError` from both the `n` and the `min_n` position. So the
+# round-24 claim "17 open occurrences became 0" was really 17 -> 2, with a passing set-equality check
+# over a table that carried a wrong reason in two rows. `_decided_number` now REFUSES rather than
+# normalises, which closes both sites in family and makes `_D_PLAIN` true where it is claimed; the
+# lesson is that a derived MEMBERSHIP check does not derive the DECISIONS, and the decisions are the
+# part that can be false while the suite is green.
 # AND WHAT THIS DOES NOT CLOSE, stated with its measurement rather than left for the next round to find:
 # the RECORD-LABEL channel. `to_experiment_records`, `seed_records` and `planned_slot_records` build an
 # `ExperimentRecord.name`, a `RunProvenance.run_id` and a `notes` string out of caller-supplied
 # identifiers (`study_id`, `res.subject`, `arm`, a seed), and a `str` subclass whose `__format__` raises
-# takes all three of those PUBLIC functions out with a `RuntimeError` -- MEASURED on 3.12.4 and 3.13.5 at
-# benchmark.py:2504, 2506, 2831, 2853 and 2854. It is NOT routed through `_shown`, and that is a decision
+# takes all three of those PUBLIC functions out with a `RuntimeError` -- MEASURED on 3.12.4 and 3.13.5.
+# NO LINE NUMBERS HERE, DELIBERATELY: the round-24 entry quoted 2504/2506/2831/2853/2854 and every one
+# of them was stale within a single commit, for the same reason `_enum_member`'s table says "KEYED BY
+# FUNCTION, NOT BY LINE NUMBER" after all six of its numbers rotted. The channel is nine rows of
+# `test_benchmark._DIAGNOSTIC_SITES` (`_D_LABEL`), across the three functions named above and the
+# operands `study_id`, `res.subject`, `res.fixture_name`, `arm`, `s` and `c.metric`; the ROW COUNT is
+# derived and asserted there, and "five sites" in the round-24 journal was a count of distinct LINES,
+# not of rows. It is NOT routed through `_shown`, and that is a decision
 # rather than an oversight: a record's NAME is an identifier a recompute looks records up by, not a
 # description, so degrading it to `<undescribable str: ...>` would file a real study under a placeholder
 # name and `verdict_from_records` would then report `records missing for [...]` -- the same reason
@@ -378,6 +421,75 @@ def _plain_parameter(v: Any) -> Any:
     return v
 
 
+def _decided_number(v: Any, what: str, *, integral: bool) -> Any:
+    """`_plain_parameter`, and then REFUSE what is not a real number. The VALIDATOR `_plain_parameter`
+    deliberately is not.
+
+    THE DEFECT THIS CLOSES, and it is the independent attestation's one FAIL on SR-10. Three rounds
+    closed this lane against `int`/`float` SUBCLASSES -- `_plain_parameter` collapses a subclass to the
+    plain number it stores -- and its own docstring says what that leaves: "anything that is not an
+    int/float subclass instance is returned unchanged, so this is a normaliser, never a validator".
+    A NON-NUMERIC object is therefore passed through untouched, and every comparison that decides here
+    is then `type(v).__lt__` / `__gt__` on the caller's class.
+    MEASURED at 775dedf, on 3.12.4 and 3.13.5, with `p = summarize('H1:S', [1.5, 1.5], level=0.9875,
+    n_boot=200, base_seed=7)` -- TWO TIED VALUES -- and an object that is neither an `int` nor a `float`,
+    whose comparisons all answer False and which renders as an honest `2`. NO `object.__setattr__`:
+    `dataclasses.replace` is the route this module's own `IntervalPair` docstring declares legitimate.
+    SIX ROUTES, all six turning `(INCONCLUSIVE, 'n=2 below protocol minimum 30: no verdict')` into
+    `(SUPPORTED, 'whole interval above margin')` off a two-value series:
+        A `dataclasses.replace(p, n=<int subclass>)`      -- CLOSED already (the control)
+        B `dataclasses.replace(p, n=<non-numeric>)`       -- IntervalPair field
+        C `interval_verdict(p, m, d, min_n=<non-numeric>)`    -- PUBLIC parameter
+        D `interval_verdict(p, m, d, width_tol=<non-numeric>)` -- PUBLIC parameter, and this one
+          converts a GENUINE bootstrap/t disagreement into a decisive SUPPORTED
+        E `ComponentResult(..., min_n=<non-numeric>)`
+        F `ComponentResult(..., width_tol=<non-numeric>)`
+    THE FIXTURE IS LOAD-BEARING AND THAT IS MEASURED, NOT ASSUMED. With UNTIED values ([1.4, 1.6]) all
+    six routes still bypass the floor -- the reason text changes -- but the disagreement rule absorbs it
+    and the verdict stays INCONCLUSIVE. Only TIED values reach SUPPORTED. A test written on an untied
+    series measures a weaker defect and would report this as a note.
+    WHY THREE CALL SITES AND NOT TWO. C and D pass through NEITHER `__post_init__`: they are the public
+    `interval_verdict` parameters. Refusing only in the two dataclasses is a half-fix of exactly the
+    shape the comment inside `_verdict_from_bounds` already warns about, so the refusal is applied there
+    too -- at the single point where a number DECIDES -- as well as in the two dataclasses, which must
+    still refuse so that a stored field and the record built from it cannot disagree.
+    `bool` is refused BY NAME, as everywhere else here (D5): `True` is not a count of anything."""
+    v = _plain_parameter(v)
+    if isinstance(v, bool) or not isinstance(v, int if integral else (int, float)):
+        raise ValueError(f"{what} must be a real {'whole number' if integral else 'number'}, "
+                         f"not a {_type_name(v)}: a value that is not one cannot be compared, and "
+                         f"every comparison this module makes with it decides a verdict")
+    return v
+
+
+def _check_seed(v: Any) -> int:
+    """THE ONE ADMISSION for a seed: a real non-bool `int`, collapsed to the plain value it stores.
+
+    Spelled once because this lane had a SECOND ENTRANCE. `SeedScores.__post_init__` refused a non-int
+    seed and normalised it, and `build_fixture` -- the other way a seed enters this module -- did
+    neither. MEASURED at 775dedf on both interpreters, with an HONEST `class MySeed(int): pass` and no
+    `object.__setattr__`: `functools.lru_cache` keys on `__hash__`/`__eq__`, so
+    `build_fixture(MySeed(11), cfg)` and `build_fixture(11, cfg)` share ONE entry, and after the
+    subclass called first the PLAIN-SEED caller received a fixture whose `.seed` was a `MySeed`
+    -- process-wide, decided by call order. The two halves need two different fixtures and only one of
+    them escapes:
+      * the HONEST subclass poisons silently (`build_fixture(11).seed` is a `MySeed`, `score_seed`
+        still returns ok=True), which is a provenance defect: the seed written to records is not the
+        seed the caller passed;
+      * a subclass that cannot DESCRIBE itself additionally escapes. `score_seed(11, ARM_FACTORIES['E'],
+        cfg)` returned ok=True on a clean cache and raised `RuntimeError` after the poisoning call,
+        out of the declared family, through `benchmark.py:1944` into `teacher_student.py:385`, which
+        is ANOTHER OWNER'S bare `f"...seed{seed}..."`. Closing it there is not this module's to do;
+        refusing the subclass before it is stored closes it from this side.
+    WHAT THIS DOES NOT DO, stated because the obvious reading is wrong: it does not stop the two calls
+    from SHARING a cache entry. The key is hashed before this body runs (the same fact `_arm_fit`
+    records). It does not need to: hash-equal int subclasses denote the same seed, and what was wrong
+    was the VALUE the shared entry stored, which is now a plain int whoever calls first."""
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise ValueError(f"seed must be an int, got {_type_name(v)}")
+    return int.__int__(v)
+
+
 # ---------------------------------------------------------------- the KEY lane and the ENUM lane
 # `_plain_number` / `_plain_parameter` / `_metric_read` are this module's admissions for a stored VALUE,
 # and they held under two full rounds of direct attack. The three below are the SAME argument for the two
@@ -523,14 +635,22 @@ def _enum_member(cls: Any, x: Any) -> Any:
             is itself a `_value2member_map_` probe, i.e. `__hash__` + `__eq__` on the caller's object, and
             the liar WINS it. MEASURED at this HEAD with `VL` as above: `Verdict(VL)` ->
             `Verdict.SUPPORTED` (the real member), `_enum_member(Verdict, VL)` -> None, and
-            `combine_joint(SUPPORTED, SUPPORTED, VL, True)` -> JOINT_SUPPORTED. So `vs` holds genuine
-            members by the time the comparison runs, the `_enum_member` wrap added here is a NO-OP, and
-            `==` would have changed nothing at this site. The wrap STAYS: the rule is module-wide and
-            enforced by the AST sweep, a no-op that satisfies it costs nothing, and the alternative is a
-            per-site exemption that has to be re-derived whenever a site moves -- which is exactly how
-            this row went stale. What the row does NOT excuse is the coercion itself; `Verdict(h3)` is a
-            separate lane (a constructor probe, not an identity comparison) and is out of this sweep's
-            scope, stated here rather than left implicit.
+            `combine_joint(SUPPORTED, SUPPORTED, VL, True)` -> JOINT_SUPPORTED. So `vs` held genuine
+            members by the time the comparison ran and the `_enum_member` wrap added here WAS a no-op.
+            IT IS NO LONGER A NO-OP, AND THAT SENTENCE IS WITHDRAWN RATHER THAN LEFT TO READ TRUE.
+            The paragraph used to end "what the row does NOT excuse is the coercion itself; `Verdict(h3)`
+            is a separate lane (a constructor probe, not an identity comparison) and is out of this
+            sweep's scope" -- i.e. the coercion was DECLARED open. N3 of the SR-10 attestation measured
+            what that cost: `Verdict(h)` builds its own message out of the caller's object, `enum.py`'s
+            `ValueError("%r is not a valid %s")`, so a `str` subclass holding an invalid value whose
+            `__repr__` raises left `combine_joint` as a `RuntimeError` FROM THE STANDARD LIBRARY --
+            which `test_benchmark._DIAGNOSTIC_SITES`, a census over THIS file, structurally cannot see.
+            The coercion now goes through `_enum_member` too and refuses in family, so the liar above
+            is REFUSED instead of reading as SUPPORTED: `combine_joint(SUPPORTED, SUPPORTED, VL, True)`
+            raises `ValueError` at this HEAD. The row's arithmetic is unchanged -- `==` would still have
+            opened TWO sites and not three -- but the wrap at this site is now load-bearing, and
+            `test_benchmark.TheEnumTableRowThatWasFalseIsCorrected` asserts the refusal rather than the
+            old no-op.
         `JointResult.__post_init__`'s `h.verdict is not Verdict.INCONCLUSIVE`  -- fail CLOSED as written;
             `!=` would have let a decisive hypothesis past the failed-global-gate check.
         `verdict_from_records`'s `r.evidence_class is not EvidenceClass.TOY_RESULT` -- fail CLOSED as
@@ -1473,11 +1593,15 @@ class IntervalPair:
         to records as `ci_level` / `n_boot`, so they are normalised here too and nothing downstream
         re-converts them. The MetricValue fields need nothing: `MetricValue.__post_init__` stores the
         plain double it checked and `_bound` / `_metric_read` plainify every read anyway."""
-        for k in ("n", "n_boot", "level"):
-            v = getattr(self, k)
-            p = _plain_parameter(v)
-            if p is not v:
-                object.__setattr__(self, k, p)
+        # REFUSE, not merely normalise: `_plain_parameter` passes a NON-NUMERIC object through
+        # unchanged by its own docstring, and the attestation's one FAIL was exactly that -- see
+        # `_decided_number`, which carries the six measured routes. All three fields are refused, not
+        # just `n`: `level` and `n_boot` are cross-checked and written to records as `ci_level` /
+        # `n_boot`, and leaving one member of a normalised set unrefused is this module's half-fix
+        # pattern one field out.
+        for k, integral in (("n", True), ("n_boot", True), ("level", False)):
+            object.__setattr__(self, k, _decided_number(getattr(self, k), f"IntervalPair.{k}",
+                                                        integral=integral))
 
     @staticmethod
     def _bound(m: Any) -> Optional[float]:
@@ -1574,7 +1698,14 @@ def _verdict_from_bounds(n: int, boot: Optional[tuple], tint: Optional[tuple], m
     # shape this module keeps rediscovering. (Found by the test written for the dataclass fix, not by
     # reading the code.) The dataclasses still normalise what they STORE, so a field and the record
     # built from it cannot disagree; this covers what they DECIDE.
-    n, min_n, width_tol = _plain_parameter(n), _plain_parameter(min_n), _plain_parameter(width_tol)
+    # REFUSED here as well as in the two dataclasses, and that is the whole point of this comment
+    # block one type-family out: `_plain_parameter` is a normaliser and a NON-NUMERIC object went
+    # through it untouched, so routes C and D of `_decided_number`'s measurement -- the PUBLIC
+    # `interval_verdict(pair, margin, direction, width_tol=..., min_n=...)` parameters -- pass through
+    # neither `__post_init__` and were open with the dataclasses fixed.
+    n = _decided_number(n, "n", integral=True)
+    min_n = _decided_number(min_n, "min_n", integral=True)
+    width_tol = _decided_number(width_tol, "width_tol", integral=False)
     if n < min_n:   # protocol 6.1: no verdict below the minimum number of seeds, wherever the verdict is made
         return Verdict.INCONCLUSIVE, f"n={n} below protocol minimum {min_n}: no verdict"
     if boot is None or tint is None:
@@ -1612,7 +1743,26 @@ def combine_joint(h1: Verdict, h2: Verdict, h3: Verdict, gates_ok: bool) -> Join
     """Protocol section 5. A failed validity gate gives INCONCLUSIVE first (section 5 last line,
     section 7 stop rule); then any UNSUPPORTED => JOINT_UNSUPPORTED; all three SUPPORTED =>
     JOINT_SUPPORTED; otherwise INCONCLUSIVE."""
-    vs = (Verdict(h1), Verdict(h2), Verdict(h3))
+    # N3: `Verdict(h)` builds its OWN message out of the caller's object -- `enum.py`'s
+    # `ValueError("%r is not a valid %s")` -- so a `str` subclass holding an invalid value whose
+    # `__repr__` raises escaped as a `RuntimeError` out of `enum.py`. MEASURED at 775dedf on both
+    # interpreters. Invisible to `test_benchmark._DIAGNOSTIC_SITES` because the format site is in the
+    # standard library, which is why a derived census over THIS file could not have found it.
+    # `_enum_member` is this module's safe admission and the lines below already used it; the refusal
+    # is kept (and keeps its `ValueError` type) rather than letting an invalid verdict fall through to
+    # JOINT_INCONCLUSIVE, which would be a quieter answer than the one this function gives today.
+    vs = tuple(_enum_member(Verdict, h) for h in (h1, h2, h3))
+    if any(v is None for v in vs):
+        # `Verdict.__members__`, NOT `[m.value for m in Verdict]`. The first spelling of this
+        # message read `.value` off each member, and THREE of this file's own guards caught it at once
+        # -- `TheStaticSpellingRuleIsATripwireNotAGuarantee` (the AST rule over `.value`
+        # /`.is_measured`), and `TheElementLaneSweepIsDerivedFromTheModule` twice (a new undeclared
+        # `combine_joint: m.value` element read, and its derived count 33 -> 34). The rule is about
+        # `MetricValue.value`, and an Enum member's `.value` is a different attribute on a different
+        # class -- but the tripwire is lexical ON PURPOSE and a per-site exemption is the thing it
+        # exists to avoid, so the message is respelled instead of the rule being widened.
+        raise ValueError(f"combine_joint takes Verdict members; a value that is not one of "
+                         f"{sorted(Verdict.__members__)} cannot be combined")
     if not gates_ok:
         return JointVerdict.JOINT_INCONCLUSIVE
     if Verdict.UNSUPPORTED in vs:
@@ -1659,8 +1809,20 @@ class ComponentResult:
         # False turned a genuine INCONCLUSIVE ("widths differ by more than 25%") into SUPPORTED, and
         # `min_n=MSub(30)` gave SUPPORTED off a two-value series -- both while the fields still RENDER as
         # 0.25 and 30 and the margin beside them was fully validated.
-        for k in ("min_n", "width_tol"):
-            object.__setattr__(self, k, _plain_parameter(getattr(self, k)))
+        # REFUSE, not merely normalise -- see `_decided_number`. Routes E and F of its measurement.
+        # THIS SITE IS REDUNDANT TODAY AND THAT IS MEASURED, NOT ASSUMED. `__post_init__` below always
+        # derives the verdict through `interval_verdict` -> `_verdict_from_bounds`, which refuses the
+        # same two values at the point of USE, so a mutant that degrades THIS line back to
+        # `_plain_parameter` is UNKILLED by the whole suite on both interpreters (round 25, mutant R3).
+        # It is kept anyway, and the reason is a rule and not a preference: a field that decides is
+        # refused where it is STORED as well as where it is READ, so a future change that stops
+        # deriving the verdict here cannot silently store a value nothing checked. What is NOT claimed
+        # is that this line is independently pinned -- it is not, the mutation harness says so, and
+        # saying "defence in depth" without that measurement would be the overclaim this module's
+        # history is made of.
+        for k, integral in (("min_n", True), ("width_tol", False)):
+            object.__setattr__(self, k, _decided_number(getattr(self, k), f"ComponentResult.{k}",
+                                                        integral=integral))
         v, why = interval_verdict(self.pair, self.margin, self.direction, self.width_tol, self.min_n)
         object.__setattr__(self, "verdict", v)
         object.__setattr__(self, "reason", why)
@@ -1873,6 +2035,11 @@ def fixture_hashes(fx: SeedFixture) -> dict:
 
 @functools.lru_cache(maxsize=4096)
 def build_fixture(seed: int, cfg: BenchmarkConfig) -> SeedFixture:
+    # N2: THE SECOND ENTRANCE TO THE SEED LANE. See `_check_seed` for the measurement; without this
+    # line an `int` SUBCLASS reached `SeedFixture.seed`, was shared through the `lru_cache` with the
+    # plain-int caller, and -- if it could not describe itself -- escaped as a `RuntimeError` out of
+    # another owner's `teacher_student.py:385`.
+    seed = _check_seed(seed)
     teacher = make_teacher(seed, cfg.width)
     train_x = _rows(make_rng(derive_seed(seed, "train_rows")), cfg.n_train, cfg.width, None)
     mask = tuple(in_region(r) for r in train_x)
@@ -2107,9 +2274,9 @@ class SeedScores:
         # `toy.robustness._check_seeds` (F2 there), and here it buys a joint verdict. Normalising makes
         # both gate comparisons run on the plain int, which is also the value `seed_list_digest` hashes
         # and `RunProvenance` records, so the card and its own digest cannot disagree.
-        if isinstance(self.seed, bool) or not isinstance(self.seed, int):
-            raise ValueError(f"seed must be an int, got {_type_name(self.seed)}")
-        object.__setattr__(self, "seed", int.__int__(self.seed))
+        # `_check_seed` rather than an inline check: `build_fixture` is the lane's other entrance
+        # (N2) and one admission beats two that can drift apart.
+        object.__setattr__(self, "seed", _check_seed(self.seed))
         # NORMALISE THE KEYS, THEN CHECK THE KEY SET -- the ordering rule of `_plain_number`, one lane out.
         # The exact-key-set test below is `__hash__`/`__eq__` on the caller's key objects, and it closes
         # only the DISPLACING forgery: a key storing "S" that answers as "E_loss_ratio" leaves "S" absent

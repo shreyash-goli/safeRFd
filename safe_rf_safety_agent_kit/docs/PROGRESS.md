@@ -11724,3 +11724,264 @@ silently.
    property rather than site by site.
 5. **Three of the 20 escape-sweep cases were not reached open by this round's fixtures** (above).
    Routed anyway; recorded as unreached, not as closed.
+
+## Round 25 — SR-10's attestation FAIL closed: the floor was defeated one TYPE FAMILY out, and a derived table carried a wrong decision
+
+**Date:** 2026-11-12. HEAD at start `775dedf`, tree clean. Owner: `src/toy/benchmark.py`,
+`tests/toy_tests/test_benchmark.py`, this entry. **Builder, not attester — the blueprint is NOT marked
+and SR-10 stays `[ ]`.** No other owner was working; every run serial.
+
+The attestation judged the verify clause (*statistical test fixtures and repeatability*) satisfied and
+the apparatus good, and failed SR-10 on one narrow subject defect. That defect, two notes and three
+figure corrections are closed here. **Nothing else was re-audited, by instruction.**
+
+### The FAIL — `_plain_parameter` is a NORMALISER, and the claim said VALIDATOR
+
+Reproduced on a pristine `git archive 775dedf` copy before anything changed. `_plain_parameter`
+collapses an `int`/`float` **subclass** and, by its own first line, *"anything that is not an int/float
+subclass instance is returned unchanged, so this is a normaliser, never a validator"*. So a
+**NON-NUMERIC** object — comparisons all answering the convenient way, rendering as an honest `2` —
+went through untouched and every comparison that decides was then `type(v).__lt__` on the caller's
+class. **No `object.__setattr__`:** `dataclasses.replace` is the route this module's own `IntervalPair`
+docstring declares legitimate.
+
+**SIX routes, all six turning `(INCONCLUSIVE, 'n=2 below protocol minimum 30: no verdict')` into
+`(SUPPORTED, 'whole interval above margin')` off a two-value series**, on 3.12.4 and 3.13.5:
+
+| | route | passes through `__post_init__`? |
+|---|---|---|
+| A | `dataclasses.replace(p, n=<int subclass>)` | — **CLOSED already (the control)** |
+| B | `dataclasses.replace(p, n=<non-numeric>)` | `IntervalPair` |
+| C | `interval_verdict(p, m, d, min_n=<non-numeric>)` | **NO — public parameter** |
+| D | `interval_verdict(p, m, d, width_tol=<non-numeric>)` | **NO — public parameter**, and this one converts a GENUINE bootstrap/t disagreement into a decisive SUPPORTED |
+| E | `ComponentResult(..., min_n=<non-numeric>)` | `ComponentResult` |
+| F | `ComponentResult(..., width_tol=<non-numeric>)` | `ComponentResult` |
+
+**The fixture is load-bearing and that is measured, not assumed.** With UNTIED values (`[1.4, 1.6]`)
+all six routes still bypass the floor — only the reason text changes — but the disagreement rule
+absorbs it and the verdict stays INCONCLUSIVE. **Only tied values reach SUPPORTED.** The contrast is
+asserted in the test (with `_decided_number` stubbed back to the normaliser in-process), not left in a
+comment, so a future reader cannot re-measure the weaker version by accident.
+
+**⚠️ Correction to the instruction I was given, and it matters.** The brief said to refuse in
+`IntervalPair.__post_init__` and `ComponentResult.__post_init__`. **Routes C and D pass through
+neither** — they are the public `interval_verdict` parameters. Fixing only the two dataclasses is a
+half-fix of exactly the shape the comment block *inside `_verdict_from_bounds`* already warns about, so
+the refusal is applied at **three** sites: both dataclasses (so a stored field and the record built
+from it cannot disagree) **and the single point of USE**. Mutant R4 — refusal removed from
+`_verdict_from_bounds` only, i.e. the briefed fix — is **killed**, which is the evidence that the third
+site is load-bearing rather than belt-and-braces.
+
+**And the claim, not just the code.** The module bullet said *"the claim holds for every value either
+field can hold"* and the test was named `TheMinimumSeedsFloorHoldsForEveryValueTheFieldsCanHold` while
+its entire hostile set was `NSub(int)`, `MSub(int)`, `WSub(float)` — **one type family**. Both the
+sentence and the test name claimed universality that the mechanism never had. **Widened, not
+narrowed** (the better half of the repertoire): the hostile set now includes a non-numeric, a `bool`
+(refused by name — D5) and a float-where-a-count-is-required, and the bullet now says that it is
+REFUSAL and not normalisation that makes the universality true, with the old wording pinned **absent**.
+
+### N2 — the seed lane had a second entrance, and its escape lands in another owner's module
+
+`SeedScores.__post_init__` refused and normalised a seed; `build_fixture` did neither, and it is
+`lru_cache`d. **Both halves measured, and they need two different fixtures — which is why either one
+alone reads as harmless:**
+
+* an **honest** `class MySeed(int): pass` poisons silently. `build_fixture(MySeed(11), cfg)` and
+  `build_fixture(11, cfg)` share one entry (hash-equal), and after the subclass called first
+  `build_fixture(11, cfg).seed` **is a `MySeed`** — process-wide, decided by call order. `score_seed`
+  still returned `ok=True`. A provenance defect: the seed written to records is not the seed passed.
+* a subclass that cannot **describe** itself additionally escapes. `score_seed(11,
+  ARM_FACTORIES['E'], cfg)` returned ok=True on a clean cache and raised **`RuntimeError` after the
+  poisoning call**, through `benchmark.py:1944` into **`teacher_student.py:385`** — another owner's
+  bare `f"...seed{seed}..."`. **A census over `benchmark.py` structurally cannot see that site.**
+
+Fixed with one admission, `_check_seed`, used by **both** entrances (mutant R9 — giving `SeedScores`
+its own second copy — is killed, because two admissions that can drift apart is how the second
+entrance happened). **What is not claimed:** the two calls still share a cache entry. The key is
+hashed before the body runs, the same fact `_arm_fit` already records; hash-equal int subclasses denote
+the same seed, and what was wrong was the VALUE the shared entry stored.
+
+### N3 — the escape was in `enum.py`, and closing it falsified two "no-op" paragraphs
+
+`combine_joint`'s first line was `vs = (Verdict(h1), Verdict(h2), Verdict(h3))`. `Verdict(h)` builds
+its own message out of the caller's object — `enum.py`'s `ValueError("%r is not a valid %s")` — so a
+`str` subclass holding an invalid value with a raising `__repr__` left `combine_joint` as a
+**`RuntimeError` from the standard library**. Routed through `_enum_member` and refused **in family**,
+keeping the `ValueError` type the bare coercion already raised for an honest invalid value (falling
+through to JOINT_INCONCLUSIVE would have been a quieter answer than the function gives today).
+
+**Three consequences the existing apparatus caught, none of which I predicted:**
+
+1. **My first message read `[m.value for m in Verdict]`** and **three** of this file's own guards fired
+   at once: the AST tripwire over `.value`/`.is_measured`, plus
+   `TheElementLaneSweepIsDerivedFromTheModule` twice (a new undeclared `combine_joint: m.value`
+   element read, and its derived count 33 → 34). The rule is about `MetricValue.value` and an Enum
+   member's `.value` is a different attribute on a different class — but **the tripwire is lexical on
+   purpose and a per-site exemption is the thing it exists to avoid**, so the message was respelled to
+   `sorted(Verdict.__members__)` rather than the rule widened.
+2. **The site was documented as a NO-OP in two places** — `_enum_member`'s own table row and
+   `TheEnumTableRowThatWasFalseIsCorrected`'s docstring — and that paragraph ended by **declaring the
+   coercion lane out of scope**. Closing it makes both false. Both withdrawn, with the old wording
+   pinned absent, and the test slot inverted from "the admission here is a no-op" to "the coercion that
+   was declared open is closed". The row's arithmetic is untouched: `==` would still have opened two
+   sites, not three.
+3. **A `test_dashboard` figure moved — see the cross-owner item below.**
+
+### Cross-owner: ONE LINE is needed in `tests/toy_tests/test_dashboard.py`, which is not mine
+
+`test_dashboard.EveryDecisiveWordRendersTheAdmittedText` fails in **all four** environments (symmetric,
+so not the asymmetric class). **Attributed by bisection, not by reading:** reverting only the N3 edit in
+a throwaway copy makes it pass; HEAD `775dedf` passes; N3 present fails.
+
+```
+KEY_LANE_FIGURES["HypothesisResult.verdict"]:  (5, 5)  ->  (21, 21)
+                                     as (moved, failed closed);  STANDING stays 0
+```
+
+The figure is the sweep's **reach**, and it increased: 21 forged cells now move and fail closed where 5
+did. **The safety figure is STANDING = 0 and it is unchanged** — that assertion sits immediately after
+the figure assertion and so never ran, so I verified it in a throwaway copy: with the figure
+re-measured to `(21, 21)` the whole class is **OK**. So the required change is exactly one line, it is
+strength and not regression, and **I did not make it, because that file has another owner.** Until it
+lands the tree shows one `test_dashboard` failure, fully explained above.
+
+### N1 — order sensitivity: STATED, not fixed, with the figures derived here
+
+The percentile bootstrap consumes its series **in the order given**, so permuting a series moves the
+bootstrap bounds while `mean`, `sd` and the t-interval — functions of the multiset — do not. The
+`seed_list_frozen` gate tests membership as a **SET**, so it does not constrain that order. Not a FAIL:
+`run_study` always presents frozen-seed-list order and an artefact reproduces bitwise from its record.
+**Not fixed**, because sorting inside `analyze_scores` would change published interval values, which is
+outside a round told to be narrow. Stated in the module docstring and pinned by
+`TheBootstrapDependsOnInputOrderAndTheGateDoesNot`, which **derives** its figures (one `mean`, one
+`sd`, one `t_lo`, many `boot_lo`, spread bounded, direction never reversing) rather than quoting the
+attester's. Mutant R14 sorts inside `bootstrap_means` and **kills** the pin, so it is not vacuous.
+
+### The derived table carried a WRONG DECISION while set-equality reported success
+
+The round-24 census decided `_verdict_from_bounds`'s `n` and `min_n` as `_D_PLAIN`, *"plain by an
+admission that already ran"*. **The admission it named was `_plain_parameter`, a normaliser.** So the
+decision was true for an int subclass and false for a non-numeric, and **benchmark.py:1579 propagated a
+`RuntimeError` from both positions** through the public `interval_verdict`, on both interpreters.
+
+**So round 24's "17 open occurrences became 0" was really 17 → 2.** The coordinator's correction is
+right, and the repair is better than the one suggested: routing through `_shown` would have *described*
+the object, whereas `_decided_number` **refuses** it, so both sites close in family and no new routed
+site is needed. The `_D_PLAIN` reason text is corrected and pinned as a contiguous passage.
+
+**The lesson, and it is the one worth carrying:** *a derived MEMBERSHIP check does not derive the
+DECISIONS.* Round 24 built a census that fails closed on an undecided site and then wrote 127 decisions
+by hand, two of which were false — and every set-equality assertion passed.
+
+### Derivations and fixtures that failed before they were right — nine
+
+1. **The first `_verdict_from_bounds` probe used an int subclass** and read "closed" — closed by
+   `_plain_parameter`, exactly as the census claimed. The non-numeric lane is a different fixture, and
+   it takes a `__lt__` answering **True** (so the f-string is reached) plus a raising `__format__`.
+2. **R3 is UNKILLED and that is recorded, not hidden.** `ComponentResult.__post_init__`'s refusal is
+   **redundant today**: `__post_init__` always derives the verdict through `_verdict_from_bounds`,
+   which refuses the same two values, so degrading that line changes nothing observable. The site is
+   kept — a field that decides is refused where it is STORED as well as where it is READ — but **it is
+   not independently pinned, the harness says so, and saying "defence in depth" without that
+   measurement would be the overclaim this module's history is made of.** The harness grew an
+   `EXPECTED REDUNDANT` verdict that fails the run if such a mutant ever becomes *killable* (which
+   would mean the note is stale).
+3. **R22 was UNKILLED: the reached-and-closed loop could run zero times.** Replacing the list with
+   `[]` passed, because the surrounding arithmetic asserted `len(list)` and not the iteration count.
+   **The same vacuity shape as round 24's M9**, found the same way — by a harness that fails the RUN.
+   Now counted.
+4. **R16 could not be anchored, twice.** A textual mutant of a *pinned* passage has a structural
+   problem: every phrase in it also appears in the assertion that pins it, so the patch matched 2 and
+   then 3 occurrences and the harness refused to run it. Resolved by anchoring on a line-break the
+   constant and the assertion do not share.
+5. **R16's first working spelling was UNKILLED** because it reverted an unpinned *sub-clause* while
+   three other clauses were asserted — *asserting the presence of the right words is not asserting the
+   absence of wrong ones*, one level down from where this project already records that defect. The
+   correction is now pinned as a contiguous passage.
+6. **The three "not reached" sites of round 24 are all REACHED**, and the fixtures were wrong in three
+   different ways: `_converged` needed the treatment to raise on its **second** call (`score_seed`
+   calls it once inside its own `try`, so a `> 2` counter armed one call too late); `score_predictor`
+   needed the hostile value **in the fixture** (`g_min=inf` leaves `fx.G` this module's own float); and
+   `exploratory_interval` needed a name that **is** a primary id. **"Not reached" was the honest thing
+   to write and also the thing a round writes when it has stopped looking for a fixture.** They are
+   recorded as *reached and closed*, which is a different claim from *measured open then closed* and
+   carries no line number. And the third is closed by **`_plain_word` one line above** the routing, not
+   by the routing — two mechanisms are two facts.
+7. **N2's RuntimeError did not reproduce from the brief's fixture.** The honest `MySeed(int)` poisons
+   but does not escape; the escape needs a *describe-raising* subclass. The brief's two halves are both
+   real and are not the same measurement.
+8. **Three test-side API errors** in the new tests (`IntervalPair.t_interval` for `tint`,
+   `evaluate_gates(...)[0]` where the function returns the gate tuple itself, and
+   `bm._plain_parameter_only_for_this_test`), each caught by running rather than by reading.
+9. **The `_doc` pin counts moved** (15 → 16 objects, 18 → 19 expressions) because `_check_seed` is a
+   new pinned object. Derived from the failure, not predicted.
+
+### Measurements
+
+Serial, one suite at a time, `PYTHONDONTWRITEBYTECODE=1`, `__pycache__` cleared before every run,
+plain `-B`, **never `-I`**. Full suite NOT run (orchestrator's). Blueprint NOT marked.
+
+| run | environments | result |
+|---|---|---|
+| `test_benchmark` | 3.12.4 and 3.13.5 × {normal, `-OO`} | **354 OK** (4/4) |
+| `test_robustness` | both × {normal, `-OO`} | **197 OK** (4/4) |
+| `test_schema` | both × {normal, `-OO`} | **55 OK** (4/4) |
+| `test_dashboard` | both × {normal, `-OO`} | **260, failures=1** (4/4) — the cross-owner `KEY_LANE_FIGURES` line above |
+| FAIL repro (`775dedf` vs candidate) | both | 6 routes SUPPORTED -> 6 routes refused in family |
+| `benchmark.py:1579` (non-numeric lane) | both | OPEN -> in-family `ValueError` |
+| `scripts/lint.sh` | 3.12.4 | `LINT: OK`, **identical 5 warnings** before and after; no new long line |
+
+**`test_schema` is in the permitted set and was run: `test_schema.py:646` has a real executable
+`from toy import benchmark as bm`, so FOUR suites import the subject, not three.** The round-24 entry
+and the attester's brief both said three.
+
+### Test counts and the baseline
+
+`test_benchmark` **348 -> 354** (+6). `test_robustness` 197, `test_schema` 55, `test_dashboard` 260 —
+unchanged. **`scripts/test_baseline.txt` needs updating:** `toy_tests.test_benchmark 348 0` ->
+`toy_tests.test_benchmark 354 0`. Not edited here.
+
+### Mutants — 22, each on a FRESH copy of the candidate tree, 48 (mutant, environment) cells
+
+**21 killed in every environment listed (46 cells); 1 declared REDUNDANT with its measurement at the
+site (2 cells); harness exit 0.** The harness fails the run on a patch that does not apply, on a mutant
+that is not killed, **and now on a declared-redundant mutant that becomes killable**. Nothing is
+mutated in place, so there is no restore path to skip.
+
+R1 `_decided_number` degraded to the normaliser · R2/R3/R4 the refusal removed from each site in turn
+(**R4 = the briefed two-site fix, killed**; R3 redundant) · R5 bool accepted · R6 a count may be a
+float · R7 `build_fixture` stops admitting the seed · R8 `_check_seed` accepts a bool · R9 a second
+copy of the seed admission · R10 the bare `Verdict()` coercion restored · R11 the coercion refusal
+falls through · R12 the withdrawn no-op sentence reinstated · R13 the order statement deleted · R14 the
+bootstrap made order-independent · R15 the census figure drifts · R16 the corrected `_D_PLAIN` reason
+reverted · R17 the 17→2 correction deleted · R18 the floor bullet's correction reverted · R19 the
+record-label row count drifts · R20 a doc-only mutant (**both interpreters × {normal, `-OO`}**) ·
+R21 a raw `__doc__` read outside `_doc` (same four) · R22 the reached-and-closed loop emptied.
+
+### Figure corrections — three relayed to me, two of which were wrong in my favour
+
+* **"`-OO` is red at f=2/e=19"** and the seven-protocol census: both held.
+* **"17 → 0" was mine and it was wrong: 17 → 2.** Accepted and repaired; the two sites were the FAIL's
+  own root cause, so the refusal closes them and no routing was needed.
+* **"five label sites"** was mine and was a count of distinct LINE NUMBERS in one commit's numbering.
+  The table has **nine rows**, and every line number quoted in the round-24 entry was stale within a
+  single commit. The declaration in `benchmark.py` now carries **no line numbers at all**, by function
+  and operand instead — the correction `_enum_member`'s table already carries after all six of its
+  numbers rotted. The test is renamed to say nine rows.
+* **`test_schema` was missing from the permitted set** (coordinator's correction): confirmed, run, 55
+  OK in all four environments.
+
+### Remaining uncertainty, recorded rather than closed
+
+1. **`test_dashboard` needs one line from its owner** (above). The tree is red until then, for a
+   reason that is measured, attributed and benign.
+2. **The RECORD-LABEL channel is still OPEN** (nine `_D_LABEL` rows, three public functions), declared
+   with its measurement and pinned to fail when it closes.
+3. **`ComponentResult.__post_init__`'s refusal is redundant today** and not independently pinned
+   (mutant R3), recorded at the site.
+4. **The raising-`__class__` channel** and **a raising attribute lookup** stay open kit-wide.
+5. **Order sensitivity is stated, not removed** (N1). A caller that assembles `analyze_scores` itself
+   can present any order and the gate will pass.
+6. **`_decided_number` refuses rather than coerces**, so a caller passing `2.0` for a count now gets a
+   `ValueError` where it previously got a verdict. That is a deliberate narrowing of what the public
+   API accepts, it is asserted, and it is the kind of change an attester should look at directly.
