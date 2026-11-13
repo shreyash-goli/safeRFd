@@ -13162,3 +13162,156 @@ only because it wrote the commands down, which is F17-R's point and the discipli
 
 **Commands.** All in the attester's report and reproducible from a clean clone; the profile, control,
 suite, runner, bare-venv and F20 invocations are recorded verbatim.
+
+## F23 and F24 pinned — the two unpinned safety disclaimers, with the harness written down this time
+
+Owner of `tests/toy_tests/test_scripts.py`, `tests/toy_tests/test_robustness.py` and this entry. Tree at
+`a32574f`. **No subject file was touched** — SR-10/11/13/14/15 are marked on attestations of specific
+committed bytes, and F14 says editing a subject after its attestation makes the mark an attestation of
+bytes that no longer exist. Pinning is additive; it costs nothing. Two pins, no new sweep dimension, no
+new table, no new derivation.
+
+### The two pins
+
+| | pin | asserts |
+|---|---|---|
+| **F23** | `test_scripts.TestDemo.`<br>`test_demo_verdict_line_carries_its_scorer_qualifier_on_that_same_line` | Runs `scripts/demo.py`, collects the stdout lines matching `\bverdict [A-Z][A-Z_]+`, asserts **exactly one**, and asserts the qualifier is intact **on that line**: `partition("[tests the scorer;")` must split, and the remainder must `startswith(" says nothing about any method]")`. |
+| **F24** | `test_robustness.TestQAHardening.`<br>`test_safety_non_claim_denies_all_three_named_properties` | `STANDARD_NON_CLAIMS[1]` must contain `Not a safety claim`; `partition("not evidence of")` must return exactly that separator; and each of `safety`, `capability reduction`, `robustness` plus `any real system` must lie **after** it. The three properties are iterated and the **count actually checked** is asserted (`checked == 3`), not `len()` of the table. Last line pins the same bytes into `sc_simple().does_not_establish`, so the pin cannot go green on a dead constant. |
+
+Why those predicates and not presence checks. F23's qualifier exists so that **no crop of the verdict line
+omits it** (`SR12_INDEPENDENT_REVIEW.md` Q2, `SR16_AUDIT_REPORT.md` §2.2); an `assertIn(qual, r.stdout)`
+passes when the qualifier is moved to its own `print`, which is the whole failure mode. Hence the pin
+locates the verdict line and asserts on *it*. F24's entry exists to deny three named properties; a length
+check or `assertIn("safety", entry)` passes on three of the five mutants below, so the pin asserts the
+**denial** (`not evidence of`) and requires all three properties on its far side.
+
+### Harness — `scratchpad/f23-f24/harness.py`, written down because F17-R says a scratchpad result is not evidence
+
+Mutates **only** a `git archive HEAD` extract at `scratchpad/f23-f24/base`, which is `git init`-ed, `add
+-A`-ed and committed first: `test_scripts` shells out to `git ls-files` and **the control itself fails in a
+bare extract**, which is how SR-16 nearly shipped M7 as KILLED. The two owned test files are **copied in**
+from the working tree (`--no-pins` keeps HEAD's, i.e. the pre-pin state). Restore is `git checkout -- . &&
+git clean -fdq`, installed on `SIGTERM` and `SIGINT` as well as in `finally`, and the extract's `git
+status` is printed clean after every run. `__pycache__` cleared before each run; `PYTHONDONTWRITEBYTECODE=1
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONPATH=src <py> -B -m unittest <target>`; plain `-B`, never `-I`.
+Neither pin reads a docstring, so no `-OO` row is owed. rc≠0 ⇒ KILLED; rc=0 ⇒ **"unkilled by \<target\>"**,
+never "survived".
+
+```
+python3 harness.py --list
+python3 harness.py --control --module test_robustness --py 3.12
+python3 harness.py --mutant M8-gut --py 3.12 --targeted
+python3 harness.py --mutant M8-gut --py 3.12 --no-pins      # pre-pin reproduction of F24
+```
+
+**Anchors** (exact, one occurrence each; `apply()` aborts on any count ≠ 1 and reports no verdict):
+
+- `scripts/demo.py` — `  [tests the scorer; says nothing about any method]` (M7-remove, anchor includes the
+  two leading spaces); `[tests the scorer; says nothing about any method]` (M7-gut → `[tests the scorer]`);
+  `says nothing about any method` (M7-weaken → `says little about any method`); the whole two-line
+  `print(f"[3] scorer-validation fixture …")` statement (M7-relocate → verdict printed alone, qualifier
+  moved to a second `print`).
+- `src/toy/robustness.py` — the line `    "Not a safety claim and not evidence of safety, capability
+  reduction, or robustness of any real system.",` replaced by `    "<text>",` for each M8 variant.
+
+### Three harness failures watched FIRST, before any verdict was trusted
+
+1. **Unapplied patch.** `X-bad-anchor` (`…any METHOD]`) → `HARNESS ABORT: anchor occurs 0 time(s) … NOTHING
+   was mutated and NO verdict is reported`, rc=1, extract restored clean. Good.
+2. **A false KILL of SR-16's own kind, produced on purpose.** `--targeted --no-pins` names a test HEAD does
+   not contain; unittest's loader raises, rc=1, and the harness printed **`--> KILLED`** for a mutant
+   nothing had caught. The combination is now refused, and a targeted run must report `Ran 1 test` or the
+   harness aborts. This is the broken-control hazard, reproduced in miniature.
+3. **A guard whose own parsing was wrong.** The "did the patch land" check read `ln[3:]` of `git status
+   --porcelain`, but the output had been `.strip()`ed, eating the leading space of the first ` M path` line
+   → `rc/toy/robustness.py`, and a correctly applied M8 patch was aborted as unlanded. Refusing to report a
+   verdict was the right failure mode; the offset was the bug. Now matched by substring.
+
+### Unkilled mutants — the pre-pin state reproduced, so each kill below is attributable to the pin
+
+| mutant | tests present | result |
+|---|---|---|
+| M8-gut (`STANDARD_NON_CLAIMS[1]` → `"Not a safety claim."`) | HEAD's (`--no-pins`) | `Ran 203 … OK` — **unkilled by `test_robustness` on 3.12.4** |
+| M7-remove (qualifier deleted) | HEAD's (`--no-pins`) | `Ran 156 … OK` in 207.1 s — **unkilled by `test_scripts` on 3.12.4** |
+
+Both reproduce SR-16's M7/M8 against a **green** control (`Ran 156 … OK` / `Ran 203 … OK` in the same
+`git init`-ed extract), so F23 and F24 are confirmed independently of the report that found them.
+
+### Kills
+
+Both are at the **pin's own test** (`--targeted`), which `CLAUDE.md` makes logically sufficient for a KILL;
+every mutant was also confirmed to leave the extract clean afterwards.
+
+| mutant | what it does | 3.12.4 | 3.13.5 | the assertion that bit |
+|---|---|---|---|---|
+| M7-remove | qualifier deleted outright (SR-16's M7) | KILLED | KILLED | no `[tests the scorer;` on the verdict line |
+| M7-gut | `[tests the scorer]` — bracket kept, denial removed | KILLED | KILLED | same |
+| M7-weaken | `says little about any method` | KILLED | KILLED | remainder does not start with ` says nothing about any method]` |
+| M7-relocate | qualifier intact in stdout, moved to its own `print` | KILLED | KILLED | **same-line** requirement — the one an `assertIn(…, stdout)` would miss |
+| M8-remove | entry → `""` | KILLED | KILLED | `Not a safety claim` not in `''` |
+| M8-gut | `"Not a safety claim."` (SR-16's M8) | KILLED | KILLED | `'' != 'not evidence of'` |
+| M8-polarity | second `not` deleted | KILLED | KILLED | same |
+| M8-hedge | `not necessarily evidence of …` | KILLED | KILLED | same |
+| M8-drop2 | `"… not evidence of safety of any real system."` — shape kept, two properties dropped | KILLED | KILLED | `capability reduction` not denied |
+
+### Counts (extract, `git archive HEAD` + `git init`, both controls GREEN)
+
+| module | before | after | interpreters |
+|---|---|---|---|
+| `test_robustness` | `Ran 203 … OK` | `Ran 204 … OK` | 3.12.4 and 3.13.5 |
+| `test_scripts` | `Ran 156 … OK` | `Ran 157 … OK` | 3.12.4 and 3.13.5 |
+
+Working tree, after the pins, `__pycache__` cleared before each: `test_robustness` `Ran 204 … OK` (5.00 s on
+3.12.4, 4.57 s on 3.13.5); `test_scripts` `Ran 157 … OK` (197.6 s on 3.12.4, 70.5 s on 3.13.5). Nothing else
+ran during any of them. The 3.12.4/3.13.5 wall-clock gap on `test_scripts` is a property of the environment
+(subprocess-heavy module, framework build vs conda), not of these pins.
+
+`scripts/test_baseline.txt` is a **floor** ("fewer tests … fails the run"), so 204 ≥ 203 and 157 ≥ 156 keep
+it green — it does not *need* raising. It should still be regenerated so the floor tracks:
+`toy_tests.test_robustness 203 0` → `204 0` and `toy_tests.test_scripts 156 4` → `157 4`, full-suite total
+1493 → 1495. **Not edited here** — the orchestrator regenerates it. The skip columns are unchanged by
+inspection (neither pin can skip), not by a `--expect none` run, which this owner did not do.
+
+### FOUND AND DELIBERATELY NOT PINNED — F23/F24 are a class, not two sites (scoping, for the orchestrator)
+
+Reported rather than pinned, per the scope rule for this round. Measured with the same harness, **with both
+new pins present and the control green**, so these are not artefacts of a missing pin:
+
+| site | mutant | result |
+|---|---|---|
+| `STANDARD_NON_CLAIMS[0]` | `"Nothing about RFdiffusion."` (fork and "any real model" dropped) | `Ran 204 … OK` — **unkilled by `test_robustness` on 3.12.4** |
+| `STANDARD_NON_CLAIMS[2]` | `"An experiment of EVALUATION_PROTOCOL."` (re-polarised) | same — **unkilled** |
+| `STANDARD_NON_CLAIMS[3]` | `"Seeds are independent samples of any real population."` (re-polarised) | same — **unkilled** |
+| `STANDARD_NON_CLAIMS[4]` | `"Passes mean the property holds."` (a pass becomes a positive claim) | same — **unkilled** |
+| `scripts/demo.py:159` | the step-[5] claim-ledger line loses `(not SUPPORTED)` | `Ran 157 … OK` in 203.6 s — **unkilled by `test_scripts` on 3.12.4** |
+
+`grep -rn` over `tests/` and `src/` finds the content of all five **only** in its own subject file. So of the
+six `STANDARD_NON_CLAIMS` entries, exactly two now have content pins: `[-1]` (since SR-13) and `[1]` (this
+round) — `[0]`, `[2]`, `[3]` and `[4]` are still assertable only by presence, and `[3]`/`[4]` can be
+**re-polarised into positive claims about real populations and about what a pass means** without a red test.
+`len(STANDARD_NON_CLAIMS) == 6` is pinned, so the table cannot be emptied; its *sentences* can be inverted.
+Three of the five are stronger than F24 was, because F24's mutant only *weakened* a denial while `Z-nc3` and
+`Z-nc4` *assert the opposite*. This is one coherent follow-up round, sized like this one.
+
+### Figure corrections and a self-report
+
+- The brief's `grep -rc "says nothing about any method"` claim — "finds it in `scripts/demo.py` and
+  **nowhere else**" — is **wrong**. It also occurs in `docs/SR12_INDEPENDENT_REVIEW.md:132`,
+  `docs/SR16_AUDIT_REPORT.md` (`:228`, `:250`, `:344`, `:500`) and, as prose about the fixtures rather than
+  the demo line, `docs/EVALUATION_PROTOCOL.md:64`. The **load-bearing** half of the claim holds: **no test
+  referenced it**, which is what F23 was.
+- **Self-report, in the spirit of the standing rule.** While the serial long-run batch was in flight I ran
+  one `echo waiting` in a second shell. It is a builtin and consumed no measurable CPU, but the rule is
+  "never run anything concurrently with a suite run, not even a cheap `ls`", and this breaks its letter.
+  The measurement in flight at that moment was the extract control for pinned `test_scripts` on 3.12.4; it
+  was **re-run serially** and reproduced: `Ran 157 … OK` in 194.6 s against the first run's 200.7 s. No
+  figure in this entry rests on the overlapped run.
+- No subject file was modified at any point: `git status` in the working tree is exactly
+  `M docs/PROGRESS.md`, `M tests/toy_tests/test_robustness.py`, `M tests/toy_tests/test_scripts.py`
+  (+205 lines, 0 deletions). The extract printed `git status clean` after **every** harness invocation,
+  the aborted ones included (no count is given here because I did not keep one, and an invented count is
+  the kind of figure this project keeps getting wrong). Nothing committed; the blueprint is unmarked.
+- **F17-R is narrowed, not closed.** `harness.py` lives in a session scratchpad and will disappear with it.
+  What survives is in this entry: the exact anchors, the exact replacements, the exact invocations, and the
+  three failure modes watched first. Rebuilding it from this section is mechanical; recovering it from the
+  scratchpad is not possible. **The two pins, which are tracked, are the durable part.**

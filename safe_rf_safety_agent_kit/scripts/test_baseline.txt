@@ -7,9 +7,9 @@ toy_tests.test_claim_ledger 100 0
 toy_tests.test_dashboard 265 0
 toy_tests.test_erasure_demo_edges 17 0
 toy_tests.test_failure_modes 20 2
-toy_tests.test_robustness 203 0
+toy_tests.test_robustness 204 0
 toy_tests.test_schema 55 0
-toy_tests.test_scripts 156 4
+toy_tests.test_scripts 157 4
 toy_tests.test_stability 106 1
 toy_tests.test_teacher_student 55 0
 toy_tests.test_tensor_ops 110 82

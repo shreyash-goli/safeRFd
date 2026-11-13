@@ -1196,6 +1196,38 @@ class TestQAHardening(unittest.TestCase):
             dataclasses.replace(c, does_not_establish=tuple(x for x in c.does_not_establish
                                                                 if x != rb.STANDARD_NON_CLAIMS[-1]))
 
+    def test_safety_non_claim_denies_all_three_named_properties(self):
+        """F24 (SR-16's M8). `STANDARD_NON_CLAIMS[1]` -- "Not a safety claim and not evidence of safety,
+        capability reduction, or robustness of any real system." -- was pinned by NOTHING: replacing it with
+        "Not a safety claim." survived all 1493 tests. Its sibling `[-1]` has had a pin since SR-13; this is
+        the same pin for the entry that actually carries the safety denial.
+
+        What is asserted is the DENIAL, not the sentence's length or its presence: the three properties the
+        entry exists to deny must each sit on the far side of the words `not evidence of` WITHIN THIS ENTRY.
+        So all of these die -- `""`; `"Not a safety claim."` (the measured mutant); `"Not a safety claim and
+        evidence of safety, capability reduction, or robustness of any real system."` (negation deleted);
+        `"... and not necessarily evidence of ..."` (denial hedged); and `"Not a safety claim and not evidence
+        of safety of any real system."` (two of the three properties dropped, sentence shape kept). A
+        `len(entry) > 60` or a bare `assertIn("safety", entry)` passes on three of those five.
+
+        The property list is iterated, so the number of properties ACTUALLY checked is asserted rather than
+        `len()` of the list: a sweep whose table a mutant can empty while the assertion still passes is this
+        project's recurring defect (four sites, one of them in a subject). The last line pins that the bytes
+        asserted here are the bytes a real scorecard carries, so the pin cannot go green on a dead constant.
+        """
+        entry = rb.STANDARD_NON_CLAIMS[1]
+        self.assertIn("Not a safety claim", entry)
+        _head, denial, denied = entry.partition("not evidence of")
+        self.assertEqual(denial, "not evidence of",
+                         f"the denial itself is absent, hedged or re-polarised: {entry!r}")
+        checked = 0
+        for prop in ("safety", "capability reduction", "robustness"):
+            self.assertIn(prop, denied, f"{prop!r} is no longer denied by {entry!r}")
+            checked += 1
+        self.assertEqual(checked, 3, "the property table was emptied; the sweep above asserted nothing")
+        self.assertIn("any real system", denied, entry)
+        self.assertIn(entry, sc_simple().does_not_establish)
+
     def test_extreme_mixed_sign_input_raises_valueerror_family(self):
         big = ((1.7e308,), (1.7e308,), (-1.7e308,))
         for m in (rb.abs_bias_fsum, rb.abs_bias_naive, rb.mse_fsum, rb.mse_naive):

@@ -641,6 +641,37 @@ class TestDemo(unittest.TestCase):
         self.assertIsNotNone(m)
         self.assertFalse(Path(m.group(1)).exists())
 
+    def test_demo_verdict_line_carries_its_scorer_qualifier_on_that_same_line(self):
+        """F23 (SR-16's M7). The demo's step-[3] line is its most quotable output -- it prints a
+        `JOINT_SUPPORTED` verdict -- and the bracketed qualifier is the DEMO'S ONLY safety qualifier on it.
+        Deleting `[tests the scorer; says nothing about any method]` from demo.py:138 survived all 1493 tests.
+
+        Pinned ON THE VERDICT LINE, not merely somewhere in stdout, because that is the qualifier's job: no
+        crop of the verdict line may omit it. A mutant that moves the qualifier to its own `print`, into the
+        banner, or into step [4] therefore dies here even though stdout still contains every word of it --
+        which is exactly the hostile-quoting case `docs/SR12_INDEPENDENT_REVIEW.md` Q2 and
+        `docs/SR16_AUDIT_REPORT.md` §2.2 raise, and which an `assertIn(..., r.stdout)` would not catch.
+
+        The verdict line is LOCATED rather than assumed: the lines matching `verdict <TOKEN>` are collected
+        and the count is asserted to be exactly 1, so deleting the print (or the verdict from it) fails on the
+        count instead of leaving a sweep with nothing to sweep. The denial is then pinned verbatim, so
+        `[tests the scorer]`, `[tests the scorer; says little about any method]` and `[tests the scorer; says
+        nothing about THIS method]` all fail, and so does an empty qualifier.
+        """
+        qual = "[tests the scorer; says nothing about any method]"
+        r = subprocess.run([sys.executable, str(SCRIPTS / "demo.py")], capture_output=True, text=True,
+                           env=_env(), cwd=ROOT, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        verdict_lines = [ln for ln in r.stdout.splitlines() if re.search(r"\bverdict [A-Z][A-Z_]+", ln)]
+        self.assertEqual(len(verdict_lines), 1,
+                         f"expected exactly one `verdict <TOKEN>` line in demo stdout, got {verdict_lines!r}")
+        line = verdict_lines[0]
+        _before, bracket, rest = line.partition("[tests the scorer;")
+        self.assertTrue(bracket, f"the verdict line carries no scorer qualifier at all: {line!r}")
+        self.assertTrue(rest.startswith(" says nothing about any method]"),
+                        f"the qualifier's denial is weakened, truncated or reworded: {line!r}")
+        self.assertIn(qual, line, f"the qualifier is not intact on the verdict line: {line!r}")
+
     def test_demo_fails_nonzero_when_toy_package_missing(self):
         r = subprocess.run([sys.executable, str(SCRIPTS / "demo.py"), "--src", str(ROOT / "docs")],
                            capture_output=True, text=True, env=_env(), cwd=ROOT, timeout=60)
