@@ -1,0 +1,84 @@
+{
+  "_README": [
+    "Tracked mutant manifest for scripts/mutate.py. Closes SR-12's F17-R.",
+    "Every entry must be re-derivable by a stranger: `find` is matched EXACTLY ONCE or the RUN fails",
+    "(not the mutant -- see trap 3 in scripts/mutate.py), and `killers` are resolved through the real",
+    "unittest loader before anything is mutated (trap 2).",
+    "A KILLED result here is evidence. A SURVIVED_UNCONFIRMED result is not a finding: only --full,",
+    "which asserts that NOTHING in the suite catches the mutant, can support a survival claim.",
+    "Adding a mutant is cheap and is the point. Removing one silently is how this project lost 265",
+    "previous results."
+  ],
+  "mutants": [
+    {
+      "id": "Z-demo4-delete",
+      "file": "scripts/demo.py",
+      "note": "delete the step-[4] `(not refuted ...)` qualifier entirely; this is the exact text that was MISSING for 28 rounds, so the mutant restores the pre-fix state",
+      "find": " (not refuted on these {len(rb_seeds)} fixtures)",
+      "replace": "",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestDemo.test_demo_status_line_carries_its_not_refuted_qualifier_on_that_same_line"
+      ]
+    },
+    {
+      "id": "Z-demo4-relocate",
+      "file": "scripts/demo.py",
+      "note": "move the qualifier off the status line into its own print; stdout still contains every word of it, so an assertIn(..., stdout) pin would pass -- this is the hostile-quoting case",
+      "find": "        print(f\"[4] robustness probe (row reorder on mse_fsum, {len(rb_seeds)} seeds): \"\n              f\"status {card.status.value} (not refuted on these {len(rb_seeds)} fixtures)\")",
+      "replace": "        print(f\"[4] robustness probe (row reorder on mse_fsum, {len(rb_seeds)} seeds): \"\n              f\"status {card.status.value}\")\n        print(f\"    (not refuted on these {len(rb_seeds)} fixtures)\")",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestDemo.test_demo_status_line_carries_its_not_refuted_qualifier_on_that_same_line"
+      ]
+    },
+    {
+      "id": "Z-demo4-count-drift",
+      "file": "scripts/demo.py",
+      "note": "drop the probe to 3 seeds while hard-coding `these 12 fixtures`; the qualifier stays grammatical and verbatim-identical to the shipped wording but is now false, which no string pin can catch",
+      "find": "        rb_seeds = tuple(range(12))\n        card = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), seeds=rb_seeds)\n        check(card.summary is not None, \"robustness probe produced no summary\")\n        # Operator decision 1 (SR-16). This line used to print `status INVARIANCE_HOLDS` bare, while\n        # steps [3] and [5] both carried a qualifier. `INVARIANCE_HOLDS` names a probe that FAILED TO\n        # REFUTE invariance on a finite fixture set; it is not a proof of invariance, and a crop of\n        # this line was the kit's most quotable overclaim. The seed count is derived, not retyped.\n        print(f\"[4] robustness probe (row reorder on mse_fsum, {len(rb_seeds)} seeds): \"\n              f\"status {card.status.value} (not refuted on these {len(rb_seeds)} fixtures)\")",
+      "replace": "        rb_seeds = tuple(range(3))\n        card = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), seeds=rb_seeds)\n        check(card.summary is not None, \"robustness probe produced no summary\")\n        # Operator decision 1 (SR-16). This line used to print `status INVARIANCE_HOLDS` bare, while\n        # steps [3] and [5] both carried a qualifier. `INVARIANCE_HOLDS` names a probe that FAILED TO\n        # REFUTE invariance on a finite fixture set; it is not a proof of invariance, and a crop of\n        # this line was the kit's most quotable overclaim. The seed count is derived, not retyped.\n        print(f\"[4] robustness probe (row reorder on mse_fsum, {len(rb_seeds)} seeds): \"\n              f\"status {card.status.value} (not refuted on these 12 fixtures)\")",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestDemo.test_demo_status_line_carries_its_not_refuted_qualifier_on_that_same_line"
+      ]
+    },
+    {
+      "id": "F16-drop-conditional",
+      "file": "scripts/demo.py",
+      "note": "remove `{cond}` from the verdict line, restoring the bare JOINT_SUPPORTED that EVALUATION_PROTOCOL.md:126 forbids while any section-8.2 check is unrun",
+      "find": "f\"verdict {joint.verdict.value}{cond}  [tests the scorer; says nothing about any method]\")",
+      "replace": "f\"verdict {joint.verdict.value}  [tests the scorer; says nothing about any method]\")",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestDemo.test_demo_verdict_line_reports_joint_supported_in_the_mandated_conditional_form"
+      ]
+    },
+    {
+      "id": "F16-empty-gates",
+      "file": "src/toy/benchmark.py",
+      "note": "empty DEFERRED_GATES, which makes complete_gate_coverage True and deletes the demo's conditional parenthetical LEGITIMATELY; the vacuity shape, sixth sighting",
+      "find": "DEFERRED_GATES = (\"gate1_config_shift_sensitivity_arm\", \"gate2_error_register_crosscheck\", \"V_set_probes\",\n                  \"pilot_execution_and_n_cap_width_rule\", \"assumption1_exchangeability_check\",\n                  \"amendment_log_hash\")",
+      "replace": "DEFERRED_GATES = ()",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestDemo.test_demo_verdict_line_reports_joint_supported_in_the_mandated_conditional_form"
+      ]
+    },
+    {
+      "id": "F23-delete-qualifier",
+      "file": "scripts/demo.py",
+      "note": "delete the step-[3] scorer qualifier; re-derives a kill the journal claimed at 9ef13a8 but left unreproducible",
+      "find": "  [tests the scorer; says nothing about any method]",
+      "replace": "",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestDemo.test_demo_verdict_line_carries_its_scorer_qualifier_on_that_same_line"
+      ]
+    },
+    {
+      "id": "Z-demo5-delete",
+      "file": "scripts/demo.py",
+      "note": "delete the step-[5] `(not SUPPORTED)` parenthetical, leaving `claim state REVIEWED` to read as a positive finding",
+      "find": "              f\"(not SUPPORTED)\")",
+      "replace": "              f\"\")",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestDemo.test_demo_claim_state_line_carries_its_not_supported_qualifier_on_that_same_line"
+      ]
+    }
+  ]
+}

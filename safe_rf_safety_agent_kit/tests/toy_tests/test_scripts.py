@@ -13,6 +13,23 @@ SCRIPTS = ROOT / "scripts"
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 
 
+def _deferred_gates():
+    """Read `DEFERRED_GATES` out of src/toy/benchmark.py by parsing it, not by importing it.
+
+    This module is deliberately free of imports from the `toy` package: everything it tests, it tests through
+    a subprocess, which is what lets it run unchanged in the bare `venv --without-pip` interpreter. Parsing
+    keeps that property and follows `_lint_blocklists` above, which exists because two hand-maintained copies
+    of a list diverged.
+    """
+    src = (ROOT / "src" / "toy" / "benchmark.py").read_text(encoding="utf-8")
+    for node in ast.parse(src).body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "DEFERRED_GATES" for t in node.targets):
+            return tuple(ast.literal_eval(node.value))
+    raise AssertionError("src/toy/benchmark.py no longer assigns DEFERRED_GATES at module level as a literal; "
+                         "this file parses it (see _deferred_gates) and must be updated together with it")
+
+
 def _lint_blocklists():
     """Read the network blocklists OUT OF scripts/lint.sh instead of restating them.
 
@@ -703,6 +720,97 @@ class TestDemo(unittest.TestCase):
                               f"deleted, weakened, re-polarised, or moved off this line: {line!r}")
         self.assertIn(f"claim state {state}", before_qual,
                       f"the qualifier no longer follows the claim state on its own line: {line!r}")
+
+    def test_demo_status_line_carries_its_not_refuted_qualifier_on_that_same_line(self):
+        """The F23/F24 sibling class, item `Z-demo4` -- SR-16's operator decision 1, now closed.
+        `scripts/demo.py` step [4] printed `status INVARIANCE_HOLDS` BARE while steps [3] and [5] both
+        carried a qualifier, and SR-16 flagged it as the kit's most quotable remaining overclaim: a reader
+        who crops that line reads `INVARIANCE_HOLDS` as a proof of invariance, when the probe's actual
+        finding is that it FAILED TO REFUTE invariance on twelve fixtures. `robustness.py` says so in its
+        own vocabulary; the demo's stdout did not.
+
+        Pinned ON THE STATUS LINE for the reason F23 established: an `assertIn("(not refuted", r.stdout)`
+        passes when the qualifier is relocated to its own `print` or folded into the banner, and relocation
+        is the exact failure a qualifier exists to prevent. The line is LOCATED rather than assumed -- the
+        lines matching `status <TOKEN>` are collected and the count asserted to be exactly 1 -- so deleting
+        the print, or the status from it, fails on the count instead of leaving a sweep with nothing to
+        sweep.
+
+        The seed count inside the qualifier is read off the line's OWN prose rather than hard-coded here, so
+        a mutant that drops the probe to three seeds while leaving the words `these 12 fixtures` standing
+        dies on the mismatch. That is the one thing a verbatim-string pin cannot catch, and the reason this
+        test parses two numbers instead of asserting one sentence.
+        """
+        r = subprocess.run([sys.executable, str(SCRIPTS / "demo.py")], capture_output=True, text=True,
+                           env=_env(), cwd=ROOT, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        status_lines = [ln for ln in r.stdout.splitlines() if re.search(r"\bstatus [A-Z][A-Z_]+", ln)]
+        self.assertEqual(len(status_lines), 1,
+                         f"expected exactly one `status <TOKEN>` line in demo stdout, got {status_lines!r}")
+        line = status_lines[0]
+        status = re.search(r"\bstatus ([A-Z][A-Z_]+)", line).group(1)
+        before_qual, qual, _rest = line.partition("(not refuted on these ")
+        self.assertTrue(qual, f"the status line carries no `(not refuted ...)` qualifier -- it has been "
+                              f"deleted, weakened, re-polarised, or moved off this line: {line!r}")
+        self.assertIn(f"status {status}", before_qual,
+                      f"the qualifier no longer follows the status on its own line: {line!r}")
+        m = re.search(r"\(not refuted on these (\d+) fixtures\)", line)
+        self.assertIsNotNone(m, f"the qualifier's wording has drifted from `(not refuted on these N "
+                               f"fixtures)`: {line!r}")
+        declared = re.search(r"(\d+) seeds", line)
+        self.assertIsNotNone(declared, f"the status line no longer declares its seed count: {line!r}")
+        self.assertEqual(m.group(1), declared.group(1),
+                         f"the qualifier's fixture count and the line's own seed count disagree -- one of "
+                         f"the two is now false: {line!r}")
+
+    def test_demo_verdict_line_reports_joint_supported_in_the_mandated_conditional_form(self):
+        """F16 (SR-12), now closed. `docs/EVALUATION_PROTOCOL.md:126` is explicit: *"While any check in
+        section 8.2 is unimplemented or unrun, JOINT_SUPPORTED is a **conditional** verdict and must be
+        reported as `JOINT_SUPPORTED (conditional on deferred checks: <list>)`"*. The demo printed the bare
+        token for 28 rounds. The document and the code are required by that same sentence to tell the same
+        story, and they did not.
+
+        THE VACUITY TRAP, and why this test asserts three things instead of one. `cond` is empty when
+        `JointResult.complete_gate_coverage` is True, and that property is just `not self.deferred_gates`.
+        So a mutant that sets `DEFERRED_GATES = ()` -- one token -- makes the parenthetical vanish
+        LEGITIMATELY, and a test that compared the line against the live tuple would sweep an empty table
+        and pass. That is the vacuity shape this project has now hit six times, once inside a subject. The
+        guard is to assert the table is non-empty FIRST, as its own assertion with its own message, before
+        any sweep over it.
+
+        `complete_gate_coverage is False` is therefore asserted as a SHIPPED FACT, not as a derivation. If
+        some future change legitimately implements, runs and passes all six deferred checks, this test is
+        SUPPOSED to fail: the protocol's next sentence says an unconditional label "requires every deferred
+        check to be implemented, run, passed and independently attested by QA", and a test that silently
+        accommodated the unconditional form would be the mechanism by which that attestation got skipped.
+        """
+        r = subprocess.run([sys.executable, str(SCRIPTS / "demo.py")], capture_output=True, text=True,
+                           env=_env(), cwd=ROOT, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        gates = _deferred_gates()
+        self.assertTrue(gates, "src/toy/benchmark.py DEFERRED_GATES is empty, so `complete_gate_coverage` is "
+                               "True, so the demo's conditional parenthetical disappears LEGITIMATELY and "
+                               "every assertion below would be vacuously satisfied. Either every section-8.2 "
+                               "check is now implemented, run, passed and QA-attested -- in which case update "
+                               "docs/EVALUATION_PROTOCOL.md:126 and this test together -- or one token has "
+                               "just deleted the demo's only conditionality signal")
+        verdict_lines = [ln for ln in r.stdout.splitlines() if re.search(r"\bverdict [A-Z][A-Z_]+", ln)]
+        self.assertEqual(len(verdict_lines), 1,
+                         f"expected exactly one `verdict <TOKEN>` line in demo stdout, got {verdict_lines!r}")
+        line = verdict_lines[0]
+        verdict = re.search(r"\bverdict ([A-Z][A-Z_]+)", line).group(1)
+        self.assertEqual(verdict, "JOINT_SUPPORTED",
+                         f"this pin is written for the fixture's JOINT_SUPPORTED verdict; it now reads "
+                         f"{verdict!r}, so the conditionality rule it guards may no longer apply: {line!r}")
+        before_qual, qual, rest = line.partition("(conditional on deferred checks: ")
+        self.assertTrue(qual, f"a JOINT_SUPPORTED verdict is printed WITHOUT the conditional form that "
+                              f"docs/EVALUATION_PROTOCOL.md:126 mandates: {line!r}")
+        self.assertIn(f"verdict {verdict}", before_qual,
+                      f"the conditional no longer follows the verdict on its own line: {line!r}")
+        named = rest.partition(")")[0]
+        for gate in gates:
+            self.assertIn(gate, named, f"deferred check {gate!r} is unimplemented but is not named in the "
+                                       f"demo's conditional list: {line!r}")
 
     def test_demo_fails_nonzero_when_toy_package_missing(self):
         r = subprocess.run([sys.executable, str(SCRIPTS / "demo.py"), "--src", str(ROOT / "docs")],

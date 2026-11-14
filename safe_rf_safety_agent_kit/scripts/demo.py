@@ -134,14 +134,26 @@ def run(src: Path, keep: bool) -> int:
         fz = bm.freeze_seed_list(7, 30)
         joint = bm.run_study(fz, bm.fixture_oracle_gated, subject="demo scorer-validation fixture",
                              registered_digest=fz.digest, cfg=cfg)
+        # F16. `docs/EVALUATION_PROTOCOL.md:126` mandates the CONDITIONAL form while any section-8.2
+        # check is unimplemented or unrun. Derived from the result, never hand-written: if a future
+        # change implements every deferred check, `complete_gate_coverage` goes True and the
+        # parenthetical disappears on its own rather than becoming a stale falsehood.
+        cond = ("" if joint.complete_gate_coverage else
+                f" (conditional on deferred checks: {', '.join(joint.deferred_gates)})")
         print(f"[3] scorer-validation fixture (ORACLE_GATED) scored on {len(fz.seeds)} seeds: "
-              f"verdict {joint.verdict.value}  [tests the scorer; says nothing about any method]")
+              f"verdict {joint.verdict.value}{cond}  [tests the scorer; says nothing about any method]")
         check(isinstance(joint.verdict, bm.JointVerdict), "scorer returned no JointVerdict")
 
         # 4. robustness probe
-        card = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), seeds=tuple(range(12)))
+        rb_seeds = tuple(range(12))
+        card = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), seeds=rb_seeds)
         check(card.summary is not None, "robustness probe produced no summary")
-        print(f"[4] robustness probe (row reorder on mse_fsum, 12 seeds): status {card.status.value}")
+        # Operator decision 1 (SR-16). This line used to print `status INVARIANCE_HOLDS` bare, while
+        # steps [3] and [5] both carried a qualifier. `INVARIANCE_HOLDS` names a probe that FAILED TO
+        # REFUTE invariance on a finite fixture set; it is not a proof of invariance, and a crop of
+        # this line was the kit's most quotable overclaim. The seed count is derived, not retyped.
+        print(f"[4] robustness probe (row reorder on mse_fsum, {len(rb_seeds)} seeds): "
+              f"status {card.status.value} (not refuted on these {len(rb_seeds)} fixtures)")
         rb_rec = rb.scorecard_to_record(card, run_id="demo-robustness", timestamp_utc=TS)
 
         # 5. claim ledger: open + review (a reviewer's act; it does not validate anything)
