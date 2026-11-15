@@ -24,6 +24,92 @@ per README step 1 and to avoid writing to that repo's `main`. No remote is confi
 
 ---
 
+## SR-12 residuals and SR-17 gate — orchestrator round, 2026-11-13/15
+
+**Task IDs:** SR-12 finding closures (F7, F8, F9, F16, F18, F19, F20, F20-b, F21, F22, M1, M2), the new
+**F26**, SR-16 operator decision 1, SR-17's gate decision, and the F17-R harness. **Commits:**
+`99987a1`, `9021064`, `d6ae8b8`, `24c4ff8`.
+
+**Evidence and commands.** All runs serial, caches cleared, `PYTHONDONTWRITEBYTECODE=1`,
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`:
+
+```
+python3 -m unittest discover -s tests          # 3.12.4 rc=0 Ran 1509 OK (skipped=2)
+                                               # 3.13.5 rc=0 Ran 1509 OK (skipped=84)
+./scripts/run_tests.sh --expect any --twice    # RESULT: OK, deterministic run1 == run2
+./scripts/run_tests.sh --expect none --update-baseline   # bare venv --without-pip 3.12.4
+                                               # rc=0 RESULT: OK (ran=1509 skipped=90)
+./scripts/lint.sh                              # LINT: OK
+python3 scripts/mutate.py                      # see below
+```
+
+**THE HARNESS IS THE ROUND'S REAL DELIVERABLE.** `scripts/mutate.py` + `scripts/mutants.json` are the
+first mutation tooling ever tracked in this repository. **Measured 7/7 KILLED at `99987a1`**, control OK
+on the unmutated extract, working tree UNCHANGED. It then refused two subsequent runs, both times
+correctly, and both times against its own author:
+
+1. **Trap 2.** Five new mutants' killers did not resolve at the then-HEAD, because the tests existed only
+   in the uncommitted tree. Without the loader pre-flight all five would have reported **KILLED** from
+   synthesised `_FailedTest` failures. This is the trap `CLAUDE.md` already warned about in prose; it is
+   now enforced by code.
+2. **Trap 3.** The `F22-bare-last-match` anchor matched **0** times, because `_ran_totals` is defined in
+   BOTH heredocs (separate python processes, no shared definition) so the body alone is not unique. An
+   unapplied patch would otherwise have reported **SURVIVED**, which is the direction that gets written
+   down as a finding.
+
+**And one mutant did its actual job: `F20-discriminator-too-broad` SURVIVED.** The negative control for
+`POLICY:PYTEST_UNUSABLE` printed only `collected 1 item` / `1 failed` with no package path, so the
+widened discriminator's remaining condition was never satisfied and the assertions passed for the wrong
+reason. The fixture now carries a traceback through `site-packages`, which is the realistic shape of a
+genuine failure inside an installed library — exactly what a too-broad discriminator would forgive. The
+mutant is now KILLED. **A pin that looks right and is not is the whole reason this tooling had to be
+tracked rather than rebuilt per round.**
+
+**Three findings changed shape under testing; those are the round's substantive corrections.**
+
+- **F22: the rule `docs/CLEAN_CLONE.md` prescribed is itself wrong, and the fix's own new test caught it.**
+  That document said to "take the last match rather than the first". MEASURED with a 4-test module whose
+  first test prints `Ran 3 tests in 0.001s`: in the redirected log the REAL total is at **line 3** and the
+  decoy at **line 6**, because unittest writes its summary to stderr UNBUFFERED while a test's `print`
+  goes to block-buffered stdout and flushes at process exit. First-match was right there; last-match was
+  wrong. For a test whose SUBPROCESS writes to the inherited fd, the order is chronological and the
+  opposite holds. **Position in the log is not information.** Both sites now anchor on unittest's summary
+  BLOCK (`separator2`, 70 dashes, immediately preceding `Ran N tests`): `['4']` on both the buffered and
+  the unbuffered log, where a bare pattern gives `['4', '3']`. CLEAN_CLONE.md is corrected, not merely
+  implemented.
+- **F21: the kit had already found this, at the CONSUMER.** `dashboard.py:2441` documents the identical
+  measurement, from round 13's container sweep, with a passing test. What was unfixed was the PRODUCER,
+  which every other consumer reads raw — the demo's stdout, the protocol's conditional label, the
+  records. Fixing it made a *passing* dashboard test's assertion false, because it pinned a contradiction
+  an honest producer no longer emits; that branch now pins both halves and keeps the consumer-side
+  detector pinned on a contradiction the producer fix cannot prevent.
+- **F26, NEW**, found by sweeping F21's SHAPE instead of fixing F21's site.
+  `HypothesisResult.__post_init__` truth-tested `blocking` and `supported_blockers` — both declared
+  `tuple`, both built with `tuple(...)` by `_hypothesis`, both PUBLIC CONSTRUCTOR PARAMETERS that nothing
+  coerced. MEASURED through the public constructor, no `object.__setattr__`: `blocking=Liar(glob)` turned
+  **INCONCLUSIVE into SUPPORTED** and left **no reason mentioning a failed gate**, while both names were
+  still present. ALSO MEASURED, so the grade is honest: **bounded** — `JointResult.__post_init__` reads
+  `gates`, not `blocking`, and refused the combination. Residue: a `HypothesisResult` consumed outside a
+  `JointResult`.
+
+**SR-17 — DECIDED, not deferred.** `docs/SR17_GATE_DECISION.md`. The task's deliverable is a judgement,
+and the judgement is **DO NOT PROCEED at this gate**, on four independent grounds, with re-open
+conditions P1–P5. **P4 is the binding one and is not a software task**: a named human owner for the
+erasure target and the held-out set, under institutional biosecurity review outside this repository.
+The file is written to be countersigned and carries an unsigned signature block. **No real model run,
+weight download, dataset use or biological tuning was performed, attempted or prepared.**
+
+**Remaining uncertainty.**
+- **F10 stays open by construction.** Commit messages `d87b48f` and `e436d93` state INFERENCE as
+  "confirms" / "direct evidence". They are immutable; this can only ever be noted.
+- **F17-R is narrowed, not closed.** 15 mutants are now re-derivable. The journal's ~265 historical kill
+  claims are not, and nothing can make them so. Whether SR-16's clause 1 now reaches PASS is for an
+  independent reviewer, not for this entry.
+- **The F7/F8/F9 pins are verbatim prose pins.** They die to deletion, weakening and inversion, which is
+  what their three mutants test. They cannot detect a *true* statement that is differently misleading.
+- **No checkbox is marked by this round.**
+
+
 ## F19 — the typed attestation ordinals are HISTORICAL, not authoritative
 
 **Closed 2026-11-13.** This journal's typed ordinals contradict each other and the contradiction was

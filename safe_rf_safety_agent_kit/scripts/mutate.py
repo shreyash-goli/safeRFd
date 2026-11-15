@@ -85,22 +85,53 @@ class RunFailure(RuntimeError):
     """The harness itself is broken or its inputs are stale. Never a statement about a mutant."""
 
 
-def tree_fingerprint() -> str:
-    """Hash of the working tree's dirty state. Trap 4: compared at entry and at every exit."""
-    out = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT, capture_output=True, text=True,
-                         check=True).stdout
-    diff = subprocess.run(["git", "diff"], cwd=ROOT, capture_output=True, text=True, check=True).stdout
-    return hashlib.sha256((out + "\0" + diff).encode()).hexdigest()
+def tree_fingerprint(subject: Path = ROOT) -> str:
+    """Hash of the subject tree's state. Trap 4: compared at entry and at every exit.
+
+    In a git repository this is the dirty state (`status --porcelain` + `diff`), which is the sharp check.
+    In an exported tree there is no index to diff against, so it is the sorted (path, size, mtime_ns) of
+    every file -- weaker, but it still catches a harness that failed to restore, which is what trap 4 is
+    for. It deliberately does NOT distinguish "the harness changed this tree" from "someone else did":
+    a mutation result taken while the tree moved underneath it is not evidence, and refusing to certify
+    it is the point.
+    """
+    if (subject / ".git").exists():
+        out = subprocess.run(["git", "status", "--porcelain"], cwd=subject, capture_output=True,
+                             text=True, check=True).stdout
+        diff = subprocess.run(["git", "diff"], cwd=subject, capture_output=True, text=True,
+                              check=True).stdout
+        return hashlib.sha256((out + "\0" + diff).encode()).hexdigest()
+    rows = []
+    for f in sorted(subject.rglob("*")):
+        if f.is_file() and "__pycache__" not in f.parts:
+            st = f.stat()
+            rows.append(f"{f.relative_to(subject)}\0{st.st_size}\0{st.st_mtime_ns}")
+    return hashlib.sha256("\n".join(rows).encode()).hexdigest()
 
 
-def make_extract(dest: Path) -> Path:
-    """`git archive HEAD` into dest, then `git init` it. Trap 1."""
+def make_extract(dest: Path, tree: Path | None = None) -> Path:
+    """`git archive HEAD` into dest (or copy `tree` instead), then `git init` it. Trap 1.
+
+    `tree` exists for workers that have no repository: a remote runner gets an EXPORTED tree, because
+    `git archive HEAD` needs a commit and shipping `.git` is not an option -- commit objects carry author
+    identity. The `git init` afterwards is NOT optional in either mode: `tests/toy_tests/test_scripts.py`
+    shells out to `git ls-files`, so a plain extract fails the CONTROL, and a failing control makes every
+    mutant read KILLED. SR-16 nearly shipped the opposite conclusion from exactly that.
+    """
     dest.mkdir(parents=True, exist_ok=True)
-    tar = dest.parent / "head.tar"
-    with tar.open("wb") as fh:
-        subprocess.run(["git", "archive", "HEAD"], cwd=ROOT, stdout=fh, check=True)
-    subprocess.run(["tar", "-xf", str(tar), "-C", str(dest)], check=True)
-    tar.unlink()
+    if tree is not None:
+        if not (tree / "scripts" / "mutants.json").is_file():
+            raise RunFailure(f"--tree {tree} does not look like this kit: scripts/mutants.json is absent")
+        for item in tree.iterdir():
+            if item.name == ".git":          # never copied, and never shipped to a worker
+                continue
+            (shutil.copytree if item.is_dir() else shutil.copy2)(item, dest / item.name)
+    else:
+        tar = dest.parent / "head.tar"
+        with tar.open("wb") as fh:
+            subprocess.run(["git", "archive", "HEAD"], cwd=ROOT, stdout=fh, check=True)
+        subprocess.run(["tar", "-xf", str(tar), "-C", str(dest)], check=True)
+        tar.unlink()
     env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"}
     subprocess.run(["git", "init", "-q"], cwd=dest, check=True, env=env)
     subprocess.run(["git", "add", "-A"], cwd=dest, check=True, env=env)
@@ -169,6 +200,8 @@ def main() -> int:
     ap.add_argument("--full", action="store_true", help="confirm survivals against the full suite")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--keep", action="store_true", help="keep the extract for inspection")
+    ap.add_argument("--tree", help="use this exported tree instead of `git archive HEAD` (for a worker "
+                                   "with no repository); it is copied, never mutated in place")
     args = ap.parse_args()
 
     mutants = json.loads(MANIFEST.read_text())["mutants"]
@@ -185,12 +218,13 @@ def main() -> int:
             raise RunFailure(f"unknown mutant id(s): {sorted(unknown)}")
         mutants = [m for m in mutants if m["id"] in args.id]
 
-    before = tree_fingerprint()
+    subject = Path(args.tree).resolve() if args.tree else ROOT
+    before = tree_fingerprint(subject)
     tmp = Path(tempfile.mkdtemp(prefix="saferf_mut_"))
 
     def bail(signum, _frame):
         # Trap 4: the signal path checks the invariant too, and says so out loud.
-        state = "UNCHANGED" if tree_fingerprint() == before else "*** CHANGED ***"
+        state = "UNCHANGED" if tree_fingerprint(subject) == before else "*** CHANGED ***"
         print(f"\n[signal {signum}] aborting. working tree: {state}", file=sys.stderr)
         shutil.rmtree(tmp, ignore_errors=True)
         sys.exit(130)
@@ -199,7 +233,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, bail)
 
     try:
-        extract = make_extract(tmp / "head")
+        extract = make_extract(tmp / "head", Path(args.tree) if args.tree else None)
         print(f"extract: {extract}")
         all_killers = sorted({k for m in mutants for k in m["killers"]})
         resolve_killers(extract, all_killers)
@@ -244,7 +278,7 @@ def main() -> int:
         print(f"\n{len(results) - len(bad)}/{len(results)} KILLED")
         return 1 if bad else 0
     finally:
-        after = tree_fingerprint()
+        after = tree_fingerprint(subject)
         print(f"working tree: {'UNCHANGED' if after == before else '*** CHANGED ***'}")
         if args.keep:
             print(f"extract kept: {tmp}")

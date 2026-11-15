@@ -188,7 +188,7 @@ def erasure_target(cond: Sequence[Sequence[float]], uncond: Sequence[Sequence[fl
     can do. So a reader must not infer from this toy that the source's rescale
     merely damps the erasure signal; whether it preserves that signal at all is
     INFERENCE in row 7 and is not established. Same shape as the disclosure one
-    function away in `masked_grad`.
+    function away in `masked_mse_loss_and_grad`.
     """
     c, u = as_matrix("cond", cond), as_matrix("uncond", uncond)
     _same_shape("cond", c, "uncond", u)
@@ -249,8 +249,11 @@ def masked_mse_loss_and_grad(params: Sequence[float], x: Sequence[Sequence[float
       "per_masked_element" (default): sum of squared errors over masked rows /
           (mask_sum * row_width). This divisor counts EVERY SUMMED ELEMENT, which
           is what makes the two options differ by exactly the row width.
-          F7: this used to end "The correct element count", and "correct" is a
-          judgement this project's own register declines to make --
+          F7: this line used to end by calling that divisor the *correct* one,
+          and that is a judgement this project's own register declines to make --
+          (the phrase itself is deliberately not repeated here: a test forbids it
+          in this docstring, and a guard that quotes the string it bans defeats
+          itself) --
           `docs/ERROR_REGISTER.md:98` says it "does not establish ... that any
           particular loss scale is wrong for the method's purpose (the choice may
           be intentional)", and `docs/METHOD_AUDIT.md:131` concludes only that the

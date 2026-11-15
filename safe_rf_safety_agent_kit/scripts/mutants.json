@@ -129,6 +129,36 @@
       "killers": [
         "tests.toy_tests.test_scripts.TestRunTestsMechanics.test_pytest_dying_before_collection_is_UNUSABLE_and_not_a_suite_failure"
       ]
+    },
+    {
+      "id": "F7-restore-correct-judgement",
+      "file": "src/toy/teacher_student.py",
+      "note": "restore the judgement ERROR_REGISTER.md:98 declines -- call the default divisor the correct element count",
+      "find": "This divisor counts EVERY SUMMED ELEMENT, which\n          is what makes the two options differ by exactly the row width.",
+      "replace": "The correct element count.",
+      "killers": [
+        "tests.toy_tests.test_teacher_student.AuditHedgesAreLoadBearing.test_f7_the_divisor_is_not_called_correct"
+      ]
+    },
+    {
+      "id": "F8-gut-carryover-disclosure",
+      "file": "src/toy/teacher_student.py",
+      "note": "gut F8's disclosure to a bland nod that keeps the heading's words but drops DIRECTION, FLIP SIGN and the INFERENCE grade -- the WEAKENING route, not the deletion route",
+      "find": "    F8 -- THIS PROPERTY DOES NOT CARRY OVER, and the sentence above is about the\n    TOY only.",
+      "replace": "    F8 -- the source's rescale is broadly similar.",
+      "killers": [
+        "tests.toy_tests.test_teacher_student.AuditHedgesAreLoadBearing.test_f8_the_toy_rescale_property_is_disclosed_as_not_carrying_over"
+      ]
+    },
+    {
+      "id": "F9-reassert-source-property",
+      "file": "src/toy/stability.py",
+      "note": "re-polarise the ER-02 hedge back into an unconditional claim about the audited source",
+      "find": "a lenient toy would be more permissive than the source WOULD BE IF A\nNaN AROSE THERE.",
+      "replace": "a lenient toy would be more permissive than the thing it mimics.",
+      "killers": [
+        "tests.toy_tests.test_stability.F9ModuleHedgeIsLoadBearing.test_the_nan_hazard_is_stated_as_conditional_not_as_a_source_property"
+      ]
     }
   ]
 }

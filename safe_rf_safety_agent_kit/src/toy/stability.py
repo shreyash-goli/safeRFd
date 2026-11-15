@@ -50,8 +50,10 @@ following QA and now rejects non-finite values in ALL elements, masked-out ones
 included, and requires strictly bool mask entries. Failing closed is the right
 policy: the audited source multiplies by the mask, and NaN * 0 stays NaN in
 torch, so a lenient toy would be more permissive than the source WOULD BE IF A
-NaN AROSE THERE. F9: this used to read "more permissive than the thing it
-mimics", which states the hazard as a property of the source. It is not one.
+NaN AROSE THERE. F9: this clause used to name the audited source obliquely, as
+the thing this module imitates, which states the hazard as a property of that
+source. (The old wording is deliberately not repeated: a test forbids it in this
+docstring, and a guard that quotes the string it bans defeats itself.) It is not one.
 `docs/ERROR_REGISTER.md` grades ER-02 "CONFIRMED-IN-SOURCE (mask multiply) +
 PATTERN-DEMONSTRATED; NaN presence UNKNOWN-NEEDS-EXECUTION" -- the multiply is
 observed, the arithmetic is demonstrated, and whether any NaN ever reaches it is

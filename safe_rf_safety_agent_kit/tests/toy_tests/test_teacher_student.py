@@ -287,6 +287,73 @@ class Gradient(unittest.TestCase):
                 self.assertAlmostEqual(g[i], fd, delta=1e-7)  # quadratic loss: error ~ roundoff only
 
 
+def _flat(doc):
+    """A docstring with its line wrapping removed, so a prose pin matches the SENTENCE rather than the
+    accident of where it wraps. Pinned without this, `"...is INFERENCE in row 7..."` failed because the
+    live text breaks between `is` and `INFERENCE` -- a pin that a reflow can break is a pin that will be
+    deleted for being flaky rather than fixed."""
+    assert doc is not None, "the docstring this pin guards has been removed entirely"
+    return re.sub(r"\s+", " ", doc).strip()
+
+
+class AuditHedgesAreLoadBearing(unittest.TestCase):
+    """F7 and F8, pinned VERBATIM. THE NUMERIC GUARDS IN THIS KIT ARE PINNED TO DEATH AND THE PROSE
+    GUARDS WERE NOT -- that asymmetry is this project's most repeated defect, and these two sentences are
+    the correspondence lane's version of it.
+
+    A docstring hedge in `src/toy/` is not decoration. `CLAUDE.md` requires that the toy modules disclose
+    every deliberate divergence from the audited source, and `docs/SR12_INDEPENDENT_REVIEW.md` grades
+    toy-to-source correspondence as its own criterion. A reader who takes a toy property for a source
+    property has been misled by this repository, which is the exact failure the whole kit exists to avoid.
+
+    Pinned verbatim, and pinned on the NEGATION as well as the claim, because the ways these sentences
+    fail are deletion, weakening and inversion -- the same three the demo's qualifiers are pinned against.
+    """
+
+    def test_f7_the_divisor_is_not_called_correct(self):
+        """F7. `masked_grad`'s docstring called `per_masked_element` "The correct element count". That is a
+        judgement this project's own register DECLINES to make: `docs/ERROR_REGISTER.md:98` says it "does
+        not establish ... that any particular loss scale is wrong for the method's purpose (the choice may
+        be intentional)", and `docs/METHOD_AUDIT.md:131` concludes only that the mismatch "by itself does
+        not explain a high gradient". Which divisor suits the method is the author's call.
+
+        Pinned as an ABSENCE plus a PRESENCE: the absence alone would be satisfied by deleting the whole
+        paragraph, and the presence alone by re-adding "correct" beside it.
+        """
+        doc = _flat(masked_mse_loss_and_grad.__doc__)
+        self.assertNotIn("The correct element count", doc,
+                         "F7 is back: the docstring asserts a judgement ERROR_REGISTER.md:98 declines")
+        self.assertNotIn("correct element count", doc.lower(),
+                         "a reworded variant of the same judgement")
+        self.assertNotIn("the correct divisor", doc.lower(), "the judgement moved to the divisor itself")
+        self.assertIn("counts EVERY SUMMED ELEMENT", doc,
+                      "the neutral description of the divisor is gone")
+        self.assertIn("is the author's call and is not decided here", doc,
+                      "the sentence that DECLINES the judgement has been removed or reworded")
+
+    def test_f8_the_toy_rescale_property_is_disclosed_as_not_carrying_over(self):
+        """F8. `erasure_target`'s docstring says the opt-in rescale "partially counteracts the displacement
+        it is applied to". True OF THE TOY, which multiplies by one non-negative Frobenius-norm ratio, so
+        the target can only be shortened or lengthened along its own direction. The audited source applies
+        a PER-ATOM map (`METHOD_AUDIT.md` rows 7-8) that is origin-dependent, can change direction, and
+        can flip sign through the origin -- none of which one positive scalar can do.
+
+        The docstring did not say so, which is the omission the F6 paragraph repairs ONE FUNCTION AWAY in
+        the same file. A reader comparing the two would reasonably infer the silence meant the property
+        carried over.
+        """
+        doc = _flat(erasure_target.__doc__)
+        self.assertIn("partially counteracts", doc)          # the toy claim is still made, as it should be
+        self.assertIn("THIS PROPERTY DOES NOT CARRY OVER", doc,
+                      "F8 is back: the toy's rescale property is stated with no disclosure that the "
+                      "source's per-atom map does not share it")
+        for phrase in ("can change DIRECTION", "FLIP SIGN", "origin-dependent"):
+            self.assertIn(phrase, doc, f"the disclosure no longer says the source map {phrase!r}")
+        self.assertIn("is INFERENCE in row 7 and is not established", doc,
+                      "the disclosure stopped grading its own claim, so a reader cannot tell it is "
+                      "INFERENCE rather than a measurement")
+
+
 class DefaultsAndInternals(unittest.TestCase):
     def test_default_normalization_is_per_masked_element(self):
         # T1: the default a caller silently gets must be the correct count.

@@ -5,6 +5,7 @@ import dataclasses
 import functools
 import inspect
 import math
+import re
 import sys
 import types
 import unittest
@@ -193,6 +194,36 @@ def _repr_raises(exc):
     refusal used to be replaced by this exception while the message was being built."""
     return lambda: type(f"ReprRaises{exc.__name__}", (),
                         {"__repr__": lambda s: (_ for _ in ()).throw(exc("repr boom"))})()
+
+
+class F9ModuleHedgeIsLoadBearing(unittest.TestCase):
+    """F9, pinned verbatim on the MODULE docstring. Same class as F7/F8 in test_teacher_student.py: the
+    numeric guards in this kit are pinned to death and the prose guards were not.
+
+    `stability.py`'s header explains WHY the helpers fail closed on NaN in masked-out elements. It used to
+    justify that with "a lenient toy would be more permissive than THE THING IT MIMICS", which states the
+    hazard as an established property of the audited source. It is not one. `docs/ERROR_REGISTER.md` grades
+    ER-02 "CONFIRMED-IN-SOURCE (mask multiply) + PATTERN-DEMONSTRATED; NaN presence UNKNOWN-NEEDS-EXECUTION"
+    -- the multiply is observed, the arithmetic is demonstrated, and whether any NaN ever reaches it is
+    UNKNOWN because no code was executed, by anyone, at any point in this audit.
+
+    The policy does not change: failing closed is still right for a toy, on the conditional alone. What
+    changes is that the module no longer borrows the audited source's authority for it.
+    """
+
+    def test_the_nan_hazard_is_stated_as_conditional_not_as_a_source_property(self):
+        doc = re.sub(r"\s+", " ", st.__doc__ or "").strip()
+        self.assertTrue(doc, "stability.py lost its module docstring, which carries the ER-02 hedge")
+        self.assertNotIn("more permissive than the thing it mimics", doc,
+                         "F9 is back: a conditional NaN hazard is stated as a property of the source")
+        self.assertIn("more permissive than the source WOULD BE IF A NaN AROSE THERE", doc,
+                      "the conditional form of the justification is gone")
+        self.assertIn("NaN presence UNKNOWN-NEEDS-EXECUTION", doc,
+                      "the docstring no longer cites ER-02's actual grade, so a reader cannot check it")
+        self.assertIn("it is not evidence that the source leaks a NaN", doc,
+                      "the sentence that DENIES the stronger reading has been removed")
+        self.assertIn("Failing closed is still the right default", doc,
+                      "the hedge was taken as a reason to weaken the policy; it is not")
 
 
 class Finite(unittest.TestCase):
