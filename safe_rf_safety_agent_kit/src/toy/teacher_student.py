@@ -177,6 +177,18 @@ def erasure_target(cond: Sequence[Sequence[float]], uncond: Sequence[Sequence[fl
     the source's scale_factor. NOTE: this rescale partially counteracts the
     displacement it is applied to, since it pulls the target's magnitude back
     toward the unconditioned magnitude. Norm is Frobenius.
+
+    F8 -- THIS PROPERTY DOES NOT CARRY OVER, and the sentence above is about the
+    TOY only. "Partially counteracts" is true here because the toy multiplies by
+    ONE non-negative Frobenius-norm ratio, so the target can only be shortened or
+    lengthened along its own direction. The audited source applies a PER-ATOM map
+    (`docs/METHOD_AUDIT.md` rows 7-8): it replaces the displacement with
+    `||u|| * (t_hat - u_hat)`, which is origin-dependent, can change DIRECTION,
+    and can FLIP SIGN through the origin -- none of which a single positive scalar
+    can do. So a reader must not infer from this toy that the source's rescale
+    merely damps the erasure signal; whether it preserves that signal at all is
+    INFERENCE in row 7 and is not established. Same shape as the disclosure one
+    function away in `masked_grad`.
     """
     c, u = as_matrix("cond", cond), as_matrix("uncond", uncond)
     _same_shape("cond", c, "uncond", u)
@@ -235,7 +247,15 @@ def masked_mse_loss_and_grad(params: Sequence[float], x: Sequence[Sequence[float
 
     normalization:
       "per_masked_element" (default): sum of squared errors over masked rows /
-          (mask_sum * row_width). The correct element count.
+          (mask_sum * row_width). This divisor counts EVERY SUMMED ELEMENT, which
+          is what makes the two options differ by exactly the row width.
+          F7: this used to end "The correct element count", and "correct" is a
+          judgement this project's own register declines to make --
+          `docs/ERROR_REGISTER.md:98` says it "does not establish ... that any
+          particular loss scale is wrong for the method's purpose (the choice may
+          be intentional)", and `docs/METHOD_AUDIT.md:131` concludes only that the
+          mismatch "by itself does not explain a high gradient". Which divisor
+          suits the method is the author's call and is not decided here.
       "per_mask_entry": divided by mask_sum only. Analogue of the normalization
           mismatch noted in the audited source (TOY reproduction of an audited
           numerical concern, not a claim about the real code's impact). It

@@ -6452,13 +6452,39 @@ class EveryPrintedCountIsWhatWasIterated(FailsClosedAssertions, unittest.TestCas
         self.assertNotIn("Complete gate coverage: yes", dcard)    # deferred_gates`: a TRUTH TEST on it
         self.assertIn("REFUSED" if "REFUSED" in dcard else "CONTRACT PROBLEM", dcard)
         self.assertNotIn("vd-supported", dcard, "an unreadable deferral left a decisive verdict")
-        # and the `__len__` member of the same lane, which is how the flag was moved without a refusal
+        # and the `__len__` member of the same lane. THIS BRANCH CHANGED MEANING WHEN F21 WAS FIXED
+        # PRODUCER-SIDE, and the change is the point, so both halves are pinned separately below.
+        #
+        # It used to read: a `deferred_gates` holding the honest six whose `__len__` answers 0 made the
+        # scorer's `complete_gate_coverage` -- then the bare truth test `not self.deferred_gates` --
+        # answer True, so the card had to REPORT A CONTRADICTION and withhold every decisive verdict.
+        # `benchmark.py` now materialises before counting (`len(tuple(...)) == 0`), so that container no
+        # longer moves the flag at all and there is no contradiction left to report: the card states the
+        # six gates honestly and the verdicts stand. Asserting the old symptom here would be asserting
+        # that the producer-side fix had failed.
         n = render_payload()
         object.__setattr__(n["joint"], "deferred_gates", container_liar(deferred, 0))
         ncard = db.render_scorecard(n["joint"])
-        self.assertNotIn("Complete gate coverage: yes", ncard)
-        self.assertIn("CONTRADICTS its complete_gate_coverage flag", ncard)
-        self.assertNotIn("vd-supported", ncard)
+        self.assertNotIn("Complete gate coverage: yes", ncard,
+                         "a lying __len__ moved the coverage flag: benchmark.py is truth-testing a "
+                         "container again (F21)")
+        self.assertIn("Complete gate coverage: NO", ncard)
+        self.assertNotIn("CONTRADICTS its complete_gate_coverage flag", ncard,
+                         "the card reported a contradiction that no longer exists -- the flag and the "
+                         "list now agree, because the flag is derived by materialising the list")
+        self.assertIn(f"CONDITIONAL on {len(deferred)} unimplemented gate(s)", ncard)
+
+        # THE CONSUMER-SIDE DETECTOR IS STILL LOAD-BEARING, and is pinned on a contradiction the
+        # producer-side fix CANNOT prevent: the flag forced True while the list still holds six. That is
+        # reachable by a duck-typed or subclassed result, and it is the case `_render_scorecard`'s
+        # `cover is not bool(deferred)` exists for. Defence in depth: if someone reverts F21, the two
+        # pins above fail AND this one keeps the page honest meanwhile.
+        c = render_payload()
+        with mock.patch.object(bm.JointResult, "complete_gate_coverage", property(lambda self: True)):
+            ccard = db.render_scorecard(c["joint"])
+        self.assertIn("CONTRADICTS its complete_gate_coverage flag", ccard)
+        self.assertNotIn("Complete gate coverage: yes", ccard)
+        self.assertNotIn("vd-supported", ccard, "a self-contradicting result kept a decisive verdict")
         # and the honest list still reads as the gates it holds, in both panels
         self.assertIn(f"CONDITIONAL on {len(deferred)} unimplemented gate(s)",
                       db.render_scorecard(render_payload()["joint"]))

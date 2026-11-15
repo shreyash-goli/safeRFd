@@ -1427,6 +1427,155 @@ class FixtureGuards(unittest.TestCase):
 
 
 # ===================================================== QA round 3: the "equivalent" labels that were wrong
+class ContainerTruthTests(unittest.TestCase):
+    """F21 and F26. A BARE TRUTH TEST ON A CONTAINER IS A LIE WAITING FOR A CONTAINER THAT TELLS IT.
+
+    Every admission in `benchmark.py`'s docstring used to be about a VALUE -- a number, a flag, a label --
+    and none was about a CONTAINER; the word did not appear in the module. Two sites truth-tested one:
+
+      * `JointResult.complete_gate_coverage` was `return not self.deferred_gates` (F21)
+      * `HypothesisResult.__post_init__` read `if self.blocking:` and `elif self.supported_blockers:` (F26)
+
+    F26 is the worse of the two, and was found by sweeping for F21's SHAPE rather than fixing F21's site:
+    those two fields decide whether a failed gate forces INCONCLUSIVE, they are declared `tuple`, they are
+    built with `tuple(...)` by `_hypothesis` -- and they are PUBLIC CONSTRUCTOR PARAMETERS that nothing
+    coerced. This is the "two public parameters bypass both `__post_init__` sites" shape this project has
+    already been bitten by once.
+
+    Both are fixed by MATERIALISING THEN COUNTING. These tests drive the public constructor only: no
+    `object.__setattr__`, no instance mutation, no monkeypatching of the class under test.
+    """
+
+    class Liar(tuple):
+        """Holds its contents honestly and answers falsy. A `tuple` subclass, so `isinstance` checks and
+        iteration both still see the contents -- which is the point: the container is not hiding, it is
+        LYING ABOUT ITS SIZE, and `len()`/`bool()` were the only things being asked."""
+        def __len__(self): return 0
+        def __bool__(self): return False
+
+    def comp(self, lo=0.5, hi=0.9, metric="S", direction="greater", margin=0.1, n=40):
+        z = bm._mv
+        pair = bm.IntervalPair("p", n, 0.9875, 100, z((lo + hi) / 2, ""), z(.1, ""), z(.1, ""), z(lo, ""),
+                               z(hi, ""), z(1., ""), z(lo, ""), z(hi, ""), z(lo, ""), z(hi, ""))
+        return bm.ComponentResult(metric, direction, margin, pair, 30, 0.25)
+
+    def test_deferred_gate_coverage_is_not_fooled_by_a_lying_len(self):
+        """F21. MEASURED at the pre-fix HEAD through plain class-level assignment: a `tuple` subclass holding
+        the honest six whose `__len__` answers 0 made `complete_gate_coverage` return **True** while
+        `tuple(deferred_gates)` still yielded all six names -- a result that contradicted itself, in the
+        favourable direction, since a True here is what licenses dropping the demo's conditional qualifier
+        and the protocol's conditional label.
+
+        THE VACUITY GUARD COMES FIRST. If `DEFERRED_GATES` were empty, `complete_gate_coverage` would be True
+        honestly and every assertion below would pass over an empty table -- the shape this project has met
+        six times. So the table's non-emptiness is asserted as its own statement with its own message.
+        """
+        self.assertTrue(bm.DEFERRED_GATES, "DEFERRED_GATES is empty, so this sweep has no table and the "
+                                           "assertions below are vacuous")
+        orig = bm.JointResult.deferred_gates
+        self.assertFalse(bm.JointResult.complete_gate_coverage.fget(bm.JointResult))   # honest baseline
+        try:
+            bm.JointResult.deferred_gates = self.Liar(orig)
+            self.assertEqual(len(bm.JointResult.deferred_gates), 0)        # the lie is in place and effective
+            self.assertEqual(len(tuple(bm.JointResult.deferred_gates)), len(orig))     # contents still there
+            self.assertFalse(bm.JointResult.complete_gate_coverage.fget(bm.JointResult),
+                             "complete_gate_coverage believed a container's __len__ over its contents: it is "
+                             "a truth test again, not a materialise-then-count")
+        finally:
+            bm.JointResult.deferred_gates = orig
+        self.assertEqual(len(bm.JointResult.deferred_gates), len(orig))                # restored
+
+    def test_a_falsy_blocking_container_cannot_turn_inconclusive_into_supported(self):
+        """F26. MEASURED at the pre-fix HEAD through the PUBLIC constructor:
+
+            HypothesisResult("H1", (comp,), blocking=tuple(glob))  -> INCONCLUSIVE,
+                reasons[0] == "gate failed: seed_list_frozen"
+            HypothesisResult("H1", (comp,), blocking=Liar(glob))   -> SUPPORTED,
+                tuple(.blocking) STILL yields both names, and NO reason mentions a failed gate
+
+        A falsy container turned INCONCLUSIVE into SUPPORTED **and erased the explanation**. Both halves are
+        asserted here, because the verdict and the `reasons` list are read by different consumers and the
+        erasure of the reason is what makes a rendered result silently wrong rather than merely wrong.
+
+        The exposure was BOUNDED one layer up and the bound is pinned separately below, so that a future
+        change which removes the bound fails loudly instead of quietly re-opening this.
+        """
+        glob = ("seed_list_frozen", "control_adequacy")
+        c = self.comp()
+        honest = bm.HypothesisResult("H1", (c,), blocking=tuple(glob))
+        self.assertIs(honest.verdict, V.INCONCLUSIVE)
+        self.assertTrue(any("gate failed" in r for r in honest.reasons))
+
+        liar = bm.HypothesisResult("H1", (c,), blocking=self.Liar(glob))
+        self.assertIs(liar.verdict, V.INCONCLUSIVE,
+                      "a falsy `blocking` container went decisive: the truth test is back")
+        self.assertTrue(any("gate failed" in r for r in liar.reasons),
+                        "the failed-gate reason was erased even though the names are present")
+        self.assertEqual(tuple(liar.blocking), glob)      # coerced, contents preserved, nothing invented
+
+    def test_a_falsy_supported_blockers_container_cannot_make_h3_supportable(self):
+        """F26's sibling site, `elif self.supported_blockers:` -- gate 12, which the protocol says makes H3
+        un-SUPPORTABLE. Swept rather than assumed: the fix for `blocking` alone would have left this one
+        live, and a half-fix that names one of two sites is a shape this project has shipped before.
+        """
+        # Built FROM the tables rather than retyped: PRIMARY["H3"] and CONVERGED carry (metric, direction,
+        # margin-key) triples, so a change to either shows up here as a shape error instead of silently
+        # leaving this pin testing a differently-shaped H3.
+        c3 = tuple(self.comp(metric=m, direction=d) for m, d, _k in bm.PRIMARY["H3"])
+        conv = tuple(self.comp(metric=m, direction=d) for m, d, _k in bm.CONVERGED)
+        self.assertEqual((len(c3), len(conv)), (len(bm.PRIMARY["H3"]), len(bm.CONVERGED)))
+        honest = bm.HypothesisResult("H3", c3, conv, supported_blockers=("convergence",))
+        self.assertIsNot(honest.verdict, V.SUPPORTED)       # the honest control: gate 12 blocks SUPPORTED
+        liar = bm.HypothesisResult("H3", c3, conv, supported_blockers=self.Liar(("convergence",)))
+        self.assertIsNot(liar.verdict, V.SUPPORTED,
+                         "a falsy `supported_blockers` container made H3 SUPPORTED despite gate 12")
+        self.assertEqual(tuple(liar.supported_blockers), ("convergence",))
+
+    def test_f26_end_to_end_a_liar_now_yields_the_honest_joint_verdict(self):
+        """F26 END TO END, and a correction to how I first wrote this pin.
+
+        The bound that made F26 non-critical is that `JointResult.__post_init__` reads `self.gates`, NOT
+        `blocking`, so even at the pre-fix HEAD a falsy-`blocking` hypothesis could not reach a false JOINT
+        verdict -- the single-place invariant REFUSED the construction: *"a failed global gate
+        ['seed_list_frozen'] requires INCONCLUSIVE, but ['H1', 'H2', 'H3'] are decisive"*.
+
+        THIS TEST FIRST ASSERTED THAT REFUSAL, AND THAT WAS WRONG -- it pinned the pre-fix symptom instead
+        of the post-fix contract. With `blocking` coerced, the liar's names are real again, the hypotheses
+        ARE INCONCLUSIVE, and so `JointResult` correctly ACCEPTS them and reports JOINT_INCONCLUSIVE. A
+        `ValueError` here would now mean the fix had failed. The fix is therefore strictly better than the
+        bound it replaces: the outcome moved from "loud refusal of a construction" to "the right verdict".
+
+        The invariant itself is still pinned, below and in `InScopeGateInvariant`, via an input that is
+        decisive for a reason the coercion cannot repair: a hypothesis built with NO blocking info at all.
+        """
+        r = bm.analyze_scores(synth_scores(FZ.seeds), frozen=FZ, registered_digest=FZ.digest,
+                              subject="s", cfg=SMALL)
+        self.assertEqual(r.verdict, J.JOINT_SUPPORTED)
+        fields = {f.name: getattr(r, f.name) for f in dataclasses.fields(bm.JointResult)}
+        gates = tuple(bm.GateResult(g.name, False, "forced") if g.name == "seed_list_frozen" else g
+                      for g in r.gates)
+
+        hs = {k: bm.HypothesisResult(h.hid, h.components, h.converged_components,
+                                     blocking=self.Liar(("seed_list_frozen (forced)",)))
+              for k, h in (("h1", r.h1), ("h2", r.h2), ("h3", r.h3))}
+        for k, h in hs.items():
+            self.assertIs(h.verdict, V.INCONCLUSIVE, k)                 # the coercion did its work
+            self.assertEqual(tuple(h.blocking), ("seed_list_frozen (forced)",))
+        j = bm.JointResult(**{**fields, "gates": gates, **hs})
+        self.assertEqual(j.verdict, J.JOINT_INCONCLUSIVE,
+                         "a failed global gate must force the joint verdict to INCONCLUSIVE")
+
+        # THE BOUND, pinned on an input the coercion cannot rescue: no blocking info at all, so the
+        # hypotheses are honestly decisive and the gate list honestly reports a failure. If this stops
+        # raising, F26's "bounded" grade is no longer honest and this file should say so.
+        bare = {"h1": bm.HypothesisResult("H1", r.h1.components),
+                "h2": bm.HypothesisResult("H2", r.h2.components),
+                "h3": bm.HypothesisResult("H3", r.h3.components, r.h3.converged_components)}
+        self.assertTrue(all(v.verdict is V.SUPPORTED for v in bare.values()))
+        with self.assertRaises(ValueError):
+            bm.JointResult(**{**fields, "gates": gates, **bare})
+
+
 class HypothesisResultPublicConstructor(unittest.TestCase):
     """The public constructor is what enforces 'no verdict without an interval'; drive it directly."""
 

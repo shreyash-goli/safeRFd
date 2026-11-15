@@ -1518,6 +1518,20 @@ class _SyntheticBase(unittest.TestCase):
         cmd = [str(RUN_TESTS), "--expect", expect, "--tests-dir", str(d), "--baseline", baseline, *args]
         if not pytest:
             cmd.append("--no-pytest")
+        else:
+            # F20, HALF (ii). A test ABOUT the pytest stage must CONTROL the plugin environment rather than
+            # inherit it. Four tests here drive that stage (`POLICY:PYTEST_FAILED`, `PYTEST_COLLECTED`,
+            # `PYTEST_SKIPPED` x2) and all four read the host's `pytest11` entry points, because pytest
+            # autoloads every installed plugin. Measured on this project's conda CPython 3.13.5: all four
+            # FAIL, with the sub-run's log carrying `OSError: Could not find/load shared object file
+            # 'libllvmlite.dylib'` from a broken numba/llvmlite install OUTSIDE this repository; the same
+            # crash reproduces from `python3 -m pytest -q .` in an empty directory holding one trivial
+            # passing test, so it is a property of the host and not of this kit. The fixtures below inject
+            # their OWN pytest outcome; a third-party plugin dying at collection replaces that fixture with
+            # noise and the assertion then measures the laptop. `e.pop` above deliberately strips the
+            # variables the SCRIPT must set -- this one is not among them, it is a property of the
+            # EXPERIMENT, so it is set here unconditionally and does not depend on the caller's shell.
+            e["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
         return subprocess.run(cmd, capture_output=True, text=True, env=e, cwd=ROOT, timeout=180)
 
     def synth_root(self, test_body, files=None):
@@ -2134,6 +2148,160 @@ class TestRunTestsMechanics(_SyntheticBase):
         self.bad(self.rt({"test_a.py": body}, "--twice", env={"STATE": str(state)}), "POLICY:NONDETERMINISTIC")
         self.ok(self.rt({"test_a.py": _pass_module(3)}, "--twice"))
         self.assertIn("deterministic: run1 == run2", self.rt({"test_a.py": _pass_module(3)}, "--twice").stdout)
+
+    def test_a_captured_ran_line_does_not_understate_the_total_f22(self):
+        """F22, SITE 2, BEHAVIOURALLY. `summarize()` and `policy()` both matched `^Ran (\\d+) tests?` with
+        `re.search`, which takes the FIRST match. A log can hold more than one such line: a test that
+        captures a sub-run's transcript and prints it embeds that sub-run's `Ran N tests`, and unittest's
+        own summary comes last, after every test has finished. So first-match reads the WRONG total.
+
+        `docs/CLEAN_CLONE.md` declared this fix and wrote that it "must therefore touch BOTH sites". Both
+        sites were unchanged -- the declaration shipped inside the very commit that marked the task. That is
+        F22, and an unpinned fix would repeat it, so this exists.
+
+        Driven by a test module that prints a plausible captured `Ran 3 tests` line while the real total is
+        4. This test FAILED against the first version of the fix and is the reason the rule changed.
+
+        THE RULE `docs/CLEAN_CLONE.md` PRESCRIBED -- "take the last match rather than the first" -- IS ALSO
+        WRONG, and this fixture is what showed it. Position in the log is not information: unittest writes
+        its summary to stderr unbuffered, while this module's `print` goes to block-buffered stdout and is
+        flushed at exit, so in the redirected log the REAL total appears at line 3 and the printed decoy at
+        line 6. First-match happened to be right here; last-match was wrong. For a test whose SUBPROCESS
+        writes to the inherited fd, the order is genuinely chronological and the opposite holds. Neither
+        position is reliable.
+
+        What is reliable is unittest's summary BLOCK: `separator2`, 70 dashes, written immediately before
+        `Ran N tests` on the same stream. See `_ran_totals` in the script.
+        """
+        body = ("import unittest\n"
+                "class T(unittest.TestCase):\n"
+                "    def test_prints_a_captured_transcript(self):\n"
+                "        print('Ran 3 tests in 0.001s')\n"
+                "        print('OK')\n"
+                "    def test_b(self): pass\n"
+                "    def test_c(self): pass\n"
+                "    def test_d(self): pass\n")
+        r = self.rt({"test_a.py": body})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        m = re.search(r"^unittest: ran=(\d+) ", r.stdout, re.M)
+        self.assertIsNotNone(m, f"no `unittest: ran=` line in stdout:\n{r.stdout}")
+        self.assertEqual(m.group(1), "4",
+                         f"the script read a captured `Ran 3 tests` line as this run's total -- the "
+                         f"first-match regex of F22 is back:\n{r.stdout}")
+
+    def test_both_f22_sites_take_the_last_ran_match_not_the_first(self):
+        """F22, BOTH SITES, STRUCTURALLY -- and an admission about why this one is structural.
+
+        Site 2 (`summarize()`) is pinned behaviourally by the test above, through `unittest: ran=`. SITE 1
+        (`policy()`, feeding `ran_log` and the `POLICY:RECORDER` check `if len(starts) < ran_log`) HAS NO
+        REACHABLE OBSERVABLE: understating `ran_log` only ever SILENCES that check, and making it speak
+        requires the recorder to have seen fewer tests than unittest ran, which is a state this suite
+        cannot arrange without introducing the very defect RECORDER exists to catch. `CLEAN_CLONE.md`
+        measured the asymmetry by driving `policy()` with two crafted logs and found it "does mask a real
+        check -- just never one that could change a verdict", because the captured transcript only exists
+        when a test already failed, so POLICY:UNITTEST_FAILED fires and the run is red either way. What
+        degrades is the diagnosis.
+
+        So this test asserts the SHAPE at both sites, and that is a weaker thing than a measurement -- a
+        count of a construct is not a measurement of its behaviour, which this project has learned the hard
+        way. It is recorded as the honest best available for site 1, not as equivalent to the pin above.
+        """
+        text = (SCRIPTS / "run_tests.sh").read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r're\.search\(r"\^Ran ', text), [],
+                         "a `^Ran` site is back to re.search, which takes the FIRST match in a log whose "
+                         "ordering is not chronological")
+        self.assertEqual(len(re.findall(r"_ran(?:_all)?\s*=\s*_ran_totals\(", text)), 2,
+                         "expected exactly 2 call sites of _ran_totals in run_tests.sh -- policy(), which "
+                         "feeds ran_log and POLICY:RECORDER, and summarize(), which feeds RAN. If a site "
+                         "was added or removed, this pin and docs/CLEAN_CLONE.md must move together: F22 "
+                         "was precisely a declared two-site fix that touched neither.")
+        self.assertEqual(len(re.findall(r"_ran(?:_all)?\[-1\]", text)), 2,
+                         "both `^Ran` sites must index [-1]; one of them stopped taking the last match")
+        self.assertEqual(text.count("def _ran_totals(text):"), 2,
+                         "_ran_totals must be defined in BOTH heredocs -- they are separate python "
+                         "processes and cannot share a definition, which is exactly how F22's two sites "
+                         "drifted apart in the first place")
+        self.assertEqual(len(re.findall(r'\^-\{10,\}\\nRan \(\\d\+\) tests\?', text)), 2,
+                         "the dash-anchored pattern is gone from a site: position in the log is not "
+                         "information (stdout is block-buffered, stderr is not), so only unittest's "
+                         "separator2 + `Ran N` block identifies the real total")
+
+    def _fake_pytest_root(self, pytest_body, n=3):
+        """A throwaway repo root whose own `pytest.py` SHADOWS the installed pytest.
+
+        `python3 -m pytest` puts the cwd first on `sys.path`, so a `pytest.py` beside the copied script is
+        what `-m pytest` executes -- while `python3 -c "import pytest"`, which the script uses to decide
+        whether the stage runs at all, imports the SAME file as a module. So the body must import cleanly
+        and misbehave only under `__main__`. That is the only way to drive the pytest stage's failure
+        branches without installing a broken plugin on the machine running these tests, which is the whole
+        point: F20 is about a host this kit does not control.
+        """
+        # Own uniquely-named root rather than `synth_root`, which hardcodes one directory name and so can
+        # only be called once per test -- and this test needs TWO roots, because its negative control is
+        # not optional.
+        root = self.dir / f"fakepytest{len(list(self.dir.glob('fakepytest*')))}"
+        (root / "scripts").mkdir(parents=True)
+        (root / "tests").mkdir()
+        shutil.copy2(RUN_TESTS, root / "scripts" / "run_tests.sh")      # copy2 keeps the executable bit
+        (root / "tests" / "test_a.py").write_text(_pass_module(n), encoding="utf-8")
+        (root / "pytest.py").write_text(pytest_body, encoding="utf-8")
+        e = _env(PATH=f"{self.shim}:{os.environ.get('PATH', '')}", MIN_TESTS="1")
+        for k in ("PYTHONHASHSEED", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE"):
+            e.pop(k, None)
+        e["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"      # the REAL pytest is not what runs here; be explicit
+        return subprocess.run([str(root / "scripts" / "run_tests.sh"), "--baseline", "none"],
+                              capture_output=True, text=True, env=e, cwd=str(root), timeout=180)
+
+    def test_pytest_dying_before_collection_is_UNUSABLE_and_not_a_suite_failure(self):
+        """F20, half (i), and the token `POLICY:PYTEST_UNUSABLE`.
+
+        AN OPTIONAL TOOL THAT IS PRESENT BUT BROKEN MUST CHANGE WHICH CHECKS RUN, NEVER WHETHER THE SUITE
+        PASSES. `README.md` records this kit getting the ABSENT case wrong once -- "for one round the
+        commands below failed on any machine without `ruff`" -- and present-but-broken was the uncovered
+        half of that same sentence. Measured on this project's conda CPython 3.13.5 before the fix:
+        `./scripts/run_tests.sh --expect any` ended `RESULT: FAIL` with `POLICY:PYTEST_FAILED` and
+        `POLICY:PYTEST_COLLECTED pytest collected 0 tests`, because a numba/llvmlite plugin OUTSIDE this
+        repository died at collection with `OSError: Could not find/load shared object file
+        'libllvmlite.dylib'`. The same crash reproduced from `python3 -m pytest -q .` in an empty directory
+        holding one trivial passing test, so it was a property of the host, not of this kit.
+
+        THE NEGATIVE CONTROL IS THE POINT OF THIS TEST, not the positive case. A branch that forgives a
+        crashing pytest is one sloppy condition away from forgiving a REAL red pytest, which is the
+        opposite error and the worse one. So the second half drives a pytest that genuinely collects and
+        genuinely fails, and requires it to STILL be fatal.
+        """
+        crash = ('import sys\n'
+                 'if __name__ == "__main__":\n'
+                 '    sys.stderr.write(\'ImportError while loading entry point "numba"\\n\'\n'
+                 '                     \'  File "/opt/miniconda3/lib/python3.13/site-packages/llvmlite/'
+                 'binding/ffi.py", line 170\\n\'\n'
+                 '                     "OSError: Could not find/load shared object file "\n'
+                 '                     "\'libllvmlite.dylib\'\\n")\n'
+                 '    sys.exit(4)\n')
+        r = self._fake_pytest_root(crash)
+        self.assertIn("POLICY:PYTEST_UNUSABLE", r.stdout,
+                      "a pytest that died before collection was not classified UNUSABLE:\n" + r.stdout)
+        self.assertIn("RESULT: OK", r.stdout,
+                      "a broken third-party plugin turned the suite RED, which is F20 itself:\n" + r.stdout)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("POLICY:PYTEST_FAILED", r.stdout)
+        self.assertNotIn("POLICY:PYTEST_COLLECTED", r.stdout)
+        self.assertIn("authoritative", r.stdout)            # the note says the unittest leg still stands
+        self.assertIn("OSError", r.stdout)                  # and it SHOWS the offending output, loudly
+
+        # NEGATIVE CONTROL: pytest collected and failed for real. Still fatal, by every token.
+        real_red = ('import sys\n'
+                    'if __name__ == "__main__":\n'
+                    '    print("collected 1 item")\n'
+                    '    print("1 failed in 0.01s")\n'
+                    '    sys.exit(1)\n')
+        r2 = self._fake_pytest_root(real_red)
+        self.assertNotIn("POLICY:PYTEST_UNUSABLE", r2.stdout,
+                         "a REAL pytest failure was forgiven as UNUSABLE -- the discriminator is too "
+                         "broad, which is a worse defect than F20:\n" + r2.stdout)
+        self.assertIn("POLICY:PYTEST_FAILED", r2.stdout)
+        self.assertNotIn("RESULT: OK", r2.stdout)
+        self.assertNotEqual(r2.returncode, 0)
 
     @unittest.skipUnless(__import__("importlib.util").util.find_spec("pytest"), "pytest not installed (optional)")
     def test_pytest_unittest_count_mismatch_fails(self):

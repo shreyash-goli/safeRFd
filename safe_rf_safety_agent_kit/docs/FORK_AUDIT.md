@@ -6,7 +6,19 @@
 **Common ancestor:** `e22092420281c644b928e64d490044dfca4f9175`
 **Fork-only commits:** `12d5426de27bc6411126262cf3f29bac3a0ce0c1` ("Add concept erasure training with fixes ... gradient is high and needs to be looked at"), `5cbd18a39c4607d65bdbf6457be3f79b27a6c3c1` ("additions").
 
-**Method:** GitHub compare `RosettaCommons/RFdiffusion` at shared ancestor versus `audited-fork:main`. Do *not* compare fork's old base directly with latest upstream `main` and label unrelated newer upstream commits as fork differences. GitHub reports fork 2 ahead / 36 behind upstream main as of audit.
+**M1 — HOW TO READ THIS FILE, AND WHAT GRADES ITS CLAIMS.** `CLAUDE.md` names this document source of
+truth #1, and it is the shortest, so it is where a reader starts. It is written as plain prose and carries
+**no label vocabulary**, while `docs/METHOD_AUDIT.md` grades all 27 of its claims
+**SOURCE OBSERVED / INFERENCE / UNKNOWN** (12 / 6 / 9) and `docs/ERROR_REGISTER.md` grades each error
+**CONFIRMED-IN-SOURCE / PATTERN-DEMONSTRATED / STATIC-ANALYSIS-ONLY / UNKNOWN-NEEDS-EXECUTION**. This file is
+therefore WEAKER THAN THE REGISTERS IT SUMMARISES, not stronger: where the two differ, the graded document
+wins. In particular, **"What has evidence in source" below is SOURCE OBSERVED throughout — statements about
+what the code says, never about what it does.** No code in the fork was executed, by anyone, at any point in
+this audit. The six "potential correctness concerns" are the graded registers' subjects, not findings about
+runtime behaviour, and item 1's *"may leave `loss` unset"* is INFERENCE (`METHOD_AUDIT.md` row 13), as is
+every statement about gradient flow (rows 14-15).
+
+**Method:** GitHub compare `RosettaCommons/RFdiffusion` at shared ancestor versus `audited-fork:main`. Do *not* compare fork's old base directly with latest upstream `main` and label unrelated newer upstream commits as fork differences. GitHub reports fork 2 ahead / 36 behind upstream main as of audit. **M2: the 36 is time-varying** — it counts upstream's movement since the shared ancestor and grows with every upstream commit, so "as of audit" dates it without saying it will drift. `docs/DIFF_EVIDENCE.md:27` grades it **UNKNOWN**. The 2-ahead figure, the 8 changed files and the ancestor do not move.
 
 ## Exact changed-file inventory
 | Path | Add | Delete | Classification | Observation |

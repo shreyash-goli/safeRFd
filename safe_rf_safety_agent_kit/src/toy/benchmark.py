@@ -102,6 +102,22 @@ Known limits stated plainly:
   probes, execution of the pilot and the n_cap width rule (only the pure
   arithmetic `required_n` exists), the exchangeability check (assumption 1),
   and the amendment log. The tail-ratio check (assumption 2) is flag-only.
+* CONTAINER ADMISSION (F21, F26). Until this revision every admission in this
+  docstring was about a VALUE -- a number, a flag, a label -- and none was about
+  a CONTAINER, so the word `CONTAINER` did not appear in this module at all.
+  Two sites truth-tested a container and both are fixed to materialise and
+  count: `complete_gate_coverage` (a lying `__len__` made it True while six
+  deferred-gate names were still present) and `HypothesisResult.__post_init__`'s
+  `blocking` / `supported_blockers` (a falsy container turned INCONCLUSIVE into
+  SUPPORTED and emptied `reasons` of any failed-gate line; bounded by
+  `JointResult.__post_init__`, which reads `gates`). WHAT REMAINS OPEN, stated
+  rather than claimed shut: `tuple(x)` defeats a lying `__len__` and a lying
+  `__bool__`, but not a container whose `__iter__` yields nothing while its
+  contents stay reachable by another route; and `if g.passed` at the failed-gate
+  loop is a truth test on a FLAG, which is route (b) below, not a container.
+  A sweep for the remaining bare truth tests is the maintainable form of this
+  admission: `grep -nE "if (not )?self[.][a-z_]+:" src/toy/benchmark.py`
+  (character class, not an escape, so this docstring stays warning-free).
 * `JointResult` derives every verdict from the intervals it holds and refuses
   an incomplete gate list; a caller can still hand-build intervals, so the
   guarantee is "no verdict without real intervals and a full gate list", not
@@ -1869,9 +1885,29 @@ class HypothesisResult:
             raise ValueError("too many converged-budget components")
         if not all(isinstance(c, ComponentResult) for c in self.components + self.converged_components):
             raise ValueError("components must be ComponentResult objects (verdicts are derived, not supplied)")
+        # F26, THE SAME SHAPE AS F21 ONE CLASS OVER, AND WORSE, BECAUSE THESE TWO FIELDS DECIDE WHETHER A
+        # FAILED GATE FORCES INCONCLUSIVE. `blocking` and `supported_blockers` are declared `tuple` and are
+        # built by `_hypothesis` via `tuple(...)`, but they are PUBLIC CONSTRUCTOR PARAMETERS and nothing
+        # coerced them here. MEASURED through the public constructor, no `object.__setattr__`, with `Liar` a
+        # `tuple` subclass holding two honest failed-gate names whose `__len__` and `__bool__` answer
+        # falsy:
+        #     HypothesisResult("H1", (comp,), blocking=tuple(glob))  -> INCONCLUSIVE,
+        #         reasons[0] == "gate failed: seed_list_frozen"
+        #     HypothesisResult("H1", (comp,), blocking=Liar(glob))   -> SUPPORTED,
+        #         tuple(.blocking) STILL yields both names, and NO reason mentions a failed gate
+        # So a falsy container turned INCONCLUSIVE into SUPPORTED and erased the explanation, which is the
+        # favourable direction. ALSO MEASURED: the exposure is BOUNDED one layer up --
+        # `JointResult.__post_init__`'s single-place invariant reads `self.gates`, not `blocking`, and
+        # refuses the combination ("a failed global gate ['seed_list_frozen'] requires INCONCLUSIVE, but
+        # ['H1', 'H2', 'H3'] are decisive"). The residue is a HypothesisResult consumed OUTSIDE a
+        # JointResult -- rendered, recorded, or quoted -- which is not nothing, since `reasons` is what a
+        # reader sees. Coerced here rather than at the call sites because the call sites were already
+        # correct and the constructor was the hole.
+        object.__setattr__(self, "blocking", tuple(self.blocking))
+        object.__setattr__(self, "supported_blockers", tuple(self.supported_blockers))
         vs = [c.verdict for c in self.components]
         reasons = [f"{_shown(c.metric, how=str)}: {_shown(c.reason, how=str)}" for c in self.components]
-        if self.blocking:
+        if len(self.blocking) > 0:
             verdict = Verdict.INCONCLUSIVE
             reasons = [f"gate failed: {_shown(g, how=str)}" for g in self.blocking] + reasons
         elif Verdict.UNSUPPORTED in vs:
@@ -1880,7 +1916,7 @@ class HypothesisResult:
             verdict = Verdict.INCONCLUSIVE
         elif self.hid != "H3":
             verdict = Verdict.SUPPORTED
-        elif self.supported_blockers:
+        elif len(self.supported_blockers) > 0:
             verdict = Verdict.INCONCLUSIVE
             reasons += [f"cannot be SUPPORTED, gate failed: {_shown(g, how=str)}"
                     for g in self.supported_blockers]
@@ -2648,7 +2684,21 @@ class JointResult:
 
     @property
     def complete_gate_coverage(self) -> bool:
-        return not self.deferred_gates
+        """MATERIALISE, THEN COUNT -- never a bare truth test on a container (F21).
+
+        This was `return not self.deferred_gates`. MEASURED through plain class-level assignment with no
+        `object.__setattr__` and no instance mutation: a `tuple` subclass holding the honest six whose
+        `__len__` answers 0 made this property return True while `tuple(self.deferred_gates)` still
+        yielded all six names -- a result that contradicted itself, in the favourable direction. The
+        vacuity shape, which this project has now met six times, once inside a subject.
+
+        `tuple(...)` ITERATES, so a container cannot both yield names and count as empty here. What
+        remains open is recorded in the module docstring's CONTAINER ADMISSION: a container whose
+        `__iter__` yields nothing while the names stay reachable some other way still reads complete.
+        That is a smaller surface than a `__len__` that lies, and it is documented rather than claimed
+        shut.
+        """
+        return len(tuple(self.deferred_gates)) == 0
 
     @property
     def gates_ok(self) -> bool:

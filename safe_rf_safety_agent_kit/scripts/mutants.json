@@ -79,6 +79,56 @@
       "killers": [
         "tests.toy_tests.test_scripts.TestDemo.test_demo_claim_state_line_carries_its_not_supported_qualifier_on_that_same_line"
       ]
+    },
+    {
+      "id": "F21-revert-truth-test",
+      "file": "src/toy/benchmark.py",
+      "note": "revert complete_gate_coverage to the bare truth test `not self.deferred_gates`, the exact pre-fix code a lying __len__ defeated",
+      "find": "        return len(tuple(self.deferred_gates)) == 0",
+      "replace": "        return not self.deferred_gates",
+      "killers": [
+        "tests.toy_tests.test_benchmark.ContainerTruthTests.test_deferred_gate_coverage_is_not_fooled_by_a_lying_len"
+      ]
+    },
+    {
+      "id": "F26-drop-both-coercions",
+      "file": "src/toy/benchmark.py",
+      "note": "remove both tuple coercions, restoring the state in which a falsy container turned INCONCLUSIVE into SUPPORTED through the public constructor",
+      "find": "        object.__setattr__(self, \"blocking\", tuple(self.blocking))\n        object.__setattr__(self, \"supported_blockers\", tuple(self.supported_blockers))\n",
+      "replace": "",
+      "killers": [
+        "tests.toy_tests.test_benchmark.ContainerTruthTests.test_a_falsy_blocking_container_cannot_turn_inconclusive_into_supported"
+      ]
+    },
+    {
+      "id": "F26-half-fix-blocking-only",
+      "file": "src/toy/benchmark.py",
+      "note": "THE HALF-FIX. Keep the `blocking` coercion, drop the `supported_blockers` one -- the shape this project has shipped before, where a brief named one of two sites. Must be killed by the gate-12 sibling pin, not by the blocking pin.",
+      "find": "        object.__setattr__(self, \"supported_blockers\", tuple(self.supported_blockers))\n",
+      "replace": "",
+      "killers": [
+        "tests.toy_tests.test_benchmark.ContainerTruthTests.test_a_falsy_supported_blockers_container_cannot_make_h3_supportable"
+      ]
+    },
+    {
+      "id": "F22-bare-last-match",
+      "file": "scripts/run_tests.sh",
+      "note": "drop the dash anchor and take the bare LAST match -- the rule docs/CLEAN_CLONE.md originally prescribed. Reads a test's block-buffered `print` as the run total. Anchored on summarize()'s copy, which is the site with a behavioural observable.",
+      "find": "    anchored = re.findall(r\"(?m)^-{10,}\\nRan (\\d+) tests?\", text)\n    if anchored:\n        return [int(n) for n in anchored]\n    return [int(n) for n in re.findall(r\"(?m)^Ran (\\d+) tests?\", text)]\n\n\ndef _ran_totals",
+      "replace": "    return [int(n) for n in re.findall(r\"(?m)^Ran (\\d+) tests?\", text)]\n\n\ndef _ran_totals",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestRunTestsMechanics.test_a_captured_ran_line_does_not_understate_the_total_f22"
+      ]
+    },
+    {
+      "id": "F20-discriminator-too-broad",
+      "file": "scripts/run_tests.sh",
+      "note": "drop the `PT_TOTAL -eq 0` and `no collected line` conditions, so a pytest that genuinely collected and failed is forgiven as UNUSABLE -- the opposite error to F20 and the worse one. Must be killed by the negative control.",
+      "find": "  if [ \"$PT_RC\" -ne 0 ] && [ \"$PT_TOTAL\" -eq 0 ] && ! grep -q \"collected\" \"$TMP/pt.log\" \\",
+      "replace": "  if [ \"$PT_RC\" -ne 0 ] \\",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestRunTestsMechanics.test_pytest_dying_before_collection_is_UNUSABLE_and_not_a_suite_failure"
+      ]
     }
   ]
 }

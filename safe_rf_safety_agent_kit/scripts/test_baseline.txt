@@ -1,7 +1,7 @@
 # module  tests  bare-environment-skips   (generated: scripts/run_tests.sh --expect none --update-baseline)
 # Fewer tests, or (bare mode) fewer skips, than recorded here fails the run. Raise only by regenerating.
 test_toy 4 0
-toy_tests.test_benchmark 354 0
+toy_tests.test_benchmark 358 0
 toy_tests.test_checkpoint 48 0
 toy_tests.test_claim_ledger 100 0
 toy_tests.test_dashboard 265 0
@@ -9,7 +9,7 @@ toy_tests.test_erasure_demo_edges 17 0
 toy_tests.test_failure_modes 20 2
 toy_tests.test_robustness 208 0
 toy_tests.test_schema 55 0
-toy_tests.test_scripts 160 4
+toy_tests.test_scripts 163 4
 toy_tests.test_stability 106 1
 toy_tests.test_teacher_student 55 0
 toy_tests.test_tensor_ops 110 82

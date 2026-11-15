@@ -348,12 +348,51 @@ policy() {
   [ "$#" -eq 3 ] || { echo "FAIL: POLICY:INTERNAL policy() takes 3 arguments (log, canon-out, baseline-stage), got $#"; return 2; }
   EXPECT="$EXPECT" LOG="$1" CANON="$2" STAGE="$3" BASELINE="$BASELINE" UPDATE="$UPDATE" python3 - <<'PY'
 import json, os, re, sys
+def _ran_totals(text):
+    """Every `Ran N tests` total in a unittest log, in the order they appear, as ints.
+
+    F22, AND A CORRECTION TO THE RULE `docs/CLEAN_CLONE.md` PRESCRIBED. That document said the fix was
+    "to take the last match rather than the first", and MEASURED, THAT IS ALSO WRONG. A log is not a
+    faithful chronological stream: unittest writes its summary to stderr UNBUFFERED, while a test's own
+    `print` goes to stdout, which is BLOCK-BUFFERED when the log is a file and is therefore flushed at
+    process exit -- AFTER the summary. Measured with a 4-test module whose first test prints
+    `Ran 3 tests in 0.001s`:
+
+        redirected to a file : line 3 `Ran 4 tests` (real), line 6 `Ran 3 tests` (the print)
+        PYTHONUNBUFFERED=1   : the print interleaves mid-dots and no longer starts a line at all
+
+    So first-match was right in that case and last-match was wrong, while for a test whose SUBPROCESS
+    writes to the inherited fd the order is genuinely chronological and last-match is right. Neither
+    position is reliable, because the position is not information.
+
+    What IS reliable is unittest's own summary BLOCK: `TextTestRunner.run` writes `separator2` -- a line of
+    70 dashes -- immediately before the `Ran N tests` line, on the same stream. Anchoring on that pair
+    picks the real total under BOTH orderings (measured: `['4']` in the buffered log and in the unbuffered
+    one, where a bare pattern gives `['4', '3']`).
+
+    The bare-pattern fallback is the WEAKER path and is kept only so that a runner which omits separator2
+    degrades to the old behaviour instead of silently reporting 0; a log that needs it is a log whose
+    ordering nobody has checked.
+    """
+    anchored = re.findall(r"(?m)^-{10,}\nRan (\d+) tests?", text)
+    if anchored:
+        return [int(n) for n in anchored]
+    return [int(n) for n in re.findall(r"(?m)^Ran (\d+) tests?", text)]
+
+
 mode, base, update = os.environ["EXPECT"], os.environ["BASELINE"], os.environ["UPDATE"] == "1"
 stage = os.environ["STAGE"]
 min_none = int(os.environ["MIN_NONE_SKIPS"])
 text = open(os.environ["LOG"], encoding="utf-8", errors="replace").read()
-m = re.search(r"^Ran (\d+) tests?", text, re.M)
-ran_log = int(m.group(1)) if m else 0
+# F22, SITE 1 OF 2. This was `re.search`, which takes the FIRST match. A log can hold more than one
+# `Ran N tests` line -- `--twice` writes two, and a captured sub-run transcript embeds its own -- and
+# the first one is then not this run's total. Understating `ran_log` DISABLES the POLICY:RECORDER check
+# below (`if len(starts) < ran_log`). Measured by driving policy() with two crafted logs, recorder
+# seeing 700 of 1493 in both: real total first -> `POLICY:RECORDER recorder saw 700 tests but unittest
+# ran 1493`, rc=1; a captured `Ran 3 tests` earlier -> rc=0 and RECORDER silent. `docs/CLEAN_CLONE.md`
+# declared this fix and said it "must therefore touch BOTH sites"; neither site had been changed.
+_ran_all = _ran_totals(text)
+ran_log = _ran_all[-1] if _ran_all else 0
 starts, skips = [], []
 for line in open(os.environ["LOG"] + ".jsonl", encoding="utf-8"):
     e = json.loads(line)
@@ -989,11 +1028,44 @@ PY
 summarize() {  # $1 = log; "RAN SKIPPED FAILED" from the unittest summary lines
   python3 - "$1" <<'PY'
 import re, sys
+def _ran_totals(text):
+    """Every `Ran N tests` total in a unittest log, in the order they appear, as ints.
+
+    F22, AND A CORRECTION TO THE RULE `docs/CLEAN_CLONE.md` PRESCRIBED. That document said the fix was
+    "to take the last match rather than the first", and MEASURED, THAT IS ALSO WRONG. A log is not a
+    faithful chronological stream: unittest writes its summary to stderr UNBUFFERED, while a test's own
+    `print` goes to stdout, which is BLOCK-BUFFERED when the log is a file and is therefore flushed at
+    process exit -- AFTER the summary. Measured with a 4-test module whose first test prints
+    `Ran 3 tests in 0.001s`:
+
+        redirected to a file : line 3 `Ran 4 tests` (real), line 6 `Ran 3 tests` (the print)
+        PYTHONUNBUFFERED=1   : the print interleaves mid-dots and no longer starts a line at all
+
+    So first-match was right in that case and last-match was wrong, while for a test whose SUBPROCESS
+    writes to the inherited fd the order is genuinely chronological and last-match is right. Neither
+    position is reliable, because the position is not information.
+
+    What IS reliable is unittest's own summary BLOCK: `TextTestRunner.run` writes `separator2` -- a line of
+    70 dashes -- immediately before the `Ran N tests` line, on the same stream. Anchoring on that pair
+    picks the real total under BOTH orderings (measured: `['4']` in the buffered log and in the unbuffered
+    one, where a bare pattern gives `['4', '3']`).
+
+    The bare-pattern fallback is the WEAKER path and is kept only so that a runner which omits separator2
+    degrades to the old behaviour instead of silently reporting 0; a log that needs it is a log whose
+    ordering nobody has checked.
+    """
+    anchored = re.findall(r"(?m)^-{10,}\nRan (\d+) tests?", text)
+    if anchored:
+        return [int(n) for n in anchored]
+    return [int(n) for n in re.findall(r"(?m)^Ran (\d+) tests?", text)]
+
+
 t = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-ran = re.search(r"^Ran (\d+) tests?", t, re.M)
+# F22, SITE 2 OF 2 -- the site CLEAN_CLONE.md named. Last match, for the reason given at site 1.
+_ran = _ran_totals(t)
 last = t.strip().splitlines()[-1] if t.strip() else ""
 skipped = re.search(r"skipped=(\d+)", last)
-print(ran.group(1) if ran else "0", skipped.group(1) if skipped else "0", "1" if last.startswith("FAILED") else "0")
+print(_ran[-1] if _ran else 0, skipped.group(1) if skipped else "0", "1" if last.startswith("FAILED") else "0")
 PY
 }
 
@@ -1022,9 +1094,35 @@ elif python3 -c "import pytest" 2>/dev/null; then
   PT_SKIPPED=$(grep -Eo '[0-9]+ skipped' "$TMP/pt.log" | tail -1 | cut -d' ' -f1); PT_SKIPPED=${PT_SKIPPED:-0}
   PT_FAILED=$(grep -Eo '[0-9]+ failed' "$TMP/pt.log" | tail -1 | cut -d' ' -f1); PT_FAILED=${PT_FAILED:-0}
   echo "pytest: passed=$PT_PASSED skipped=$PT_SKIPPED failed=$PT_FAILED rc=$PT_RC"
-  [ "$PT_RC" -eq 0 ] || { echo "FAIL: POLICY:PYTEST_FAILED pytest failed"; FAIL=1; }
-  [ "$((PT_PASSED + PT_SKIPPED + PT_FAILED))" -eq "$RAN" ] || { echo "FAIL: POLICY:PYTEST_COLLECTED pytest collected $((PT_PASSED + PT_SKIPPED + PT_FAILED)) tests, unittest ran $RAN"; FAIL=1; }
-  [ "$PT_SKIPPED" -eq "$SKIPPED" ] || { echo "FAIL: POLICY:PYTEST_SKIPPED pytest skipped $PT_SKIPPED, unittest skipped $SKIPPED"; FAIL=1; }
+  # F20, HALF (i). AN OPTIONAL TOOL THAT IS PRESENT BUT BROKEN MUST CHANGE WHICH CHECKS RUN, NEVER WHETHER
+  # THE SUITE PASSES. `README.md` already records this kit getting the ABSENT case wrong once ("for one round
+  # the commands below failed on any machine without `ruff`"); present-but-broken was the uncovered half of
+  # that same sentence. pytest autoloads every `pytest11` entry point in the environment, and nothing here
+  # installs, declares or bounds them: on this project's conda CPython 3.13.5 a broken numba/llvmlite plugin
+  # dies at collection with `OSError: Could not find/load shared object file 'libllvmlite.dylib'`, pytest
+  # collects 0 tests, and the suite went RED for a reason outside this repository.
+  # THE DISCRIMINATOR IS DELIBERATELY NARROW, because the failure this must NOT swallow is a real pytest
+  # failure. All four conditions must hold: nonzero rc, ZERO tests accounted for, no `collected` line at all
+  # (pytest prints one as soon as collection starts), and a traceback that names a plugin or an installed
+  # package rather than anything under the tests directory. A genuine red run has tests accounted for, or a
+  # `collected` line, or both -- so it still reaches POLICY:PYTEST_FAILED below. A broken CONFTEST in this
+  # repository names the tests directory and so is also still fatal.
+  PT_TOTAL=$((PT_PASSED + PT_SKIPPED + PT_FAILED))
+  PT_UNUSABLE=0
+  if [ "$PT_RC" -ne 0 ] && [ "$PT_TOTAL" -eq 0 ] && ! grep -q "collected" "$TMP/pt.log" \
+     && grep -qE "site-packages|dist-packages|entry point|PluginValidationError" "$TMP/pt.log" \
+     && ! grep -qF "$TESTS_DIR" "$TMP/pt.log"; then PT_UNUSABLE=1; fi
+  if [ "$PT_UNUSABLE" = 1 ]; then
+    echo "== pytest == SKIPPED: POLICY:PYTEST_UNUSABLE pytest is installed but DIED BEFORE COLLECTION in this"
+    echo "   environment -- a third-party plugin this kit does not install, declare or bound. The unittest"
+    echo "   results above are authoritative and are NOT affected. This is a note, not a failure. Re-run with"
+    echo "   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 to get the pytest cross-check back. Offending output:"
+    grep -oE "(OSError|ImportError|ModuleNotFoundError|PluginValidationError)[^\"]*" "$TMP/pt.log" | head -3 | sed 's/^/   /'
+  else
+    [ "$PT_RC" -eq 0 ] || { echo "FAIL: POLICY:PYTEST_FAILED pytest failed"; FAIL=1; }
+    [ "$PT_TOTAL" -eq "$RAN" ] || { echo "FAIL: POLICY:PYTEST_COLLECTED pytest collected $PT_TOTAL tests, unittest ran $RAN"; FAIL=1; }
+    [ "$PT_SKIPPED" -eq "$SKIPPED" ] || { echo "FAIL: POLICY:PYTEST_SKIPPED pytest skipped $PT_SKIPPED, unittest skipped $SKIPPED"; FAIL=1; }
+  fi
 else
   echo "== pytest == SKIPPED: pytest is not installed (optional; unittest results above are authoritative)"
 fi

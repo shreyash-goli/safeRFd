@@ -11,11 +11,12 @@ This starter includes a source-grounded change audit, dependency-aware task plan
 - Fork-only commits: `12d5426de27bc6411126262cf3f29bac3a0ce0c1`, `5cbd18a39c4607d65bdbf6457be3f79b27a6c3c1`
 - Changed files: 8, including the new 691-line `rfdiffusion_erasure_teacher_student.py`.
 - Verified by GitHub compare, 2026-11-09. The present upstream `main` is 36 commits beyond the merge base; compare against the merge base to isolate fork-only changes.
+- **M2: the 36 is TIME-VARYING and is almost certainly wrong by now.** It is not a property of the fork; it counts how far `RosettaCommons/RFdiffusion` has moved since the shared ancestor, and it grows every time upstream commits. `docs/DIFF_EVIDENCE.md:27` says so outright — *"UNKNOWN: the 36 figure is time-dependent"* — and this line carried only a verification date, which is weaker than the register it derives from. **The fork-only figures above do not move**: 2 fork commits, 8 changed files, one shared ancestor, all fixed by the merge base. `docs/SOURCE_SNAPSHOT.json` records which comparison produced which number and warns that the former `behind_by: 36` field mixed two different comparisons. Re-derive the 36 before quoting it, or quote the merge base instead.
 
 ## First steps
 
 1. Extract into a fresh repository and inspect `docs/FORK_AUDIT.md`.
-2. From the repo root, run `python3 -m unittest discover -s tests -v` to check the mock-only starter.
+2. From the repo root, run `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 -m unittest discover -s tests -v` to check the mock-only starter. **F20-b: that variable is not optional on a machine that has pytest.** This step used to prescribe the bare command, and the bare command is host-dependent — measured on this project's conda CPython 3.13.5 it reports **4 failures in `test_scripts`**, because those tests spawn `scripts/run_tests.sh`, whose pytest stage autoloads every third-party `pytest11` plugin the environment installs, and a broken `llvmlite` outside this repository dies at collection. With the variable set: 0 failures. See "Offline CI, scripts and clean-clone check" below, which documented this for `run_tests.sh` while this step — the one a newcomer runs first — still prescribed the command that fails.
 3. Read `docs/BUILD_BLUEPRINT.md` for the task DAG and completion criteria.
 4. Enable Claude Agent Teams in `.claude/settings.json`. Launch `claude` from the repository root. If you want unattended permissions, do so only in an isolated disposable environment without sensitive files or credentials.
 5. Paste `docs/ORCHESTRATOR_PROMPT.md` into the main Claude Code session.

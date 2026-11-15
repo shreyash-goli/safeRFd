@@ -24,6 +24,42 @@ per README step 1 and to avoid writing to that repo's `main`. No remote is confi
 
 ---
 
+## F19 — the typed attestation ordinals are HISTORICAL, not authoritative
+
+**Closed 2026-11-13.** This journal's typed ordinals contradict each other and the contradiction was
+recorded as unresolved for five rounds. SR-13 is labelled `(4th)`, `(5th)`, `(6th)`, `(8th)` — with no
+`(7th)` — then "fails **tenth**" (`:9988`) and "**eleventh** attestation" (`:12424`); SR-11 runs
+`(6th)`, `(7th)`, then "fails **eighth**" (`:10191`). `PROGRESS.md:8631-8633` states the problem in this
+journal's own words and calls the authoritative series **UNKNOWN**.
+
+**Resolution, following this project's own rule that a verified list "should be derived, not typed":**
+every typed ordinal in this file is **historical labelling with no authority**. The derived figure is the
+section count per task, from one command:
+
+```
+grep -oE "^## SR-[0-9]+" docs/PROGRESS.md | sed 's/^## //' | sort | uniq -c
+```
+
+Measured 2026-11-13 at HEAD `178c700`, **106 sections across 16 tasks**:
+
+| SR-00 | SR-01 | SR-02 | SR-03 | SR-04 | SR-05 | SR-06 | SR-07 |
+|---|---|---|---|---|---|---|---|
+| 1 | 2 | 5 | 4 | 4 | 4 | 7 | 2 |
+
+| SR-08 | SR-09 | SR-10 | SR-11 | SR-12 | SR-13 | SR-14 | SR-15 |
+|---|---|---|---|---|---|---|---|
+| 2 | 14 | 16 | 10 | 3 | 14 | 5 | 13 |
+
+**This count is an UPPER BOUND on attestations, not an attestation count**, and the distinction is the
+whole reason the typed ordinals drifted: some sections are builder records rather than independent QA
+passes, and the headings are not written to one pattern (`QA verdict`, `PASS`, `FAIL`, `Re-...` and
+bare descriptive titles all occur), so no single grep separates the two. **What is authoritative is the
+per-section text together with `git log`** — each section is individually datable and names its own
+verdict. **Do not quote a count of attestations for any task without deriving it from the sections
+themselves.** The orchestrator relayed these typed figures to reviewers as authoritative before the
+contradiction was caught; that is the integrity defect, and the substance each ordinal labelled is
+intact.
+
 ## SR-00 — Scaffold, version control, provenance
 
 - **Task ID and date:** SR-00, 2026-11-09

@@ -1303,9 +1303,19 @@ This is hygiene, not a sandbox; the runtime socket guard is a second, partial la
   one that could change a verdict**, because the captured transcript exists only because a test already failed, so
   `POLICY:UNITTEST_FAILED` fires and the run is red with rc=1 either way. What degrades is the diagnosis, not the
   gate. The fix must therefore touch BOTH sites, not only `summarize()`. `failed=1` in that line is not a miscount: `$BAD` is a flag (`1` if the summary line
-  begins `FAILED`), not a failure count. The fix is to take the last match rather than the first; until someone
-  does, **do not read `ran=` or the `MIN_TESTS` figure off a red run** — read the `Ran N tests` line the script
-  tails immediately above it.
+  begins `FAILED`), not a failure count. **FIXED, and the fix this bullet prescribed was itself wrong.** This text said *"the fix is to take the
+  last match rather than the first"*. Measured 2026-11-15 with a 4-test module whose first test prints
+  `Ran 3 tests in 0.001s`: in the redirected log the REAL total appears at **line 3** and the printed decoy at
+  **line 6**, because unittest writes its summary to stderr UNBUFFERED while a test's `print` goes to
+  block-buffered stdout and is flushed at process exit. So here first-match was right and last-match was wrong;
+  for a test whose SUBPROCESS writes to the inherited fd the order is genuinely chronological and the opposite
+  holds. **Position in the log is not information.** What is reliable is unittest's own summary BLOCK:
+  `TextTestRunner.run` writes `separator2` — 70 dashes — immediately before the `Ran N tests` line, on the same
+  stream. Both sites now anchor on that pair (`_ran_totals`, defined in each heredoc because they are separate
+  python processes): measured `['4']` on the buffered log and on the unbuffered one, where a bare pattern gives
+  `['4', '3']`. Pinned behaviourally at `summarize()` via `unittest: ran=` and structurally at both sites;
+  `policy()`'s own observable is unreachable, because understating `ran_log` only ever SILENCES
+  POLICY:RECORDER, and that is recorded as a weaker pin rather than dressed up as a measurement.
 - **The 1/3/4 variable-by-variable table comes from the stand-in; the Linux TOTAL does not, any more.** The
   table under "Filesystem-case skips" is from a real case-sensitive APFS disk image, which is still a stand-in:
   it shows which *variable* drives each skip. The **4** it predicts for the Linux configuration is now measured
