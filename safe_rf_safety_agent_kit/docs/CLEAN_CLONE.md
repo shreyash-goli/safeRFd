@@ -1,6 +1,9 @@
 # Clean-clone verification (offline, stdlib only)
 
 **The kit downloads nothing and requires no credentials.** It needs only Python 3.12 or newer (the standard library
+
+**Scope of that sentence, since 2026-11-15:** it is about the suite, the demo, `lint.sh` and `run_tests.sh`, which is what every measurement in this document exercises. `scripts/modal_mutants.py` is a tracked script that DOES require the network and a third-party account (`modal`), and it is declared in `README.md` under "Mutation evidence". Nothing in the suite, the demo, the lint script or CI imports it — verified by `git grep -l modal -- tests/ .github/ scripts/lint.sh scripts/run_tests.sh src/`, which finds nothing — so no offline guarantee in this document depends on it, and `--expect none` on a bare interpreter stays true. It is listed here because the kit's scope statement must match its tracked contents, which for one commit it did not.
+
 is enough). No package manager, no API key, no model weights, no dataset, and **every connection the suite makes is
 to loopback.** That is deliberately narrower than "the suite opens no socket", because it does: the runner's guard
 canary and the negative-control tests that drive the runner with `--no-network-guard` (which is what makes them

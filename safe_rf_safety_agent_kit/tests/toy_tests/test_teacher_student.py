@@ -1,8 +1,10 @@
 """SR-05 tests. TOY RESULT only: abstract numbers, no biological content, no safety claims."""
+import ast
 import copy
 import dataclasses
 import re
 from datetime import datetime, timezone
+import inspect
 import math
 import random
 import sys
@@ -287,12 +289,43 @@ class Gradient(unittest.TestCase):
                 self.assertAlmostEqual(g[i], fd, delta=1e-7)  # quadratic loss: error ~ roundoff only
 
 
-def _flat(doc):
-    """A docstring with its line wrapping removed, so a prose pin matches the SENTENCE rather than the
-    accident of where it wraps. Pinned without this, `"...is INFERENCE in row 7..."` failed because the
-    live text breaks between `is` and `INFERENCE` -- a pin that a reflow can break is a pin that will be
-    deleted for being flaky rather than fixed."""
-    assert doc is not None, "the docstring this pin guards has been removed entirely"
+def _flat(qualname):
+    """The docstring LITERAL for `qualname`, read from `toy/teacher_student.py`'s AST, line wrapping
+    collapsed.
+
+    TWO SEPARATE REASONS THIS IS NOT `obj.__doc__`.
+
+    (1) `-OO` STRIPS DOCSTRINGS. A pin that reads `__doc__` ERRORS under `-OO` instead of checking
+    anything, and this project had already found and STRUCTURALLY closed that class one task earlier:
+    `docs/PROGRESS.md` records all 31 `__doc__` reads in `test_benchmark.py` being rewritten to
+    `ast.get_docstring(..., clean=False)` so "every pin runs in both modes at unchanged strength", and
+    `test_stability.py` carries a purpose-built `_doc` helper for it. The first version of the F7/F8
+    pins read `__doc__` directly and so REGRESSED a closed defect class -- measured, 3.12.4 `-OO`:
+    `test_teacher_student` went from `Ran 55 ... FAILED (failures=1)` to
+    `Ran 57 ... FAILED (failures=1, errors=2)`. Found by independent QA, not by me.
+
+    (2) Line wrapping is not content. The F8 sentence failed a verbatim pin only because the live text
+    breaks between `is` and `INFERENCE`. A pin a reflow can break is a pin that gets deleted for being
+    flaky rather than fixed.
+
+    Reading the AST gives exactly the string `__doc__` WOULD hold, so the pin is unchanged in strength
+    and runs in both modes.
+    """
+    tree = ast.parse(inspect.getsource(sys.modules["toy.teacher_student"]))
+    found = {}
+
+    def walk(node, prefix):
+        for child in node.body:
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                found[prefix + child.name] = ast.get_docstring(child)
+                walk(child, prefix + child.name + ".")
+    walk(tree, "")
+    if qualname not in found:
+        raise AssertionError(f"{qualname} is not defined in toy/teacher_student.py any more; this pin "
+                             f"names it explicitly so a rename fails here rather than going quiet")
+    doc = found[qualname]
+    assert doc is not None, f"{qualname} has no docstring literal in the source -- the text this pin " \
+                            f"guards was deleted (this is NOT the `-OO` case: the AST is read from source)"
     return re.sub(r"\s+", " ", doc).strip()
 
 
@@ -320,7 +353,7 @@ class AuditHedgesAreLoadBearing(unittest.TestCase):
         Pinned as an ABSENCE plus a PRESENCE: the absence alone would be satisfied by deleting the whole
         paragraph, and the presence alone by re-adding "correct" beside it.
         """
-        doc = _flat(masked_mse_loss_and_grad.__doc__)
+        doc = _flat("masked_mse_loss_and_grad")
         self.assertNotIn("The correct element count", doc,
                          "F7 is back: the docstring asserts a judgement ERROR_REGISTER.md:98 declines")
         self.assertNotIn("correct element count", doc.lower(),
@@ -342,7 +375,7 @@ class AuditHedgesAreLoadBearing(unittest.TestCase):
         the same file. A reader comparing the two would reasonably infer the silence meant the property
         carried over.
         """
-        doc = _flat(erasure_target.__doc__)
+        doc = _flat("erasure_target")
         self.assertIn("partially counteracts", doc)          # the toy claim is still made, as it should be
         self.assertIn("THIS PROPERTY DOES NOT CARRY OVER", doc,
                       "F8 is back: the toy's rescale property is stated with no disclosure that the "
@@ -543,8 +576,13 @@ class Hardening(unittest.TestCase):
         audited source's net multiplier goes the other way (0.42, a deflation), so a reader
         comparing toy to source would take the wrong sign. The disclosure is pinned here because
         nothing pinned it when it was wrong. This pins a *documentation* claim, so it can only
-        ever be as good as the arithmetic in METHOD_AUDIT 2.2 that it points at."""
-        doc = masked_mse_loss_and_grad.__doc__ or ""
+        ever be as good as the arithmetic in METHOD_AUDIT 2.2 that it points at.
+
+        PRE-EXISTING `-OO` DEFECT, fixed 2026-11-15. This read `__doc__ or ""`, so under `python -OO`
+        it compared its needles against the empty string and FAILED -- measured identically at
+        `75f51e6` and at `7bd6c75`, so it predates this round and was simply never run in that mode
+        here. Same class as F7/F8/F9; now reads the source literal via `_flat`, like them."""
+        doc = _flat("masked_mse_loss_and_grad")
         self.assertIn("THE SIGN DOES NOT CARRY OVER", doc)
         self.assertIn("0.42", doc)
         self.assertIn("DEFLATION", doc)

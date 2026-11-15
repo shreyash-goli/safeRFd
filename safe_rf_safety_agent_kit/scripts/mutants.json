@@ -7,7 +7,8 @@
     "A KILLED result here is evidence. A SURVIVED_UNCONFIRMED result is not a finding: only --full,",
     "which asserts that NOTHING in the suite catches the mutant, can support a survival claim.",
     "Adding a mutant is cheap and is the point. Removing one silently is how this project lost 265",
-    "previous results."
+    "previous results.",
+    "CLASS-U MUTANTS (`U-` prefix) target the four modules whose marks rested on mutation sweeps nobody can re-run -- schema.py (SR-04), robustness.py (SR-11), claim_ledger.py (SR-13/14), dashboard.py (SR-13). Their killers are EXISTING tests, derived by applying each mutant and seeing what failed, not written for this manifest. That is deliberate: it re-derives a slice of those marks' own evidence, which is what F17-R asked for and what the first 15 mutants did NOT do."
   ],
   "mutants": [
     {
@@ -158,6 +159,46 @@
       "replace": "a lenient toy would be more permissive than the thing it mimics.",
       "killers": [
         "tests.toy_tests.test_stability.F9ModuleHedgeIsLoadBearing.test_the_nan_hazard_is_stated_as_conditional_not_as_a_source_property"
+      ]
+    },
+    {
+      "id": "U-schema-nonblank-guard",
+      "file": "src/toy/schema.py",
+      "note": "SR-04 (class U). Disable `_nonblank`'s blank-string refusal. Killed by an EXISTING test, not by one written for this manifest -- that is the point: it re-derives a slice of SR-04's own evidence rather than pinning this round's fixes.",
+      "find": "    if not value.strip():\n        raise ValueError(f\"{name} must not be empty or blank\")",
+      "replace": "    if False:\n        raise ValueError(f\"{name} must not be empty or blank\")",
+      "killers": [
+        "tests.toy_tests.test_schema.InvalidInputs.test_blank_run_id"
+      ]
+    },
+    {
+      "id": "U-claim-ledger-genesis-digest",
+      "file": "src/toy/claim_ledger.py",
+      "note": "SR-14 (class U). Accept the all-zero placeholder digest as a real evidence value, which would let a forged ref pass as evidence. Killed by an existing test.",
+      "find": "        if self.value == GENESIS_DIGEST:\n            raise EventFormatError(\"evidence value must not be the all-zero placeholder digest\")",
+      "replace": "        if False:\n            raise EventFormatError(\"evidence value must not be the all-zero placeholder digest\")",
+      "killers": [
+        "tests.toy_tests.test_claim_ledger.RequiredFields.test_evidence_ref_shape"
+      ]
+    },
+    {
+      "id": "U-robustness-insufficient-counts",
+      "file": "src/toy/robustness.py",
+      "note": "SR-11 (class U). Let an InsufficientEvidence card hold n_measured >= n_required, i.e. contradict its own stated minimum. Killed by an existing test.",
+      "find": "        if self.n_measured >= self.n_required:\n            raise ValueError(\"InsufficientEvidence requires n_measured < n_required\")",
+      "replace": "        if False:\n            raise ValueError(\"InsufficientEvidence requires n_measured < n_required\")",
+      "killers": [
+        "tests.toy_tests.test_robustness.TestQAHardening.test_insufficient_evidence_requires_n_below_required"
+      ]
+    },
+    {
+      "id": "U-dashboard-control-char-escape",
+      "file": "src/toy/dashboard.py",
+      "note": "SR-13 (class U). Pass every character through unescaped, so bidi/control/private-use characters act on the rendered page's layout instead of being made visible. Killed by an existing test.",
+      "find": "        if ch in \"\\n\\t\" or (cat[0] not in \"CZ\" and ch.isprintable()) or ch == \" \":",
+      "replace": "        if True:",
+      "killers": [
+        "tests.toy_tests.test_dashboard.Injection.test_bidi_and_control_made_visible"
       ]
     }
   ]

@@ -2437,11 +2437,18 @@ def render_scorecard(joint: Any) -> str:
     # HEAD on the honest fixture -- whose `deferred_gates` holds SIX -- the card printed "CONDITIONAL on
     # 0 unimplemented gate(s)" beside JOINT_SUPPORTED, the suffix surviving only because
     # `complete_gate_coverage is not True` independently held it up.
-    # AND THE COVERAGE FLAG IS A CLAIM DERIVED FROM THIS VERY LIST: the scorer's
-    # `complete_gate_coverage` is `not self.deferred_gates`, a TRUTH TEST, so the caller's `__len__`
-    # decides it -- measured, a `deferred_gates` holding the honest six whose `__len__` answers 0
-    # printed "Complete gate coverage: yes" beside JOINT_SUPPORTED, which is `_render_uncertainty`'s
-    # "none listed" one protocol over. A result that contradicts itself about which gates a SUPPORTED
+    # AND THE COVERAGE FLAG IS A CLAIM DERIVED FROM THIS VERY LIST. HISTORY, RE-TENSED 2026-11-15:
+    # the scorer's `complete_gate_coverage` USED TO BE `not self.deferred_gates`, a TRUTH TEST, so the
+    # caller's `__len__` decided it -- measured then, a `deferred_gates` holding the honest six whose
+    # `__len__` answered 0 printed "Complete gate coverage: yes" beside JOINT_SUPPORTED, which is
+    # `_render_uncertainty`'s "none listed" one protocol over. F21 FIXED THAT PRODUCER-SIDE: it is now
+    # `len(tuple(self.deferred_gates)) == 0`, which materialises before counting, so that container no
+    # longer moves the flag. This comment stated the old mechanism in the PRESENT tense for one commit
+    # after it was withdrawn -- the project's own "a withdrawn guarantee outlives its withdrawal in a
+    # comment" class, found here by independent QA. THE CHECK BELOW STAYS, and is not redundant: it
+    # catches a flag/list contradiction however it arises, including from a duck-typed or subclassed
+    # result that the producer-side fix cannot reach, and it is what keeps the page honest if F21 is
+    # ever reverted. A result that contradicts itself about which gates a SUPPORTED
     # verdict is conditional on is refused the same way a relabelled `subject_kind` is: the
     # contradiction is reported and every decisive verdict is withheld. Found by this round's container
     # sweep, once `joint.deferred_gates` was added to the walk at all.

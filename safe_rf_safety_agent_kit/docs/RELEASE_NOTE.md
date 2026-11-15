@@ -1,6 +1,6 @@
 # Release note — SafeRFdiffusion safety-replication audit kit
 
-**Version:** `75f51e6` · **Date:** 2026-11-13 · **Status of the release: FAIL on final QA
+**Version:** `7bd6c75` (superseding `75f51e6`) · **Date:** 2026-11-13, revised 2026-11-15 · **Status of the release: FAIL on final QA
 (`docs/SR16_AUDIT_REPORT.md`). Do not describe this kit as complete.**
 
 ---
@@ -52,9 +52,21 @@ Independent QA at `75f51e6` returned **FAIL**, on one of its three criteria. The
 
 ### Why it failed
 
-1. **One of the 16 completed tasks was marked complete without any independent QA record.** SR-00,
-   the foundational scaffold task, has no QA verdict section anywhere in the project journal, which
-   the project's own rules require before a task may be marked.
+1. ~~**One of the 16 completed tasks was marked complete without any independent QA record.**~~
+   **WITHDRAWN 2026-11-15 — THIS CLAIM WAS FALSE, AND IT WAS A FALSE CLAIM ABOUT THIS PROJECT'S OWN
+   WORK IN ITS READER-FACING ARTIFACT.** SR-00 **is** independently attested.
+   `docs/PROGRESS.md:27` carries *"**Independent QA verdict and test log:** **PASS**"* with
+   hand-re-derived arithmetic (`toy_target((3,1),(1,2),s=0.5)` = `(0.0, 2.5)`;
+   `masked_mse((3,9),(1,0),(T,F))` = `4.0`), three QA-raised defects, remaining limitations and a
+   commit SHA — every element `CLAUDE.md:13-14` requires. Defect D1 forced a structural repository
+   change (`tests/toy/` → `tests/toy_tests/`): a rubber stamp does not rename a test package.
+   **How the error was made:** `docs/SR16_AUDIT_REPORT.md` §1.2 inferred the absence from a single
+   heading grep, `grep -c "^## SR-00 — QA verdict"` → 0. That count is true; the inference from it is
+   not, because the attestation sits under a different heading. A count of a construct is not a
+   measurement of its behaviour — the project's own rule, applied here to the project's own review.
+   Verified independently at three HEADs, byte-identical, and traced to `04a393b`, the commit that
+   flips the checkbox, so it was not added later.
+   **Clause 1 does not fail on SR-00.** It fails on reason 2 alone.
 2. **The evidence behind most of the completed tasks cannot be re-run by anyone.** Across roughly 28
    review rounds, the decisive evidence for a majority of the marks was mutation testing — deliberately
    breaking the code to confirm a test notices. **No mutation tool was ever committed to this
@@ -72,10 +84,10 @@ before its pass. It means a stranger cannot check them.
 
 | | Defect |
 |---|---|
-| 1 | SR-00 is marked complete with no independent QA attestation. |
-| 2 | Mutation evidence behind most marks is unreproducible; no harness is tracked. |
+| 1 | ~~SR-00 is marked complete with no independent QA attestation.~~ **WITHDRAWN — FALSE.** SR-00 is attested at `docs/PROGRESS.md:27`; the claim rested on a heading grep. See above. |
+| 2 | Mutation evidence behind most marks is unreproducible. **Half amended:** a harness IS now tracked (`scripts/mutate.py`, `scripts/mutants.json`), 15 mutants, 15/15 KILLED on two platforms. The ~313 historical claims in the journal remain unreproducible and no harness can make them otherwise, and the 15 mutants pin THIS round's fixes rather than re-deriving any mark's evidence. **Still open.** |
 | 3 | The demo prints a joint verdict in a form the project's own evaluation protocol forbids, in the same paragraph where the protocol requires the document and the code to agree. |
-| 4 | The demo's single safety qualifier, and one of the robustness module's standard non-claim strings, are not pinned by any test: removing either leaves all 1,493 tests passing. |
+| 4 | The demo's single safety qualifier, and one of the robustness module's standard non-claim strings, are not pinned by any test: removing either left all 1,493 tests passing. **CLOSED:** all seven disclaimer strings now carry pins, each proven against removal, gutting, weakening and relocation, and two against inversion; the demo's three stdout qualifiers have tracked mutants that die. |
 | 5 | `benchmark.py`'s `complete_gate_coverage` is a truth test on a container, so a container that misreports its own length makes the result contradict itself. A one-line fix is known and was measured not to break anything. |
 | 6 | The evaluation protocol's own header states it has never been independently reviewed, while the task that shipped it was marked on a recorded independent pass. |
 | 7 | On a machine with pytest installed, whether the suite passes depends on third-party pytest plugins this kit neither installs nor bounds. Set `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`. The README's "First steps" command omits that precondition. |
@@ -86,9 +98,9 @@ before its pass. It means a stranger cannot check them.
 Each was re-run by independent QA from a clean clone at `75f51e6`. Each is a statement about this
 repository's own code and nothing else.
 
-- 1,493 tests, 0 failures, on CPython 3.12.4 and on CPython 3.13.5.
+- 1,512 tests, 0 failures, on CPython 3.12.4 and on CPython 3.13.5. (This figure was 1,493 at `75f51e6`; every count in this note was re-measured at `7bd6c75`.)
 - Deterministic: two consecutive runs give identical per-module counts and an identical skip list.
-- On a bare interpreter with nothing third-party installed: 1,493 run, 90 skipped, 0 failed, with
+- On a bare interpreter with nothing third-party installed: 1,512 run, 90 skipped, 0 failed, with
   every skip naming the package it is missing.
 - `scripts/demo.py` exits 0 and renders a dashboard that is byte-identical across re-renders and
   across both interpreters.

@@ -2226,6 +2226,55 @@ class TestRunTestsMechanics(_SyntheticBase):
                          "information (stdout is block-buffered, stderr is not), so only unittest's "
                          "separator2 + `Ran N` block identifies the real total")
 
+    def test_every_declared_mutant_still_applies_and_names_a_test_that_exists(self):
+        """THE MANIFEST IS NOW GUARDED BY THE SUITE, not only by whoever remembers to run the harness.
+
+        Independent QA's finding: `git grep -l -e mutants.json -e mutate.py -- tests/ .github/
+        scripts/lint.sh scripts/run_tests.sh` found NOTHING. So an anchor that drifted, or a killer test
+        that was renamed, was caught only when a human ran a script that nothing runs -- while
+        `test_the_TOOLS_allowlist_is_exactly_the_tools_this_suite_gates_on` next door derives its set
+        from the suite's own sites so drift turns the suite red. The harness got no equivalent.
+
+        This is the cheap half of that guard and it is deliberately NOT a mutation run: it asserts the
+        manifest's two preconditions, which are exactly the two the harness refuses the RUN on.
+          * every `find` anchor occurs EXACTLY ONCE in its file (the harness's trap 3 -- an unapplied
+            patch would otherwise be reported as SURVIVED, the direction that becomes a finding);
+          * every `killers` entry resolves through the real unittest loader to at least one real test
+            (trap 2 -- a name that does not exist becomes a synthesised `_FailedTest` that RUNS and
+            FAILS, which is indistinguishable from a kill).
+
+        It does not verify any mutant is killed. Only `scripts/mutate.py` does that, and this test
+        makes no claim to replace it.
+        """
+        man = json.loads((SCRIPTS / "mutants.json").read_text(encoding="utf-8"))
+        mutants = man["mutants"]
+        self.assertTrue(mutants, "scripts/mutants.json declares no mutants, so every assertion below "
+                                 "would sweep an empty table")
+        ids = [m["id"] for m in mutants]
+        self.assertEqual(len(set(ids)), len(ids), f"duplicate mutant ids: {ids}")
+        loader = unittest.defaultTestLoader
+        for m in mutants:
+            with self.subTest(mutant=m["id"]):
+                target = ROOT / m["file"]
+                self.assertTrue(target.is_file(), f"{m['file']} does not exist")
+                n = target.read_text(encoding="utf-8").count(m["find"])
+                self.assertEqual(n, 1, f"anchor occurs {n} times in {m['file']} (need exactly 1); the "
+                                       f"code moved under the manifest and the harness would refuse "
+                                       f"the whole run")
+                self.assertNotEqual(m["find"], m["replace"], "a no-op mutant can never be killed")
+                self.assertTrue(m["killers"], "no killer named")
+                for name in m["killers"]:
+                    suite = loader.loadTestsFromName(name)
+                    flat = list(suite)
+                    while flat and isinstance(flat[0], unittest.TestSuite):
+                        flat = [t for sub in flat for t in sub]
+                    self.assertTrue(flat, f"killer {name} loaded 0 tests")
+                    for t in flat:
+                        self.assertNotEqual(type(t).__name__, "_FailedTest",
+                                            f"killer {name} does not exist: unittest synthesised a "
+                                            f"_FailedTest, which RUNS and FAILS and so would read as "
+                                            f"a KILL")
+
     def _fake_pytest_root(self, pytest_body, n=3):
         """A throwaway repo root whose own `pytest.py` SHADOWS the installed pytest.
 

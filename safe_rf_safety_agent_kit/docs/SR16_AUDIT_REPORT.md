@@ -93,7 +93,25 @@ Derived by a script that parses `docs/BUILD_BLUEPRINT.md` rather than reading it
 on SR-17, whose dependency SR-16 is correctly unchecked. This agrees with SR-12 §6.1 and was derived
 independently of it.
 
-### 1.2 Does every marked task have a QA attestation record? — **No. SR-00 has none.** MEASURED
+### 1.2 Does every marked task have a QA attestation record? — **WITHDRAWN. Yes, including SR-00.**
+
+> **CORRECTION, 2026-11-15, by a later independent QA pass.** The conclusion of this subsection is
+> **FALSE** and is withdrawn. SR-00 **is** independently attested at `docs/PROGRESS.md:27`, which carries
+> *"**Independent QA verdict and test log:** **PASS**"*, hand-re-derived arithmetic, three QA-raised
+> defects (D1 of which forced `tests/toy/` → `tests/toy_tests/`), remaining limitations and a commit SHA
+> — every element `CLAUDE.md:13-14` names. Verified byte-identical at three HEADs and traced to
+> `04a393b`, the commit that flips the checkbox.
+>
+> **The error is this report's own liability #2 realised.** The finding rested on one heading grep (C9/C2,
+> `grep -c "^## SR-00 — QA verdict"` → 0) and the attestation lives under a different heading. The count
+> is true; the inference is not. This report's liability #5 claims "I read the 16 attestation sections",
+> which cannot be true of the SR-00 section and also yield this conclusion.
+> `docs/SR12_INDEPENDENT_REVIEW.md:170` makes the mirror-image error in the other direction.
+>
+> **Clause 1's FAIL does not rest on SR-00.** It rests on §3 (F17-R) alone, which remains open. The text
+> below is preserved unedited as the record of what was claimed.
+
+**SUPERSEDED TEXT FOLLOWS.**
 
 `CLAUDE.md` is explicit twice over: *"Never mark a task `[x]` from a build alone; QA must
 independently attest to its acceptance criteria"*, and *"After each task: record task ID, evidence,

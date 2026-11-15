@@ -99,8 +99,19 @@ def main():
     for res in sorted(results, key=lambda d: d["id"]):
         line = [ln for ln in res["out"].splitlines()
                 if ln.startswith(res["id"]) or " KILLED " in ln or "SURVIVED" in ln or "ERROR" in ln]
-        verdict = "KILLED" if (res["rc"] == 0 and any("KILLED" in ln for ln in line)) else "NOT KILLED"
-        (killed if verdict == "KILLED" else other).append(res["id"])
+        # THREE OUTCOMES, NOT TWO. This read `rc == 0 and ... else "NOT KILLED"`, which reports an
+        # INTERRUPTED OR PREEMPTED container as a finding -- and a preempted container is routine on a
+        # pool. Independent QA found this paired with the harness's SIGTERM path exiting 1 instead of
+        # 130. A worker that never reached a verdict has not measured a survival; saying it did is the
+        # direction this project says gets written down as a finding.
+        tail = res["out"] + res["err"]
+        if res["rc"] == 0 and "1/1 KILLED" in tail:
+            verdict = "KILLED"
+        elif "SURVIVED" in tail or "NOT KILLED" in tail or "RUN FAILURE" in tail:
+            verdict = "NOT KILLED"
+        else:
+            verdict = "NO VERDICT"      # interrupted, preempted, or died before reporting
+        (killed if verdict == "KILLED" else other).append(f"{res['id']} ({verdict})")
         print(f"{res['id']:<30} {verdict:<11} rc={res['rc']}  {(line[-1][:90] if line else '')}")
         if verdict != "KILLED":
             print("   stdout tail:", res["out"][-700:].replace("\n", "\n   "))

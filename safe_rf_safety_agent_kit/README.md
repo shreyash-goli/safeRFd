@@ -30,6 +30,38 @@ This starter includes a source-grounded change audit, dependency-aware task plan
 
 **Correction (SR-12 finding F5).** An earlier version of this line said the `ALLOW_EXTERNAL_NETWORK=false` environment flag "applies to the toy application". That was an overstatement: **no code in this kit reads that flag, or any of the other flags in `.env.example`.** They are declarative markers for a human reader, and setting them changes no behaviour. The kit's actual offline guarantees are structural, not flag-driven — `src/toy/` is standard-library only and imports no network module (enforced by `scripts/lint.sh` and `tests/toy_tests/test_scripts.py`), `scripts/run_tests.sh` runs the suite under a Python-level socket guard that makes the *named* connection and name-resolution entry points of the `socket` module raise — the patched names, and the deliberately unpatched ones with reasons, are tuples in that script, and the suite asserts every member of the family is in one of them. It is a tripwire on names, not a sandbox, and it is **not** a claim that the suite opens no socket: the guard's own negative controls run with the guard disabled, and those attempts are loopback-only. **This sentence used to end "so nothing leaves the host", and that was an overclaim**: targeting loopback is a property of the *addresses the suite asks for*, which is tested; it is not a property of the *host's egress*. **This line used to continue that the host's egress "has never been observed", and that is no longer true**: at `18107f8` the suite, the demo and the lint script were run under a macOS `sandbox-exec` profile denying network in and out, on CPython 3.12.4 and 3.13.5, with a control in the same sandbox proving the denial was live. Hermeticity is now attested **on that one host, that one OS and that one mechanism, for `connect()` and name resolution only** — not on Linux, not for the CI workflow, and not in a way that makes the socket guard a sandbox. See `docs/CLEAN_CLONE.md`, "First observation in a network-denied environment". No model weights exist anywhere in the tree. See `docs/CLEAN_CLONE.md` for the full statement.
 
+## Mutation evidence: what is checkable and what is not (F17-R)
+
+**Read this before quoting any "killed" figure from `docs/PROGRESS.md`.**
+
+`scripts/mutate.py` and `scripts/mutants.json` are a tracked mutation harness. Run it:
+
+```
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 scripts/mutate.py          # every mutant
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 scripts/mutate.py --list
+```
+
+It mutates a `git archive HEAD` extract, never your working tree, and it refuses the RUN rather than
+the mutant when its own preconditions fail. **Measured 15/15 KILLED** on CPython 3.12.4 (macOS, arm64)
+and on CPython 3.12.10 (`Linux-4.19.0-gvisor-x86_64-with-glibc2.36`).
+
+**Every mutation figure recorded in `docs/PROGRESS.md` before 2026-11-13 is ATTESTER-REPORTED AND
+UNREPRODUCED.** Those harnesses were built in session scratchpads and are gone; roughly 313 lines of
+that journal say "killed" and no reader can re-run one of them. That is a defect in this project's
+record, not a claim that the figures are wrong — it means they are **uncheckable**, and a checkbox
+resting on one rests on something you cannot verify. The 15 mutants above are the only mutation
+evidence in this repository that a stranger can re-derive, and they **pin this round's own fixes
+rather than re-deriving the evidence behind any task's mark**. Four modules that carry marks whose
+decisive evidence was a mutation sweep — `robustness.py`, `dashboard.py`, `claim_ledger.py`,
+`schema.py` — have **no mutants at all** yet.
+
+`scripts/modal_mutants.py` runs the same manifest on a second platform. **It is the one tracked script
+that needs the network and third-party credentials** (`modal`, and a Modal account); it is imported by
+nothing in the suite, the demo, the lint script or CI, so the offline guarantees stated below are
+unaffected by it. It uploads `git archive HEAD` only — never `.git`, because commit objects carry
+author identity — and refuses to upload if it finds an email address in the tarball or if the tree is
+dirty.
+
 ## Offline CI, scripts and clean-clone check (SR-15)
 `./scripts/lint.sh`, `./scripts/run_tests.sh` and `python3 scripts/demo.py` download nothing and need no credentials, and on a **bare** Python 3.12+ interpreter they need nothing else. **This sentence used to say they "need only Python 3.12+", which is true of a bare interpreter and false of a developer machine**: `run_tests.sh` runs a pytest stage whenever pytest is importable, and that stage loads every third-party pytest plugin the environment autoloads. Measured at `18107f8` on this project's conda CPython 3.13.5, `./scripts/run_tests.sh --expect any` ends **`RESULT: FAIL`** — a numba/llvmlite plugin dies at collection with `OSError: Could not find/load shared object file 'libllvmlite.dylib'`, the pytest stage collects 0 tests, and four of `tests/toy_tests/test_scripts.py`'s own pytest-stage tests fail with it — while the same command with **`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`** set ends `RESULT: OK`. **So on any interpreter that has pytest, set that variable** (it is in the commands below); the suite's pass/fail is otherwise hostage to packages this kit neither declares nor installs. The failure is loud — `POLICY:PYTEST_FAILED` and `POLICY:PYTEST_COLLECTED` — never a silent pass.
 

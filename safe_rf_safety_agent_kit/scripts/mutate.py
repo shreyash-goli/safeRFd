@@ -57,6 +57,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -184,13 +185,42 @@ def run_tests(extract: Path, targets: list[str], timeout: int = 1800) -> subproc
 
 
 def classify(r: subprocess.CompletedProcess) -> tuple[str, str]:
+    """KILLED only on a NAMED test failure. Anything else nonzero is an ERROR.
+
+    THIS USED TO REPORT A FALSE KILL, found by independent QA. The old rule was "nonzero rc and no
+    loader marker -> KILLED", with a marker list of five strings. MEASURED: a mutant that deleted one
+    character so `src/toy/benchmark.py` no longer PARSES came back
+    `KILLED  rc=1; no FAIL/ERROR line` and the run exited 0. No test discriminated anything; the
+    harness credited a kill.
+
+    Two things were wrong, and the second is the structural one:
+
+    * the marker list missed `SyntaxError`, `IndentationError`, `ImportError` and anything else raised
+      at module import -- a blocklist of strings, which is the shape this project distrusts everywhere
+      else;
+    * the loader PRE-FLIGHT runs on the UNMUTATED extract, so it can never catch a load failure
+      CAUSED BY the mutation. `mutate.py`'s own header claimed that pre-flight closed this; it closes
+      only the typo-in-a-killer-name half.
+
+    So the test is now an ALLOWLIST on the evidence a kill is supposed to leave: unittest must report
+    that it RAN tests (`Ran N test...`) and must name at least one `FAIL:`/`ERROR:` line. A crash
+    before or during import satisfies neither and is reported as ERROR, which fails the RUN. This is
+    the "reassuring direction of error" rule: an unexplained nonzero exit is not evidence.
+    """
     blob = r.stdout + r.stderr
     hit = [m for m in LOADER_MARKERS if m in blob]
     if hit:
         return ERROR, f"loader markers present ({', '.join(hit)}): a load failure, not a kill"
+    ran = re.search(r"(?m)^Ran (\d+) tests?", blob)
+    named = [ln for ln in blob.splitlines() if ln.startswith(("FAIL:", "ERROR:"))]
     if r.returncode != 0:
-        tail = [ln for ln in blob.splitlines() if ln.startswith(("FAIL:", "ERROR:"))]
-        return KILLED, f"rc={r.returncode}; " + ("; ".join(tail[:3]) if tail else "no FAIL/ERROR line")
+        if ran is None:
+            return ERROR, (f"rc={r.returncode} but unittest never reported `Ran N tests` -- the module "
+                           f"did not load or the run died before collecting. NOT a kill")
+        if not named:
+            return ERROR, (f"rc={r.returncode}, {ran.group(1)} test(s) ran, but no FAIL:/ERROR: line "
+                           f"names a failure. An unexplained nonzero exit is not evidence")
+        return KILLED, f"rc={r.returncode}; " + "; ".join(named[:3])
     return SURVIVED, f"rc=0; {blob.strip().splitlines()[-1] if blob.strip() else 'no output'}"
 
 
@@ -219,13 +249,30 @@ def main() -> int:
         mutants = [m for m in mutants if m["id"] in args.id]
 
     subject = Path(args.tree).resolve() if args.tree else ROOT
+    _applied: dict[str, str] = {}      # extract path -> original text, for the signal path to restore
     before = tree_fingerprint(subject)
     tmp = Path(tempfile.mkdtemp(prefix="saferf_mut_"))
 
     def bail(signum, _frame):
-        # Trap 4: the signal path checks the invariant too, and says so out loud.
+        """Trap 4 on the signal path. RESTORE FIRST, THEN REMOVE -- it used to be the other way round.
+
+        Found by independent QA: this removed the extract while a mutation was still applied, so the
+        inner `finally: target.write_text(original)` then raised `FileNotFoundError`, which is not a
+        `RunFailure`, so `__main__`'s handler did not catch it. The process died on an unhandled
+        traceback with **exit 1, never 130** -- and `scripts/modal_mutants.py` reads any nonzero exit
+        as NOT KILLED, i.e. it would report an interrupted or preempted container AS A FINDING. That is
+        the exact direction this project says gets written down as a finding.
+
+        The safety half was never in doubt and is re-checked here: the working tree is not touched.
+        """
+        for path, text in list(_applied.items()):
+            try:
+                Path(path).write_text(text)
+            except OSError as exc:
+                print(f"[signal {signum}] COULD NOT RESTORE {path}: {exc}", file=sys.stderr)
         state = "UNCHANGED" if tree_fingerprint(subject) == before else "*** CHANGED ***"
-        print(f"\n[signal {signum}] aborting. working tree: {state}", file=sys.stderr)
+        print(f"\n[signal {signum}] aborting; {len(_applied)} mutation(s) restored first. "
+              f"subject tree: {state}", file=sys.stderr)
         shutil.rmtree(tmp, ignore_errors=True)
         sys.exit(130)
 
@@ -256,6 +303,7 @@ def main() -> int:
             if n != 1:
                 raise RunFailure(f"[{m['id']}] anchor occurs {n} times in {m['file']} (need exactly 1). "
                                  f"Trap 3: an unapplied patch would have reported SURVIVED.")
+            _applied[str(target)] = original
             target.write_text(original.replace(m["find"], m["replace"]))
             try:
                 r = run_tests(extract, m["killers"])
@@ -268,6 +316,7 @@ def main() -> int:
                     kind, why = "SURVIVED_UNCONFIRMED", why + " (targeted only; --full to confirm)"
             finally:
                 target.write_text(original)
+                _applied.pop(str(target), None)
             results.append((m["id"], kind, why))
             print(f"{m['id']:<28} {kind:<20} {why[:110]}")
 

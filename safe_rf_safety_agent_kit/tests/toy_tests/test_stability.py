@@ -1,5 +1,6 @@
 """SR-06 tests: adversarial numeric cases for toy.stability. Abstract numbers only;
 no biological content and no claim about any real system."""
+import ast
 import copy
 import dataclasses
 import functools
@@ -212,8 +213,15 @@ class F9ModuleHedgeIsLoadBearing(unittest.TestCase):
     """
 
     def test_the_nan_hazard_is_stated_as_conditional_not_as_a_source_property(self):
-        doc = re.sub(r"\s+", " ", st.__doc__ or "").strip()
-        self.assertTrue(doc, "stability.py lost its module docstring, which carries the ER-02 hedge")
+        # READ FROM SOURCE, NOT `st.__doc__`. `-OO` strips docstrings, and this file already carries a
+        # purpose-built `_doc` helper plus NOTE E precisely so docstring pins never ERROR in that mode.
+        # The first version of this pin read `st.__doc__ or ""`, which regressed that closed class --
+        # measured, 3.12.4 `-OO`: `test_stability` went from `Ran 106 ... OK` to
+        # `Ran 107 ... FAILED (failures=1)` -- and reported the false reason "lost its module docstring"
+        # when in fact the interpreter had stripped it. Found by independent QA.
+        doc = re.sub(r"\s+", " ", ast.get_docstring(ast.parse(inspect.getsource(st))) or "").strip()
+        self.assertTrue(doc, "stability.py has no module docstring literal in its source -- the text "
+                             "this pin guards was deleted (not the `-OO` case: this reads the source)")
         self.assertNotIn("more permissive than the thing it mimics", doc,
                          "F9 is back: a conditional NaN hazard is stated as a property of the source")
         self.assertIn("more permissive than the source WOULD BE IF A NaN AROSE THERE", doc,

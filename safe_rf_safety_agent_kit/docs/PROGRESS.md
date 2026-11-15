@@ -24,177 +24,6 @@ per README step 1 and to avoid writing to that repo's `main`. No remote is confi
 
 ---
 
-## Mutation evidence replicated on a second platform — 2026-11-15, HEAD `f1ef34f`
-
-**Task ID:** F17-R (narrowing, continued). **What is new:** the 15 tracked mutants were run on a worker
-that is not this laptop, and the verdicts agree.
-
-| | local | Modal worker |
-|---|---|---|
-| platform | macOS (Darwin 25.6.0), arm64 | `Linux-4.19.0-gvisor-x86_64-with-glibc2.36` |
-| CPython | 3.12.4 | **3.12.10** |
-| result | **15/15 KILLED** | **15/15 KILLED** |
-| control | OK on unmutated extract | OK on unmutated extract |
-| tree after | UNCHANGED | UNCHANGED |
-
-Commands:
-
-```
-PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 scripts/mutate.py              # local, all 15
-python3 -m modal run scripts/modal_mutants.py                           # one container per mutant
-```
-
-**WHY A SECOND PLATFORM IS EVIDENCE AND NOT JUST SPEED.** Every kill in this project had been measured
-on one machine, with one Python build, one filesystem and one git. **F20 was itself a finding about
-results being hostage to one host's installed packages** — the suite read `RESULT: FAIL` on this laptop's
-conda interpreter because of a broken `llvmlite` outside the repository. A pin that passes only here is
-not a pin. All fifteen hold on a different OS, a different architecture, a different libc and a
-different CPython patch level.
-
-**What was uploaded, and what was refused.** `git archive HEAD` only: 72 members, **none under
-`.git/`**, because commit objects carry author identity. `scripts/modal_mutants.py` refuses to upload
-if it finds an email address in the tarball, and refuses if the tree is dirty, since then
-`git archive HEAD` is not what is being tested. Git runs on the worker with
-`GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null` and no identity configured at all.
-
-**One defect in that screen, found before it mattered.** The first version tested `b".git/" in blob` and
-answered **YES** on a clean tree — the match came from FILE CONTENT, because
-`docs/SR12_INDEPENDENT_REVIEW.md` discusses `.git/` in prose. A byte-substring search reported as a
-structural fact, which is the error class this project most often finds in its own history. The check
-now enumerates tar members.
-
-**Remaining uncertainty.**
-- **Two platforms is two, not many.** Both are x86-or-arm CPython 3.12; nothing here speaks to 3.13 on
-  Linux, to a case-sensitive filesystem beyond the four known skips, or to Windows.
-- **The 15 mutants are the ones someone thought to write.** A mutation score over a hand-written
-  manifest measures the manifest. It says nothing about the defects nobody modelled, and the manifest
-  is deliberately small: 15 against ~265 historical kill claims that remain unreproducible.
-- **F17-R is narrowed, not closed**, and whether SR-16's clause 1 now reaches PASS is for an
-  independent reviewer.
-
-
-## SR-12 residuals and SR-17 gate — orchestrator round, 2026-11-13/15
-
-**Task IDs:** SR-12 finding closures (F7, F8, F9, F16, F18, F19, F20, F20-b, F21, F22, M1, M2), the new
-**F26**, SR-16 operator decision 1, SR-17's gate decision, and the F17-R harness. **Commits:**
-`99987a1`, `9021064`, `d6ae8b8`, `24c4ff8`.
-
-**Evidence and commands.** All runs serial, caches cleared, `PYTHONDONTWRITEBYTECODE=1`,
-`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`:
-
-```
-python3 -m unittest discover -s tests          # 3.12.4 rc=0 Ran 1509 OK (skipped=2)
-                                               # 3.13.5 rc=0 Ran 1509 OK (skipped=84)
-./scripts/run_tests.sh --expect any --twice    # RESULT: OK, deterministic run1 == run2
-./scripts/run_tests.sh --expect none --update-baseline   # bare venv --without-pip 3.12.4
-                                               # rc=0 RESULT: OK (ran=1509 skipped=90)
-./scripts/lint.sh                              # LINT: OK
-python3 scripts/mutate.py                      # see below
-```
-
-**THE HARNESS IS THE ROUND'S REAL DELIVERABLE.** `scripts/mutate.py` + `scripts/mutants.json` are the
-first mutation tooling ever tracked in this repository. **Measured 7/7 KILLED at `99987a1`**, control OK
-on the unmutated extract, working tree UNCHANGED. It then refused two subsequent runs, both times
-correctly, and both times against its own author:
-
-1. **Trap 2.** Five new mutants' killers did not resolve at the then-HEAD, because the tests existed only
-   in the uncommitted tree. Without the loader pre-flight all five would have reported **KILLED** from
-   synthesised `_FailedTest` failures. This is the trap `CLAUDE.md` already warned about in prose; it is
-   now enforced by code.
-2. **Trap 3.** The `F22-bare-last-match` anchor matched **0** times, because `_ran_totals` is defined in
-   BOTH heredocs (separate python processes, no shared definition) so the body alone is not unique. An
-   unapplied patch would otherwise have reported **SURVIVED**, which is the direction that gets written
-   down as a finding.
-
-**And one mutant did its actual job: `F20-discriminator-too-broad` SURVIVED.** The negative control for
-`POLICY:PYTEST_UNUSABLE` printed only `collected 1 item` / `1 failed` with no package path, so the
-widened discriminator's remaining condition was never satisfied and the assertions passed for the wrong
-reason. The fixture now carries a traceback through `site-packages`, which is the realistic shape of a
-genuine failure inside an installed library — exactly what a too-broad discriminator would forgive. The
-mutant is now KILLED. **A pin that looks right and is not is the whole reason this tooling had to be
-tracked rather than rebuilt per round.**
-
-**Three findings changed shape under testing; those are the round's substantive corrections.**
-
-- **F22: the rule `docs/CLEAN_CLONE.md` prescribed is itself wrong, and the fix's own new test caught it.**
-  That document said to "take the last match rather than the first". MEASURED with a 4-test module whose
-  first test prints `Ran 3 tests in 0.001s`: in the redirected log the REAL total is at **line 3** and the
-  decoy at **line 6**, because unittest writes its summary to stderr UNBUFFERED while a test's `print`
-  goes to block-buffered stdout and flushes at process exit. First-match was right there; last-match was
-  wrong. For a test whose SUBPROCESS writes to the inherited fd, the order is chronological and the
-  opposite holds. **Position in the log is not information.** Both sites now anchor on unittest's summary
-  BLOCK (`separator2`, 70 dashes, immediately preceding `Ran N tests`): `['4']` on both the buffered and
-  the unbuffered log, where a bare pattern gives `['4', '3']`. CLEAN_CLONE.md is corrected, not merely
-  implemented.
-- **F21: the kit had already found this, at the CONSUMER.** `dashboard.py:2441` documents the identical
-  measurement, from round 13's container sweep, with a passing test. What was unfixed was the PRODUCER,
-  which every other consumer reads raw — the demo's stdout, the protocol's conditional label, the
-  records. Fixing it made a *passing* dashboard test's assertion false, because it pinned a contradiction
-  an honest producer no longer emits; that branch now pins both halves and keeps the consumer-side
-  detector pinned on a contradiction the producer fix cannot prevent.
-- **F26, NEW**, found by sweeping F21's SHAPE instead of fixing F21's site.
-  `HypothesisResult.__post_init__` truth-tested `blocking` and `supported_blockers` — both declared
-  `tuple`, both built with `tuple(...)` by `_hypothesis`, both PUBLIC CONSTRUCTOR PARAMETERS that nothing
-  coerced. MEASURED through the public constructor, no `object.__setattr__`: `blocking=Liar(glob)` turned
-  **INCONCLUSIVE into SUPPORTED** and left **no reason mentioning a failed gate**, while both names were
-  still present. ALSO MEASURED, so the grade is honest: **bounded** — `JointResult.__post_init__` reads
-  `gates`, not `blocking`, and refused the combination. Residue: a `HypothesisResult` consumed outside a
-  `JointResult`.
-
-**SR-17 — DECIDED, not deferred.** `docs/SR17_GATE_DECISION.md`. The task's deliverable is a judgement,
-and the judgement is **DO NOT PROCEED at this gate**, on four independent grounds, with re-open
-conditions P1–P5. **P4 is the binding one and is not a software task**: a named human owner for the
-erasure target and the held-out set, under institutional biosecurity review outside this repository.
-The file is written to be countersigned and carries an unsigned signature block. **No real model run,
-weight download, dataset use or biological tuning was performed, attempted or prepared.**
-
-**Remaining uncertainty.**
-- **F10 stays open by construction.** Commit messages `d87b48f` and `e436d93` state INFERENCE as
-  "confirms" / "direct evidence". They are immutable; this can only ever be noted.
-- **F17-R is narrowed, not closed.** 15 mutants are now re-derivable. The journal's ~265 historical kill
-  claims are not, and nothing can make them so. Whether SR-16's clause 1 now reaches PASS is for an
-  independent reviewer, not for this entry.
-- **The F7/F8/F9 pins are verbatim prose pins.** They die to deletion, weakening and inversion, which is
-  what their three mutants test. They cannot detect a *true* statement that is differently misleading.
-- **No checkbox is marked by this round.**
-
-
-## F19 — the typed attestation ordinals are HISTORICAL, not authoritative
-
-**Closed 2026-11-13.** This journal's typed ordinals contradict each other and the contradiction was
-recorded as unresolved for five rounds. SR-13 is labelled `(4th)`, `(5th)`, `(6th)`, `(8th)` — with no
-`(7th)` — then "fails **tenth**" (`:9988`) and "**eleventh** attestation" (`:12424`); SR-11 runs
-`(6th)`, `(7th)`, then "fails **eighth**" (`:10191`). `PROGRESS.md:8631-8633` states the problem in this
-journal's own words and calls the authoritative series **UNKNOWN**.
-
-**Resolution, following this project's own rule that a verified list "should be derived, not typed":**
-every typed ordinal in this file is **historical labelling with no authority**. The derived figure is the
-section count per task, from one command:
-
-```
-grep -oE "^## SR-[0-9]+" docs/PROGRESS.md | sed 's/^## //' | sort | uniq -c
-```
-
-Measured 2026-11-13 at HEAD `178c700`, **106 sections across 16 tasks**:
-
-| SR-00 | SR-01 | SR-02 | SR-03 | SR-04 | SR-05 | SR-06 | SR-07 |
-|---|---|---|---|---|---|---|---|
-| 1 | 2 | 5 | 4 | 4 | 4 | 7 | 2 |
-
-| SR-08 | SR-09 | SR-10 | SR-11 | SR-12 | SR-13 | SR-14 | SR-15 |
-|---|---|---|---|---|---|---|---|
-| 2 | 14 | 16 | 10 | 3 | 14 | 5 | 13 |
-
-**This count is an UPPER BOUND on attestations, not an attestation count**, and the distinction is the
-whole reason the typed ordinals drifted: some sections are builder records rather than independent QA
-passes, and the headings are not written to one pattern (`QA verdict`, `PASS`, `FAIL`, `Re-...` and
-bare descriptive titles all occur), so no single grep separates the two. **What is authoritative is the
-per-section text together with `git log`** — each section is individually datable and names its own
-verdict. **Do not quote a count of attestations for any task without deriving it from the sections
-themselves.** The orchestrator relayed these typed figures to reviewers as authoritative before the
-contradiction was caught; that is the integrity defect, and the substance each ordinal labelled is
-intact.
-
 ## SR-00 — Scaffold, version control, provenance
 
 - **Task ID and date:** SR-00, 2026-11-09
@@ -13760,3 +13589,290 @@ must emit a tool call to end a turn.**
 - **F17-R is narrowed, not closed.** `harness.py` lives in a session scratchpad and will disappear with it.
   What survives is in this entry: every anchor, every replacement text, every invocation, and the four
   failure modes watched first. The five pins, which are tracked, are the durable part.
+
+## Mutation evidence replicated on a second platform — 2026-11-15, HEAD `f1ef34f`
+
+**Task ID:** F17-R (narrowing, continued). **What is new:** the 15 tracked mutants were run on a worker
+that is not this laptop, and the verdicts agree.
+
+| | local | Modal worker |
+|---|---|---|
+| platform | macOS (Darwin 25.6.0), arm64 | `Linux-4.19.0-gvisor-x86_64-with-glibc2.36` |
+| CPython | 3.12.4 | **3.12.10** |
+| result | **15/15 KILLED** | **15/15 KILLED** |
+| control | OK on unmutated extract | OK on unmutated extract |
+| tree after | UNCHANGED | UNCHANGED |
+
+Commands:
+
+```
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 scripts/mutate.py              # local, all 15
+python3 -m modal run scripts/modal_mutants.py                           # one container per mutant
+```
+
+**WHY A SECOND PLATFORM IS EVIDENCE AND NOT JUST SPEED.** Every kill in this project had been measured
+on one machine, with one Python build, one filesystem and one git. **F20 was itself a finding about
+results being hostage to one host's installed packages** — the suite read `RESULT: FAIL` on this laptop's
+conda interpreter because of a broken `llvmlite` outside the repository. A pin that passes only here is
+not a pin. All fifteen hold on a different OS, a different architecture, a different libc and a
+different CPython patch level.
+
+**What was uploaded, and what was refused.** `git archive HEAD` only: 72 members, **none under
+`.git/`**, because commit objects carry author identity. `scripts/modal_mutants.py` refuses to upload
+if it finds an email address in the tarball, and refuses if the tree is dirty, since then
+`git archive HEAD` is not what is being tested. Git runs on the worker with
+`GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null` and no identity configured at all.
+
+**One defect in that screen, found before it mattered.** The first version tested `b".git/" in blob` and
+answered **YES** on a clean tree — the match came from FILE CONTENT, because
+`docs/SR12_INDEPENDENT_REVIEW.md` discusses `.git/` in prose. A byte-substring search reported as a
+structural fact, which is the error class this project most often finds in its own history. The check
+now enumerates tar members.
+
+**Remaining uncertainty.**
+- **Two platforms is two, not many.** Both are x86-or-arm CPython 3.12; nothing here speaks to 3.13 on
+  Linux, to a case-sensitive filesystem beyond the four known skips, or to Windows.
+- **The 15 mutants are the ones someone thought to write.** A mutation score over a hand-written
+  manifest measures the manifest. It says nothing about the defects nobody modelled, and the manifest
+  is deliberately small: 15 against ~265 historical kill claims that remain unreproducible.
+- **F17-R is narrowed, not closed**, and whether SR-16's clause 1 now reaches PASS is for an
+  independent reviewer.
+
+
+## SR-12 residuals and SR-17 gate — orchestrator round, 2026-11-13/15
+
+**Task IDs:** SR-12 finding closures (F7, F8, F9, F16, F18, F19, F20, F20-b, F21, F22, M1, M2), the new
+**F26**, SR-16 operator decision 1, SR-17's gate decision, and the F17-R harness. **Commits:**
+`99987a1`, `9021064`, `d6ae8b8`, `24c4ff8`.
+
+**Evidence and commands.** All runs serial, caches cleared, `PYTHONDONTWRITEBYTECODE=1`,
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`:
+
+```
+python3 -m unittest discover -s tests          # 3.12.4 rc=0 Ran 1509 OK (skipped=2)
+                                               # 3.13.5 rc=0 Ran 1509 OK (skipped=84)
+./scripts/run_tests.sh --expect any --twice    # RESULT: OK, deterministic run1 == run2
+./scripts/run_tests.sh --expect none --update-baseline   # bare venv --without-pip 3.12.4
+                                               # rc=0 RESULT: OK (ran=1509 skipped=90)
+./scripts/lint.sh                              # LINT: OK
+python3 scripts/mutate.py                      # see below
+```
+
+**THE HARNESS IS THE ROUND'S REAL DELIVERABLE.** `scripts/mutate.py` + `scripts/mutants.json` are the
+first mutation tooling ever tracked in this repository. **Measured 7/7 KILLED at `99987a1`**, control OK
+on the unmutated extract, working tree UNCHANGED. It then refused two subsequent runs, both times
+correctly, and both times against its own author:
+
+1. **Trap 2.** Five new mutants' killers did not resolve at the then-HEAD, because the tests existed only
+   in the uncommitted tree. Without the loader pre-flight all five would have reported **KILLED** from
+   synthesised `_FailedTest` failures. This is the trap `CLAUDE.md` already warned about in prose; it is
+   now enforced by code.
+2. **Trap 3.** The `F22-bare-last-match` anchor matched **0** times, because `_ran_totals` is defined in
+   BOTH heredocs (separate python processes, no shared definition) so the body alone is not unique. An
+   unapplied patch would otherwise have reported **SURVIVED**, which is the direction that gets written
+   down as a finding.
+
+**And one mutant did its actual job: `F20-discriminator-too-broad` SURVIVED.** The negative control for
+`POLICY:PYTEST_UNUSABLE` printed only `collected 1 item` / `1 failed` with no package path, so the
+widened discriminator's remaining condition was never satisfied and the assertions passed for the wrong
+reason. The fixture now carries a traceback through `site-packages`, which is the realistic shape of a
+genuine failure inside an installed library — exactly what a too-broad discriminator would forgive. The
+mutant is now KILLED. **A pin that looks right and is not is the whole reason this tooling had to be
+tracked rather than rebuilt per round.**
+
+**Three findings changed shape under testing; those are the round's substantive corrections.**
+
+- **F22: the rule `docs/CLEAN_CLONE.md` prescribed is itself wrong, and the fix's own new test caught it.**
+  That document said to "take the last match rather than the first". MEASURED with a 4-test module whose
+  first test prints `Ran 3 tests in 0.001s`: in the redirected log the REAL total is at **line 3** and the
+  decoy at **line 6**, because unittest writes its summary to stderr UNBUFFERED while a test's `print`
+  goes to block-buffered stdout and flushes at process exit. First-match was right there; last-match was
+  wrong. For a test whose SUBPROCESS writes to the inherited fd, the order is chronological and the
+  opposite holds. **Position in the log is not information.** Both sites now anchor on unittest's summary
+  BLOCK (`separator2`, 70 dashes, immediately preceding `Ran N tests`): `['4']` on both the buffered and
+  the unbuffered log, where a bare pattern gives `['4', '3']`. CLEAN_CLONE.md is corrected, not merely
+  implemented.
+- **F21: the kit had already found this, at the CONSUMER.** `dashboard.py:2441` documents the identical
+  measurement, from round 13's container sweep, with a passing test. What was unfixed was the PRODUCER,
+  which every other consumer reads raw — the demo's stdout, the protocol's conditional label, the
+  records. Fixing it made a *passing* dashboard test's assertion false, because it pinned a contradiction
+  an honest producer no longer emits; that branch now pins both halves and keeps the consumer-side
+  detector pinned on a contradiction the producer fix cannot prevent.
+- **F26, NEW**, found by sweeping F21's SHAPE instead of fixing F21's site.
+  `HypothesisResult.__post_init__` truth-tested `blocking` and `supported_blockers` — both declared
+  `tuple`, both built with `tuple(...)` by `_hypothesis`, both PUBLIC CONSTRUCTOR PARAMETERS that nothing
+  coerced. MEASURED through the public constructor, no `object.__setattr__`: `blocking=Liar(glob)` turned
+  **INCONCLUSIVE into SUPPORTED** and left **no reason mentioning a failed gate**, while both names were
+  still present. ALSO MEASURED, so the grade is honest: **bounded** — `JointResult.__post_init__` reads
+  `gates`, not `blocking`, and refused the combination. Residue: a `HypothesisResult` consumed outside a
+  `JointResult`.
+
+**SR-17 — DECIDED, not deferred.** `docs/SR17_GATE_DECISION.md`. The task's deliverable is a judgement,
+and the judgement is **DO NOT PROCEED at this gate**, on four independent grounds, with re-open
+conditions P1–P5. **P4 is the binding one and is not a software task**: a named human owner for the
+erasure target and the held-out set, under institutional biosecurity review outside this repository.
+The file is written to be countersigned and carries an unsigned signature block. **No real model run,
+weight download, dataset use or biological tuning was performed, attempted or prepared.**
+
+**Remaining uncertainty.**
+- **F10 stays open by construction.** Commit messages `d87b48f` and `e436d93` state INFERENCE as
+  "confirms" / "direct evidence". They are immutable; this can only ever be noted.
+- **F17-R is narrowed, not closed.** 15 mutants are now re-derivable. The journal's ~265 historical kill
+  claims are not, and nothing can make them so. Whether SR-16's clause 1 now reaches PASS is for an
+  independent reviewer, not for this entry.
+- **The F7/F8/F9 pins are verbatim prose pins.** They die to deletion, weakening and inversion, which is
+  what their three mutants test. They cannot detect a *true* statement that is differently misleading.
+- **No checkbox is marked by this round.**
+
+
+## F19 — the typed attestation ordinals are HISTORICAL, not authoritative
+
+**Closed 2026-11-13.** This journal's typed ordinals contradict each other and the contradiction was
+recorded as unresolved for five rounds. SR-13 is labelled `(4th)`, `(5th)`, `(6th)`, `(8th)` — with no
+`(7th)` — then "fails **tenth**" (`:9988`) and "**eleventh** attestation" (`:12424`); SR-11 runs
+`(6th)`, `(7th)`, then "fails **eighth**" (`:10191`). `PROGRESS.md:8631-8633` states the problem in this
+journal's own words and calls the authoritative series **UNKNOWN**.
+
+**Resolution, following this project's own rule that a verified list "should be derived, not typed":**
+every typed ordinal in this file is **historical labelling with no authority**. The derived figure is the
+section count per task, from one command:
+
+```
+grep -oE "^## SR-[0-9]+" docs/PROGRESS.md | sed 's/^## //' | sort | uniq -c
+```
+
+Measured 2026-11-13 at HEAD `178c700`, **106 sections across 16 tasks**:
+
+| SR-00 | SR-01 | SR-02 | SR-03 | SR-04 | SR-05 | SR-06 | SR-07 |
+|---|---|---|---|---|---|---|---|
+| 1 | 2 | 5 | 4 | 4 | 4 | 7 | 2 |
+
+| SR-08 | SR-09 | SR-10 | SR-11 | SR-12 | SR-13 | SR-14 | SR-15 |
+|---|---|---|---|---|---|---|---|
+| 2 | 14 | 16 | 10 | 3 | 14 | 5 | 13 |
+
+**This count is an UPPER BOUND on attestations, not an attestation count**, and the distinction is the
+whole reason the typed ordinals drifted: some sections are builder records rather than independent QA
+passes, and the headings are not written to one pattern (`QA verdict`, `PASS`, `FAIL`, `Re-...` and
+bare descriptive titles all occur), so no single grep separates the two. **What is authoritative is the
+per-section text together with `git log`** — each section is individually datable and names its own
+verdict. **Do not quote a count of attestations for any task without deriving it from the sections
+themselves.** The orchestrator relayed these typed figures to reviewers as authoritative before the
+contradiction was caught; that is the integrity defect, and the substance each ordinal labelled is
+intact.
+
+
+## Independent QA on SR-16 clause 1 — FAIL, and its remediation. 2026-11-15
+
+**Verdict received: clause 1 remains FAIL; SR-16 must not be marked.** QA refuted one of the two
+carriers, left the other standing, and found a third that this round had introduced. Its full report is
+not in the tree (it was an in-session review); every finding acted on below is restated with its own
+evidence so the record stands without it.
+
+**APPEND-ONLY WAS VIOLATED BY THIS ROUND, AND THAT IS THE WORST OF THE FINDINGS.**
+`git diff 75f51e6 7bd6c75 --numstat -- docs/PROGRESS.md` → `598 0`, with a hunk `@@ -24,6 +24,177 @@`:
+**171 lines prepended** to a file whose line 3 reads *"Durable, append-only record."* Every
+`PROGRESS.md:<line>` citation in the kit was therefore off by exactly **+171** — including
+`docs/EVALUATION_PROTOCOL.md:3`, *the sentence that is F18's fix*, and the F19 entry above, whose own
+thesis is "derive, not type". Clause 1 asks whether a stranger can check what a checkbox asserts, and at
+that HEAD every pointer that would let them do so missed. **Fixed by moving the prepended block to the
+end of this file**: one move, no citation edited, all 25 distinct citations resolve again. Verified
+`:27`→SR-00, `:6362`→SR-09 r10 PASS, `:11314`→SR-06, `:12666`→SR-12, `:13044`→SR-15.
+
+**SR-16's §1.2 IS FALSE AND IS WITHDRAWN.** SR-00 **is** independently attested, at `:27`:
+*"**Independent QA verdict and test log:** **PASS**"*, with hand-re-derived arithmetic, three QA-raised
+defects, remaining limitations and a commit SHA — every element `CLAUDE.md:13-14` requires. Byte-identical
+at three HEADs; `git log -S` traces it to `04a393b`, the commit that flips the checkbox, so it was not
+added later. D1 of those three defects forced `tests/toy/` → `tests/toy_tests/`: a rubber stamp does not
+rename a test package. **The error's mechanism is this project's own rule, applied to its own review:**
+the finding rested on `grep -c "^## SR-00 — QA verdict"` → 0. The count is true; the inference is not,
+because the attestation sits under a different heading. **A count of a construct is not a measurement of
+its behaviour.** Withdrawn in `docs/SR16_AUDIT_REPORT.md` §1.2 (superseded text preserved) and in
+`docs/RELEASE_NOTE.md` defect #1, where it was **a false negative claim about this project's own work in
+the reader-facing artifact**.
+
+**THE HARNESS REPORTED A FALSE KILL.** MEASURED: a mutant deleting one character so
+`src/toy/benchmark.py` no longer parses returned `KILLED  rc=1; no FAIL/ERROR line`, and the run exited
+**0**. Two causes, the second structural: `LOADER_MARKERS` was a five-string BLOCKLIST missing
+`SyntaxError`/`IndentationError`/`ImportError`; and the loader pre-flight runs on the **unmutated**
+extract, so it can never catch a load failure *caused by* the mutation — which `mutate.py`'s own header
+claimed it closed. `classify()` is now an ALLOWLIST on the evidence a kill must leave: unittest must
+report `Ran N tests` **and** name a `FAIL:`/`ERROR:` line. Re-ran the probe: `ERROR … NOT a kill`,
+`0/1 KILLED`, exit **1**. No previously recorded figure is affected — all 15 produced named `FAIL:`
+lines — but it was the reassuring direction of error inside the one tool whose purpose is to make
+mutation claims trustworthy.
+
+**THE SIGTERM PATH CRASHED.** `bail()` removed the extract *before* the inner `finally` restored, so
+`write_text` raised `FileNotFoundError`, which is not a `RunFailure`, so the handler missed it and the
+process died with **exit 1, never 130**. `scripts/modal_mutants.py` read any nonzero exit as NOT KILLED,
+so an interrupted or preempted container would have been **reported as a finding**. `bail()` now restores
+every applied mutation first, from a registry, and `modal_mutants.py` separates **NO VERDICT** from NOT
+KILLED. The safety half was never in doubt: the working tree is not touched, re-verified across the
+deliberate SIGTERM.
+
+**THE 15 MUTANTS DID NOT COVER THE EVIDENCE THAT CARRIED THE FAIL, and that criticism was right.** They
+were a regression-pin suite for this round's own fixes: 6 on demo stdout, 4 behavioural in
+`benchmark.py`, 2 in `run_tests.sh`, 3 on docstring prose — and **zero** on `schema.py`,
+`robustness.py`, `dashboard.py`, `claim_ledger.py`, which are exactly the modules whose marks rested on
+mutation sweeps nobody can re-run. **Four class-U mutants added**, and their killers were **derived**,
+not written: each mutant was applied to a disposable copy and the existing suite was run to see what
+failed. Every killer is a **pre-existing** test, so these re-derive a slice of those marks' own evidence
+rather than this round's work.
+
+```
+U-schema-nonblank-guard           KILLED  test_schema.InvalidInputs.test_blank_run_id
+U-claim-ledger-genesis-digest     KILLED  test_claim_ledger.RequiredFields.test_evidence_ref_shape
+U-robustness-insufficient-counts  KILLED  test_robustness.TestQAHardening.test_insufficient_evidence_requires_n_below_required
+U-dashboard-control-char-escape   KILLED  test_dashboard.Injection.test_bidi_and_control_made_visible
+4/4 KILLED, working tree UNCHANGED.    Manifest: 19 mutants.
+```
+
+**F17-R'S DISCLOSURE HALF WAS NEVER DONE.** `grep -nic -e mutat -e mutant README.md` → **0**, and
+`git grep -l -e mutants.json -e mutate.py -- tests/ .github/ scripts/lint.sh scripts/run_tests.sh` →
+**nothing**, so an anchor that drifted was caught only by running a script nothing ran. Both fixed:
+`README.md` now carries a "Mutation evidence: what is checkable and what is not" section stating that
+**every mutation figure in this journal before 2026-11-13 is ATTESTER-REPORTED AND UNREPRODUCED**, and
+`tests/toy_tests/test_scripts.py` now asserts, for every declared mutant, that its anchor occurs exactly
+once and that every killer resolves to a real test — the harness's own traps 2 and 3, enforced by the
+suite.
+
+**A `-OO` REGRESSION, declared.** The F7/F8/F9 pins read `__doc__` directly, which `-OO` strips — a class
+this project had already **structurally closed** one task earlier by rewriting all 31 `__doc__` reads in
+`test_benchmark.py` to `ast.get_docstring(..., clean=False)`. Measured, 3.12.4 `-OO`:
+`test_teacher_student` 55/FAILED(1) → 57/FAILED(1, **errors=2**); `test_stability` 106/OK →
+107/**FAILED(1)**. All now read the source literal; both modules are **OK in both modes**, and the
+pre-existing `-OO` failure at `test_normalization_analogy_discloses_the_opposite_sign` — present
+identically at `75f51e6`, so not from this round — is fixed too.
+
+**Smaller:** `dashboard.py` stated F21's withdrawn mechanism in the present tense for one commit (the
+project's own "a withdrawn guarantee outlives its withdrawal in a comment" class); re-tensed, and the
+consumer-side check kept with its reason. `scripts/modal_mutants.py` is a tracked script requiring the
+network and a third-party account, which contradicted `docs/CLEAN_CLONE.md:3` and `README.md`; now
+declared in both, with `git grep -l modal -- tests/ .github/ scripts/lint.sh scripts/run_tests.sh src/`
+→ nothing, so no offline guarantee depends on it. `docs/RELEASE_NOTE.md` figures re-measured.
+
+**Measured at this tree (hardened gate, run 1794779209):**
+
+```
+3.12.4  rc=0  Ran 1513  OK (skipped=2)
+3.13.5  rc=0  Ran 1513  OK (skipped=84)
+bare venv --without-pip 3.12.4, --expect none --update-baseline: rc=0,
+    RESULT: OK (ran=1513 skipped=90); test_scripts 163 -> 164; rows summing to 1513
+./scripts/lint.sh: LINT: OK
+-OO: test_teacher_student 57 OK, test_stability 107 OK
+```
+
+**Remaining uncertainty.**
+- **Clause 1 is still FAIL and SR-16 is still unmarked.** 19 tracked mutants against ~313 unreproducible
+  historical claims. Four class-U modules now have one behavioural mutant each; a mark whose decisive
+  evidence was *"30 write routes, 14/14 refused, 8 killing mutants"* is not re-derived by one mutant.
+- **The Modal 15/15 was not verified by QA** (it needs network and the `modal` package) and was produced
+  before the `bail()`/exit-status fix, by a harness that would have mis-reported an interruption. The
+  figure stands; the tool that produced it has since been corrected.
+- **`--full` has never completed.** QA ran it >35 minutes and interrupted it; it confirmed the branch
+  genuinely launches the whole suite, so it is not a no-op, but no `--full` verdict has been observed.
+  In practice `SURVIVED_UNCONFIRMED` is the operative default, and no SURVIVE claim is made anywhere.
+- **The control is asymmetric to `--full`** (read, not measured): the control covers only the killers,
+  while `--full` adjudicates against the whole suite, so a suite red for an unrelated reason would turn
+  a survivor into KILLED. Harmless at this HEAD, where the full suite is green on both interpreters.
+- **No checkbox is marked by this round.** F10 remains open by construction.
