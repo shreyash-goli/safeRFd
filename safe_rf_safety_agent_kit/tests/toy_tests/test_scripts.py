@@ -2289,10 +2289,27 @@ class TestRunTestsMechanics(_SyntheticBase):
         self.assertIn("authoritative", r.stdout)            # the note says the unittest leg still stands
         self.assertIn("OSError", r.stdout)                  # and it SHOWS the offending output, loudly
 
-        # NEGATIVE CONTROL: pytest collected and failed for real. Still fatal, by every token.
+        # NEGATIVE CONTROL: pytest collected and failed FOR REAL. Still fatal, by every token.
+        #
+        # THIS CONTROL WAS TOO WEAK AT FIRST AND A MUTANT PROVED IT. The earlier version printed only
+        # `collected 1 item` / `1 failed`, with no package path anywhere -- so a mutant that DELETED the
+        # `PT_TOTAL -eq 0` and `no collected line` conditions SURVIVED: its remaining condition (a
+        # traceback naming an installed package) was never satisfied by this fixture, so the branch did
+        # not fire either way and the assertions below passed for the wrong reason.
+        #
+        # The realistic shape is the one that matters: a genuine test failure whose traceback passes
+        # THROUGH an installed library shows site-packages paths, which is common and is exactly what the
+        # widened discriminator would forgive. The fixture now carries one, so every condition the branch
+        # tests is exercised and dropping any of them is fatal to this test.
         real_red = ('import sys\n'
                     'if __name__ == "__main__":\n'
                     '    print("collected 1 item")\n'
+                    '    print("")\n'
+                    '    print("=================================== FAILURES ===================================")\n'
+                    '    print("_______________________________ test_division ________________________________")\n'
+                    '    print("  File \'/opt/miniconda3/lib/python3.13/site-packages/numpy/_core/'
+                    'fromnumeric.py\', line 3504, in mean")\n'
+                    '    print("ZeroDivisionError: division by zero")\n'
                     '    print("1 failed in 0.01s")\n'
                     '    sys.exit(1)\n')
         r2 = self._fake_pytest_root(real_red)
