@@ -113,9 +113,9 @@
     {
       "id": "F22-bare-last-match",
       "file": "scripts/run_tests.sh",
-      "note": "drop the dash anchor and take the bare LAST match -- the rule docs/CLEAN_CLONE.md originally prescribed. Reads a test's block-buffered `print` as the run total. Anchored on summarize()'s copy, which is the site with a behavioural observable.",
-      "find": "    anchored = re.findall(r\"(?m)^-{10,}\\nRan (\\d+) tests?\", text)\n    if anchored:\n        return [int(n) for n in anchored]\n    return [int(n) for n in re.findall(r\"(?m)^Ran (\\d+) tests?\", text)]\n\n\ndef _ran_totals",
-      "replace": "    return [int(n) for n in re.findall(r\"(?m)^Ran (\\d+) tests?\", text)]\n\n\ndef _ran_totals",
+      "note": "drop the dash anchor and take the bare LAST match -- the rule docs/CLEAN_CLONE.md originally prescribed. Reads a test's block-buffered `print` as the run total. Anchored on summarize()'s copy, which is the site with a behavioural observable. Anchored via the line FOLLOWING summarize()'s copy, because _ran_totals is defined in BOTH heredocs (separate python processes) and the body alone is not unique -- trap 3 caught exactly that.",
+      "find": "    anchored = re.findall(r\"(?m)^-{10,}\\nRan (\\d+) tests?\", text)\n    if anchored:\n        return [int(n) for n in anchored]\n    return [int(n) for n in re.findall(r\"(?m)^Ran (\\d+) tests?\", text)]\n\n\nt = open(sys.argv[1]",
+      "replace": "    return [int(n) for n in re.findall(r\"(?m)^Ran (\\d+) tests?\", text)]\n\n\nt = open(sys.argv[1]",
       "killers": [
         "tests.toy_tests.test_scripts.TestRunTestsMechanics.test_a_captured_ran_line_does_not_understate_the_total_f22"
       ]
