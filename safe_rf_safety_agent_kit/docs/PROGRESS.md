@@ -24,6 +24,55 @@ per README step 1 and to avoid writing to that repo's `main`. No remote is confi
 
 ---
 
+## Mutation evidence replicated on a second platform — 2026-11-15, HEAD `f1ef34f`
+
+**Task ID:** F17-R (narrowing, continued). **What is new:** the 15 tracked mutants were run on a worker
+that is not this laptop, and the verdicts agree.
+
+| | local | Modal worker |
+|---|---|---|
+| platform | macOS (Darwin 25.6.0), arm64 | `Linux-4.19.0-gvisor-x86_64-with-glibc2.36` |
+| CPython | 3.12.4 | **3.12.10** |
+| result | **15/15 KILLED** | **15/15 KILLED** |
+| control | OK on unmutated extract | OK on unmutated extract |
+| tree after | UNCHANGED | UNCHANGED |
+
+Commands:
+
+```
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python3 scripts/mutate.py              # local, all 15
+python3 -m modal run scripts/modal_mutants.py                           # one container per mutant
+```
+
+**WHY A SECOND PLATFORM IS EVIDENCE AND NOT JUST SPEED.** Every kill in this project had been measured
+on one machine, with one Python build, one filesystem and one git. **F20 was itself a finding about
+results being hostage to one host's installed packages** — the suite read `RESULT: FAIL` on this laptop's
+conda interpreter because of a broken `llvmlite` outside the repository. A pin that passes only here is
+not a pin. All fifteen hold on a different OS, a different architecture, a different libc and a
+different CPython patch level.
+
+**What was uploaded, and what was refused.** `git archive HEAD` only: 72 members, **none under
+`.git/`**, because commit objects carry author identity. `scripts/modal_mutants.py` refuses to upload
+if it finds an email address in the tarball, and refuses if the tree is dirty, since then
+`git archive HEAD` is not what is being tested. Git runs on the worker with
+`GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_SYSTEM=/dev/null` and no identity configured at all.
+
+**One defect in that screen, found before it mattered.** The first version tested `b".git/" in blob` and
+answered **YES** on a clean tree — the match came from FILE CONTENT, because
+`docs/SR12_INDEPENDENT_REVIEW.md` discusses `.git/` in prose. A byte-substring search reported as a
+structural fact, which is the error class this project most often finds in its own history. The check
+now enumerates tar members.
+
+**Remaining uncertainty.**
+- **Two platforms is two, not many.** Both are x86-or-arm CPython 3.12; nothing here speaks to 3.13 on
+  Linux, to a case-sensitive filesystem beyond the four known skips, or to Windows.
+- **The 15 mutants are the ones someone thought to write.** A mutation score over a hand-written
+  manifest measures the manifest. It says nothing about the defects nobody modelled, and the manifest
+  is deliberately small: 15 against ~265 historical kill claims that remain unreproducible.
+- **F17-R is narrowed, not closed**, and whether SR-16's clause 1 now reaches PASS is for an
+  independent reviewer.
+
+
 ## SR-12 residuals and SR-17 gate — orchestrator round, 2026-11-13/15
 
 **Task IDs:** SR-12 finding closures (F7, F8, F9, F16, F18, F19, F20, F20-b, F21, F22, M1, M2), the new
