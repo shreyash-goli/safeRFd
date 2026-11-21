@@ -1,0 +1,110 @@
+# Offline, read-only CI for the TOY safety-audit kit. No secrets, no deploy, no pushes, no artifacts uploaded.
+# (.env.example flags are inert markers read by no code; enforcement is the socket guard.)
+# NETWORK, precisely. BOTH JOBS REACH github.com BEFORE A TEST RUNS: actions/checkout@v4 and
+# actions/setup-python@v5 are themselves fetched from github.com, checkout fetches this repository, and
+# setup-python fetches a Python build unless the runner image already carries that version. This comment used
+# to open "Nothing in this workflow reaches a remote host except the pip-install step of the optional-deps
+# job", and that was FALSE for core-no-deps as well -- independently of hermeticity, and it is the same claim
+# README.md retracted in SR-15's eighth round. The true statement is narrower in two ways at once -- it is
+# about the SUITE rather than the workflow, and about the ADDRESS A STEP ASKS FOR rather than about arrival:
+# NO STEP THAT RUNS scripts/lint.sh, scripts/run_tests.sh OR scripts/demo.py ASKS FOR A NON-LOOPBACK ADDRESS,
+# and the only step that asks a package index for anything is the pip-install step of the optional-deps job
+# (PyPI plus download.pytorch.org). README.md retracted the wording "reaches a remote host", and the clause
+# above used to be worded with it, rescued only by the sentence that followed: a reader who stopped at the
+# colon got exactly the claim README.md withdrew, and until SR-15's tenth round no needle covered that
+# rephrasing. What the suite tests is the address asked for, and no CI job has ever run network-denied, for the
+# plainer reason that this workflow has never been executed at all: hermeticity is UNATTESTED FOR CI. This
+# clause used to add that it was unattested "exactly as it is in docs/CLEAN_CLONE.md", and that cross-reference
+# is now wrong -- at 18107f8 a macOS sandbox-exec profile denying network in and out attested it for the suite,
+# the demo and the lint script on ONE developer host, on CPython 3.12.4 and 3.13.5, with a control in the same
+# sandbox proving the denial was live. That is one host, one OS, one mechanism and two egress paths: no runner,
+# no Linux, and nothing about this file. See docs/CLEAN_CLONE.md, "First observation in a network-denied
+# environment".
+# Every test step runs the suite through scripts/run_tests.sh, whose socket guard makes the
+# patched socket entry points raise (the patched and deliberately-unpatched names are tuples in that script).
+# But the suite does attempt connections, and this comment used to deny it: the guard's own negative controls
+# re-invoke the runner with --no-network-guard, which is what makes them controls, and the runner's canary
+# connect runs unguarded in the test that proves a missing guard is detected. Every one of those targets is
+# LOOPBACK -- a closed port on 127.0.0.1, a loopback bind or UDP sendto, an AF_UNIX socket -- so they are
+# refused by the runner's own stack, over the loopback device, and no packet reaches a network interface. This
+# line used to say "no packet reaches an interface", which is wrong in the one word that matters: loopback
+# traffic DOES traverse `lo`. docs/CLEAN_CLONE.md states the careful version, and this line now matches it.
+# The targets aimed at 192.0.2.1 (TEST-NET-1, unroutable only by convention) until SR-15. See
+# docs/CLEAN_CLONE.md, "Connection attempts the suite itself makes". No egress allow-list is configured for the
+# runner, so this is a property of the suite, not of CI.
+# NO LINTER IS INSTALLED BY EITHER JOB, DELIBERATELY, and that is load-bearing for the skip policy. scripts/lint.sh
+# treats ruff's correctness rules (E9,F63,F7,F82) as FATAL when ruff is present and never fails when it is absent,
+# so both jobs run its stdlib-only path. The test of the fatal-ruff behaviour therefore SKIPS here, with the reason
+# "optional developer tool `ruff` is not on PATH" -- the second environment-skip category in scripts/run_tests.sh
+# (capped, and excluded from the skip floors and the baseline). Until SR-15's third round that test's reason named
+# no package, so BOTH jobs below would have gone red on every push: core-no-deps with POLICY:NONE_REASON and
+# optional-deps with POLICY:TORCH_MODE_MISSING. The defect was invisible on any machine that had ruff. If you add a
+# linter to either job, expect that skip to disappear and the behavioural test to run; nothing else changes.
+# `ruff` is the only name on the `TOOLS` allowlist in scripts/run_tests.sh, and that allowlist is the fifth
+# round's fix: a test gated on any OTHER absent tool must declare its name there (the suite's own
+# test_the_TOOLS_allowlist_is_exactly_the_tools_this_suite_gates_on derives the set from the skip sites and goes
+# red otherwise), because an undeclared name is POLICY:TOOL_UNDECLARED in every mode, `--expect any` included.
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  # Fixed so hash-order effects are identical run to run; see scripts/run_tests.sh.
+  PYTHONHASHSEED: "0"
+
+jobs:
+  core-no-deps:
+    name: core, nothing installed (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Confirm nothing third-party is installed
+        run: |
+          python -c "import sys; print(sys.version)"
+          for m in torch numpy pytest yaml; do
+            if python -c "import $m" 2>/dev/null; then echo "unexpected: $m is installed"; exit 1; fi
+          done
+      - name: Lint (stdlib only)
+        run: ./scripts/lint.sh
+      - name: Offline suite, run twice (torch/numpy tests must be SKIPPED with a reason)
+        run: ./scripts/run_tests.sh --expect none --twice
+      - name: Offline demo
+        run: python scripts/demo.py
+
+  optional-deps:
+    name: torch+numpy pinned (py3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned optional dependencies (the only network use in this workflow)
+        run: |
+          python -m pip install --upgrade "pip<26"
+          python -m pip install -c constraints.txt -r requirements-dev.txt numpy \
+            torch --extra-index-url https://download.pytorch.org/whl/cpu
+          python -c "import numpy, torch; print('numpy', numpy.__version__, 'torch', torch.__version__)"
+          python -c "import numpy; assert numpy.__version__.startswith('1.'), 'numpy must stay <2'"
+      - name: Lint
+        run: ./scripts/lint.sh
+      - name: Offline suite under unittest and pytest, run twice (torch tests must RUN)
+        run: ./scripts/run_tests.sh --expect torch --twice
+      - name: Offline demo
+        run: python scripts/demo.py

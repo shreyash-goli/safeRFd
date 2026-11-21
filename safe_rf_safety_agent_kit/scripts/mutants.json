@@ -1,0 +1,205 @@
+{
+  "_README": [
+    "Tracked mutant manifest for scripts/mutate.py. Closes SR-12's F17-R.",
+    "Every entry must be re-derivable by a stranger: `find` is matched EXACTLY ONCE or the RUN fails",
+    "(not the mutant -- see trap 3 in scripts/mutate.py), and `killers` are resolved through the real",
+    "unittest loader before anything is mutated (trap 2).",
+    "A KILLED result here is evidence. A SURVIVED_UNCONFIRMED result is not a finding: only --full,",
+    "which asserts that NOTHING in the suite catches the mutant, can support a survival claim.",
+    "Adding a mutant is cheap and is the point. Removing one silently is how this project lost 265",
+    "previous results.",
+    "CLASS-U MUTANTS (`U-` prefix) target the four modules whose marks rested on mutation sweeps nobody can re-run -- schema.py (SR-04), robustness.py (SR-11), claim_ledger.py (SR-13/14), dashboard.py (SR-13). Their killers are EXISTING tests, derived by applying each mutant and seeing what failed, not written for this manifest. That is deliberate: it re-derives a slice of those marks' own evidence, which is what F17-R asked for and what the first 15 mutants did NOT do."
+  ],
+  "mutants": [
+    {
+      "id": "Z-demo4-delete",
+      "file": "scripts/demo.py",
+      "note": "delete the step-[4] `(not refuted ...)` qualifier entirely; this is the exact text that was MISSING for 28 rounds, so the mutant restores the pre-fix state",
+      "find": " (not refuted on these {len(rb_seeds)} fixtures)",
+      "replace": "",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestDemo.test_demo_status_line_carries_its_not_refuted_qualifier_on_that_same_line"
+      ]
+    },
+    {
+      "id": "Z-demo4-relocate",
+      "file": "scripts/demo.py",
+      "note": "move the qualifier off the status line into its own print; stdout still contains every word of it, so an assertIn(..., stdout) pin would pass -- this is the hostile-quoting case",
+      "find": "        print(f\"[4] robustness probe (row reorder on mse_fsum, {len(rb_seeds)} seeds): \"\n              f\"status {card.status.value} (not refuted on these {len(rb_seeds)} fixtures)\")",
+      "replace": "        print(f\"[4] robustness probe (row reorder on mse_fsum, {len(rb_seeds)} seeds): \"\n              f\"status {card.status.value}\")\n        print(f\"    (not refuted on these {len(rb_seeds)} fixtures)\")",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestDemo.test_demo_status_line_carries_its_not_refuted_qualifier_on_that_same_line"
+      ]
+    },
+    {
+      "id": "Z-demo4-count-drift",
+      "file": "scripts/demo.py",
+      "note": "drop the probe to 3 seeds while hard-coding `these 12 fixtures`; the qualifier stays grammatical and verbatim-identical to the shipped wording but is now false, which no string pin can catch",
+      "find": "        rb_seeds = tuple(range(12))\n        card = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), seeds=rb_seeds)\n        check(card.summary is not None, \"robustness probe produced no summary\")\n        # Operator decision 1 (SR-16). This line used to print `status INVARIANCE_HOLDS` bare, while\n        # steps [3] and [5] both carried a qualifier. `INVARIANCE_HOLDS` names a probe that FAILED TO\n        # REFUTE invariance on a finite fixture set; it is not a proof of invariance, and a crop of\n        # this line was the kit's most quotable overclaim. The seed count is derived, not retyped.\n        print(f\"[4] robustness probe (row reorder on mse_fsum, {len(rb_seeds)} seeds): \"\n              f\"status {card.status.value} (not refuted on these {len(rb_seeds)} fixtures)\")",
+      "replace": "        rb_seeds = tuple(range(3))\n        card = rb.probe_shift(rb.mse_fsum, rb.shift_reorder_rows(), seeds=rb_seeds)\n        check(card.summary is not None, \"robustness probe produced no summary\")\n        # Operator decision 1 (SR-16). This line used to print `status INVARIANCE_HOLDS` bare, while\n        # steps [3] and [5] both carried a qualifier. `INVARIANCE_HOLDS` names a probe that FAILED TO\n        # REFUTE invariance on a finite fixture set; it is not a proof of invariance, and a crop of\n        # this line was the kit's most quotable overclaim. The seed count is derived, not retyped.\n        print(f\"[4] robustness probe (row reorder on mse_fsum, {len(rb_seeds)} seeds): \"\n              f\"status {card.status.value} (not refuted on these 12 fixtures)\")",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestDemo.test_demo_status_line_carries_its_not_refuted_qualifier_on_that_same_line"
+      ]
+    },
+    {
+      "id": "F16-drop-conditional",
+      "file": "scripts/demo.py",
+      "note": "remove `{cond}` from the verdict line, restoring the bare JOINT_SUPPORTED that EVALUATION_PROTOCOL.md:126 forbids while any section-8.2 check is unrun",
+      "find": "f\"verdict {joint.verdict.value}{cond}  [tests the scorer; says nothing about any method]\")",
+      "replace": "f\"verdict {joint.verdict.value}  [tests the scorer; says nothing about any method]\")",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestDemo.test_demo_verdict_line_reports_joint_supported_in_the_mandated_conditional_form"
+      ]
+    },
+    {
+      "id": "F16-empty-gates",
+      "file": "src/toy/benchmark.py",
+      "note": "empty DEFERRED_GATES, which makes complete_gate_coverage True and deletes the demo's conditional parenthetical LEGITIMATELY; the vacuity shape, sixth sighting",
+      "find": "DEFERRED_GATES = (\"gate1_config_shift_sensitivity_arm\", \"gate2_error_register_crosscheck\", \"V_set_probes\",\n                  \"pilot_execution_and_n_cap_width_rule\", \"assumption1_exchangeability_check\",\n                  \"amendment_log_hash\")",
+      "replace": "DEFERRED_GATES = ()",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestDemo.test_demo_verdict_line_reports_joint_supported_in_the_mandated_conditional_form"
+      ]
+    },
+    {
+      "id": "F23-delete-qualifier",
+      "file": "scripts/demo.py",
+      "note": "delete the step-[3] scorer qualifier; re-derives a kill the journal claimed at 9ef13a8 but left unreproducible",
+      "find": "  [tests the scorer; says nothing about any method]",
+      "replace": "",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestDemo.test_demo_verdict_line_carries_its_scorer_qualifier_on_that_same_line"
+      ]
+    },
+    {
+      "id": "Z-demo5-delete",
+      "file": "scripts/demo.py",
+      "note": "delete the step-[5] `(not SUPPORTED)` parenthetical, leaving `claim state REVIEWED` to read as a positive finding",
+      "find": "              f\"(not SUPPORTED)\")",
+      "replace": "              f\"\")",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestDemo.test_demo_claim_state_line_carries_its_not_supported_qualifier_on_that_same_line"
+      ]
+    },
+    {
+      "id": "F21-revert-truth-test",
+      "file": "src/toy/benchmark.py",
+      "note": "revert complete_gate_coverage to the bare truth test `not self.deferred_gates`, the exact pre-fix code a lying __len__ defeated",
+      "find": "        return len(tuple(self.deferred_gates)) == 0",
+      "replace": "        return not self.deferred_gates",
+      "killers": [
+        "tests.toy_tests.test_benchmark.ContainerTruthTests.test_deferred_gate_coverage_is_not_fooled_by_a_lying_len"
+      ]
+    },
+    {
+      "id": "F26-drop-both-coercions",
+      "file": "src/toy/benchmark.py",
+      "note": "remove both tuple coercions, restoring the state in which a falsy container turned INCONCLUSIVE into SUPPORTED through the public constructor",
+      "find": "        object.__setattr__(self, \"blocking\", tuple(self.blocking))\n        object.__setattr__(self, \"supported_blockers\", tuple(self.supported_blockers))\n",
+      "replace": "",
+      "killers": [
+        "tests.toy_tests.test_benchmark.ContainerTruthTests.test_a_falsy_blocking_container_cannot_turn_inconclusive_into_supported"
+      ]
+    },
+    {
+      "id": "F26-half-fix-blocking-only",
+      "file": "src/toy/benchmark.py",
+      "note": "THE HALF-FIX. Keep the `blocking` coercion, drop the `supported_blockers` one -- the shape this project has shipped before, where a brief named one of two sites. Must be killed by the gate-12 sibling pin, not by the blocking pin.",
+      "find": "        object.__setattr__(self, \"supported_blockers\", tuple(self.supported_blockers))\n",
+      "replace": "",
+      "killers": [
+        "tests.toy_tests.test_benchmark.ContainerTruthTests.test_a_falsy_supported_blockers_container_cannot_make_h3_supportable"
+      ]
+    },
+    {
+      "id": "F22-bare-last-match",
+      "file": "scripts/run_tests.sh",
+      "note": "drop the dash anchor and take the bare LAST match -- the rule docs/CLEAN_CLONE.md originally prescribed. Reads a test's block-buffered `print` as the run total. Anchored on summarize()'s copy, which is the site with a behavioural observable. Anchored via the line FOLLOWING summarize()'s copy, because _ran_totals is defined in BOTH heredocs (separate python processes) and the body alone is not unique -- trap 3 caught exactly that.",
+      "find": "    anchored = re.findall(r\"(?m)^-{10,}\\nRan (\\d+) tests?\", text)\n    if anchored:\n        return [int(n) for n in anchored]\n    return [int(n) for n in re.findall(r\"(?m)^Ran (\\d+) tests?\", text)]\n\n\nt = open(sys.argv[1]",
+      "replace": "    return [int(n) for n in re.findall(r\"(?m)^Ran (\\d+) tests?\", text)]\n\n\nt = open(sys.argv[1]",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestRunTestsMechanics.test_a_captured_ran_line_does_not_understate_the_total_f22"
+      ]
+    },
+    {
+      "id": "F20-discriminator-too-broad",
+      "file": "scripts/run_tests.sh",
+      "note": "drop the `PT_TOTAL -eq 0` and `no collected line` conditions, so a pytest that genuinely collected and failed is forgiven as UNUSABLE -- the opposite error to F20 and the worse one. Must be killed by the negative control.",
+      "find": "  if [ \"$PT_RC\" -ne 0 ] && [ \"$PT_TOTAL\" -eq 0 ] && ! grep -q \"collected\" \"$TMP/pt.log\" \\",
+      "replace": "  if [ \"$PT_RC\" -ne 0 ] \\",
+      "killers": [
+        "tests.toy_tests.test_scripts.TestRunTestsMechanics.test_pytest_dying_before_collection_is_UNUSABLE_and_not_a_suite_failure"
+      ]
+    },
+    {
+      "id": "F7-restore-correct-judgement",
+      "file": "src/toy/teacher_student.py",
+      "note": "restore the judgement ERROR_REGISTER.md:98 declines -- call the default divisor the correct element count",
+      "find": "This divisor counts EVERY SUMMED ELEMENT, which\n          is what makes the two options differ by exactly the row width.",
+      "replace": "The correct element count.",
+      "killers": [
+        "tests.toy_tests.test_teacher_student.AuditHedgesAreLoadBearing.test_f7_the_divisor_is_not_called_correct"
+      ]
+    },
+    {
+      "id": "F8-gut-carryover-disclosure",
+      "file": "src/toy/teacher_student.py",
+      "note": "gut F8's disclosure to a bland nod that keeps the heading's words but drops DIRECTION, FLIP SIGN and the INFERENCE grade -- the WEAKENING route, not the deletion route",
+      "find": "    F8 -- THIS PROPERTY DOES NOT CARRY OVER, and the sentence above is about the\n    TOY only.",
+      "replace": "    F8 -- the source's rescale is broadly similar.",
+      "killers": [
+        "tests.toy_tests.test_teacher_student.AuditHedgesAreLoadBearing.test_f8_the_toy_rescale_property_is_disclosed_as_not_carrying_over"
+      ]
+    },
+    {
+      "id": "F9-reassert-source-property",
+      "file": "src/toy/stability.py",
+      "note": "re-polarise the ER-02 hedge back into an unconditional claim about the audited source",
+      "find": "a lenient toy would be more permissive than the source WOULD BE IF A\nNaN AROSE THERE.",
+      "replace": "a lenient toy would be more permissive than the thing it mimics.",
+      "killers": [
+        "tests.toy_tests.test_stability.F9ModuleHedgeIsLoadBearing.test_the_nan_hazard_is_stated_as_conditional_not_as_a_source_property"
+      ]
+    },
+    {
+      "id": "U-schema-nonblank-guard",
+      "file": "src/toy/schema.py",
+      "note": "SR-04 (class U). Disable `_nonblank`'s blank-string refusal. Killed by an EXISTING test, not by one written for this manifest -- that is the point: it re-derives a slice of SR-04's own evidence rather than pinning this round's fixes.",
+      "find": "    if not value.strip():\n        raise ValueError(f\"{name} must not be empty or blank\")",
+      "replace": "    if False:\n        raise ValueError(f\"{name} must not be empty or blank\")",
+      "killers": [
+        "tests.toy_tests.test_schema.InvalidInputs.test_blank_run_id"
+      ]
+    },
+    {
+      "id": "U-claim-ledger-genesis-digest",
+      "file": "src/toy/claim_ledger.py",
+      "note": "SR-14 (class U). Accept the all-zero placeholder digest as a real evidence value, which would let a forged ref pass as evidence. Killed by an existing test.",
+      "find": "        if self.value == GENESIS_DIGEST:\n            raise EventFormatError(\"evidence value must not be the all-zero placeholder digest\")",
+      "replace": "        if False:\n            raise EventFormatError(\"evidence value must not be the all-zero placeholder digest\")",
+      "killers": [
+        "tests.toy_tests.test_claim_ledger.RequiredFields.test_evidence_ref_shape"
+      ]
+    },
+    {
+      "id": "U-robustness-insufficient-counts",
+      "file": "src/toy/robustness.py",
+      "note": "SR-11 (class U). Let an InsufficientEvidence card hold n_measured >= n_required, i.e. contradict its own stated minimum. Killed by an existing test.",
+      "find": "        if self.n_measured >= self.n_required:\n            raise ValueError(\"InsufficientEvidence requires n_measured < n_required\")",
+      "replace": "        if False:\n            raise ValueError(\"InsufficientEvidence requires n_measured < n_required\")",
+      "killers": [
+        "tests.toy_tests.test_robustness.TestQAHardening.test_insufficient_evidence_requires_n_below_required"
+      ]
+    },
+    {
+      "id": "U-dashboard-control-char-escape",
+      "file": "src/toy/dashboard.py",
+      "note": "SR-13 (class U). Pass every character through unescaped, so bidi/control/private-use characters act on the rendered page's layout instead of being made visible. Killed by an existing test.",
+      "find": "        if ch in \"\\n\\t\" or (cat[0] not in \"CZ\" and ch.isprintable()) or ch == \" \":",
+      "replace": "        if True:",
+      "killers": [
+        "tests.toy_tests.test_dashboard.Injection.test_bidi_and_control_made_visible"
+      ]
+    }
+  ]
+}

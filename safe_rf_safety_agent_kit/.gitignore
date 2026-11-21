@@ -1,0 +1,29 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.venv/
+# `venv/` as well as `.venv/`: scripts/run_tests.sh prunes BOTH from the bytecode sweep and docs/CLEAN_CLONE.md
+# tells the reader, in the Steps that create one, that both are "pruned ... and ignored by git". Only `.venv/`
+# was here, so a reader who followed the Steps and used `venv` got an untracked interpreter tree in git status.
+# Pinned by test_every_directory_pruned_from_the_bytecode_sweep_is_git_ignored.
+venv/
+node_modules/
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.npz
+*.pdb
+*.cif
+
+# SR-15 tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+saferf_demo_*/

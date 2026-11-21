@@ -1,0 +1,59 @@
+{
+  "audit_date": "2026-11-09",
+  "fork": "audited-fork/safeRFdiffusion",
+  "upstream": "RosettaCommons/RFdiffusion",
+  "merge_base": "e22092420281c644b928e64d490044dfca4f9175",
+  "upstream_head_at_comparison": "86507b6538f51fce57b5a72477165f03999ed7ae",
+  "fork_commits": [
+    "12d5426de27bc6411126262cf3f29bac3a0ce0c1",
+    "5cbd18a39c4607d65bdbf6457be3f79b27a6c3c1"
+  ],
+  "ahead_by": 2,
+  "behind_by_vs_merge_base": 0,
+  "behind_by_vs_upstream_main": 36,
+  "behind_by_field_note": "SR-01 relabel. The merge-base compare (base=merge_base, head=fork main) returns ahead_by=2, behind_by=0. The 36 figure comes from a different comparison (audited-fork:main...RosettaCommons:main, status=diverged, upstream ahead_by=36, behind_by=2) and is time-varying as upstream advances. The former 'behind_by: 36' field mixed the two comparisons. Verified live 2026-11-09.",
+  "changed_files": [
+    {
+      "filename": "config/inference/base.yaml",
+      "additions": 1,
+      "deletions": 1
+    },
+    {
+      "filename": "rfdiffusion/diffusion.py",
+      "additions": 13,
+      "deletions": 6
+    },
+    {
+      "filename": "rfdiffusion/inference/model_runners.py",
+      "additions": 37,
+      "deletions": 8
+    },
+    {
+      "filename": "rfdiffusion/inference/utils.py",
+      "additions": 67,
+      "deletions": 56
+    },
+    {
+      "filename": "rfdiffusion/kinematics.py",
+      "additions": 33,
+      "deletions": 38
+    },
+    {
+      "filename": "rfdiffusion/util.py",
+      "additions": 71,
+      "deletions": 28
+    },
+    {
+      "filename": "rfdiffusion/util_module.py",
+      "additions": 1,
+      "deletions": 1
+    },
+    {
+      "filename": "rfdiffusion_erasure_teacher_student.py",
+      "additions": 691,
+      "deletions": 0
+    }
+  ],
+  "evidence_url": "https://api.github.com/repos/RosettaCommons/RFdiffusion/compare/e22092420281c644b928e64d490044dfca4f9175...audited-fork:main",
+  "snapshot_note": "Source metadata captured via GitHub connector; this is not a model-performance or safety-validation result."
+}
